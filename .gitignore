@@ -1,0 +1,53 @@
+# Python & Packaging
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.uv_cache/
+dist/
+build/
+*.egg-info/
+
+# Tooling Caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Environment & Secrets (NEVER COMMIT)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
+
+# Model Weights, Adapters & Large Datasets
+*.safetensors
+*.gguf
+*.bin
+*.pt
+*.pth
+*.onnx
+data/raw_papers/
+data/pdfs/
+data/tex_sources/
+models/base/
+models/adapters/**/*.safetensors
+
+# Local DB Volumes & OS Files
+.postgres_data/
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store
+Thumbs.db
+
+# Node / Web UI
+web-ui/node_modules/
+web-ui/dist/
