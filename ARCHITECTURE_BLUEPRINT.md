@@ -4,19 +4,37 @@
 **Project Repository:** `enterprise-context-scout`  
 **Last Updated:** 2026-10-28  
 **Target Hardware (Local Dev & Training):** Apple M5 Pro (48 GB Unified Memory)  
-**Target Production Stack (Enterprise GCP):** Google ADK (`google-adk` v2.12.0), Google Gen AI SDK (`google-genai` v2.31.0), Model Context Protocol (`mcp` v2.3.0), Gemma 4 (`26B-A4B-it` / `31B-it` / `12B-it` / `E4B-it`), `EmbeddingGemma 2` (768-dim), `ShieldGemma 2` / Google Cloud Model Armor, PostgreSQL 17 (`pgvector` + `pg_trgm` + FTS + RLS -> Cloud SQL / AlloyDB), and `gemini-2.5-flash` (GA) / `gemini-3.8-flash` (Preview).
+**Target Production Stack (Enterprise GCP):** Google ADK (`google-adk` v2.12.0), Google Gen AI SDK (`google-genai` v2.31.0), Model Context Protocol (`mcp` v2.3.0), Gemma 4 (`26B-A4B-it` / `31B-it` / `12B-it` / `E4B-it`), `EmbeddingGemma 2` (768-dim), `ShieldGemma 2` / Google Cloud Model Armor, PostgreSQL 17 (`pgvector` + `pg_trgm` + FTS + RLS -> Cloud SQL / AlloyDB), and `gemini-3.8-flash` (Fast Execution) / `gemini-4-argon` (Frontier Reasoning).
 
 ---
 
 ## 1. Executive Thesis & What Problem This System Solves
 
 ### 1.1 The Enterprise Economics & Reliability Problem
-When engineering and quantitative research teams use frontier models (`gemini-2.5-flash`, `gemini-3.8-flash`, `gemini-2.5-pro`) directly on large repositories and document corpora, two failure modes occur:
-1. **Token & Cost Burn on Exploration (80–90% Waste):** In multi-turn coding and investigation tasks, 80–90% of input tokens are spent searching directories, reading irrelevant files, inspecting outdated docs, and tracing imports across turns (`reported` / `inferred` from SWE-bench & Agentless cost profiles, [arXiv:2407.01489](https://arxiv.org/abs/2407.01489)).
-2. **"Half-Information" Hallucinations:** Naive vector RAG chunks code at arbitrary token boundaries, severing functions from their imported type definitions, callers, and unit test fixtures (`verified`, [Anthropic Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval), [Sourcegraph Architecture](https://sourcegraph.com/blog/how-cody-understands-your-codebase)). When a frontier model receives partial context, it guesses missing signatures, shifts line numbers, or trusts stale documentation over live code.
 
-### 1.2 Our Solution: The Dual-Engine Open-Source Context Scout
-We decouple **Context Discovery & Verification (Local/Private Open-Weights Gemma 4 + Deterministic AST/Hybrid Engines)** from **Code Implementation (Paid Gemini Flash)** and expose the same grounded intelligence behind a **Multi-Role Enterprise UI Chatbox**:
+When engineering and quantitative research teams direct expensive commercial frontier models across large multi-file repositories and dense research corpora, two catastrophic economic and reliability failure modes occur:
+
+1. **Massive Token & Cost Burn on Exploration (80–90% Waste):**
+   In typical multi-turn coding and investigation tasks, 80–90% of input tokens are burned purely on exploratory search—scanning directory trees, reading unedited files, inspecting obsolete comments, and tracing cross-file imports (`reported` / `inferred` from SWE-bench & Agentless cost profiles, [arXiv:2407.01489](https://arxiv.org/abs/2407.01489)). Running multi-turn exploration loops on premium frontier models rapidly exhausts enterprise budgets:
+   - **Anthropic Claude Opus 5.5:** $4.00 / 1M input tokens, $20.00 / 1M output tokens.
+   - **OpenAI GPT-5.6 Sol:** $4.00 / 1M input tokens, $20.00 / 1M output tokens.
+   - **Google Gemini 4 Argon (`gemini-4-argon`):** $2.00–$4.00 / 1M input tokens ($2.00 introductory through Nov 30, 2026; $4.00 standard), $10.00–$20.00 / 1M output tokens ($10.00 introductory; $20.00 standard).
+   *(Note: Legacy 2025 models such as `gemini-2.5-pro` and `gemini-2.5-flash` are retired from frontier status and superseded by October 2026 architectures.)*
+
+2. **"Half-Information" Hallucinations:**
+   Naive vector RAG chunks code at arbitrary token boundaries, severing functions from their imported type definitions, callers, and unit test fixtures (`verified`, [Anthropic Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval), [Sourcegraph Architecture](https://sourcegraph.com/blog/how-cody-understands-your-codebase)). When an implementation model receives fragmented context, it hallucinates missing parameters, shifts 1-indexed line numbers, or assumes stale comments reflect running code.
+
+### 1.2 Our Solution: Decoupled Zero-Cost Discovery & 1-Shot Execution
+
+We decouple **Context Discovery & Verification** (100% local, open-weights `Gemma-4-26B-A4B-it` at $0 token cost) from **Implementation Execution** (paid Google `gemini-3.8-flash` or `gemini-4-argon` in 1 shot) under a strictly 100% Google model execution runtime per `AGENTS.md`:
+
+| Architectural Tier | Model ID & Engine | Pricing (Input / Output per 1M) | Core Function & Economic Profile |
+|:---|:---|:---:|:---|
+| **Frontier Reference (Market)** | Anthropic Claude Opus 5.5 | $4.00 / $20.00 | High-cost external frontier; prohibited from runtime, baseline for savings |
+| **Frontier Reference (Market)** | OpenAI GPT-5.6 Sol | $4.00 / $20.00 | High-cost external frontier; prohibited from runtime, baseline for savings |
+| **Google Frontier Reasoning** | Google Gemini 4 Argon (`gemini-4-argon`) | $2.00–$4.00 / $10.00–$20.00 | Premium Google frontier model; reserved for 1-shot complex architectural refactors |
+| **Local Discovery Engine** | **Google Gemma 4 26B-A4B-it** (MoE, 3.8B Active) | **$0.00 / $0.00** | **100% Local Discovery & Verification**: Absorbs 30k–60k exploration tokens at $0 API cost |
+| **Fast Execution Engine** | **Google Gemini 3.8 Flash (`gemini-3.8-flash`)** | **$0.75 / $3.75** (promo to Dec 31, 2026; $1.50/$7.50 std) | **1-Shot Code Execution**: Generates patches from compact 2k–4k verified `ImplementationContextPack` |
 
 1. **Zero-Cost Local Scouting (`Gemma-4-26B-A4B-it` + Domain QLoRA Cartridges):** Absorbs 30,000–60,000 tokens of noisy multi-hop search, AST skeleton inspection, and paper analysis locally ($0 API cost), emitting **structured pointers** (`repo`, `commit_sha`, `file_path`, `start_line`, `end_line`) rather than re-typing code from memory.
 2. **Deterministic Byte-for-Byte Slicing & 1-Hop AST Auto-Closure:** Pure Python + `tree-sitter` slices exact lines from Git and mechanically attaches imported types, direct callers, and matching test fixtures—eliminating "half-information" before a single paid Gemini token is spent.
@@ -64,7 +82,7 @@ flowchart TD
 
     subgraph Outputs["4. Dual Execution Surfaces"]
         ChatMode["Surface A: Multi-Role UI Chatbox\n(Role-tailored answer + clickable file:line & paper citations)"]
-        PaidHandoff["Surface B: Paid Model Implementation\n(gemini-2.5-flash / gemini-3.8-flash)"]
+        PaidHandoff["Surface B: Paid Model Implementation\n(gemini-3.8-flash / gemini-4-argon)"]
         Worktree["Isolated Git Worktree Sandbox\n(Applies patch -> runs ruff + pytest -> ADK HITL Approval)"]
         Flywheel[("ContextMissEvent & Telemetry Ledger\n(Auto-saves misses for next QLoRA round)")]
     end
@@ -118,7 +136,7 @@ flowchart LR
 
 ## 3. Why We Chose Every Component: Industry Evidence & Trade-Off Matrices
 
-Every architectural choice in this blueprint is backed by verified industry engineering benchmarks. Use these matrices to defend the system in architectural evaluation and system design reviews.
+Every architectural choice in this blueprint is backed by verified industry engineering benchmarks. The following trade-off matrices define the technical evaluation criteria and design defense for each system component.
 
 ### 3.1 Decision Matrix 1: How to Teach an LLM About Codebases & Documents
 
@@ -540,13 +558,13 @@ When a request arrives with `domain_id="quant_research_scout"`, the `DomainRegis
 ### 6.2 Cross-Domain Federation (`FederatedScoutCoordinator`, `ARC-01`)
 When a task spans both domains—for example, *"Implement the volatility-scaled opening range breakout from arXiv paper X into our `src/strategies/intraday.py` engine"*—the ADK `FederatedScoutCoordinator` executes a 2-stage federated DAG:
 1. **Stage 1 (Model 2 — `quant_research_scout`):** Extracts and validates the `QuantStrategyBrief` (LaTeX signal math, entry/exit rules, and `IN_NSE`/`DE_XETRA`/`US_EQUITY` friction rules).
-2. **Stage 2 (Model 1 — `trading_code_scout`):** Receives the validated `QuantStrategyBrief` and locates the exact target files, line ranges, and 1-hop AST dependencies in your GitHub trading repo, merging both into a single composite `ImplementationContextPack` for `gemini-3.8-flash` / `gemini-2.5-flash`.
+2. **Stage 2 (Model 1 — `trading_code_scout`):** Receives the validated `QuantStrategyBrief` and locates the exact target files, line ranges, and 1-hop AST dependencies in your GitHub trading repo, merging both into a single composite `ImplementationContextPack` for `gemini-3.8-flash` (or `gemini-4-argon` when complex reasoning is required).
 
 ---
 
 ## 7. Deep-Dive: QLoRA Mechanics, Memory Math & Teacher-Student Distillation
 
-### 7.1 How LoRA & QLoRA Work Mathematically (Mathematical Formulation)
+### 7.1 Mathematical Formulation of LoRA & QLoRA
 Instead of updating a full weight matrix $W_0 \in \mathbb{R}^{d \times k}$ during fine-tuning, **LoRA (Low-Rank Adaptation)** freezes $W_0$ in 4-bit NormalFloat (`NF4` / MLX 4-bit) and injects two tiny trainable matrices $B \in \mathbb{R}^{d \times r}$ and $A \in \mathbb{R}^{r \times k}$ where rank $r \ll \min(d, k)$:
 $$h = W_0 x + \frac{\alpha}{r} B A x$$
 - **Rank ($r = 16$):** Controls the capacity of the adapter. For task/schema specialization and domain routing, $r \in \{16, 32\}$ captures 99% of full fine-tuning quality while training $<0.5\%$ of the parameters.
@@ -575,7 +593,7 @@ To train **Adapter 1 (`trading_code_scout`)** and **Adapter 2 (`quant_research_s
 
 ## 8. The 4-Layer Quality Guarantee Before Calling Paid Gemini Flash
 
-To prevent the failure mode where the local Scout sends bad context and forces paid `gemini-3.8-flash` / `gemini-2.5-flash` to search on every turn, every implementation handoff passes through **4 deterministic gates**:
+To prevent the failure mode where the local Scout sends bad context and forces paid execution models (`gemini-3.8-flash` or `gemini-4-argon`) to search on every turn, every implementation handoff passes through **4 deterministic gates**:
 
 1. **Gate 1 — Deterministic 1-Hop AST Expansion (0 LLM Tokens):**
    - Even if the Scout only selects `src/backtest/engine.py:L110-165`, Python's `ASTDependencyExpander` queries `ast_edges` and automatically slices and appends:
@@ -619,10 +637,10 @@ No change ships without passing deterministic and statistical evaluation gates (
 
 | Metric | Target Threshold | How It Is Measured |
 | :--- | :---: | :--- |
-| **1. Zero-Touch Sufficiency Rate** | **$\ge 85.0\%$** | % of held-out implementation tasks where `gemini-3.8-flash` / `gemini-2.5-flash` produces a passing `pytest` patch using *only* the initial `ContextPack` (0 `MissingContextRequest` calls). |
+| **1. Zero-Touch Sufficiency Rate** | **$\ge 85.0\%$** | % of held-out implementation tasks where `gemini-3.8-flash` (or `gemini-4-argon`) produces a passing `pytest` patch using *only* the initial `ContextPack` (0 `MissingContextRequest` calls). |
 | **2. File & Symbol Recall@5** | **$\ge 90.0\%$** | % of ground-truth target files/functions present in the Scout's `ContextPack`. |
 | **3. Verbatim Citation Faithfulness** | **$100.0\%$** | % of emitted code slices and paper quotes that match the underlying Git blob / document text byte-for-byte. |
-| **4. Frontier Token Savings Ratio** | **$\ge 80.0\%$** | $1 - \frac{\text{Tokens sent to Gemini Flash}}{\text{Total tokens explored during investigation}}$. |
+| **4. Frontier Token Savings Ratio** | **$\ge 80.0\%$** | $1 - \frac{\text{Tokens sent to Gemini Execution Model}}{\text{Total tokens explored during investigation}}$. |
 | **5. RBAC Zero-Leakage Rate** | **$100.0\%$** | Red-team suite of 20 cross-role queries attempting to access `quant_restricted` chunks from a `product_manager` principal (must return 0 restricted chunks). |
 | **6. Prompt-Injection Block Rate** | **$\ge 95.0\%$** | Red-team suite of 20 poisoned paper chunks & GitHub issues tested against `ShieldGemma 2` + sanitizer. |
 
@@ -634,19 +652,19 @@ All runs emit **OpenTelemetry (`opentelemetry-sdk`)** spans following GenAI sema
 
 The following technical trade-offs, limitations, and mitigations are documented for the production deployment of Enterprise Context Scout:
 
-1. **Pushback:** *"Why not just dump the whole repo into Gemini 2.5/3.8 Flash's 1M-token context window with context caching?"*
-   - **Your Defense:** Three reasons:
+1. **Trade-Off & Edge Case:** *"Why not just dump the whole repo into Gemini 3.8 Flash's 1M-token context window with context caching?"*
+   - **Technical Rationale & Mitigation:** Three reasons:
      1. **Scale:** 1M tokens only holds ~30,000–40,000 lines of code. Real enterprise systems (and 1,000+ quant papers + multi-repo codebases) span tens of millions of tokens.
      2. **Cache Invalidation Churn:** In an active repository where commits land every few minutes, prefix context caches invalidate constantly, forcing full re-billing.
      3. **Lost-in-the-Middle Attention Degradation:** Even within 1M tokens, reasoning precision over subtle cross-file type contracts degrades when 95% of the prompt is distractor code. Sending a compiler-closed 3,000-token `ContextPack` gives higher patch accuracy at 85–90% lower cost.
-2. **Pushback:** *"Why use QLoRA on Gemma 4 instead of just prompting the base Gemma 4 model?"*
-   - **Your Defense:** Base open-weights models require 1,500–2,500 tokens of few-shot examples and schema instructions on every turn to reliably emit strict JSON pointers and domain-specific `QuantStrategyBrief` schemas, and still fail schema validation ~12–18% of the time. A QLoRA adapter ($r=16, \alpha=32$) bakes the output schema, tool-calling discipline, and domain taxonomy directly into 50 MB of weights—eliminating few-shot prompt bloat (cutting local prefill latency by ~60%) and raising schema adherence above 98%.
-3. **Pushback:** *"What breaks if a developer renames a core interface across 40 files?"*
-   - **Your Defense:** Pure vector search breaks completely on bulk renames until everything is re-embedded. Because our Code Engine uses `pg_trgm` trigram search + `tree-sitter` AST edges keyed by Git Blob-SHA, a 40-file rename updates in `<2 seconds` via Merkle diffing and resolves all 40 call sites deterministically via `ast_edges`.
-4. **Pushback:** *"What is the main limitation of `tree-sitter` compared to Google's Kythe or Sourcegraph's SCIP?"*
-   - **Your Defense:** `tree-sitter` builds a fast, syntax-level AST per file and resolves explicit imports and symbol names heuristically, whereas `Kythe` and `SCIP` hook into the compiler/type-checker to resolve dynamically dispatched or overloaded methods across packages with 100% compiler accuracy. We chose `tree-sitter` because it indexes broken/in-progress code in milliseconds without needing a full Bazel/compiler build per repo, and we mitigate polymorphism edge cases by combining AST edges with trigram search.
-5. **Pushback:** *"How do you prevent data leakage when fine-tuning a LoRA adapter in a multi-tenant enterprise?"*
-   - **Your Defense:** We never train a shared LoRA adapter on restricted tenant secrets or PII. LoRA training datasets only contain schema/tool-routing trajectories over public or role-cleared architectural skeletons, while restricted data stays strictly inside PostgreSQL behind Row-Level Security (`RLS`).
+2. **Trade-Off & Edge Case:** *"Why use QLoRA on Gemma 4 instead of just prompting the base Gemma 4 model?"*
+   - **Technical Rationale & Mitigation:** Base open-weights models require 1,500–2,500 tokens of few-shot examples and schema instructions on every turn to reliably emit strict JSON pointers and domain-specific `QuantStrategyBrief` schemas, and still fail schema validation ~12–18% of the time. A QLoRA adapter ($r=16, \alpha=32$) bakes the output schema, tool-calling discipline, and domain taxonomy directly into 50 MB of weights—eliminating few-shot prompt bloat (cutting local prefill latency by ~60%) and raising schema adherence above 98%.
+3. **Trade-Off & Edge Case:** *"What breaks if a developer renames a core interface across 40 files?"*
+   - **Technical Rationale & Mitigation:** Pure vector search breaks completely on bulk renames until everything is re-embedded. Because our Code Engine uses `pg_trgm` trigram search + `tree-sitter` AST edges keyed by Git Blob-SHA, a 40-file rename updates in `<2 seconds` via Merkle diffing and resolves all 40 call sites deterministically via `ast_edges`.
+4. **Trade-Off & Edge Case:** *"What is the main limitation of `tree-sitter` compared to Google's Kythe or Sourcegraph's SCIP?"*
+   - **Technical Rationale & Mitigation:** `tree-sitter` builds a fast, syntax-level AST per file and resolves explicit imports and symbol names heuristically, whereas `Kythe` and `SCIP` hook into the compiler/type-checker to resolve dynamically dispatched or overloaded methods across packages with 100% compiler accuracy. We chose `tree-sitter` because it indexes broken/in-progress code in milliseconds without needing a full Bazel/compiler build per repo, and we mitigate polymorphism edge cases by combining AST edges with trigram search.
+5. **Trade-Off & Edge Case:** *"How do you prevent data leakage when fine-tuning a LoRA adapter in a multi-tenant enterprise?"*
+   - **Technical Rationale & Mitigation:** We never train a shared LoRA adapter on restricted tenant secrets or PII. LoRA training datasets only contain schema/tool-routing trajectories over public or role-cleared architectural skeletons, while restricted data stays strictly inside PostgreSQL behind Row-Level Security (`RLS`).
 
 ---
 
@@ -711,7 +729,7 @@ enterprise-context-scout/
 | **M2: Code Engine (`tree-sitter` AST + Merkle Sync + Slicer)** | Build Git Blob-SHA Merkle indexer, `tree-sitter` Python/TS AST symbol & call-edge extractor, 1-hop `ASTDependencyExpander`, and `DeterministicSlicer`. | `pytest tests/test_m2_code_engine.py` indexes a real multi-file trading repo, proves a second sync skips unchanged blobs in `<50ms`, and verifies 1-hop AST closure auto-attaches imported types and callers. |
 | **M3: Quant Paper Harvester & Contextual Retrieval Engine** | Build arXiv/OpenAlex harvester (India NSE, Germany DAX/Xetra, US equities), `.tex`/Docling parser, `Gemma-4-E4B-it` contextual header generator, `EmbeddingGemma 2` indexer, RRF hybrid search, and Quant Scepticism Gate. | `pytest tests/test_m3_quant_engine.py` ingests real quant papers across IN/DE/US, preserves LaTeX formulas, and verifies the Scepticism Gate flags strategies missing transaction cost assumptions. |
 | **M4: Enterprise MCP Servers (`mcp` v2.3.0)** | Build `code_repo_mcp.py` and `quant_corpus_mcp.py` with typed tool schemas, server-side `PrincipalContext` enforcement, and `DomainPack` tool allow-lists. | `pytest tests/test_m4_mcp_servers.py` verifies MCP tool calls, schema validation, and unauthorized tool rejection. |
-| **M5: Google ADK 2.12 Scout Workflow, Pre-Flight Gate & Gemini Handoff** | Build the ADK `Workflow` DAG for `Gemma-4-26B-A4B-it`, the 4-Check `PreFlightValidator` ($0 bounce-back loop), `ShieldGemma 2` guardrails, and the `gemini-3.8-flash` / `gemini-2.5-flash` worktree handoff with `require_confirmation=True`. | `pytest tests/test_m5_adk_workflow.py` proves an incomplete Scout draft is caught by Pre-Flight and auto-remediated locally before calling Gemini Flash, and logs exact token savings. |
+| **M5: Google ADK 2.12 Scout Workflow, Pre-Flight Gate & Gemini Handoff** | Build the ADK `Workflow` DAG for `Gemma-4-26B-A4B-it`, the 4-Check `PreFlightValidator` ($0 bounce-back loop), `ShieldGemma 2` guardrails, and the `gemini-3.8-flash` / `gemini-4-argon` worktree handoff with `require_confirmation=True`. | `pytest tests/test_m5_adk_workflow.py` proves an incomplete Scout draft is caught by Pre-Flight and auto-remediated locally before calling Gemini Flash, and logs exact token savings. |
 | **M6: Enterprise Evaluation Harness & OpenTelemetry** | Build the automated eval runner measuring Zero-Touch Sufficiency ($\ge 85\%$), Recall@5, Citation Faithfulness ($100\%$), RBAC zero-leakage, and OTel spans. | `uv run pytest tests/test_m6_eval_harness.py` executes the golden benchmark suite and outputs the Markdown/JSON CI gate report. |
 | **M7: Teacher Distillation & QLoRA Training (`Model 1` & `Model 2`)** | Run `teacher_distiller.py` (with `gemini-3.8-flash` / `gemma-4-31B-it` + deterministic filter) and train both QLoRA adapters (`trading_code_scout` and `quant_research_scout`) on your M5 Pro (`mlx-lm`) + Vertex AI `PEFT` script. | Before-vs-After benchmark report proving QLoRA adapter improves localization/schema pass rate and reduces prompt token overhead. |
 | **M8: FastAPI SSE Backend, TypeScript/React UI & `.gitlab-ci.yml`** | Build the FastAPI streaming API, strict TypeScript/React UI (Role Switcher, DomainPack Selector, Citation Inspector, Token-Savings Meter, 1-Click Gemini Diff Modal), and GitLab CI pipeline. | End-to-end UI + API integration test suite passes (`pytest` + `npm run typecheck && npm run test`). |

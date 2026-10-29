@@ -605,7 +605,7 @@ The architecture was audited against `enterprise-context-scout/AGENTS.md` and us
 
 | Component | Architecture Specification | Compliance Status | Rule Reference |
 | :--- | :--- | :---: | :--- |
-| **Frontier Models** | `gemini-2.5-flash`, `gemini-3.8-flash`, `gemini-2.5-pro` via `google-genai >=2.31.0` | **100% COMPLIANT** | Rule 2; `AGENTS.md:33` |
+| **Execution & Frontier Models** | `gemini-3.8-flash` (Fast Execution), `gemini-4-argon` (Frontier Reasoning) via `google-genai >=2.31.0` | **100% COMPLIANT** | Rule 2; `AGENTS.md:36` |
 | **Agent Orchestration** | Google ADK 2.x (`google-adk >=2.12.0` DAG `Workflow`) | **100% COMPLIANT** | Rule 2; `AGENTS.md:34` |
 | **Tool Protocol** | Model Context Protocol (`mcp >=2.3.0` via stdio / Streamable HTTP) | **100% COMPLIANT** | Rule 2; `AGENTS.md:35` |
 | **Local Scout Model** | `google/gemma-4-26B-A4B-it` (MoE: 25.2B total / 3.8B active params) | **100% COMPLIANT** | Rule 2; `AGENTS.md:20` |
