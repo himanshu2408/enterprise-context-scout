@@ -15,6 +15,9 @@ dependencies = [
     "pyyaml>=6.0.2,<7.0.0",
     "psycopg[binary,pool]>=3.2.3,<4.0.0",
     "pgvector>=0.3.6,<1.0.0",
+    "tree-sitter>=0.24.0,<0.27.0",
+    "tree-sitter-python>=0.23.0,<0.26.0",
+    "tree-sitter-typescript>=0.23.0,<0.25.0",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +47,14 @@ warn_return_any = true
 warn_unused_configs = true
 mypy_path = "src"
 packages = ["context_scout"]
+
+[[tool.mypy.overrides]]
+module = [
+    "tree_sitter",
+    "tree_sitter_python",
+    "tree_sitter_typescript",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -39,10 +39,7 @@ class AdapterPool:
 
     def register_from_manifest(self, manifest: DomainPackManifest) -> AdapterSlot:
         with self._lock:
-            if (
-                manifest.domain_id not in self._slots
-                and len(self._slots) >= self._max_slots
-            ):
+            if manifest.domain_id not in self._slots and len(self._slots) >= self._max_slots:
                 raise RuntimeError(
                     f"AdapterPool capacity ({self._max_slots}) reached for '{manifest.domain_id}'"
                 )

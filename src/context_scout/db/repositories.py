@@ -184,9 +184,7 @@ class PostgresRLSRepository:
             ),
         )
 
-    def insert_ast_edge(
-        self, conn: Connection[tuple[object, ...]], record: ASTEdgeRecord
-    ) -> None:
+    def insert_ast_edge(self, conn: Connection[tuple[object, ...]], record: ASTEdgeRecord) -> None:
         conn.execute(
             """
             INSERT INTO ast_edges (
@@ -234,6 +232,23 @@ class PostgresRLSRepository:
             (domain_id,),
         ).fetchall()
         return [str(r[0]) for r in rows]
+
+    def get_file_blob_hashes(
+        self, conn: Connection[tuple[object, ...]], domain_id: str, repo_name: str
+    ) -> dict[str, tuple[UUID, str]]:
+        rows = conn.execute(
+            """
+            SELECT file_path, file_id, git_blob_sha
+            FROM code_files
+            WHERE domain_id = %s AND repo_name = %s
+            ORDER BY file_path;
+            """,
+            (domain_id, repo_name),
+        ).fetchall()
+        return {str(r[0]): (UUID(str(r[1])), str(r[2])) for r in rows}
+
+    def delete_code_file(self, conn: Connection[tuple[object, ...]], file_id: UUID) -> None:
+        conn.execute("DELETE FROM code_files WHERE file_id = %s;", (file_id,))
 
 
 class InMemoryRLSRepository:
@@ -308,6 +323,34 @@ class InMemoryRLSRepository:
             and _scopes_intersect(d.allowed_scopes, principal.allowed_scopes)
         ]
 
+    def get_file_blob_hashes(
+        self, principal: PrincipalContext, domain_id: str, repo_name: str
+    ) -> dict[str, tuple[UUID, str]]:
+        visible = self.list_visible_code_files(principal, domain_id)
+        return {
+            f.file_path: (f.file_id, f.git_blob_sha) for f in visible if f.repo_name == repo_name
+        }
+
+    def delete_code_file(self, principal: PrincipalContext, file_id: UUID) -> None:
+        if file_id in self._files:
+            file_rec = self._files[file_id]
+            if not _scopes_intersect(file_rec.allowed_scopes, principal.allowed_scopes):
+                raise PermissionError("Principal lacks scope to delete code_file")
+            del self._files[file_id]
+            deleted_sym_ids = {
+                s_id for s_id, sym in self._symbols.items() if sym.file_id == file_id
+            }
+            for s_id in deleted_sym_ids:
+                self._symbols.pop(s_id, None)
+            deleted_edge_ids = {
+                e_id
+                for e_id, edge in self._edges.items()
+                if edge.source_symbol_id in deleted_sym_ids
+                or edge.target_symbol_id in deleted_sym_ids
+            }
+            for e_id in deleted_edge_ids:
+                self._edges.pop(e_id, None)
+
     def search_symbols_hybrid_rrf(
         self,
         principal: PrincipalContext,
@@ -342,9 +385,7 @@ class InMemoryRLSRepository:
                 1
                 for t in q_tokens
                 if t
-                in (
-                    f"{s.qualified_name} {s.signature_skeleton} {s.contextual_summary}"
-                ).lower()
+                in (f"{s.qualified_name} {s.signature_skeleton} {s.contextual_summary}").lower()
             ),
             reverse=True,
         )
