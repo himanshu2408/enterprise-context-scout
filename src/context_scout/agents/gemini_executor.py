@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import time
 import uuid
 from datetime import UTC, datetime
@@ -441,11 +442,13 @@ class GeminiImplementationExecutor:
             orig_text = target_path.read_text(encoding="utf-8")
             orig_lines = orig_text.splitlines(keepends=True)
 
-        comment_line = (
-            f"# Context Scout Verified Implementation: {pack.user_task.strip()}\n"
-        )
+        wrapped_lines = textwrap.wrap(pack.user_task.strip(), width=72)
+        comment_lines = [
+            "# Context Scout Verified Implementation:\n",
+            *[f"# {line}\n" for line in wrapped_lines],
+        ]
         insert_pos = min(len(orig_lines), max(0, target_slice.end_line))
-        mod_lines = [*orig_lines[:insert_pos], comment_line, *orig_lines[insert_pos:]]
+        mod_lines = [*orig_lines[:insert_pos], *comment_lines, *orig_lines[insert_pos:]]
 
         diff_iterator = difflib.unified_diff(
             orig_lines,
@@ -459,7 +462,7 @@ class GeminiImplementationExecutor:
                 f"--- a/{target_slice.file_path}\n"
                 f"+++ b/{target_slice.file_path}\n"
                 f"@@ -1,1 +1,2 @@\n"
-                f"+{comment_line}"
+                f"+{''.join(comment_lines)}"
             )
         return diff_text
 

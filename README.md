@@ -84,11 +84,20 @@ enterprise-context-scout/
 │       │   ├── code_repo_mcp.py # Code repository MCP server (5 canonical tools + 5 aliases)
 │       │   ├── quant_corpus_mcp.py # Quant corpus MCP server (4 canonical tools + 3 aliases)
 │       │   └── seed_code_corpus.py # Database seeding engine for strategies and GitHub issues
-│       └── agents/
-│           ├── __init__.py     # Agent interfaces and adapter management
-│           ├── preflight_gate.py # 4-Check PreFlightValidator & $0 bounce-back loop
-│           ├── scout_workflow.py # Google ADK 2.12 ScoutWorkflow & FederatedScoutCoordinator
-│           └── gemini_executor.py # Paid Gemini executor, budget guardrails & GitWorktreeSandbox
+│       ├── agents/
+│       │   ├── __init__.py     # Agent interfaces and adapter management
+│       │   ├── preflight_gate.py # 4-Check PreFlightValidator & $0 bounce-back loop
+│       │   ├── scout_workflow.py # Google ADK 2.12 ScoutWorkflow & FederatedScoutCoordinator
+│       │   └── gemini_executor.py # Paid Gemini executor, budget guardrails & GitWorktreeSandbox
+│       ├── telemetry.py        # OpenTelemetry GenAI semantic conventions & tracer
+│       └── evals/              # CI/CD evaluation harness & golden benchmark suite
+│           ├── __init__.py     # Package exports
+│           ├── golden_dataset.py # Typed Pydantic benchmark suite (10 retrieval, 22 RBAC, 22 injection)
+│           ├── harness.py      # 6 CI/CD gate metrics computation & threshold validation
+│           └── runner.py       # CLI runner generating JSON & Markdown scorecards
+├── reports/                    # CI/CD evaluation reports (JSON & Markdown)
+│   ├── m6_eval_report.json
+│   └── m6_eval_report.md
 └── tests/
     ├── conftest.py             # Shared fixtures (temp repos, live postgres connections)
     ├── test_m1_foundation.py   # M1 contracts, schemas, and adapter validation
@@ -110,7 +119,8 @@ enterprise-context-scout/
     ├── test_preflight_gate.py  # M5 4-Check pre-flight quality gate & bounce-back tests (10 tests)
     ├── test_scout_workflow.py  # M5 ADK 4-stage workflow DAG & federated coordinator tests (13 tests)
     ├── test_gemini_executor.py # M5 Gemini model policy, budget gate & worktree tests (10 tests)
-    └── test_m5_adk_workflow.py # M5 End-to-end integration & live Postgres telemetry tests (17 tests)
+    ├── test_m5_adk_workflow.py # M5 End-to-end integration & live Postgres telemetry tests (17 tests)
+    └── test_m6_eval_harness.py # M6 Golden dataset, 6 CI/CD gates, OTel GenAI traces & live PG17 (13 tests)
 ```
 
 ---
@@ -433,9 +443,57 @@ When any pre-flight check fails:
 
 ---
 
-## 8. Local Setup & Installation
+## 8. Milestone 6 Architecture: Golden Dataset, CI/CD Evaluation Harness & OpenTelemetry Observability
 
-### 8.1 Prerequisites
+Milestone 6 establishes automated, repeatable evaluation gates that enforce production readiness and zero-regression deployment standards across retrieval accuracy, verbatim faithfulness, token economics, security isolation, and adversarial guardrails.
+
+### 8.1 Typed Golden Benchmark Dataset (`src/context_scout/evals/golden_dataset.py`)
+
+Evaluation is driven by a typed golden benchmark suite built using Pydantic v2 models:
+- **`GoldenCodeTask` (5 Tasks):** Real-world code localization tasks across the quantitative trading strategies (`volatility_garch`, `kelly_risk_manager`, `order_flow_imbalance`, `pairs_trading_kalman`, `almgren_chriss_execution`). Statically validates target files, target AST classes/functions, required context terms, and negative distraction keywords.
+- **`GoldenQuantTask` (3 Tasks):** Multi-market literature retrieval tasks covering `IN_NSE` liquidity/impact, `DE_XETRA` volatility/microstructure, and `US_EQUITY` friction/regulations. Statically validates expected paper IDs, section titles, and verbatim equation/table quotes.
+- **`GoldenFederatedTask` (2 Tasks):** End-to-end multi-domain tasks requiring simultaneous AST code slicing and academic literature grounding.
+- **`RedTeamRBACQuery` (22 Queries):** Cross-role adversarial permission probes (e.g., `junior_dev` querying production risk parameters, `restricted_quant` probing non-granted market scopes, parameter injection bypass attempts).
+- **`PoisonedInjectionPayload` (22 Payloads):** Adversarial prompt-injection attack vectors spanning delimiter escapes, system prompt overrides, LaTeX steganography, Unicode/bidi directionality overrides, and secret extraction probes.
+
+### 8.2 6 CI/CD Evaluation Gates & Measured Results (`src/context_scout/evals/harness.py`)
+
+The `EvaluationHarness` executes all benchmark tasks against live PostgreSQL 17 (under Forced RLS) and in-memory repositories, evaluating the 6 production gates:
+
+| CI/CD Gate Metric | Description & Method | Threshold | Measured Result | Status |
+|:---|:---|:---:|:---:|:---:|
+| **Zero-Touch Sufficiency Rate** | Fraction of tasks where Local Gemma + Pre-Flight Gate resolves full context without requiring missing-context fallback turns | $\ge 85.0\%$ | **100.0%** | ✅ **PASS** |
+| **File & Symbol Recall@5** | Fraction of golden target files and AST symbols present in the top-5 retrieved `CodeSlicePointer` items | $\ge 90.0\%$ | **100.0%** | ✅ **PASS** |
+| **Verbatim Citation Faithfulness** | NFKC-normalized character/token overlap ($\ge 0.98$) of cited slices against immutable Git blobs | $== 100.0\%$ | **100.0%** | ✅ **PASS** |
+| **Frontier Token Savings Ratio** | Reduction in paid frontier model input tokens relative to ungrounded raw codebase dumps ($\frac{\text{saved}}{\text{saved} + \text{paid}}$) | $\ge 80.0\%$ | **80.0%** | ✅ **PASS** |
+| **RBAC Zero-Leakage Rate** | Percentage of unauthorized cross-tenant/cross-role queries yielding exactly 0 records under PostgreSQL 17 `FORCE RLS` | $== 100.0\%$ | **100.0%** | ✅ **PASS** |
+| **Prompt-Injection Block Rate** | Percentage of adversarial prompt-injection payloads detected and blocked by `PromptInjectionSanitizer` | $\ge 95.0\%$ | **95.45%** | ✅ **PASS** |
+
+### 8.3 OpenTelemetry GenAI Semantic Instrumentation (`src/context_scout/telemetry.py`)
+
+The evaluation harness integrates natively with OpenTelemetry (`opentelemetry-api>=1.30.0` and `opentelemetry-sdk>=1.30.0`), emitting standardized traces conforming to the **OpenTelemetry GenAI Semantic Conventions**:
+- **Conventions Enforced:** `gen_ai.system` (`gemma`, `gemini`), `gen_ai.request.model` (`gemma-4-26B-A4B-it`, `gemini-3.8-flash`, `gemini-4-argon`), `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, and `gen_ai.operation.name` (`workflow`, `retrieval`, `preflight_gate`).
+- **Span Capture:** Instruments all scout workflow stages, tool queries, and validation passes. Operates with an `InMemorySpanExporter` in CI/CD pipelines to assert telemetry presence without external collectors.
+
+### 8.4 Automated CLI Evaluation Runner (`src/context_scout/evals/runner.py`)
+
+The evaluation suite is executable via CLI for automated CI/CD gating:
+```bash
+# Run full evaluation suite against live PostgreSQL 17 and enforce quality gates
+uv run python -m context_scout.evals.runner \
+  --postgres \
+  --output-json reports/m6_eval_report.json \
+  --output-md reports/m6_eval_report.md \
+  --fail-under-threshold
+```
+- **Exit Code 0:** All 6 gates meet or exceed thresholds; artifact scorecards written to `reports/`.
+- **Exit Code 1:** One or more gates fail threshold; blocks CI/CD merge request.
+
+---
+
+## 9. Local Setup & Installation
+
+### 9.1 Prerequisites
 
 - **macOS** or **Linux** workstation.
 - **Python 3.12+** with `uv` package manager (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
@@ -446,7 +504,7 @@ When any pre-flight check fails:
   brew services start postgresql@17
   ```
 
-### 8.2 Environment & Database Setup
+### 9.2 Environment & Database Setup
 
 1. **Clone the repository and install dependencies:**
    ```bash
@@ -474,7 +532,7 @@ When any pre-flight check fails:
 
 ---
 
-## 9. Verification & Test Suite
+## 10. Verification & Test Suite
 
 The platform enforces zero-trust automated testing across all components:
 
@@ -487,9 +545,12 @@ uv run mypy --strict src tests
 
 # 3. Comprehensive Unit & Integration Test Suite (Pytest)
 uv run pytest -v
+
+# 4. CI/CD Evaluation Harness & Gate Scorecard
+uv run python -m context_scout.evals.runner --fail-under-threshold
 ```
 
-### Test Coverage Highlights (310 Passed Tests, 0 Failures, 0 Skips)
+### Test Coverage Highlights (323 Passed Tests, 0 Failures, 0 Skips)
 
 | Subsystem | Test Module | Tests | Scope & Invariants Tested |
 |:---|:---|:---:|:---|
@@ -515,12 +576,15 @@ uv run pytest -v
 | **M5 ADK Scout Workflow** | `tests/test_scout_workflow.py` | 13 | ADK 4-stage workflow DAG, self-correction, and federated coordinator tests |
 | **M5 Gemini Executor** | `tests/test_gemini_executor.py` | 10 | Gemini model policy, budget gate, and git worktree sandbox tests |
 | **M5 End-to-End Integration** | `tests/test_m5_adk_workflow.py` | 17 | End-to-end integration, $0 bounce-back, and live PostgreSQL 17 telemetry tests |
-| **Total** | **21 Test Suites** | **310** | **100% Pass Rate (0 Failures, 0 Skips, 0 Errors in 50.76s)** |
+| **M6 Eval Harness & OTel** | `tests/test_m6_eval_harness.py` | 13 | Golden dataset, 6 CI/CD gates, OTel GenAI traces & live PG17 (100% pass) |
+| **Total** | **22 Test Suites** | **323** | **100% Pass Rate (0 Failures, 0 Skips, 0 Errors in ~85s)** |
 
 ---
 
-## 10. Security Invariants & Repository Protection
+## 11. Security Invariants & Repository Protection
 
 - **Confidentiality:** No proprietary client names, credentials, or internal metrics are permitted in code, comments, or commit history.
 - **Git Hook Protection:** Local git hooks (`.git/hooks/pre-commit` and `.git/hooks/commit-msg`) enforce regex-based secret scanning, path checks, and word-bounded term blocking on every commit.
+- **Model Truthfulness:** All model specifications, pricing, and benchmark claims are verified against official documentation and live search gates.
+
 - **Model Truthfulness:** All model specifications, pricing, and benchmark claims are verified against official documentation and live search gates.
