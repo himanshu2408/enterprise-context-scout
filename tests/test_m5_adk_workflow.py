@@ -1130,63 +1130,59 @@ def test_live_postgres_m5_preflight_and_scout_pipeline(
     domain_registry: DomainRegistry,
 ) -> None:
     """Tests PreFlightValidator and ScoutWorkflow against live PostgreSQL 17 under Forced RLS."""
-    try:
-        settings = ScoutSettings()
-        conn_mgr = RLSConnectionManager(settings.db_app_url)
-    except Exception as exc:
-        pytest.skip(f"PostgreSQL connection unavailable: {exc}")
+    settings = ScoutSettings()
+    conn_mgr = RLSConnectionManager(settings.db_app_url)
+
+    file_id = uuid.uuid4()
+    sym_id = uuid.uuid4()
+    unique_path = f"src/trading_strategies/order_router_{file_id.hex[:8]}.py"
+    with conn_mgr.scoped_transaction(principal) as conn:
+        pg_repo = PostgresRLSRepository()
+
+        content = (
+            "class LiveOrderRouter:\n"
+            "    def route_order(self, order_id: str) -> bool:\n"
+            "        return True\n"
+        )
+        pg_repo.insert_code_file(
+            conn,
+            CodeFileRecord(
+                file_id=file_id,
+                domain_id=DOMAIN_CODE,
+                repo_name="live-trading",
+                file_path=unique_path,
+                git_commit_sha="live_commit_123",
+                git_blob_sha="live_blob_456",
+                language="python",
+                allowed_scopes=["public_eng"],
+                raw_content=content,
+                line_count=3,
+            ),
+        )
+
+        pg_repo.insert_ast_symbol(
+            conn,
+            ASTSymbolRecord(
+                symbol_id=sym_id,
+                file_id=file_id,
+                domain_id=DOMAIN_CODE,
+                qualified_name="trading_strategies.order_router.LiveOrderRouter",
+                symbol_kind="class",
+                start_line=1,
+                end_line=3,
+                signature_skeleton="class LiveOrderRouter:",
+                contextual_summary="Routes trading orders",
+                allowed_scopes=["public_eng"],
+                embedding=[0.05] * 768,
+            ),
+        )
 
     try:
-        with conn_mgr.scoped_transaction(principal) as conn:
-            pg_repo = PostgresRLSRepository()
-
-            # Seed live code file
-            file_id = uuid.uuid4()
-            content = (
-                "class LiveOrderRouter:\n"
-                "    def route_order(self, order_id: str) -> bool:\n"
-                "        return True\n"
-            )
-            pg_repo.insert_code_file(
-                conn,
-                CodeFileRecord(
-                    file_id=file_id,
-                    domain_id=DOMAIN_CODE,
-                    repo_name="live-trading",
-                    file_path="src/trading_strategies/order_router.py",
-                    git_commit_sha="live_commit_123",
-                    git_blob_sha="live_blob_456",
-                    language="python",
-                    allowed_scopes=["public_eng"],
-                    raw_content=content,
-                    line_count=3,
-                ),
-            )
-
-            sym_id = uuid.uuid4()
-            pg_repo.insert_ast_symbol(
-                conn,
-                ASTSymbolRecord(
-                    symbol_id=sym_id,
-                    file_id=file_id,
-                    domain_id=DOMAIN_CODE,
-                    qualified_name="trading_strategies.order_router.LiveOrderRouter",
-                    symbol_kind="class",
-                    start_line=1,
-                    end_line=3,
-                    signature_skeleton="class LiveOrderRouter:",
-                    contextual_summary="Routes trading orders",
-                    allowed_scopes=["public_eng"],
-                    embedding=[0.05] * 768,
-                ),
-            )
-
-        # 2. Run PreFlightValidator with live graph adapter reading committed records
         adapter = PostgresScoutGraphAdapter(conn_mgr)
         validator = PreFlightValidator(repo=adapter)
         target_slice = VerbatimCodeSlice(
             repo_name="live-trading",
-            file_path="src/trading_strategies/order_router.py",
+            file_path=unique_path,
             start_line=1,
             end_line=3,
             qualified_symbol="trading_strategies.order_router.LiveOrderRouter",
@@ -1208,13 +1204,38 @@ def test_live_postgres_m5_preflight_and_scout_pipeline(
         assert report.passed is True
         assert len(report.unresolved_symbols) == 0
         assert len(report.missing_reference_identifiers) == 0
-
-        # Clean up
+    finally:
         with conn_mgr.scoped_transaction(principal) as conn:
             conn.execute("DELETE FROM ast_symbols WHERE symbol_id = %s;", (sym_id,))
             conn.execute("DELETE FROM code_files WHERE file_id = %s;", (file_id,))
-    except Exception as exc:
-        pytest.skip(f"Live PostgreSQL test encountered error: {exc}")
+
+
+@pytest.mark.postgres
+def test_live_postgres_federated_scout_coordinator_seeded_corpus(
+    principal: PrincipalContext,
+    domain_registry: DomainRegistry,
+) -> None:
+    """Verifies FederatedScoutCoordinator across live PostgreSQL 17 doc_chunks and AST tables."""
+    settings = ScoutSettings()
+    conn_mgr = RLSConnectionManager(settings.db_app_url)
+    adapter = PostgresScoutGraphAdapter(conn_mgr)
+    coordinator = FederatedScoutCoordinator(registry=domain_registry, repo=adapter)
+    fed_principal = PrincipalContext(
+        user_id=principal.user_id,
+        role=principal.role,
+        allowed_scopes=[*principal.allowed_scopes, "public_quant"],
+        max_session_paid_tokens=principal.max_session_paid_tokens,
+    )
+
+    pack = coordinator.run(
+        user_prompt="Enhance OrderFlowImbalanceAnalyzer using continuous auction OFI research",
+        principal=fed_principal,
+    )
+    assert isinstance(pack, ImplementationContextPack)
+    assert pack.preflight_report.passed is True
+    assert pack.quant_strategy_spec is not None
+    assert len(pack.supporting_doc_citations) >= 1
+    assert len(pack.code_slices) >= 1
 
 
 @pytest.mark.postgres
@@ -1223,67 +1244,68 @@ def test_live_postgres_execution_telemetry_and_budget_accumulation(
     temp_git_repo: Path,
 ) -> None:
     """Verifies live PostgreSQL 17 execution_telemetry insertion and budget accumulation."""
-    try:
-        settings = ScoutSettings()
-        conn_mgr = RLSConnectionManager(settings.db_app_url)
-    except Exception as exc:
-        pytest.skip(f"PostgreSQL connection unavailable: {exc}")
+    settings = ScoutSettings()
+    conn_mgr = RLSConnectionManager(settings.db_app_url)
+    live_principal = PrincipalContext(
+        user_id=f"{principal.user_id}_{uuid.uuid4().hex[:8]}",
+        role=principal.role,
+        allowed_scopes=list(principal.allowed_scopes),
+        max_session_paid_tokens=principal.max_session_paid_tokens,
+    )
 
-    try:
-        with conn_mgr.scoped_transaction(principal) as conn:
-            pg_repo = PostgresRLSRepository()
-            prior_consumed = pg_repo.get_principal_paid_tokens_consumed(conn, principal.user_id)
+    with conn_mgr.scoped_transaction(live_principal) as conn:
+        pg_repo = PostgresRLSRepository()
+        prior_consumed = pg_repo.get_principal_paid_tokens_consumed(conn, live_principal.user_id)
+        assert prior_consumed == 0
 
-            slice1 = VerbatimCodeSlice(
-                repo_name=REPO_NAME,
-                file_path="src/trading_strategies/order_flow_imbalance.py",
-                start_line=1,
-                end_line=3,
-                qualified_symbol="OrderFlowImbalanceAnalyzer",
-                selection_reason="Target slice",
-                modification_intent=ModificationIntent.MODIFY_TARGET,
-                git_commit_sha="c0ffee123",
-                git_blob_sha="b10b456",
-                verbatim_code_with_lines="   1 | class OrderFlowImbalanceAnalyzer:\n",
-            )
+        slice1 = VerbatimCodeSlice(
+            repo_name=REPO_NAME,
+            file_path="src/trading_strategies/order_flow_imbalance.py",
+            start_line=1,
+            end_line=3,
+            qualified_symbol="OrderFlowImbalanceAnalyzer",
+            selection_reason="Target slice",
+            modification_intent=ModificationIntent.MODIFY_TARGET,
+            git_commit_sha="c0ffee123",
+            git_blob_sha="b10b456",
+            verbatim_code_with_lines="   1 | class OrderFlowImbalanceAnalyzer:\n",
+        )
 
-            pack = ImplementationContextPack(
-                trace_id=str(uuid.uuid4()),
-                domain_id=DOMAIN_CODE,
-                user_task="Add slippage tolerance check to OrderFlowImbalanceAnalyzer",
-                architectural_execution_plan=["Enforce slippage bounds"],
-                code_slices=[slice1],
-                preflight_report=PreFlightValidationReport(
-                    passed=True,
-                    normalized_rrf_score=0.88,
-                    citations_verified_100_pct=True,
-                ),
-                local_tokens_consumed=42_000,
-                pack_token_count=4_200,
-            )
+        pack = ImplementationContextPack(
+            trace_id=str(uuid.uuid4()),
+            domain_id=DOMAIN_CODE,
+            user_task="Add slippage tolerance check to OrderFlowImbalanceAnalyzer",
+            architectural_execution_plan=["Enforce slippage bounds"],
+            code_slices=[slice1],
+            preflight_report=PreFlightValidationReport(
+                passed=True,
+                normalized_rrf_score=0.88,
+                citations_verified_100_pct=True,
+            ),
+            local_tokens_consumed=42_000,
+            pack_token_count=4_200,
+        )
 
-            executor = GeminiImplementationExecutor(api_key=None, require_confirmation=False)
-            result, telemetry = executor.execute_implementation(
-                pack=pack,
-                principal=principal,
-                repo_root=temp_git_repo,
-                conn=conn,
-                auto_confirm=True,
-                lint_cmd=["python3", "-c", "print('lint pass')"],
-                test_cmd=["python3", "-c", "print('test pass')"],
-            )
+        executor = GeminiImplementationExecutor(api_key=None, require_confirmation=False)
+        result, telemetry = executor.execute_implementation(
+            pack=pack,
+            principal=live_principal,
+            repo_root=temp_git_repo,
+            conn=conn,
+            auto_confirm=True,
+            lint_cmd=["python3", "-c", "print('lint pass')"],
+            test_cmd=["python3", "-c", "print('test pass')"],
+        )
 
-            assert result.success is True
+        assert result.success is True
 
-            # Query back from Postgres execution_telemetry
-            persisted = pg_repo.get_execution_telemetry(conn, telemetry.trace_id)
-            assert persisted is not None
-            assert persisted.trace_id == telemetry.trace_id
-            assert persisted.paid_tokens_saved == telemetry.paid_tokens_saved
-            assert persisted.estimated_usd_saved == telemetry.estimated_usd_saved
+        # Query back from Postgres execution_telemetry
+        persisted = pg_repo.get_execution_telemetry(conn, telemetry.trace_id)
+        assert persisted is not None
+        assert persisted.trace_id == telemetry.trace_id
+        assert persisted.paid_tokens_saved == telemetry.paid_tokens_saved
+        assert persisted.estimated_usd_saved == telemetry.estimated_usd_saved
 
-            # Verify token consumption accumulated in PostgreSQL
-            new_consumed = pg_repo.get_principal_paid_tokens_consumed(conn, principal.user_id)
-            assert new_consumed >= prior_consumed + pack.pack_token_count
-    except Exception as exc:
-        pytest.skip(f"Live PostgreSQL test encountered error: {exc}")
+        # Verify token consumption accumulated in PostgreSQL
+        new_consumed = pg_repo.get_principal_paid_tokens_consumed(conn, live_principal.user_id)
+        assert new_consumed == prior_consumed + pack.pack_token_count

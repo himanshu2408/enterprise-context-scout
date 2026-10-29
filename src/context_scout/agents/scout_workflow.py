@@ -370,21 +370,36 @@ class LocalGemmaClient:
         ):
             target_markets.append(MarketRegime.US_NYSE_NASDAQ)
 
+        slicer = DeterministicSlicer()
         verified_citations: list[DocCitationSpan] = []
-        for chk in chunks[:3]:
+        for chk in chunks:
+            if len(verified_citations) >= 3:
+                break
             snippet = chk.verbatim_content.strip()
-            first_sent = snippet.split(".")[0] + "." if "." in snippet else snippet[:120]
-
-            verified_citations.append(
-                DocCitationSpan(
+            if not snippet:
+                continue
+            candidates = [
+                snippet.split(".")[0] + "." if "." in snippet else snippet[:120],
+                *[ln.strip() for ln in snippet.splitlines() if len(ln.strip()) >= 20],
+                snippet,
+            ]
+            for cand in candidates:
+                if not cand:
+                    continue
+                cand_cit = DocCitationSpan(
                     chunk_id=str(chk.chunk_id),
                     doc_id=chk.doc_id,
                     doc_title=chk.doc_title,
                     source_uri=chk.source_uri,
                     section_heading=chk.section_heading,
-                    verbatim_quote=first_sent,
+                    verbatim_quote=cand,
                 )
-            )
+                if slicer.verify_doc_citation(
+                    citation=cand_cit,
+                    chunk_content=chk.verbatim_content,
+                ).is_valid:
+                    verified_citations.append(cand_cit)
+                    break
 
         if not verified_citations:
             verified_citations.append(
