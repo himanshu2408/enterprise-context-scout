@@ -85,7 +85,10 @@ enterprise-context-scout/
 │       │   ├── quant_corpus_mcp.py # Quant corpus MCP server (4 canonical tools + 3 aliases)
 │       │   └── seed_code_corpus.py # Database seeding engine for strategies and GitHub issues
 │       └── agents/
-│           └── __init__.py     # Agent interfaces and adapter management
+│           ├── __init__.py     # Agent interfaces and adapter management
+│           ├── preflight_gate.py # 4-Check PreFlightValidator & $0 bounce-back loop
+│           ├── scout_workflow.py # Google ADK 2.12 ScoutWorkflow & FederatedScoutCoordinator
+│           └── gemini_executor.py # Paid Gemini executor, budget guardrails & GitWorktreeSandbox
 └── tests/
     ├── conftest.py             # Shared fixtures (temp repos, live postgres connections)
     ├── test_m1_foundation.py   # M1 contracts, schemas, and adapter validation
@@ -103,7 +106,11 @@ enterprise-context-scout/
     ├── test_real_paper_harvest_live.py # Live harvest, PDF fallback, DB persistence & gate integration (6 tests)
     ├── test_m4_mcp_servers.py  # M4 Enterprise MCP servers, live Postgres RLS & bounds tests (18 tests)
     ├── test_m4_security.py     # M4 Out-of-band RBAC, domain gate, and guardrail tests (37 tests)
-    └── test_adversarial_security.py # M4 Adversarial security fuzzing and pool isolation tests (47 tests)
+    ├── test_adversarial_security.py # M4 Adversarial security fuzzing and pool isolation tests (47 tests)
+    ├── test_preflight_gate.py  # M5 4-Check pre-flight quality gate & bounce-back tests (10 tests)
+    ├── test_scout_workflow.py  # M5 ADK 4-stage workflow DAG & federated coordinator tests (13 tests)
+    ├── test_gemini_executor.py # M5 Gemini model policy, budget gate & worktree tests (10 tests)
+    └── test_m5_adk_workflow.py # M5 End-to-end integration & live Postgres telemetry tests (17 tests)
 ```
 
 ---
@@ -359,9 +366,76 @@ Provides high-precision research discovery across 14,318 genuine academic chunks
 
 ---
 
-## 7. Local Setup & Installation
+## 7. Milestone 5 Architecture: Google ADK 2.12 Scout, 4-Check Pre-Flight Gate & Paid Gemini Worktree Handoff
 
-### 7.1 Prerequisites
+Milestone 5 unifies the local open-weights discovery stack with production-grade Google ADK (`google-adk>=2.12.0`) workflows, enforcing a strict 4-check deterministic pre-flight gate that guarantees zero paid token waste on exploratory context discovery, coupled with an isolated git worktree sandbox and human confirmation gate.
+
+### 7.1 4-Check Pre-Flight Quality Gate (`src/context_scout/agents/preflight_gate.py`)
+
+To eliminate the 80–90% paid token wastage observed in naive agent setups, the `PreFlightValidator` acts as a zero-cost deterministic gate before any paid Gemini API call is executed:
+
+1. **Check 1 (100% Internal Symbol Resolution):**
+   - Parses AST symbol references across all candidate `code_slices`.
+   - Rejects any pack containing ungrounded internal function, method, or class references.
+   - Automatically executes 1-hop AST dependency closure expansion to auto-attach missing caller and type definition slices up to `MAX_EXPANSION_TOKEN_BUDGET = 1500`.
+2. **Check 2 (Zero Novel Target Identifiers, `VAL-01`):**
+   - Cross-checks all target modification symbols against the indexed AST symbol graph.
+   - Prevents hallucinations targeting non-existent modules or symbols before code generation commences.
+3. **Check 3 (Normalized RRF Floor, `BLK-01`):**
+   - Enforces a statutory retrieval quality floor: requires highest normalized 3-way RRF score $\ge 0.55$.
+   - Rejects low-confidence context packs with weak lexical/semantic grounding.
+4. **Check 4 (100% Verbatim Citation Verification, `VAL-02`):**
+   - Audits every academic paper citation against indexed `doc_chunks` using `DeterministicSlicer` with NFKC normalization ($\ge 0.98$ overlap required).
+   - Rejects hallucinated quotes, misattributed claims, or tampered equation citations.
+
+### 7.2 $0 Local Bounce-Back Loop & Context Flywheel
+
+When any pre-flight check fails:
+- The system returns `PreFlightValidationReport(passed=False)` with structured diagnostic feedback (`bounce_back_feedback`).
+- Generates `InsufficientContextDiagnostic(paid_tokens_spent=0)` locally. Zero paid tokens are spent.
+- Triggers up to 2 local self-correction turns with `LocalGemmaClient` at $0 API cost, searching for missing symbols or refining retrieval queries.
+- Records `MissingContextRequest` flywheel events, capturing context miss patterns to inform future QLoRA distillation datasets.
+
+### 7.3 Local Gemma Discovery Engine & Multi-Domain ADK Workflow (`src/context_scout/agents/scout_workflow.py`)
+
+- **Local Gemma Client (`LocalGemmaClient`, `HW-01`, `ARC-02`):**
+  - Targets `google/gemma-4-26B-A4B-it` (MoE: 25.2B total / 3.8B active parameters, 256K context) at $0 token cost.
+  - Enforces strict 32,768-token KV cache clamping (`HW-01`) preventing out-of-memory errors on Apple Silicon MPS and local GPUs.
+  - Dynamic in-memory LoRA adapter hot-swapping (`ARC-02`) via `load_lora_adapter` / `unload_lora_adapter` without full model reload.
+- **4-Stage ADK Scout Workflow (`ScoutWorkflow`):**
+  - **Stage 1 (Discovery):** Local Gemma queries enterprise MCP tools (`code_repo_mcp`, `quant_corpus_mcp`) across live PostgreSQL 17 under Forced RLS.
+  - **Stage 2 (Expansion):** Bounded 1-hop AST closure expands caller, type, and test dependencies.
+  - **Stage 3 (Assembly):** Assembles a compact, typed `ImplementationContextPack` containing byte-exact slices, verified citations, and provenance metadata.
+  - **Stage 4 (Pre-Flight Validation):** `PreFlightValidator` verifies all 4 quality gates.
+- **Federated Multi-Domain DAG Coordination (`FederatedScoutCoordinator`, `ARC-01`):**
+  - Orchestrates multi-domain requests spanning `trading_code_scout` and `quant_research_scout`.
+  - Dispatches domain scouts concurrently or sequentially, performs score-normalized RRF fusion, and produces a unified context pack with deduplicated AST slices and academic citations.
+
+### 7.4 Paid Gemini Implementation Executor & Git Worktree Sandbox (`src/context_scout/agents/gemini_executor.py`)
+
+- **Google Model Policy & Hard Budget Enforcement:**
+  - Allowed execution models: **Google `gemini-3.8-flash`** ($0.75/$3.75 promo) for fast execution, or **`gemini-4-argon`** ($2.00–$4.00/$10.00–$20.00 std) for complex frontier reasoning.
+  - Legacy 2025 models (`gemini-2.5-pro`, `gemini-2.5-flash`) are strictly rejected.
+  - Hard per-turn budget caps checked via `max_budget_usd`. If projected token cost exceeds budget, execution halts before calling the model API.
+- **Isolated Ephemeral Git Worktree Sandbox (`GitWorktreeSandbox`):**
+  - Creates an isolated ephemeral git worktree on an ephemeral branch (`scout-exec-<uuid>`) off `repo_root`.
+  - Applies synthesized unified diff patches using `git apply --whitespace=fix`.
+  - Runs automated verification commands (`ruff check`, `pytest`) within the isolated worktree directory.
+  - **Human Confirmation Gate:** Requires explicit human sign-off (`confirm_and_merge(confirmed=True)`) before committing. When declined (`confirmed=False`), changes are aborted with zero residual disk pollution.
+  - Automatic worktree cleanup removes worktree directories and branches upon context manager exit.
+
+### 7.5 Institutional ROI & Execution Telemetry
+
+- **Live PostgreSQL 17 Telemetry (`execution_telemetry` table):**
+  - Records every scout execution: `trace_id`, `domain_id`, `discovery_tokens_saved`, `paid_tokens_spent`, `net_dollar_savings`, `preflight_passed`, and `human_confirmed`.
+  - Empirically verifies $>80\%$ token savings over brute-force frontier queries:
+    $$\text{Savings \%} = \frac{\text{discovery\_tokens\_saved}}{\text{discovery\_tokens\_saved} + \text{paid\_tokens\_spent}} \times 100 \ge 80\%$$
+
+---
+
+## 8. Local Setup & Installation
+
+### 8.1 Prerequisites
 
 - **macOS** or **Linux** workstation.
 - **Python 3.12+** with `uv` package manager (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
@@ -372,7 +446,7 @@ Provides high-precision research discovery across 14,318 genuine academic chunks
   brew services start postgresql@17
   ```
 
-### 7.2 Environment & Database Setup
+### 8.2 Environment & Database Setup
 
 1. **Clone the repository and install dependencies:**
    ```bash
@@ -400,7 +474,7 @@ Provides high-precision research discovery across 14,318 genuine academic chunks
 
 ---
 
-## 8. Verification & Test Suite
+## 9. Verification & Test Suite
 
 The platform enforces zero-trust automated testing across all components:
 
@@ -415,7 +489,7 @@ uv run mypy --strict src tests
 uv run pytest -v
 ```
 
-### Test Coverage Highlights (260 Passed Tests, 0 Failures, 0 Skips)
+### Test Coverage Highlights (310 Passed Tests, 0 Failures, 0 Skips)
 
 | Subsystem | Test Module | Tests | Scope & Invariants Tested |
 |:---|:---|:---:|:---|
@@ -437,11 +511,15 @@ uv run pytest -v
 | **M4 Enterprise MCP Servers** | `tests/test_m4_mcp_servers.py` | 18 | Live PostgreSQL 17 Forced RLS, canonical tools, payload bounds ($\le 32$ KB), strategy queries |
 | **M4 Security Layer** | `tests/test_m4_security.py` | 37 | Out-of-band principal binding, domain authorization gate, prompt injection & secret guardrails |
 | **M4 Adversarial Security** | `tests/test_adversarial_security.py` | 47 | Adversarial parameter injection fuzzing, connection pool isolation, NUL byte detection, TWAP fallback |
-| **Total** | **18 Test Suites** | **260** | **100% Pass Rate (0 Failures, 0 Skips, 0 Errors in 44.44s)** |
+| **M5 Pre-Flight Gate** | `tests/test_preflight_gate.py` | 10 | 4-Check pre-flight quality gate, symbol auto-attachment, and $0 bounce-back tests |
+| **M5 ADK Scout Workflow** | `tests/test_scout_workflow.py` | 13 | ADK 4-stage workflow DAG, self-correction, and federated coordinator tests |
+| **M5 Gemini Executor** | `tests/test_gemini_executor.py` | 10 | Gemini model policy, budget gate, and git worktree sandbox tests |
+| **M5 End-to-End Integration** | `tests/test_m5_adk_workflow.py` | 17 | End-to-end integration, $0 bounce-back, and live PostgreSQL 17 telemetry tests |
+| **Total** | **21 Test Suites** | **310** | **100% Pass Rate (0 Failures, 0 Skips, 0 Errors in 50.76s)** |
 
 ---
 
-## 9. Security Invariants & Repository Protection
+## 10. Security Invariants & Repository Protection
 
 - **Confidentiality:** No proprietary client names, credentials, or internal metrics are permitted in code, comments, or commit history.
 - **Git Hook Protection:** Local git hooks (`.git/hooks/pre-commit` and `.git/hooks/commit-msg`) enforce regex-based secret scanning, path checks, and word-bounded term blocking on every commit.

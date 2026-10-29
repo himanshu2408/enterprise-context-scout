@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import date
 from typing import Any, Final
 from uuid import UUID
 
@@ -12,9 +13,10 @@ from context_scout.db.repositories import (
     ASTEdgeRecord,
     ASTSymbolRecord,
     CodeFileRecord,
+    DocChunkRecord,
 )
 from context_scout.db.session import RLSConnectionManager
-from context_scout.schemas.contracts import PrincipalContext
+from context_scout.schemas.contracts import MarketRegime, PrincipalContext
 from context_scout.security.rbac import (
     get_current_principal,
     scoped_db_session,
@@ -246,6 +248,70 @@ class PostgresScoutGraphAdapter:
                         target_symbol_id=t_sym_id,
                         edge_kind=str(r[5]),  # type: ignore[arg-type]
                         allowed_scopes=scopes_list,
+                    )
+                )
+            return results
+
+    def list_visible_doc_chunks(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        market_scope: MarketRegime | None = None,
+    ) -> list[DocChunkRecord]:
+        """Returns visible document chunks under Forced RLS (bounded to 100 rows)."""
+        with scoped_db_session(self.connection_manager, principal) as conn:
+            query = """
+                SELECT chunk_id, domain_id, doc_id, doc_title, source_uri,
+                       market_scope, published_date, authority_weight,
+                       section_heading, contextual_header, verbatim_content,
+                       metadata_json, allowed_scopes
+                FROM doc_chunks
+                WHERE domain_id = %s
+            """
+            params: list[object] = [domain_id]
+            if market_scope is not None:
+                query += " AND market_scope = %s"
+                params.append(
+                    market_scope.value if hasattr(market_scope, "value") else str(market_scope)
+                )
+            query += " ORDER BY doc_id, chunk_id LIMIT 100;"
+            rows = conn.execute(query, tuple(params)).fetchall()
+            results: list[DocChunkRecord] = []
+            for r in rows:
+                meta = r[11]
+                if isinstance(meta, str):
+                    meta_dict = json.loads(meta)
+                elif isinstance(meta, dict):
+                    meta_dict = meta
+                else:
+                    meta_dict = {}
+
+                pub_date = r[6]
+                if isinstance(pub_date, str):
+                    pub_date = date.fromisoformat(pub_date)
+                elif not isinstance(pub_date, date):
+                    pub_date = None
+
+                raw_scopes = r[12]
+                scopes_list = (
+                    [str(s) for s in raw_scopes] if isinstance(raw_scopes, (list, tuple)) else []
+                )
+                results.append(
+                    DocChunkRecord(
+                        chunk_id=UUID(str(r[0])),
+                        domain_id=str(r[1]),
+                        doc_id=str(r[2]),
+                        doc_title=str(r[3]),
+                        source_uri=str(r[4]),
+                        market_scope=MarketRegime(str(r[5])),
+                        published_date=pub_date,
+                        authority_weight=float(str(r[7])),
+                        section_heading=str(r[8]),
+                        contextual_header=str(r[9]),
+                        verbatim_content=str(r[10]),
+                        metadata_json=meta_dict,
+                        allowed_scopes=scopes_list,
+                        embedding=[],
                     )
                 )
             return results
