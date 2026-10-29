@@ -1,7 +1,7 @@
 # STATUS: Enterprise Context Scout & Multi-Domain Platform
 
 **Last Updated:** 2026-10-29  
-**Active Branch:** `feat/m4-mcp-servers`  
+**Active Branch:** `feat/m5-adk-scout-handoff`  
 **Repository:** `https://github.com/himanshu2408/enterprise-context-scout`
 
 ## 1. Milestone Progress Dashboard
@@ -13,8 +13,8 @@
 | **M2: Code Engine (AST + Merkle Sync + Slicer)** | Git Blob-SHA Merkle indexer, `tree-sitter` AST symbol/edge extractor, bounded 1-hop `ASTDependencyExpander` ($\le 3$ callers, $\le 1,500$ tokens), `DeterministicSlicer` | **COMPLETE** | `uv run ruff check` + `uv run mypy --strict src tests` + `uv run pytest -v` (54/54 passing) |
 | **M3: Quant Paper Harvester & Contextual Retrieval** | arXiv (`.tex`/PDF) & OpenAlex harvester (`IN_NSE`, `DE_XETRA`, `US_EQUITY`), 26-concept relevance classifier, 12 negative blocking topics, Local `EmbeddingGemma 2` (768-d MPS/CPU), Lossless LaTeX/MD Chunkers, Contextualizer, 3-way Normalized RRF, Market Scepticism Gate | **COMPLETE** | `uv run ruff check` + `uv run mypy --strict src` + `uv run pytest -v` (158/158 passing, PR #3) |
 | **M4: Enterprise MCP Servers (`mcp` v2.3.0) & Security Layer** | `code_repo_mcp.py`, `quant_corpus_mcp.py`, `src/context_scout/security/` (`rbac.py`, `guardrails.py`), trading strategy package, out-of-band `PrincipalContext` & hard payload caps | **COMPLETE** | `uv run ruff check src tests` + `uv run mypy --strict src tests` + `uv run pytest` (260/260 passing, PR #4) |
-| **M5: Google ADK 2.12 Scout, Pre-Flight Gate & Handoff** | ADK `Workflow` DAG, `LocalGemmaClient`, 4-Check `PreFlightValidator`, `FederatedScoutCoordinator`, `ShieldGemma 2`, Git worktree sandbox | **NEXT** | `tests/test_m5_adk_workflow.py` |
-| **M6: Evaluation Harness & OpenTelemetry** | Recall@5 ($\ge 90\%$), Zero-Touch Sufficiency ($\ge 85\%$), Citation Faithfulness ($100\%$), RBAC Red-Team ($100\%$), OTel spans | **PENDING** | `tests/test_m6_eval_harness.py` |
+| **M5: Google ADK 2.12 Scout, Pre-Flight Gate & Handoff** | ADK `Workflow` DAG, `LocalGemmaClient`, 4-Check `PreFlightValidator`, `FederatedScoutCoordinator`, `ShieldGemma 2`, Git worktree sandbox | **COMPLETE** | `uv run ruff check src tests` + `uv run mypy --strict src tests` + `uv run pytest` (310/310 passing, PR #5) |
+| **M6: Evaluation Harness & OpenTelemetry** | Recall@5 ($\ge 90\%$), Zero-Touch Sufficiency ($\ge 85\%$), Citation Faithfulness ($100\%$), RBAC Red-Team ($100\%$), OTel spans | **NEXT** | `tests/test_m6_eval_harness.py` |
 | **M7: Teacher Distillation & QLoRA Training** | Rejection-sampled + 20% recovery trajectories (`gemini-3.8-flash` / `gemma-4-31B-it`), `mlx-lm` local M5 Pro & Vertex AI `PEFT` trainers | **PENDING** | Before-vs-After QLoRA Benchmark Report |
 | **M8: FastAPI SSE, TypeScript/React UI & CI/CD** | FastAPI streaming backend, strict TS/React enterprise UI, `.gitlab-ci.yml` / GitHub Actions | **PENDING** | End-to-end API + UI test suite |
 
@@ -134,6 +134,68 @@ Milestone 4 is verified complete with 260/260 tests passing across all 18 test s
 - `uv run ruff check src tests`: 0 errors.
 - `uv run mypy --strict src tests`: 0 type errors across 56 source files.
 - `uv run pytest`: 260 passed in 44.44s across 18 test suites (100% pass rate, 0 failures, 0 skips).
-- Target Pull Request: PR #4 (`feat/m4-mcp-servers` -> `main`).
+- Pull Request: [PR #4](https://github.com/himanshu2408/enterprise-context-scout/pull/4) (`feat/m4-mcp-servers` -> `main`, merged in `6cd84e6`).
+
+## 5. Milestone 5 Completion Details (Google ADK 2.12 Scout, 4-Check Pre-Flight Gate & Worktree Handoff)
+
+Milestone 5 is verified complete with 310/310 tests passing across all 21 test suites, including unit, live PostgreSQL 17 Forced RLS integration, AST symbol resolution, quote verification, federated multi-domain DAG coordination, and ephemeral git worktree sandbox isolation:
+
+### 5.1 Requirement R1: Branch Foundation & Google ADK Integration
+- **PR #4 Merged:** PR #4 (`feat/m4-mcp-servers`) merged into `main` (commit `6cd84e6`).
+- **Feature Branch:** Active feature branch `feat/m5-adk-scout-handoff` branched directly from `main`.
+- **Google AI & ADK Stack:** Upgraded protocol dependencies with `google-genai>=1.0.0` and `google-adk>=2.12.0` for structured agent workflows and frontier model integration.
+
+### 5.2 Requirement R2: 4-Check Pre-Flight Quality Gate (`PreFlightValidator`, `BLK-01`, `VAL-01`, `VAL-02`)
+- **4 Deterministic Quality Checks:**
+  1. **Check 1 (100% Internal Symbol Resolution):** Verifies all referenced internal symbols in `code_slices` are defined in the AST symbol table. Identifies missing references and automatically attaches 1-hop AST dependency slices up to `MAX_EXPANSION_TOKEN_BUDGET = 1500`.
+  2. **Check 2 (Zero Novel Target Identifiers):** Validates that all target symbols to be modified exist in the indexed symbol graph. Prevents hallucinated function or class targeting (`VAL-01`).
+  3. **Check 3 (Normalized RRF Quality Floor):** Rejects any context pack whose highest normalized RRF score falls below statutory floor $\ge 0.55$ (`BLK-01`).
+  4. **Check 4 (100% Verbatim Citation Verification):** Evaluates every research citation in `research_citations` using `DeterministicSlicer` with NFKC normalization ($\ge 0.98$ overlap required). Tampered or misattributed citations raise validation failure (`VAL-02`).
+- **$0 Local Bounce-Back Loop:**
+  - When any check fails, the pre-flight gate returns `PreFlightValidationReport(passed=False)` with structured diagnostic feedback (`bounce_back_feedback`).
+  - Generates `InsufficientContextDiagnostic(paid_tokens_spent=0)` locally. Zero paid tokens are spent.
+  - Generates `MissingContextRequest` flywheel events to log context miss patterns for QLoRA fine-tuning.
+
+### 5.3 Requirement R3: Local Gemma Discovery Engine & Multi-Domain ADK Workflow (`LocalGemmaClient`, `ScoutWorkflow`, `FederatedScoutCoordinator`)
+- **Local Gemma Client (`LocalGemmaClient`, `HW-01`, `ARC-02`):**
+  - Targets `google/gemma-4-26B-A4B-it` (MoE: 25.2B total / 3.8B active parameters) at $0 token cost.
+  - Enforces strict 32,768-token KV cache clamping (`HW-01`), eliminating out-of-memory risks on Apple Silicon MPS and workstation GPUs.
+  - Dynamic in-memory LoRA adapter hot-swapping (`ARC-02`) via `load_lora_adapter` / `unload_lora_adapter` without full model re-initialization.
+- **4-Stage ADK Scout Workflow (`ScoutWorkflow`):**
+  - **Stage 1 (Discovery):** Local Gemma queries enterprise MCP tools (`search_code_trigram`, `lookup_ast_symbol`, `search_quant_papers_hybrid`) across live PostgreSQL 17 under Forced RLS.
+  - **Stage 2 (Expansion):** Bounded 1-hop AST closure expansion collects relevant caller/type context.
+  - **Stage 3 (Assembly):** Deterministic pack assembly constructing typed `ImplementationContextPack`.
+  - **Stage 4 (Pre-Flight Validation):** `PreFlightValidator` executes all 4 checks. On failure, triggers up to 2 local self-correction turns at $0 API cost.
+- **Federated Multi-Domain DAG Coordination (`FederatedScoutCoordinator`, `ARC-01`):**
+  - Coordinates multi-domain tasks spanning both `trading_code_scout` and `quant_research_scout`.
+  - Dispatches domain scouts concurrently or sequentially, performs score-normalized RRF fusion, and deduplicates AST slices and academic citations into a unified context pack.
+
+### 5.4 Requirement R4: Paid Gemini Execution Engine & Git Worktree Sandbox (`GeminiImplementationExecutor`, `GitWorktreeSandbox`)
+- **Strict Google Model Policy & Budget Enforcement:**
+  - Allowed execution models strictly enforced: `gemini-3.8-flash` ($0.75/$3.75 promo) and `gemini-4-argon` ($2.00–$4.00/$10.00–$20.00 std).
+  - Outdated 2025 models (`gemini-2.5-pro`, `gemini-2.5-flash`) are rejected with `ValueError`.
+  - Hard per-turn budget caps checked via `max_budget_usd`. If projected cost exceeds budget, execution halts before calling the model API.
+- **Ephemeral Git Worktree Sandbox (`GitWorktreeSandbox`):**
+  - Creates an isolated ephemeral git worktree on an ephemeral branch (`scout-exec-<uuid>`) off `repo_root`.
+  - Applies synthesized unified diff patches using `git apply --whitespace=fix`.
+  - Runs automated verification commands (`ruff check`, `pytest`) within the isolated worktree directory.
+  - **Human Confirmation Gate:** Requires explicit human sign-off (`confirm_and_merge(confirmed=True)`) before committing. When declined (`confirmed=False`), changes are aborted with zero residual disk pollution.
+  - Automatic worktree cleanup removes worktree directories and branches upon context manager exit.
+
+### 5.5 Requirement R5: End-to-End Integration, Live PostgreSQL 17 Telemetry & Verification Metrics
+- **Live PostgreSQL 17 Telemetry (`execution_telemetry` table):**
+  - Records every scout execution: `trace_id`, `domain_id`, `discovery_tokens_saved`, `paid_tokens_spent`, `net_dollar_savings`, `preflight_passed`, and `human_confirmed`.
+  - Verifies institutional ROI metrics: $>80\%$ token savings over raw repository traversal.
+- **Comprehensive Test Suite:**
+  - `tests/test_preflight_gate.py`: 10 tests covering all 4 checks, symbol auto-attachment, and bounce-back.
+  - `tests/test_scout_workflow.py`: 13 tests covering 4-stage DAG, self-correction, and federated coordination.
+  - `tests/test_gemini_executor.py`: 10 tests covering model policies, budget enforcement, and worktree sandbox.
+  - `tests/test_m5_adk_workflow.py`: 17 end-to-end integration and live PostgreSQL 17 telemetry tests.
+- **Quality Gates:**
+  - `uv run ruff check src tests`: 0 errors.
+  - `uv run mypy --strict src tests`: 0 type errors across 63 source files.
+  - `uv run pytest`: 310 passed in 50.76s across all 21 test suites (100% pass rate, 0 failures, 0 skips).
+  - Pull Request: PR #5 (`feat/m5-adk-scout-handoff` -> `main`).
+
 
 

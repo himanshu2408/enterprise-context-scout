@@ -4,8 +4,8 @@ import json
 import math
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date
-from typing import Literal
+from datetime import date, datetime
+from typing import Any, Literal
 from uuid import UUID
 
 from psycopg import Connection
@@ -13,6 +13,7 @@ from psycopg import Connection
 from context_scout.db.bm25 import BM25Okapi
 from context_scout.schemas.contracts import (
     DomainPackManifest,
+    ExecutionTelemetryRecord,
     MarketRegime,
     PrincipalContext,
     compute_normalized_rrf,
@@ -479,6 +480,111 @@ class PostgresRLSRepository:
         hits.sort(key=lambda h: h.normalized_rrf_score, reverse=True)
         return hits[:top_k]
 
+    def record_execution_telemetry(
+        self, conn: Connection[tuple[object, ...]], record: ExecutionTelemetryRecord
+    ) -> None:
+        mode_val = str(record.execution_mode)
+        missing_json = json.dumps(record.missing_context_requests)
+        conn.execute(
+            """
+            INSERT INTO execution_telemetry (
+                trace_id, domain_id, principal_id, principal_role,
+                execution_mode, local_tokens_read, context_pack_tokens_sent,
+                paid_tokens_saved, estimated_usd_saved, preflight_passed_first_try,
+                zero_touch_sufficient, missing_context_requests, latency_ms,
+                created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, COALESCE(%s, NOW()))
+            ON CONFLICT (trace_id) DO UPDATE SET
+                local_tokens_read = EXCLUDED.local_tokens_read,
+                context_pack_tokens_sent = EXCLUDED.context_pack_tokens_sent,
+                paid_tokens_saved = EXCLUDED.paid_tokens_saved,
+                estimated_usd_saved = EXCLUDED.estimated_usd_saved,
+                preflight_passed_first_try = EXCLUDED.preflight_passed_first_try,
+                zero_touch_sufficient = EXCLUDED.zero_touch_sufficient,
+                missing_context_requests = EXCLUDED.missing_context_requests,
+                latency_ms = EXCLUDED.latency_ms;
+            """,
+            (
+                record.trace_id,
+                record.domain_id,
+                record.principal_id,
+                record.principal_role,
+                mode_val,
+                record.local_tokens_read,
+                record.context_pack_tokens_sent,
+                record.paid_tokens_saved,
+                record.estimated_usd_saved,
+                record.preflight_passed_first_try,
+                record.zero_touch_sufficient,
+                missing_json,
+                record.latency_ms,
+                record.created_at,
+            ),
+        )
+
+    def get_execution_telemetry(
+        self, conn: Connection[tuple[object, ...]], trace_id: UUID
+    ) -> ExecutionTelemetryRecord | None:
+        row = conn.execute(
+            """
+            SELECT
+                trace_id, domain_id, principal_id, principal_role,
+                execution_mode, local_tokens_read, context_pack_tokens_sent,
+                paid_tokens_saved, estimated_usd_saved, preflight_passed_first_try,
+                zero_touch_sufficient, missing_context_requests, latency_ms,
+                created_at
+            FROM execution_telemetry
+            WHERE trace_id = %s;
+            """,
+            (trace_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        raw_missing = row[11]
+        if isinstance(raw_missing, str):
+            missing_requests = json.loads(raw_missing)
+        elif isinstance(raw_missing, list):
+            missing_requests = raw_missing
+        else:
+            missing_requests = []
+        zero_touch_val: bool | None = bool(row[10]) if row[10] is not None else None
+        created_at_val: datetime | None = row[13] if isinstance(row[13], datetime) else None
+        return ExecutionTelemetryRecord(
+            trace_id=UUID(str(row[0])),
+            domain_id=str(row[1]),
+            principal_id=str(row[2]),
+            principal_role=str(row[3]),
+            execution_mode=str(row[4]),  # type: ignore[arg-type]
+            local_tokens_read=int(str(row[5])),
+            context_pack_tokens_sent=int(str(row[6])),
+            paid_tokens_saved=int(str(row[7])),
+            estimated_usd_saved=float(str(row[8])),
+            preflight_passed_first_try=bool(row[9]),
+            zero_touch_sufficient=zero_touch_val,
+            missing_context_requests=missing_requests,
+            latency_ms=int(str(row[12])),
+            created_at=created_at_val,
+        )
+
+    def get_principal_paid_tokens_consumed(
+        self,
+        conn: Connection[tuple[object, ...]],
+        principal_id: str,
+        since_hours: int = 24,
+    ) -> int:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(context_pack_tokens_sent), 0)
+            FROM execution_telemetry
+            WHERE principal_id = %s
+              AND created_at >= NOW() - (%s || ' hours')::interval;
+            """,
+            (principal_id, str(since_hours)),
+        ).fetchone()
+        return int(str(row[0])) if row and row[0] is not None else 0
+
+
 
 
 class InMemoryRLSRepository:
@@ -492,6 +598,7 @@ class InMemoryRLSRepository:
         self._symbols: dict[UUID, ASTSymbolRecord] = {}
         self._edges: dict[UUID, ASTEdgeRecord] = {}
         self._docs: dict[UUID, DocChunkRecord] = {}
+        self._telemetry: dict[UUID, ExecutionTelemetryRecord] = {}
 
     def insert_code_file(self, principal: PrincipalContext, record: CodeFileRecord) -> None:
         if not _scopes_intersect(record.allowed_scopes, principal.allowed_scopes):
@@ -719,4 +826,49 @@ class InMemoryRLSRepository:
 
         hits.sort(key=lambda h: h.normalized_rrf_score, reverse=True)
         return hits[:top_k]
+
+    def record_execution_telemetry(
+        self,
+        conn_or_record: Any,
+        maybe_record: ExecutionTelemetryRecord | None = None,
+    ) -> None:
+        if isinstance(conn_or_record, ExecutionTelemetryRecord):
+            record = conn_or_record
+        elif maybe_record is not None:
+            record = maybe_record
+        else:
+            raise ValueError("record_execution_telemetry requires an ExecutionTelemetryRecord")
+        self._telemetry[record.trace_id] = record
+
+    def get_execution_telemetry(
+        self,
+        trace_id_or_conn: Any,
+        maybe_trace_id: UUID | None = None,
+    ) -> ExecutionTelemetryRecord | None:
+        if isinstance(trace_id_or_conn, UUID):
+            return self._telemetry.get(trace_id_or_conn)
+        if maybe_trace_id is not None:
+            return self._telemetry.get(maybe_trace_id)
+        if isinstance(trace_id_or_conn, str):
+            return self._telemetry.get(UUID(trace_id_or_conn))
+        return None
+
+    def get_principal_paid_tokens_consumed(
+        self,
+        principal_or_conn: Any,
+        maybe_principal_id: str | None = None,
+        since_hours: int = 24,
+    ) -> int:
+        if isinstance(principal_or_conn, str):
+            principal_id = principal_or_conn
+        elif maybe_principal_id is not None:
+            principal_id = maybe_principal_id
+        else:
+            return 0
+        return sum(
+            rec.context_pack_tokens_sent
+            for rec in self._telemetry.values()
+            if rec.principal_id == principal_id
+        )
+
 
