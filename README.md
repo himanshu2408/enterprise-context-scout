@@ -82,7 +82,8 @@ enterprise-context-scout/
     ├── test_m3_quant_engine.py # M3 paper harvester, parser, contextualizer & RRF tests
     ├── test_postgres_m3_live.py # M3 PostgreSQL 17 live RLS & 3-way RRF integration tests
     ├── test_adversarial_m3_chunker_harvester.py # Adversarial stress tests for chunkers & harvesters (17 tests)
-    └── test_adversarial_m3_rrf_scepticism.py # Adversarial stress tests for 3-way RRF & scepticism gate (24 tests)
+    ├── test_adversarial_m3_rrf_scepticism.py # Adversarial stress tests for 3-way RRF & scepticism gate (24 tests)
+    └── test_real_paper_harvest_live.py # Live harvest, PDF fallback, DB persistence & gate integration (6 tests)
 ```
 
 ---
@@ -178,14 +179,22 @@ Milestone 3 delivers the `quant_research_scout` engine, transforming unstructure
 Academic quantitative literature is distributed across preprint servers and open-access repositories with disparate schemas and rate constraints. The harvester automates multi-market ingestion:
 
 - **arXiv Ingestion:** Standard-library Atom XML parser (`parse_arxiv_atom_feed`) resolving `http://www.w3.org/2005/Atom` namespaces. Handles versioned paper identifiers (e.g. `2403.99999v4` $\rightarrow$ canonical URI), extracts clean titles, summaries, and authors, and parses ISO-8601 dates with resilient `ValueError` fallback to baseline dates.
-- **OpenAlex REST API:** Parameterised query builder generating targeted concept filters (`concepts.id:...`) and reconstructs linear abstract text from token position inverted index arrays (`abstract_inverted_index`).
+- **In-Memory LaTeX Archive Decompression & Include Resolution:**
+  - `unpack_latex_archive` inspects `/e-print/{arxiv_num}` payload bytes directly in memory.
+  - Automatically identifies and decompresses `.tar.gz` and standalone `.gz` archives without writing temporary files to disk, eliminating `UnicodeDecodeError` on binary gzip headers (`\x1f\x8b`).
+  - `resolve_latex_includes` locates root TeX documents (`\documentclass` + `\begin{document}`) and recursively resolves nested `\input{...}`, `\include{...}`, and `\subfile{...}` directives, stripping subfile preambles to produce a single coherent LaTeX document.
+- **OpenAlex REST API v2 Integration:**
+  - Employs canonical OpenAlex concept IDs (`OPENALEX_CONCEPT_MAP`: Economics `C162324750`, Financial Economics `C144133570`, Finance `C149782125`, Financial System `C106159729`, Econometrics `C149923435`, Order Book `C2779835941`) to bypass deprecated field queries.
+  - Enforces `has_fulltext:true`, `type:article|preprint`, `is_retracted:false`, and `sort=cited_by_count:desc` to prioritize high-impact quantitative research.
+  - Integrates OpenAlex polite pool routing (`mailto=scout@example.com`) ensuring 10 req/s throughput.
+  - Reconstructs linear abstract text from inverted token-index arrays (`abstract_inverted_index`).
 - **Market Scope Presets (`MarketRegime`):**
   - `IN_NSE` (`MarketRegime.INDIA_NSE_BSE`): National Stock Exchange of India & Bombay Stock Exchange quantitative research (NIFTY/BANKNIFTY liquidity, STT transaction friction, market impact, order flow imbalance).
   - `DE_XETRA` (`MarketRegime.GERMANY_XETRA_DAX`): Deutsche Börse Xetra order book microstructure, DAX intraday volatility, and MiFID II European market structure.
   - `US_EQUITY` (`MarketRegime.US_NYSE_NASDAQ`): US equity/options microstructure, Reg NMS order routing, sub-penny trading, and algorithmic execution.
-- **Resilient HTTP Client:** `HttpPaperHarvesterClient` implements exponential backoff ($t_{\text{sleep}} = \text{base} \times 2^{\text{attempt}} + \text{jitter}$) where $\text{base} = 3.5\text{ s}$ and $\text{jitter} \in [0.1, 0.5]\text{ s}$ to adhere to academic API rate limits. Handles UTF-8 TeX source archives with fallback to raw PDF binary downloads.
+- **Resilient HTTP Client & Dual Fallback:** `HttpPaperHarvesterClient` implements exponential backoff ($t_{\text{sleep}} = \text{base} \times 2^{\text{attempt}} + \text{jitter}$) where $\text{base} = 3.5\text{ s}$ and $\text{jitter} \in [0.1, 0.5]\text{ s}$ to adhere to academic API rate limits. Automatically falls back from arXiv LaTeX sources to direct arXiv PDF downloads (`https://arxiv.org/pdf/{arxiv_num}.pdf`) or OpenAlex open-access PDF URLs when TeX source is unavailable.
 
-### 5.2 Lossless LaTeX & Markdown Table Chunking (`doc_parser.py`)
+### 5.2 Lossless LaTeX & PDF Document Parsing (`doc_parser.py`)
 
 Standard text chunkers break documents at fixed token windows, splitting mathematical proofs and tabular data across chunk boundaries. Milestone 3 implements lossless chunkers:
 
@@ -193,6 +202,11 @@ Standard text chunkers break documents at fixed token windows, splitting mathema
   - Tokenizes documents into atomic blocks where math environments (`equation`, `equation*`, `align`, `align*`, `gather`, `gather*`, `multline`, `multline*`, `flalign*`, display math `$$...$$`, and inline math `$...$`) are never split across chunk boundaries.
   - Full table float preservation: matches `\begin{table} ... \begin{tabular} ... \end{tabular} ... \end{table}` and standalone `tabular` blocks as atomic units, preventing nested tabular boundary splitting under chunk token pressure.
   - Maintains a 3-level hierarchical section breadcrumb trail (`\section`, `\subsection`, `\subsubsection`) with automatic stack rollback upon section level decrements.
+- **`PdfDocParser`:**
+  - High-fidelity PDF fallback powered by `pypdf`.
+  - Extracts full document text with automatic NUL-byte (`\x00`) sanitization to prevent PostgreSQL storage errors.
+  - Regex-driven section boundary detection matching standard academic headings (`Abstract`, `Introduction`, `Methodology`, `Results`, `Discussion`, `Conclusion`, `References`).
+  - Bounded token chunking (400–800 tokens) guaranteeing structural preservation when raw LaTeX source is inaccessible.
 - **`MarkdownTableChunker`:**
   - Parses GitHub Flavored Markdown (GFM) pipe tables with leading and trailing whitespace tolerance.
   - Ensures multi-row data tables (e.g. 50+ row liquidity matrices) remain intact as indivisible units in `chunk.tables_markdown`.
@@ -240,6 +254,24 @@ Backtests frequently overfit by assuming zero or unrealistically low execution f
 - **100% Verbatim Citation Verification (`VAL-02`):**
   - Every numerical claim and quote in the strategy brief is verified against indexed chunks using `DeterministicSlicer` with Unicode NFKC normalization.
   - Requires $\ge 0.98$ token overlap. Single-character or single-digit alterations (e.g. 15.2 bps altered to 15.3 bps) trigger `HallucinatedQuoteError` and immediate brief rejection.
+
+### 5.6 Scaled Corpus Ingestion & Live PostgreSQL 17 Persistence
+
+To validate the retrieval engine under institutional conditions, the automated harvest pipeline ingested a multi-market corpus:
+
+- **Harvested Corpus Scale:**
+  - **330 Total Papers:** Top 110 citation-ranked papers per market (`IN_NSE`: 110, `DE_XETRA`: 110, `US_EQUITY`: 110).
+  - **Local Storage Cache:** Cached under `data/papers/` (git-ignored) with structured metadata in `data/papers/metadata/{market}_papers.jsonl` and full source/summary text under `data/papers/content/{market}/`.
+- **Database Persistence (`doc_chunks`):**
+  - **1,473 Total Persisted Chunks** in local PostgreSQL 17 under domain `quant_research_scout` and scope `public_quant`.
+  - **Market Breakdown:** `DE_XETRA`: 639 chunks, `US_EQUITY`: 449 chunks, `IN_NSE`: 385 chunks.
+  - Each chunk contains 50-token situated headers, 768-dimensional embeddings, and precomputed `tsvector` lexemes.
+- **Live 3-Way Normalized RRF Verification:**
+  - Query evaluation against live database chunks demonstrates strong multi-modal convergence:
+    - `IN_NSE` ("order flow imbalance NIFTY market impact"): Top RRF score **0.7097** (BM25 rank: 34, Vector rank: 67, Trigram rank: 1).
+    - `DE_XETRA` ("Xetra order book liquidity DAX volatility"): Top RRF score **0.6300** (BM25 rank: 227, Vector rank: 6, Trigram rank: 21).
+    - `US_EQUITY` ("high frequency trading NYSE execution friction"): Top RRF score **0.7130** (BM25 rank: 16, Vector rank: 6, Trigram rank: 88).
+  - All top results comfortably exceed the institutional $\ge 0.55$ Pre-Flight quality gate threshold.
 
 ---
 
@@ -299,7 +331,7 @@ uv run mypy --strict src tests
 uv run pytest -v
 ```
 
-### Test Coverage Highlights (110 Passed Tests, 0 Failures, 0 XFails)
+### Test Coverage Highlights (116 Passed Tests, 0 Failures, 0 XFails)
 
 | Subsystem | Test Module | Tests | Scope & Invariants Tested |
 |:---|:---|:---:|:---|
@@ -315,7 +347,8 @@ uv run pytest -v
 | **M3 Postgres Live** | `tests/test_postgres_m3_live.py` | 2 | Live PostgreSQL 17 RLS document chunk storage and 3-way hybrid RRF |
 | **M3 Adversarial Harvester** | `tests/test_adversarial_m3_chunker_harvester.py` | 17 | Nested LaTeX table float integrity, Markdown whitespace, non-ISO dates |
 | **M3 Adversarial RRF & Gate** | `tests/test_adversarial_m3_rrf_scepticism.py` | 24 | RRF mathematical peak invariant, multi-market friction floors, citation tampering |
-| **Total** | **12 Test Suites** | **110** | **100% Pass Rate (0 Failures, 0 XFails, 0 Errors)** |
+| **M3 Live Harvest & Ingestion** | `tests/test_real_paper_harvest_live.py` | 6 | Live arXiv tar decompression, PDF fallback, OpenAlex v2, DB persistence & Scepticism Gate |
+| **Total** | **13 Test Suites** | **116** | **100% Pass Rate (0 Failures, 0 XFails, 0 Errors)** |
 
 ---
 

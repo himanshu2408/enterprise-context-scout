@@ -3,11 +3,14 @@
 Guarantees zero math formulas or tabular matrices are split across chunk boundaries.
 """
 
+import io
 import re
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Final
 from uuid import UUID, uuid4
+
+from pypdf import PdfReader
 
 from context_scout.db.repositories import DocChunkRecord
 from context_scout.schemas.contracts import MarketRegime
@@ -392,15 +395,110 @@ class MarkdownTableChunker:
         return chunks
 
 
+# Standard PDF section headers pattern
+PDF_SECTION_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(?:(?:[0-9]+\.?\s+)?(Abstract|Introduction|Related Work|Literature Review|"
+    r"Data and Methodology|Methodology|Model Specification|Empirical Results|"
+    r"Market Microstructure|Trading Strategy|Friction and Transaction Costs|"
+    r"Performance Evaluation|Discussion|Conclusion|References))\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+class PdfDocParser:
+    """Extracts structured sections and chunks from raw PDF bytes."""
+
+    def extract_text(self, pdf_bytes: bytes) -> str:
+        """Extracts plain text across all pages in the PDF."""
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        pages_text: list[str] = []
+        for page in reader.pages:
+            text = (page.extract_text() or "").replace("\x00", "")
+            if text.strip():
+                pages_text.append(text.strip())
+        return "\n\n".join(pages_text)
+
+    def parse_pdf(self, pdf_bytes: bytes) -> list[ParsedSection]:
+        """Extracts semantic sections from PDF bytes."""
+        full_text = self.extract_text(pdf_bytes)
+        if not full_text.strip():
+            return []
+
+        matches = list(PDF_SECTION_PATTERN.finditer(full_text))
+        if not matches:
+            return [
+                ParsedSection(
+                    heading="Document Body",
+                    level=1,
+                    content=full_text,
+                    formulas_latex=[],
+                    tables_markdown=[],
+                )
+            ]
+
+        sections: list[ParsedSection] = []
+        first_start = matches[0].start()
+        if first_start > 0:
+            preamble = full_text[:first_start].strip()
+            if preamble:
+                sections.append(
+                    ParsedSection(
+                        heading="Title / Header",
+                        level=1,
+                        content=preamble,
+                    )
+                )
+
+        for i, match in enumerate(matches):
+            heading = match.group(0).strip()
+            start_pos = match.end()
+            end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(full_text)
+            body = full_text[start_pos:end_pos].strip()
+            sections.append(
+                ParsedSection(
+                    heading=heading,
+                    level=1,
+                    content=body,
+                )
+            )
+
+        return sections
+
+    def chunk_pdf(
+        self,
+        doc_id: str,
+        doc_title: str,
+        source_uri: str,
+        market_scope: MarketRegime,
+        pdf_bytes: bytes,
+        min_chunk_tokens: int = 400,
+        max_chunk_tokens: int = 800,
+    ) -> list[DocumentChunk]:
+        """Parses and chunks PDF bytes into standard DocumentChunk objects."""
+        sections = self.parse_pdf(pdf_bytes)
+        latex_parser = LatexDocParser()
+        return latex_parser.chunk_paper(
+            doc_id=doc_id,
+            doc_title=doc_title,
+            source_uri=source_uri,
+            market_scope=market_scope,
+            sections=sections,
+            min_chunk_tokens=min_chunk_tokens,
+            max_chunk_tokens=max_chunk_tokens,
+        )
+
+
 __all__ = [
     "LATEX_SECTION_PATTERN",
     "LATEX_TABLE_PATTERN",
     "MATH_BLOCK_PATTERN",
     "MD_HEADING_PATTERN",
     "MD_TABLE_ROW_PATTERN",
+    "PDF_SECTION_PATTERN",
     "DocumentChunk",
     "LatexDocParser",
     "MarkdownTableChunker",
     "ParsedSection",
+    "PdfDocParser",
     "estimate_tokens",
 ]
