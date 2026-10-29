@@ -174,9 +174,12 @@ def parse_arxiv_atom_feed(xml_text: str, market_scope: MarketRegime) -> list[Har
         abstract = re.sub(r"\s+", " ", raw_abstract).strip()
 
         pub_text = entry.findtext("atom:published", default="", namespaces=ARXIV_XML_NS).strip()
-        pub_date = (
-            date.fromisoformat(pub_text[:10]) if len(pub_text) >= 10 else date(2024, 1, 1)
-        )
+        try:
+            pub_date = (
+                date.fromisoformat(pub_text[:10]) if len(pub_text) >= 10 else date(2024, 1, 1)
+            )
+        except ValueError:
+            pub_date = date(2024, 1, 1)
 
         authors: list[str] = []
         for author_elem in entry.findall("atom:author", ARXIV_XML_NS):
