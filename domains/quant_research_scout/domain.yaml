@@ -7,6 +7,10 @@ lora_adapter_path: "domains/quant_research_scout/adapters/gemma4_26b_quant_resea
 embedding_model_id: "google/embeddinggemma-2"
 embedding_dimensions: 768
 mcp_read_tools_allowed:
+  - "quant_corpus_mcp:search_quant_papers_hybrid"
+  - "quant_corpus_mcp:extract_paper_equations_and_tables"
+  - "quant_corpus_mcp:verify_market_friction_assumptions"
+  - "quant_corpus_mcp:compare_cross_market_regimes"
   - "quant_corpus_mcp:search_papers_hybrid"
   - "quant_corpus_mcp:get_paper_section"
   - "quant_corpus_mcp:compare_market_frictions"

@@ -24,6 +24,7 @@ dependencies = [
     "pillow>=13.0.0",
     "torchvision>=0.29.2",
     "fonttools>=4.68.0",
+    "mcp>=2.3.0,<3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -59,6 +60,8 @@ module = [
     "tree_sitter",
     "tree_sitter_python",
     "tree_sitter_typescript",
+    "scipy",
+    "scipy.optimize",
 ]
 ignore_missing_imports = true
 
