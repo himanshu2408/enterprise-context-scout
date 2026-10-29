@@ -37,6 +37,7 @@ def test_google_only_model_policy_enforcement() -> None:
     assert validate_google_model_id("google/gemma-4-E4B-it") == "google/gemma-4-E4B-it"
     assert validate_google_model_id("google/embeddinggemma-2") == "google/embeddinggemma-2"
     assert validate_google_model_id("gemini-3.8-flash") == "gemini-3.8-flash"
+    assert validate_google_model_id("gemini-4-argon") == "gemini-4-argon"
 
     for prohibited in [
         "gpt-4o",
@@ -52,6 +53,7 @@ def test_google_only_model_policy_enforcement() -> None:
 
     settings = ScoutSettings()
     assert settings.primary_model_id == "google/gemma-4-26B-A4B-it"
+    assert settings.frontier_model_id == "gemini-3.8-flash"
     assert settings.local_max_kv_tokens == 32_768
 
 
