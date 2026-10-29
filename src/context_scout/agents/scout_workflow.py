@@ -26,6 +26,7 @@ from typing import Any, Final
 
 from context_scout.agents.domain_registry import AdapterPool, AdapterSlot, DomainRegistry
 from context_scout.agents.preflight_gate import (
+    PROMPT_STOPWORDS,
     BoundGraphRepository,
     PreFlightValidator,
 )
@@ -33,6 +34,7 @@ from context_scout.ast_engine.dependency_expander import ASTDependencyExpander
 from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
 from context_scout.config import validate_google_model_id
 from context_scout.db.repositories import (
+    ASTSymbolRecord,
     CodeFileRecord,
     DocChunkRecord,
 )
@@ -238,47 +240,75 @@ class LocalGemmaClient:
 
         files_by_id: dict[uuid.UUID, CodeFileRecord] = {f.file_id: f for f in visible_files}
 
-        # 1. Match symbols in repository
+        # Identify files explicitly mentioned in prompt
+        mentioned_file_ids = {
+            f.file_id
+            for f in visible_files
+            if f.file_path in candidates_to_search
+            or f.file_path.split("/")[-1] in candidates_to_search
+        }
+
+        # 1. Match symbols in repository with priority ordering
+        t1_exact: list[tuple[ASTSymbolRecord, bool]] = []
+        t2_file_classes: list[tuple[ASTSymbolRecord, bool]] = []
+        t2_file_others: list[tuple[ASTSymbolRecord, bool]] = []
+        t3_subword: list[tuple[ASTSymbolRecord, bool]] = []
+
         for sym in visible_symbols:
             short_name = sym.qualified_name.split(".")[-1]
-            is_prompt_match = (
+            is_exact = (
                 sym.qualified_name in candidates_to_search
                 or short_name in candidates_to_search
-                or any(w in sym.qualified_name for w in candidates_to_search if len(w) > 4)
             )
-            is_feedback_match = (
+            is_feedback = (
                 sym.qualified_name in missing_from_feedback
                 or short_name in missing_from_feedback
             )
+            if is_exact or is_feedback:
+                t1_exact.append((sym, is_feedback))
+            elif sym.file_id in mentioned_file_ids:
+                if sym.symbol_kind in ("class", "interface", "type_alias"):
+                    t2_file_classes.append((sym, False))
+                else:
+                    t2_file_others.append((sym, False))
+            elif any(
+                w in sym.qualified_name
+                for w in candidates_to_search
+                if len(w) > 4 and w.lower() not in PROMPT_STOPWORDS
+            ):
+                t3_subword.append((sym, False))
 
-            if is_prompt_match or is_feedback_match:
-                file_rec = files_by_id.get(sym.file_id)
-                file_path = file_rec.file_path if file_rec else "src/unknown.py"
-                repo_name = file_rec.repo_name if file_rec else "trading-execution"
+        candidate_ordered = t1_exact + t2_file_classes + t2_file_others + t3_subword
 
-                intent = (
-                    ModificationIntent.MODIFY_TARGET
-                    if (is_prompt_match and not is_feedback_match and len(pointers) == 0)
-                    else ModificationIntent.REFERENCE_ONLY
-                )
-                reason = (
-                    f"Remediated via $0 bounce-back feedback: {short_name}"
-                    if is_feedback_match
-                    else f"Located symbol {sym.qualified_name} from user task"
-                )
+        for sym, is_feedback_match in candidate_ordered:
+            short_name = sym.qualified_name.split(".")[-1]
+            file_rec = files_by_id.get(sym.file_id)
+            file_path = file_rec.file_path if file_rec else "src/unknown.py"
+            repo_name = file_rec.repo_name if file_rec else "trading-execution"
 
-                ptr = CodeSlicePointer(
-                    repo_name=repo_name,
-                    file_path=file_path,
-                    start_line=sym.start_line,
-                    end_line=sym.end_line,
-                    qualified_symbol=sym.qualified_name,
-                    selection_reason=reason,
-                    modification_intent=intent,
-                )
-                pointers.append(ptr)
-                covered_symbols.add(sym.qualified_name)
-                covered_symbols.add(short_name)
+            intent = (
+                ModificationIntent.MODIFY_TARGET
+                if (not is_feedback_match and len(pointers) == 0)
+                else ModificationIntent.REFERENCE_ONLY
+            )
+            reason = (
+                f"Remediated via $0 bounce-back feedback: {short_name}"
+                if is_feedback_match
+                else f"Located symbol {sym.qualified_name} from user task"
+            )
+
+            ptr = CodeSlicePointer(
+                repo_name=repo_name,
+                file_path=file_path,
+                start_line=sym.start_line,
+                end_line=sym.end_line,
+                qualified_symbol=sym.qualified_name,
+                selection_reason=reason,
+                modification_intent=intent,
+            )
+            pointers.append(ptr)
+            covered_symbols.add(sym.qualified_name)
+            covered_symbols.add(short_name)
 
         # 2. Match whole files in repository if mentioned
         for f in visible_files:
