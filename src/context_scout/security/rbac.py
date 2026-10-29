@@ -1,15 +1,19 @@
 """Enterprise Out-of-Band RBAC and Session Principal Binding (SEC-04)."""
 
+from __future__ import annotations
+
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from psycopg import Connection
 
-from context_scout.agents.domain_registry import DomainRegistry
 from context_scout.db.session import RLSConnectionManager
 from context_scout.schemas.contracts import PrincipalContext
+
+if TYPE_CHECKING:
+    from context_scout.agents.domain_registry import DomainRegistry
 
 
 class SecurityError(Exception):
