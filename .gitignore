@@ -37,6 +37,7 @@ htmlcov/
 data/raw_papers/
 data/pdfs/
 data/tex_sources/
+data/papers/
 models/base/
 models/adapters/**/*.safetensors
 
@@ -51,6 +52,6 @@ Thumbs.db
 # Node / Web UI
 web-ui/node_modules/
 web-ui/dist/
-# Local Notes & Defense Materials (NEVER COMMIT)
+# Local scratch & private notes (NEVER COMMIT)
 .fde/
 
