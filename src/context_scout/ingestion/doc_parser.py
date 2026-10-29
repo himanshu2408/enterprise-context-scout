@@ -26,7 +26,8 @@ MATH_BLOCK_PATTERN: Final[re.Pattern[str]] = re.compile(
 
 # Atomic LaTeX tabular pattern
 LATEX_TABLE_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"\\begin\{(?:table|tabular)\*?\}.*?\\end\{(?:table|tabular)\*?\}",
+    r"\\begin\{table\*?\}.*?\\end\{table\*?\}|"
+    r"\\begin\{tabular\*?\}.*?\\end\{tabular\*?\}",
     re.DOTALL,
 )
 
@@ -327,7 +328,7 @@ class MarkdownTableChunker:
                             tables_markdown=[
                                 t.group(0)
                                 for t in re.finditer(
-                                    r"(?:^\|.+\|$\n?)+", chunk_text, re.MULTILINE
+                                    r"(?:^\s*\|.+?\|\s*$\n?)+", chunk_text, re.MULTILINE
                                 )
                             ],
                             token_count_approx=current_tokens,
