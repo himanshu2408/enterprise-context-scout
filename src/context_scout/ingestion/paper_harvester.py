@@ -11,6 +11,7 @@ import random
 import re
 import tarfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -63,6 +64,209 @@ class MarketHarvestQuery:
     max_results: int = 50
 
 
+QUANT_ARXIV_CATEGORIES: Final[list[str]] = [
+    "q-fin.TR",  # Trading and Market Microstructure
+    "q-fin.PM",  # Portfolio Management
+    "q-fin.ST",  # Statistical Finance
+    "q-fin.CP",  # Computational Finance
+    "q-fin.RM",  # Risk Management
+]
+
+POSITIVE_QUANT_CONCEPTS: Final[list[str]] = [
+    "momentum",
+    "mean reversion",
+    "statistical arbitrage",
+    "pairs trading",
+    "limit order book",
+    "order flow",
+    "market microstructure",
+    "high-frequency trading",
+    "market making",
+    "optimal execution",
+    "Almgren-Chriss",
+    "Hawkes process",
+    "transaction cost",
+    "slippage",
+    "bid-ask spread",
+    "volatility forecasting",
+    "GARCH",
+    "factor alpha",
+    "portfolio optimization",
+    "Sharpe ratio",
+    "drawdown",
+    "reinforcement learning trading",
+    "intraday",
+    "tick size",
+    "closing auction",
+    "derivatives hedging",
+]
+
+NEGATIVE_BLOCKING_KEYWORDS: Final[list[str]] = [
+    "covid",
+    "coronavirus",
+    "pandemic",
+    "mandatory csr",
+    "corporate social responsibility",
+    "climate change",
+    "natural disaster",
+    "green bond",
+    "circular economy",
+    "brexit",
+    "industrial symbiotic",
+    "board gender",
+]
+
+
+@dataclass(frozen=True)
+class RelevanceVerdict:
+    """Outcome of quantitative finance relevance and negative-topic evaluation."""
+
+    is_relevant: bool
+    matched_positive: list[str]
+    matched_negative: list[str]
+    score: float
+    rejection_reason: str | None = None
+
+
+class QuantRelevanceClassifier:
+    """Strict relevance classifier matching actionable quant concepts and blocking noise."""
+
+    def __init__(self, min_positive_matches: int = 1) -> None:
+        self.min_positive_matches = min_positive_matches
+
+        self._neg_patterns: dict[str, re.Pattern[str]] = {
+            "covid": re.compile(r"\b(?:covid(?:-?19)?|sars-cov-2)\b", re.IGNORECASE),
+            "coronavirus": re.compile(r"\bcoronavirus(?:es)?\b", re.IGNORECASE),
+            "pandemic": re.compile(r"\bpandemics?\b", re.IGNORECASE),
+            "mandatory csr": re.compile(r"\bmandatory\s+csr\b", re.IGNORECASE),
+            "corporate social responsibility": re.compile(
+                r"\bcorporate\s+social\s+responsibility\b|\bcsr\b", re.IGNORECASE
+            ),
+            "climate change": re.compile(
+                r"\bclimate\s+change\b|\bglobal\s+warming\b|\bcarbon\s+emission", re.IGNORECASE
+            ),
+            "natural disaster": re.compile(r"\bnatural\s+disasters?\b", re.IGNORECASE),
+            "green bond": re.compile(r"\bgreen\s+bonds?\b", re.IGNORECASE),
+            "circular economy": re.compile(r"\bcircular\s+economy\b", re.IGNORECASE),
+            "brexit": re.compile(r"\bbrexit\b", re.IGNORECASE),
+            "industrial symbiotic": re.compile(r"\bindustrial\s+symbio\w*", re.IGNORECASE),
+            "board gender": re.compile(
+                r"\bboard\s+gender\b|\bgender\s+diversity\s+(?:on|in)\s+board|\bfemale\s+directors?",
+                re.IGNORECASE,
+            ),
+        }
+
+        self._pos_patterns: dict[str, re.Pattern[str]] = {
+            "momentum": re.compile(r"\bmomentum\b", re.IGNORECASE),
+            "mean reversion": re.compile(r"\bmean\s*[- ]\s*rever(?:sion|ting)\b", re.IGNORECASE),
+            "statistical arbitrage": re.compile(
+                r"\bstat(?:istical)?\s*[- ]\s*arbitrage\b|\bstat\s*arb\b", re.IGNORECASE
+            ),
+            "pairs trading": re.compile(r"\bpairs?\s*[- ]\s*trading\b", re.IGNORECASE),
+            "limit order book": re.compile(r"\blimit\s+order\s+books?\b|\blob\b", re.IGNORECASE),
+            "order flow": re.compile(r"\border\s+flows?\b|\bofi\b", re.IGNORECASE),
+            "market microstructure": re.compile(r"\b(?:market\s+)?microstructure\b", re.IGNORECASE),
+            "high-frequency trading": re.compile(
+                r"\bhigh\s*[- ]\s*frequency\s+trading\b|\bhft\b|\balgorithmic\s+trading\b",
+                re.IGNORECASE,
+            ),
+            "market making": re.compile(r"\bmarket\s*[- ]\s*mak(?:ing|er|ers)\b", re.IGNORECASE),
+            "optimal execution": re.compile(
+                r"\boptimal\s+execution\b|\bexecution\s+algorithms?\b|\btwap\b|\bvwap\b",
+                re.IGNORECASE,
+            ),
+            "Almgren-Chriss": re.compile(r"\balmgren\s*[- ]\s*chriss\b", re.IGNORECASE),
+            "Hawkes process": re.compile(r"\bhawkes\s+process(?:es)?\b", re.IGNORECASE),
+            "transaction cost": re.compile(
+                r"\btransaction\s+costs?\b|\btrading\s+frictions?\b|\bturnover\s+costs?\b|\bsecurities\s+transaction\s+tax\b|\bstt\b",
+                re.IGNORECASE,
+            ),
+            "slippage": re.compile(r"\bslippage\b", re.IGNORECASE),
+            "bid-ask spread": re.compile(
+                r"\bbid\s*[- ]\s*ask\s+spreads?\b|\bhalf\s*[- ]\s*spreads?\b", re.IGNORECASE
+            ),
+            "volatility forecasting": re.compile(
+                r"\bvolatility\s+forecast(?:ing|s)?\b|\brealized\s+volatility\b|\bimplied\s+volatility\b",
+                re.IGNORECASE,
+            ),
+            "GARCH": re.compile(r"\b(?:e|gjr-)?garch\b|\barch\s+models?\b", re.IGNORECASE),
+            "factor alpha": re.compile(
+                r"\b(?:factor\s+alpha|alpha\s+factors?|multi-factor\s+model|cross-sectional\s+momentum|fama-french)\b",
+                re.IGNORECASE,
+            ),
+            "portfolio optimization": re.compile(
+                r"\bportfolio\s+optimi[zs]ation\b|\bmean\s*[- ]\s*variance\b|\brisk\s+parity\b",
+                re.IGNORECASE,
+            ),
+            "Sharpe ratio": re.compile(
+                r"\bsharpe\s+ratio\b|\binformation\s+ratio\b|\bsortino\s+ratio\b", re.IGNORECASE
+            ),
+            "drawdown": re.compile(r"\b(?:max(?:imum)?\s+)?drawdowns?\b", re.IGNORECASE),
+            "reinforcement learning trading": re.compile(
+                r"\breinforcement\s+learning(?:\s+\w+){0,3}\s+trading\b|\bq-learning\b",
+                re.IGNORECASE,
+            ),
+            "intraday": re.compile(r"\bintraday\b", re.IGNORECASE),
+            "tick size": re.compile(r"\btick\s+sizes?\b", re.IGNORECASE),
+            "closing auction": re.compile(
+                r"\bclosing\s+auctions?\b|\bclosing\s+cross\b|\bauction\s+imbalance\b",
+                re.IGNORECASE,
+            ),
+            "derivatives hedging": re.compile(
+                r"\b(?:derivatives?|delta|gamma|options?)\s+hedging\b", re.IGNORECASE
+            ),
+        }
+
+    def evaluate(self, title: str, abstract: str = "", content: str = "") -> RelevanceVerdict:
+        """Evaluates text against positive concepts and negative blocking keywords."""
+        full_text = f"{title}\n{abstract}\n{content}"
+
+        matched_neg: list[str] = []
+        for kw, pattern in self._neg_patterns.items():
+            if pattern.search(full_text):
+                matched_neg.append(kw)
+
+        if matched_neg:
+            neg_desc = ", ".join(matched_neg)
+            return RelevanceVerdict(
+                is_relevant=False,
+                matched_positive=[],
+                matched_negative=matched_neg,
+                score=0.0,
+                rejection_reason=f"Rejected: Matched negative blocking keyword(s): {neg_desc}",
+            )
+
+        matched_pos: list[str] = []
+        for concept, pattern in self._pos_patterns.items():
+            if pattern.search(full_text):
+                matched_pos.append(concept)
+
+        if len(matched_pos) < self.min_positive_matches:
+            return RelevanceVerdict(
+                is_relevant=False,
+                matched_positive=matched_pos,
+                matched_negative=[],
+                score=0.0,
+                rejection_reason=(
+                    f"Rejected: Insufficient positive quant concepts "
+                    f"({len(matched_pos)} < {self.min_positive_matches})"
+                ),
+            )
+
+        score = min(1.0, len(matched_pos) / 5.0)
+        return RelevanceVerdict(
+            is_relevant=True,
+            matched_positive=matched_pos,
+            matched_negative=[],
+            score=score,
+            rejection_reason=None,
+        )
+
+    def is_relevant(self, title: str, abstract: str = "", content: str = "") -> bool:
+        """Returns True if the text passes positive concepts and negative blocking checks."""
+        return self.evaluate(title, abstract, content).is_relevant
+
+
 MARKET_QUERY_PRESETS: Final[dict[MarketRegime, MarketHarvestQuery]] = {
     MarketRegime.INDIA_NSE_BSE: MarketHarvestQuery(
         market_scope=MarketRegime.INDIA_NSE_BSE,
@@ -77,7 +281,7 @@ MARKET_QUERY_PRESETS: Final[dict[MarketRegime, MarketHarvestQuery]] = {
             "SEBI intraday",
             "Indian equity momentum",
         ],
-        arxiv_categories=["q-fin.TR", "q-fin.PM", "q-fin.ST"],
+        arxiv_categories=["q-fin.TR", "q-fin.PM", "q-fin.ST", "q-fin.CP", "q-fin.RM"],
         openalex_concepts=["National Stock Exchange of India", "Stock market", "Transaction cost"],
         start_year=2018,
         max_results=50,
@@ -94,7 +298,7 @@ MARKET_QUERY_PRESETS: Final[dict[MarketRegime, MarketHarvestQuery]] = {
             "closing auction liquidity",
             "electronic order book Germany",
         ],
-        arxiv_categories=["q-fin.TR", "q-fin.PM", "q-fin.CP"],
+        arxiv_categories=["q-fin.TR", "q-fin.PM", "q-fin.ST", "q-fin.CP", "q-fin.RM"],
         openalex_concepts=["Deutsche Börse", "Financial market", "Order book"],
         start_year=2018,
         max_results=50,
@@ -112,7 +316,7 @@ MARKET_QUERY_PRESETS: Final[dict[MarketRegime, MarketHarvestQuery]] = {
             "market maker inventory",
             "Almgren-Chriss",
         ],
-        arxiv_categories=["q-fin.TR", "q-fin.PM", "q-fin.ST", "q-fin.CP"],
+        arxiv_categories=["q-fin.TR", "q-fin.PM", "q-fin.ST", "q-fin.CP", "q-fin.RM"],
         openalex_concepts=["New York Stock Exchange", "NASDAQ", "High-frequency trading"],
         start_year=2018,
         max_results=50,
@@ -177,6 +381,7 @@ def build_openalex_query_url(
     filter_terms: list[str] = [
         f"from_publication_date:{query.start_year}-01-01",
         "has_fulltext:true",
+        "is_oa:true",
         "type:article|preprint",
         "is_retracted:false",
     ]
@@ -447,17 +652,34 @@ def parse_openalex_response(
             if isinstance(best_oa_loc, dict) and best_oa_loc.get("pdf_url")
             else None
         )
+        open_access = item.get("open_access")
+        oa_url = (
+            open_access.get("oa_url")
+            if isinstance(open_access, dict) and open_access.get("oa_url")
+            else None
+        )
+        if not best_oa_pdf and oa_url:
+            best_oa_pdf = str(oa_url)
+
         locations = item.get("locations")
         oa_locations: list[str] = []
         if isinstance(locations, list):
             for loc in locations:
-                if isinstance(loc, dict) and loc.get("pdf_url"):
-                    oa_locations.append(str(loc.get("pdf_url")))
+                if isinstance(loc, dict):
+                    if loc.get("pdf_url"):
+                        oa_locations.append(str(loc.get("pdf_url")))
+                    elif loc.get("landing_page_url"):
+                        lp = str(loc.get("landing_page_url"))
+                        if "pdf" in lp.lower() or "arxiv.org" in lp.lower():
+                            oa_locations.append(lp)
+        if oa_url and str(oa_url) not in oa_locations:
+            oa_locations.append(str(oa_url))
 
         metadata: dict[str, object] = {
             "cited_by_count": int(item.get("cited_by_count") or 0),
             "doi": doi,
             "best_oa_pdf_url": best_oa_pdf,
+            "oa_url": oa_url,
             "oa_locations": oa_locations,
         }
 
@@ -506,14 +728,35 @@ class HttpPaperHarvesterClient:
         self.max_retries = max_retries
         self.user_agent = user_agent
         self.timeout_sec = timeout_sec
+        self._last_arxiv_time: float = 0.0
 
     def _execute_http_get(self, url: str) -> str:
+        if "export.arxiv.org" in url:
+            elapsed = time.time() - self._last_arxiv_time
+            if elapsed < 3.0:
+                time.sleep(3.0 - elapsed)
+            self._last_arxiv_time = time.time()
+
         req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
         for attempt in range(self.max_retries + 1):
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
                     raw_bytes = resp.read()
                     return str(raw_bytes.decode("utf-8", errors="replace"))
+            except urllib.error.HTTPError as err:
+                if err.code == 429 and "openalex.org" in url:
+                    logger.warning(
+                        "OpenAlex rate limit reached (HTTP 429); skipping query for %s", url
+                    )
+                    return ""
+                if attempt == self.max_retries:
+                    logger.error("HTTP request failed after %d retries: %s", self.max_retries, err)
+                    raise
+                backoff = self.base_backoff_sec * (2**attempt) + random.uniform(0.1, 0.5)
+                logger.warning(
+                    "HTTP attempt %d failed (%s); backing off %.2fs", attempt + 1, err, backoff
+                )
+                time.sleep(backoff)
             except Exception as err:
                 if attempt == self.max_retries:
                     logger.error("HTTP request failed after %d retries: %s", self.max_retries, err)
@@ -614,14 +857,52 @@ class HttpPaperHarvesterClient:
             candidate_urls: list[str] = []
             if isinstance(best_oa_pdf_url, str) and best_oa_pdf_url:
                 candidate_urls.append(best_oa_pdf_url)
+            oa_url = paper.metadata.get("oa_url")
+            if isinstance(oa_url, str) and oa_url and oa_url not in candidate_urls:
+                candidate_urls.append(oa_url)
             oa_locs = paper.metadata.get("oa_locations")
             if isinstance(oa_locs, list):
                 for loc in oa_locs:
                     if isinstance(loc, str) and loc and loc not in candidate_urls:
                         candidate_urls.append(loc)
 
+            raw_tex_oa: str | None = None
             raw_pdf_oa: bytes | None = None
             for url in candidate_urls:
+                # If URL routes to arXiv, attempt high-signal source extraction
+                arxiv_m = re.search(r"arxiv\.org/(?:abs|pdf)/([0-9]+\.[0-9]+(?:v[0-9]+)?)", url)
+                if arxiv_m:
+                    arxiv_id = arxiv_m.group(1)
+                    try:
+                        req = urllib.request.Request(
+                            f"https://arxiv.org/e-print/{arxiv_id}",
+                            headers={"User-Agent": self.user_agent},
+                        )
+                        with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                            data = resp.read()
+                            if data.startswith(b"%PDF"):
+                                raw_pdf_oa = data
+                                break
+                            raw_tex_oa = unpack_latex_archive(data)
+                            if raw_tex_oa:
+                                break
+                    except Exception:
+                        pass
+
+                    if not raw_tex_oa and not raw_pdf_oa:
+                        try:
+                            req = urllib.request.Request(
+                                f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+                                headers={"User-Agent": self.user_agent},
+                            )
+                            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                                data = resp.read()
+                                if data.startswith(b"%PDF"):
+                                    raw_pdf_oa = data
+                                    break
+                        except Exception:
+                            pass
+
                 try:
                     req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
                     with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
@@ -632,7 +913,7 @@ class HttpPaperHarvesterClient:
                 except Exception:
                     continue
 
-            if raw_pdf_oa:
+            if raw_tex_oa or raw_pdf_oa:
                 return HarvestedPaper(
                     doc_id=paper.doc_id,
                     source=paper.source,
@@ -642,7 +923,7 @@ class HttpPaperHarvesterClient:
                     market_scope=paper.market_scope,
                     source_uri=paper.source_uri,
                     abstract=paper.abstract,
-                    raw_tex_content=None,
+                    raw_tex_content=raw_tex_oa,
                     raw_pdf_bytes=raw_pdf_oa,
                     metadata=paper.metadata,
                 )
@@ -822,13 +1103,18 @@ __all__ = [
     "DEFAULT_USER_AGENT",
     "FIXTURE_PAPERS",
     "MARKET_QUERY_PRESETS",
+    "NEGATIVE_BLOCKING_KEYWORDS",
     "OPENALEX_CONCEPT_MAP",
+    "POSITIVE_QUANT_CONCEPTS",
+    "QUANT_ARXIV_CATEGORIES",
     "HarvestedPaper",
     "HarvesterSource",
     "HttpPaperHarvesterClient",
     "MarketHarvestQuery",
     "MockPaperHarvesterClient",
     "PaperHarvesterClient",
+    "QuantRelevanceClassifier",
+    "RelevanceVerdict",
     "build_arxiv_query_url",
     "build_openalex_query_url",
     "parse_arxiv_atom_feed",

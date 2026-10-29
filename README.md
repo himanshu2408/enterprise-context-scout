@@ -331,7 +331,7 @@ uv run mypy --strict src tests
 uv run pytest -v
 ```
 
-### Test Coverage Highlights (116 Passed Tests, 0 Failures, 0 XFails)
+### Test Coverage Highlights (158 Passed Tests, 0 Failures, 0 Skips)
 
 | Subsystem | Test Module | Tests | Scope & Invariants Tested |
 |:---|:---|:---:|:---|
@@ -347,8 +347,10 @@ uv run pytest -v
 | **M3 Postgres Live** | `tests/test_postgres_m3_live.py` | 2 | Live PostgreSQL 17 RLS document chunk storage and 3-way hybrid RRF |
 | **M3 Adversarial Harvester** | `tests/test_adversarial_m3_chunker_harvester.py` | 17 | Nested LaTeX table float integrity, Markdown whitespace, non-ISO dates |
 | **M3 Adversarial RRF & Gate** | `tests/test_adversarial_m3_rrf_scepticism.py` | 24 | RRF mathematical peak invariant, multi-market friction floors, citation tampering |
+| **M3 Challenger Harvester** | `tests/test_empirical_m3_harvester_parser_challenge.py` | 19 | Empirical full-text LaTeX/PDF validation, 5 arXiv categories, 0 .txt stubs |
+| **M3 Challenger Verification** | `tests/test_empirical_m3_challenger_verification.py` | 23 | Live RLS isolation on $\ge 1,000$ chunks, 3-way RRF fusion, negative topic rejection |
 | **M3 Live Harvest & Ingestion** | `tests/test_real_paper_harvest_live.py` | 6 | Live arXiv tar decompression, PDF fallback, OpenAlex v2, DB persistence & Scepticism Gate |
-| **Total** | **13 Test Suites** | **116** | **100% Pass Rate (0 Failures, 0 XFails, 0 Errors)** |
+| **Total** | **15 Test Suites** | **158** | **100% Pass Rate (0 Failures, 0 Skips, 0 Errors in 33.91s)** |
 
 ---
 

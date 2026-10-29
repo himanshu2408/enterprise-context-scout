@@ -3,6 +3,8 @@
 Guarantees zero math formulas or tabular matrices are split across chunk boundaries.
 """
 
+from __future__ import annotations
+
 import io
 import logging
 import re
@@ -122,8 +124,97 @@ class DocumentChunk:
         )
 
 
+PDF_MAGIC_BYTES: Final[bytes] = b"%PDF-"
+MIN_PDF_CHAR_COUNT: Final[int] = 3000
+MIN_PDF_CHUNK_COUNT: Final[int] = 3
+MIN_TEX_CHAR_COUNT: Final[int] = 3000
+
+
+@dataclass(frozen=True)
+class ContentValidationResult:
+    """Validation result for extracted document sources."""
+
+    is_valid: bool
+    char_count: int
+    chunk_count: int
+    error_message: str | None = None
+
+
+def validate_pdf_extraction(
+    pdf_bytes: bytes,
+    extracted_text: str,
+    chunks: list[DocumentChunk],
+    min_chars: int = MIN_PDF_CHAR_COUNT,
+    min_chunks: int = MIN_PDF_CHUNK_COUNT,
+) -> ContentValidationResult:
+    """Validates that PDF bytes begin with %PDF-, yield >= min_chars and >= min_chunks."""
+    if not pdf_bytes.startswith(PDF_MAGIC_BYTES):
+        return ContentValidationResult(
+            is_valid=False,
+            char_count=len(extracted_text),
+            chunk_count=len(chunks),
+            error_message="Invalid PDF header: missing %PDF- magic bytes",
+        )
+    clean_text = extracted_text.strip()
+    if len(clean_text) < min_chars:
+        return ContentValidationResult(
+            is_valid=False,
+            char_count=len(clean_text),
+            chunk_count=len(chunks),
+            error_message=(
+                f"Extracted characters ({len(clean_text)}) below minimum required ({min_chars})"
+            ),
+        )
+    if len(chunks) < min_chunks:
+        return ContentValidationResult(
+            is_valid=False,
+            char_count=len(clean_text),
+            chunk_count=len(chunks),
+            error_message=(
+                f"Generated chunks ({len(chunks)}) below minimum required ({min_chunks})"
+            ),
+        )
+    return ContentValidationResult(
+        is_valid=True,
+        char_count=len(clean_text),
+        chunk_count=len(chunks),
+        error_message=None,
+    )
+
+
+def validate_tex_source(
+    tex_content: str,
+    min_chars: int = MIN_TEX_CHAR_COUNT,
+) -> ContentValidationResult:
+    """Validates that LaTeX source yields >= min_chars characters."""
+    clean_tex = tex_content.strip()
+    if len(clean_tex) < min_chars:
+        return ContentValidationResult(
+            is_valid=False,
+            char_count=len(clean_tex),
+            chunk_count=0,
+            error_message=(
+                f"LaTeX content length ({len(clean_tex)}) below minimum required ({min_chars})"
+            ),
+        )
+    return ContentValidationResult(
+        is_valid=True,
+        char_count=len(clean_tex),
+        chunk_count=0,
+        error_message=None,
+    )
+
+
 class LatexDocParser:
     """Structure-aware LaTeX parser with lossless mathematical equation and table chunking."""
+
+    def validate_source(
+        self,
+        tex_content: str,
+        min_chars: int = 3000,
+    ) -> ContentValidationResult:
+        """Validates that LaTeX source satisfies the minimum length requirement."""
+        return validate_tex_source(tex_content, min_chars=min_chars)
 
     def parse_latex(self, tex_content: str) -> list[ParsedSection]:
         """Parses LaTeX into structured sections while preserving mathematical formulas."""
@@ -420,8 +511,8 @@ class PdfDocParser:
     """Extracts structured sections and chunks from raw PDF bytes."""
 
     def extract_text(self, pdf_bytes: bytes) -> str:
-        """Extracts plain text across all pages in the PDF."""
-        if not pdf_bytes or len(pdf_bytes) < 32:
+        """Extracts plain text across all pages in the PDF, validating %PDF- magic bytes."""
+        if not pdf_bytes or len(pdf_bytes) < 32 or not pdf_bytes.startswith(PDF_MAGIC_BYTES):
             return ""
         try:
             reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -526,6 +617,38 @@ class PdfDocParser:
             logger.debug("Unexpected error during PDF chunking: %s", exc)
             return []
 
+    def validate_and_chunk(
+        self,
+        doc_id: str,
+        doc_title: str,
+        source_uri: str,
+        market_scope: MarketRegime,
+        pdf_bytes: bytes,
+        min_chars: int = MIN_PDF_CHAR_COUNT,
+        min_chunks: int = MIN_PDF_CHUNK_COUNT,
+        min_chunk_tokens: int = 400,
+        max_chunk_tokens: int = 800,
+    ) -> tuple[ContentValidationResult, list[DocumentChunk]]:
+        """Extracts text, parses chunks, and validates PDF against quality thresholds."""
+        text = self.extract_text(pdf_bytes)
+        chunks = self.chunk_pdf(
+            doc_id=doc_id,
+            doc_title=doc_title,
+            source_uri=source_uri,
+            market_scope=market_scope,
+            pdf_bytes=pdf_bytes,
+            min_chunk_tokens=min_chunk_tokens,
+            max_chunk_tokens=max_chunk_tokens,
+        )
+        val = validate_pdf_extraction(
+            pdf_bytes=pdf_bytes,
+            extracted_text=text,
+            chunks=chunks,
+            min_chars=min_chars,
+            min_chunks=min_chunks,
+        )
+        return val, chunks
+
 
 __all__ = [
     "LATEX_SECTION_PATTERN",
@@ -533,11 +656,18 @@ __all__ = [
     "MATH_BLOCK_PATTERN",
     "MD_HEADING_PATTERN",
     "MD_TABLE_ROW_PATTERN",
+    "MIN_PDF_CHAR_COUNT",
+    "MIN_PDF_CHUNK_COUNT",
+    "MIN_TEX_CHAR_COUNT",
+    "PDF_MAGIC_BYTES",
     "PDF_SECTION_PATTERN",
+    "ContentValidationResult",
     "DocumentChunk",
     "LatexDocParser",
     "MarkdownTableChunker",
     "ParsedSection",
     "PdfDocParser",
     "estimate_tokens",
+    "validate_pdf_extraction",
+    "validate_tex_source",
 ]
