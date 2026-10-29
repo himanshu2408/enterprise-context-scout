@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: context-scout-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_local_admin_pw
+      POSTGRES_DB: context_scout
+    ports:
+      - "54329:5432"
+    volumes:
+      - ./.postgres_data:/var/lib/postgresql/data
+      - ./sql/001_init_schema.sql:/docker-entrypoint-initdb.d/001_init_schema.sql:ro
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=512MB"
+      - "-c"
+      - "work_mem=32MB"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d context_scout"]
+      interval: 3s
+      timeout: 3s
+      retries: 10

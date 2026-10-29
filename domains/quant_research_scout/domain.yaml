@@ -1,0 +1,18 @@
+domain_id: "quant_research_scout"
+display_name: "Multi-Market Quant Research & Strategy Specialist (IN / DE / US - Model 2)"
+base_model_id: "google/gemma-4-26B-A4B-it"
+contextualizer_model_id: "google/gemma-4-E4B-it"
+lora_adapter_id: "gemma4_26b_quant_research"
+lora_adapter_path: "domains/quant_research_scout/adapters/gemma4_26b_quant_research"
+embedding_model_id: "google/embeddinggemma-2"
+embedding_dimensions: 768
+mcp_read_tools_allowed:
+  - "quant_corpus_mcp:search_papers_hybrid"
+  - "quant_corpus_mcp:get_paper_section"
+  - "quant_corpus_mcp:compare_market_frictions"
+authority_rules:
+  primary_truth_source: "document"
+  require_out_of_sample_check: true
+  require_transaction_cost_check: true
+  freshness_half_life_days: 730
+output_contract: "QuantStrategyBrief"
