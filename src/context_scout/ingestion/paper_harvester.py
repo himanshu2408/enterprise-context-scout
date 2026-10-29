@@ -14,6 +14,7 @@ import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+import zlib
 from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
@@ -261,7 +262,7 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
                             tex_files[member.name] = raw_member.decode("utf-8")
                         except UnicodeDecodeError:
                             tex_files[member.name] = raw_member.decode("latin-1", errors="replace")
-    except (tarfile.TarError, gzip.BadGzipFile, EOFError, OSError):
+    except (tarfile.TarError, gzip.BadGzipFile, EOFError, OSError, zlib.error):
         pass
 
     # 2. If no tex files found via tar, try standalone gzip decompression
@@ -282,7 +283,7 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
                                     tex_files[member.name] = raw_member.decode(
                                         "latin-1", errors="replace"
                                     )
-            except (tarfile.TarError, OSError):
+            except (tarfile.TarError, OSError, EOFError):
                 # Single standalone .tex file
                 try:
                     text = decompressed.decode("utf-8")
@@ -290,7 +291,7 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
                     text = decompressed.decode("latin-1", errors="replace")
                 if "\\documentclass" in text or "\\begin{document}" in text or "%" in text:
                     return text
-        except (gzip.BadGzipFile, OSError, UnicodeDecodeError):
+        except (gzip.BadGzipFile, OSError, UnicodeDecodeError, EOFError, zlib.error):
             pass
 
     if not tex_files:

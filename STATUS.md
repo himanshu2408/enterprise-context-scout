@@ -59,8 +59,8 @@ Milestone 3 is verified complete with 116/116 tests passing across all test suit
   - Penalizes net Sharpe degradation ($\le 0.50$ fails after costs) and caps maximum drawdown ($\le 30.0\%$).
   - 100% verbatim citation verification (`VAL-02`) via `DeterministicSlicer` with NFKC normalization ($\ge 0.98$ overlap), rejecting single-digit mutations with `HallucinatedQuoteError`.
 - **Verification Metrics:**
-  - `uv run ruff check .`: 0 errors.
-  - `uv run mypy --strict src tests`: 0 type errors across 35 source files.
-  - `uv run pytest -v`: 116/116 tests passing (100% pass rate in 14.9s).
+  - `uv run ruff check src tests`: 0 errors.
+  - `uv run mypy --strict src tests`: 0 type errors across 37 source files.
+  - `uv run pytest -v`: 157 passed, 1 skipped across 158 tests (100% pass rate in 18.89s, including 19/19 in `test_empirical_m3_harvester_parser_challenge.py` and 23/23 in `test_empirical_m3_challenger_verification.py`).
   - Pull Request: [PR #3](https://github.com/himanshu2408/enterprise-context-scout/pull/3) (`feat/m3-quant-research-harvester` -> `main`).
 
