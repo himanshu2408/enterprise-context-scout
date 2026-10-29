@@ -388,32 +388,32 @@ def test_live_postgres_execution_telemetry_persistence(
     temp_git_repo: Path,
 ) -> None:
     """Integration test persisting telemetry directly into PostgreSQL 17 execution_telemetry."""
-    try:
-        settings = ScoutSettings()
-        conn_mgr = RLSConnectionManager(settings.db_app_url)
-    except Exception as exc:
-        pytest.skip(f"PostgreSQL connection unavailable: {exc}")
+    settings = ScoutSettings()
+    conn_mgr = RLSConnectionManager(settings.db_app_url)
+    live_principal = PrincipalContext(
+        user_id=f"{principal.user_id}_{uuid.uuid4().hex[:8]}",
+        role=principal.role,
+        allowed_scopes=list(principal.allowed_scopes),
+        max_session_paid_tokens=principal.max_session_paid_tokens,
+    )
 
-    try:
-        with conn_mgr.scoped_transaction(principal) as conn:
-            executor = GeminiImplementationExecutor(api_key=None)
-            result, telemetry = executor.execute_implementation(
-                pack=sample_context_pack,
-                principal=principal,
-                repo_root=temp_git_repo,
-                conn=conn,
-                lint_cmd=["python3", "-c", "print('lint pass')"],
-                test_cmd=["python3", "-c", "print('test pass')"],
-            )
+    with conn_mgr.scoped_transaction(live_principal) as conn:
+        executor = GeminiImplementationExecutor(api_key=None)
+        result, telemetry = executor.execute_implementation(
+            pack=sample_context_pack,
+            principal=live_principal,
+            repo_root=temp_git_repo,
+            conn=conn,
+            lint_cmd=["python3", "-c", "print('lint pass')"],
+            test_cmd=["python3", "-c", "print('test pass')"],
+        )
 
-            assert result.success is True
-            # Query back from Postgres
-            pg_repo = PostgresRLSRepository()
-            retrieved = pg_repo.get_execution_telemetry(conn, telemetry.trace_id)
-            assert retrieved is not None
-            assert retrieved.trace_id == telemetry.trace_id
-            assert retrieved.domain_id == DOMAIN_ID
-            assert retrieved.paid_tokens_saved == telemetry.paid_tokens_saved
-            assert retrieved.estimated_usd_saved == telemetry.estimated_usd_saved
-    except Exception as exc:
-        pytest.skip(f"PostgreSQL live test skipped: {exc}")
+        assert result.success is True
+        # Query back from Postgres
+        pg_repo = PostgresRLSRepository()
+        retrieved = pg_repo.get_execution_telemetry(conn, telemetry.trace_id)
+        assert retrieved is not None
+        assert retrieved.trace_id == telemetry.trace_id
+        assert retrieved.domain_id == DOMAIN_ID
+        assert retrieved.paid_tokens_saved == telemetry.paid_tokens_saved
+        assert retrieved.estimated_usd_saved == telemetry.estimated_usd_saved
