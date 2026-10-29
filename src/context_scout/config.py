@@ -14,6 +14,8 @@ ALLOWED_GOOGLE_MODEL_PREFIXES: Final[tuple[str, ...]] = (
     "gemini-2.5-",
     "gemini-3.5-",
     "gemini-3.8-",
+    "gemini-4-",
+    "gemini-4-argon",
     "gemini-embedding-",
 )
 
@@ -58,7 +60,7 @@ class ScoutSettings(BaseSettings):
     teacher_model_id: str = Field(default="google/gemma-4-31B-it")
     embedding_model_id: str = Field(default="google/embeddinggemma-2")
     shield_model_id: str = Field(default="google/shieldgemma-2-2b-it")
-    frontier_model_id: str = Field(default="gemini-2.5-flash")
+    frontier_model_id: str = Field(default="gemini-3.8-flash")
 
     embedding_dimensions: int = Field(default=768, ge=128, le=3072)
     local_max_kv_tokens: int = Field(default=32_768, ge=4_096, le=32_768)
