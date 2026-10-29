@@ -4,24 +4,30 @@ Guarantees zero math formulas or tabular matrices are split across chunk boundar
 """
 
 import io
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Final
 from uuid import UUID, uuid4
 
+import pypdf.errors
 from pypdf import PdfReader
 
 from context_scout.db.repositories import DocChunkRecord
 from context_scout.schemas.contracts import MarketRegime
 
+logger = logging.getLogger(__name__)
+
 _MATH_ENV_NAMES = (
-    r"equation|equation\*|align|align\*|gather|gather\*|multline|multline\*|flalign|flalign\*"
+    r"equation|equation\*|align|align\*|gather|gather\*|multline|multline\*|flalign|flalign\*|"
+    r"eqnarray|eqnarray\*"
 )
 
-# Atomic math block pattern: \begin{equation}...\end{equation}, $$...$$, $...$
+# Atomic math block pattern: \begin{equation}...\end{equation}, \[...\], $$...$$, $...$
 MATH_BLOCK_PATTERN: Final[re.Pattern[str]] = re.compile(
     rf"(\\begin\{{(?:{_MATH_ENV_NAMES})\}}.*?\\end\{{(?:{_MATH_ENV_NAMES})\}}|"
+    r"\\\[.*?\\\]|"
     r"\$\$.*?\$\$|"
     r"(?<!\\)\$.+?(?<!\\)\$)",
     re.DOTALL,
@@ -48,7 +54,7 @@ MD_HEADING_PATTERN: Final[re.Pattern[str]] = re.compile(
 
 # Markdown table row pattern
 MD_TABLE_ROW_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^\s*\|.+?\|\s*$",
+    r"^\s*\|?[^|\r\n]*(?:\|[^|\r\n]*)+\|?\s*$",
     re.MULTILINE,
 )
 
@@ -123,9 +129,12 @@ class LatexDocParser:
         """Parses LaTeX into structured sections while preserving mathematical formulas."""
         # Strip document wrapper if present
         body = tex_content
-        doc_match = re.search(r"\\begin\{document\}(.*?)\\end\{document\}", tex_content, re.DOTALL)
+        doc_match = re.search(r"\\begin\{document\}(.*)\\end\{document\}", tex_content, re.DOTALL)
         if doc_match:
             body = doc_match.group(1)
+            # Strip any nested \begin{document} / \end{document} and duplicate \documentclass
+            body = re.sub(r"\\documentclass\s*(?:\[[^\]]*\])?\s*\{[^}]*\}", "", body)
+            body = re.sub(r"\\(?:begin|end)\s*\{document\}", "", body)
 
         matches = list(LATEX_SECTION_PATTERN.finditer(body))
         if not matches:
@@ -331,7 +340,9 @@ class MarkdownTableChunker:
                             tables_markdown=[
                                 t.group(0)
                                 for t in re.finditer(
-                                    r"(?:^\s*\|.+?\|\s*$\n?)+", chunk_text, re.MULTILINE
+                                    r"(?:^\s*\|?[^|\r\n]*(?:\|[^|\r\n]*)+\|?\s*$\n?)+",
+                                    chunk_text,
+                                    re.MULTILINE,
                                 )
                             ],
                             token_count_approx=current_tokens,
@@ -410,17 +421,37 @@ class PdfDocParser:
 
     def extract_text(self, pdf_bytes: bytes) -> str:
         """Extracts plain text across all pages in the PDF."""
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        pages_text: list[str] = []
-        for page in reader.pages:
-            text = (page.extract_text() or "").replace("\x00", "")
-            if text.strip():
-                pages_text.append(text.strip())
-        return "\n\n".join(pages_text)
+        if not pdf_bytes or len(pdf_bytes) < 32:
+            return ""
+        try:
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            pages_text: list[str] = []
+            for page in reader.pages:
+                text = (page.extract_text() or "").replace("\x00", "")
+                if text.strip():
+                    pages_text.append(text.strip())
+            return "\n\n".join(pages_text)
+        except (
+            pypdf.errors.PyPdfError,
+            OSError,
+            ValueError,
+            IndexError,
+            KeyError,
+            EOFError,
+        ) as exc:
+            logger.debug("Failed to extract text from PDF bytes: %s", exc)
+            return ""
 
     def parse_pdf(self, pdf_bytes: bytes) -> list[ParsedSection]:
         """Extracts semantic sections from PDF bytes."""
-        full_text = self.extract_text(pdf_bytes)
+        if not pdf_bytes or len(pdf_bytes) < 32:
+            return []
+        try:
+            full_text = self.extract_text(pdf_bytes)
+        except Exception as exc:
+            logger.debug("Unexpected error during PDF parsing: %s", exc)
+            return []
+
         if not full_text.strip():
             return []
 
@@ -475,17 +506,25 @@ class PdfDocParser:
         max_chunk_tokens: int = 800,
     ) -> list[DocumentChunk]:
         """Parses and chunks PDF bytes into standard DocumentChunk objects."""
-        sections = self.parse_pdf(pdf_bytes)
-        latex_parser = LatexDocParser()
-        return latex_parser.chunk_paper(
-            doc_id=doc_id,
-            doc_title=doc_title,
-            source_uri=source_uri,
-            market_scope=market_scope,
-            sections=sections,
-            min_chunk_tokens=min_chunk_tokens,
-            max_chunk_tokens=max_chunk_tokens,
-        )
+        if not pdf_bytes or len(pdf_bytes) < 32:
+            return []
+        try:
+            sections = self.parse_pdf(pdf_bytes)
+            if not sections:
+                return []
+            latex_parser = LatexDocParser()
+            return latex_parser.chunk_paper(
+                doc_id=doc_id,
+                doc_title=doc_title,
+                source_uri=source_uri,
+                market_scope=market_scope,
+                sections=sections,
+                min_chunk_tokens=min_chunk_tokens,
+                max_chunk_tokens=max_chunk_tokens,
+            )
+        except Exception as exc:
+            logger.debug("Unexpected error during PDF chunking: %s", exc)
+            return []
 
 
 __all__ = [
