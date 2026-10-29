@@ -260,11 +260,11 @@ Backtests frequently overfit by assuming zero or unrealistically low execution f
 To validate the retrieval engine under institutional conditions, the automated harvest pipeline ingested a multi-market corpus:
 
 - **Harvested Corpus Scale:**
-  - **330 Total Papers:** Top 110 citation-ranked papers per market (`IN_NSE`: 110, `DE_XETRA`: 110, `US_EQUITY`: 110).
+  - **300 Total Verified Full-Text Papers:** Exactly 100 verified full-text papers per market (`IN_NSE`: 100, `DE_XETRA`: 100, `US_EQUITY`: 100), with 0 `.txt` abstract stubs (259 LaTeX `.tex` sources and 44 full-text `.pdf` papers).
   - **Local Storage Cache:** Cached under `data/papers/` (git-ignored) with structured metadata in `data/papers/metadata/{market}_papers.jsonl` and full source/summary text under `data/papers/content/{market}/`.
 - **Database Persistence (`doc_chunks`):**
-  - **1,473 Total Persisted Chunks** in local PostgreSQL 17 under domain `quant_research_scout` and scope `public_quant`.
-  - **Market Breakdown:** `DE_XETRA`: 639 chunks, `US_EQUITY`: 449 chunks, `IN_NSE`: 385 chunks.
+  - **14,331 Total Genuine Chunks Persisted** in local PostgreSQL 17 under domain `quant_research_scout` and scope `public_quant` with 768-dimensional `google/embeddinggemma-2` embeddings.
+  - **Market Breakdown:** `DE_XETRA`: 5,013 chunks, `US_EQUITY`: 4,982 chunks, `IN_NSE`: 4,336 chunks.
   - Each chunk contains 50-token situated headers, 768-dimensional embeddings, and precomputed `tsvector` lexemes.
 - **Live 3-Way Normalized RRF Verification:**
   - Query evaluation against live database chunks demonstrates strong multi-modal convergence:
