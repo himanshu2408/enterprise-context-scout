@@ -136,7 +136,7 @@ flowchart LR
 
 ## 3. Why We Chose Every Component: Industry Evidence & Trade-Off Matrices
 
-Every architectural choice in this blueprint is backed by verified industry engineering benchmarks. Use these matrices to defend the system in architectural evaluation and system design reviews.
+Every architectural choice in this blueprint is backed by verified industry engineering benchmarks. The following trade-off matrices define the technical evaluation criteria and design defense for each system component.
 
 ### 3.1 Decision Matrix 1: How to Teach an LLM About Codebases & Documents
 
@@ -564,7 +564,7 @@ When a task spans both domains—for example, *"Implement the volatility-scaled 
 
 ## 7. Deep-Dive: QLoRA Mechanics, Memory Math & Teacher-Student Distillation
 
-### 7.1 How LoRA & QLoRA Work Mathematically (Mathematical Formulation)
+### 7.1 Mathematical Formulation of LoRA & QLoRA
 Instead of updating a full weight matrix $W_0 \in \mathbb{R}^{d \times k}$ during fine-tuning, **LoRA (Low-Rank Adaptation)** freezes $W_0$ in 4-bit NormalFloat (`NF4` / MLX 4-bit) and injects two tiny trainable matrices $B \in \mathbb{R}^{d \times r}$ and $A \in \mathbb{R}^{r \times k}$ where rank $r \ll \min(d, k)$:
 $$h = W_0 x + \frac{\alpha}{r} B A x$$
 - **Rank ($r = 16$):** Controls the capacity of the adapter. For task/schema specialization and domain routing, $r \in \{16, 32\}$ captures 99% of full fine-tuning quality while training $<0.5\%$ of the parameters.
@@ -652,19 +652,19 @@ All runs emit **OpenTelemetry (`opentelemetry-sdk`)** spans following GenAI sema
 
 The following technical trade-offs, limitations, and mitigations are documented for the production deployment of Enterprise Context Scout:
 
-1. **Pushback:** *"Why not just dump the whole repo into Gemini 3.8 Flash's 1M-token context window with context caching?"*
-   - **Your Defense:** Three reasons:
+1. **Trade-Off & Edge Case:** *"Why not just dump the whole repo into Gemini 3.8 Flash's 1M-token context window with context caching?"*
+   - **Technical Rationale & Mitigation:** Three reasons:
      1. **Scale:** 1M tokens only holds ~30,000–40,000 lines of code. Real enterprise systems (and 1,000+ quant papers + multi-repo codebases) span tens of millions of tokens.
      2. **Cache Invalidation Churn:** In an active repository where commits land every few minutes, prefix context caches invalidate constantly, forcing full re-billing.
      3. **Lost-in-the-Middle Attention Degradation:** Even within 1M tokens, reasoning precision over subtle cross-file type contracts degrades when 95% of the prompt is distractor code. Sending a compiler-closed 3,000-token `ContextPack` gives higher patch accuracy at 85–90% lower cost.
-2. **Pushback:** *"Why use QLoRA on Gemma 4 instead of just prompting the base Gemma 4 model?"*
-   - **Your Defense:** Base open-weights models require 1,500–2,500 tokens of few-shot examples and schema instructions on every turn to reliably emit strict JSON pointers and domain-specific `QuantStrategyBrief` schemas, and still fail schema validation ~12–18% of the time. A QLoRA adapter ($r=16, \alpha=32$) bakes the output schema, tool-calling discipline, and domain taxonomy directly into 50 MB of weights—eliminating few-shot prompt bloat (cutting local prefill latency by ~60%) and raising schema adherence above 98%.
-3. **Pushback:** *"What breaks if a developer renames a core interface across 40 files?"*
-   - **Your Defense:** Pure vector search breaks completely on bulk renames until everything is re-embedded. Because our Code Engine uses `pg_trgm` trigram search + `tree-sitter` AST edges keyed by Git Blob-SHA, a 40-file rename updates in `<2 seconds` via Merkle diffing and resolves all 40 call sites deterministically via `ast_edges`.
-4. **Pushback:** *"What is the main limitation of `tree-sitter` compared to Google's Kythe or Sourcegraph's SCIP?"*
-   - **Your Defense:** `tree-sitter` builds a fast, syntax-level AST per file and resolves explicit imports and symbol names heuristically, whereas `Kythe` and `SCIP` hook into the compiler/type-checker to resolve dynamically dispatched or overloaded methods across packages with 100% compiler accuracy. We chose `tree-sitter` because it indexes broken/in-progress code in milliseconds without needing a full Bazel/compiler build per repo, and we mitigate polymorphism edge cases by combining AST edges with trigram search.
-5. **Pushback:** *"How do you prevent data leakage when fine-tuning a LoRA adapter in a multi-tenant enterprise?"*
-   - **Your Defense:** We never train a shared LoRA adapter on restricted tenant secrets or PII. LoRA training datasets only contain schema/tool-routing trajectories over public or role-cleared architectural skeletons, while restricted data stays strictly inside PostgreSQL behind Row-Level Security (`RLS`).
+2. **Trade-Off & Edge Case:** *"Why use QLoRA on Gemma 4 instead of just prompting the base Gemma 4 model?"*
+   - **Technical Rationale & Mitigation:** Base open-weights models require 1,500–2,500 tokens of few-shot examples and schema instructions on every turn to reliably emit strict JSON pointers and domain-specific `QuantStrategyBrief` schemas, and still fail schema validation ~12–18% of the time. A QLoRA adapter ($r=16, \alpha=32$) bakes the output schema, tool-calling discipline, and domain taxonomy directly into 50 MB of weights—eliminating few-shot prompt bloat (cutting local prefill latency by ~60%) and raising schema adherence above 98%.
+3. **Trade-Off & Edge Case:** *"What breaks if a developer renames a core interface across 40 files?"*
+   - **Technical Rationale & Mitigation:** Pure vector search breaks completely on bulk renames until everything is re-embedded. Because our Code Engine uses `pg_trgm` trigram search + `tree-sitter` AST edges keyed by Git Blob-SHA, a 40-file rename updates in `<2 seconds` via Merkle diffing and resolves all 40 call sites deterministically via `ast_edges`.
+4. **Trade-Off & Edge Case:** *"What is the main limitation of `tree-sitter` compared to Google's Kythe or Sourcegraph's SCIP?"*
+   - **Technical Rationale & Mitigation:** `tree-sitter` builds a fast, syntax-level AST per file and resolves explicit imports and symbol names heuristically, whereas `Kythe` and `SCIP` hook into the compiler/type-checker to resolve dynamically dispatched or overloaded methods across packages with 100% compiler accuracy. We chose `tree-sitter` because it indexes broken/in-progress code in milliseconds without needing a full Bazel/compiler build per repo, and we mitigate polymorphism edge cases by combining AST edges with trigram search.
+5. **Trade-Off & Edge Case:** *"How do you prevent data leakage when fine-tuning a LoRA adapter in a multi-tenant enterprise?"*
+   - **Technical Rationale & Mitigation:** We never train a shared LoRA adapter on restricted tenant secrets or PII. LoRA training datasets only contain schema/tool-routing trajectories over public or role-cleared architectural skeletons, while restricted data stays strictly inside PostgreSQL behind Row-Level Security (`RLS`).
 
 ---
 
