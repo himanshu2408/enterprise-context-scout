@@ -1,0 +1,41 @@
+"""Pydantic v2 contracts and mathematical normalization helpers."""
+
+from context_scout.schemas.contracts import (
+    AuthorityRules,
+    CodeSlicePointer,
+    DocCitationSpan,
+    DomainPackManifest,
+    ExecutionMode,
+    FrictionVerdict,
+    ImplementationContextPack,
+    InsufficientContextDiagnostic,
+    MarketRegime,
+    ModificationIntent,
+    PreFlightValidationReport,
+    PrincipalContext,
+    QuantStrategyBrief,
+    RoleType,
+    VerbatimCodeSlice,
+    compute_normalized_rrf,
+    evaluate_market_friction_floor,
+)
+
+__all__ = [
+    "AuthorityRules",
+    "CodeSlicePointer",
+    "DocCitationSpan",
+    "DomainPackManifest",
+    "ExecutionMode",
+    "FrictionVerdict",
+    "ImplementationContextPack",
+    "InsufficientContextDiagnostic",
+    "MarketRegime",
+    "ModificationIntent",
+    "PreFlightValidationReport",
+    "PrincipalContext",
+    "QuantStrategyBrief",
+    "RoleType",
+    "VerbatimCodeSlice",
+    "compute_normalized_rrf",
+    "evaluate_market_friction_floor",
+]
