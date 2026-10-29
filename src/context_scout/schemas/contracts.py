@@ -1,7 +1,9 @@
 """Core Pydantic v2 contracts and deterministic scoring/friction validators."""
 
+from datetime import datetime
 from enum import StrEnum
-from typing import Final, Literal
+from typing import Any, Final, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -254,3 +256,60 @@ class ImplementationContextPack(BaseModel):
     preflight_report: PreFlightValidationReport
     local_tokens_consumed: int = Field(ge=0)
     pack_token_count: int = Field(ge=1)
+
+
+class MissingContextRequest(BaseModel):
+    """Structured request emitted by Gemini when an edge-case symbol is needed."""
+
+    missing_symbol: str = Field(min_length=1, description="Qualified symbol or identifier name")
+    file_hint: str | None = Field(default=None, description="Optional target file path hint")
+    reason: str = Field(
+        min_length=1, description="Reason this symbol is required to implement the patch"
+    )
+
+
+class ContextMissEvent(BaseModel):
+    """Structured record logged into execution_telemetry for QLoRA flywheel retraining."""
+
+    trace_id: str = Field(min_length=1)
+    domain_id: str = Field(min_length=1)
+    missing_symbol: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    resolved_file_path: str | None = None
+    resolved_lines: str | None = None
+    timestamp: str = Field(description="ISO-8601 UTC timestamp")
+    resolution_strategy: str = Field(default="deterministic_ast_slice")
+
+
+class ExecutionTelemetryRecord(BaseModel):
+    """Pydantic model matching PostgreSQL 17 execution_telemetry table."""
+
+    trace_id: UUID
+    domain_id: str = Field(min_length=1)
+    principal_id: str = Field(min_length=1)
+    principal_role: str = Field(min_length=1)
+    execution_mode: Literal["chat_qa", "gemini_handoff"] | ExecutionMode
+    local_tokens_read: int = Field(ge=0)
+    context_pack_tokens_sent: int = Field(ge=0)
+    paid_tokens_saved: int
+    estimated_usd_saved: float
+    preflight_passed_first_try: bool
+    zero_touch_sufficient: bool | None = None
+    missing_context_requests: list[dict[str, Any]] = Field(default_factory=list)
+    latency_ms: int = Field(ge=0)
+    created_at: datetime | None = None
+
+
+class PatchExecutionResult(BaseModel):
+    """Result of GitWorktreeSandbox patch application and verification."""
+
+    success: bool
+    patch_diff: str
+    target_files: list[str] = Field(default_factory=list)
+    lint_passed: bool
+    tests_passed: bool
+    verification_passed: bool
+    requires_human_confirmation: bool
+    confirmed: bool = False
+    details: str = ""
+
