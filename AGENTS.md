@@ -8,10 +8,14 @@ These rules apply unconditionally to all AI agents (Antigravity, Gemini CLI, Cla
   2. `STATUS.md` (current milestone progress, test status, and open items).
 - Whenever a milestone completes or an architectural decision changes, update `STATUS.md`.
 
-## 1A. Subagent Model & Live Visibility Policy (Direct, Skills, and `/teamwork`)
+## 1A. Subagent Model, Live Visibility & Zero-Trust Freshness Policy
 - **Default to `Model: "flash"`:** Whenever invoking any subagent via `invoke_subagent`—whether directly, from a skill, or inside `/teamwork` / `teamwork-preview`—ALWAYS pass `Model: "flash"` (or `"flash_lite"` for trivial tasks) instead of `"inherit"` or `"pro"`, unless the user explicitly asks for `"pro"` or `"inherit"`.
 - **Live UI Model Badge in `Role`:** Always prefix the `Role` argument in `invoke_subagent` with `[Gemini Flash]` (e.g., `Role: "[Gemini Flash] AST Graph Builder"`) so the running model is visible directly on the live subagent badge in the UI while it works.
 - **Explicit Chat Log:** Whenever a subagent is launched, report its `Role`, exact `Model` parameter (`flash`), and `conversationId` in chat.
+- **Zero-Trust Live Search Gate (Mandatory for Main Agent & Subagents):** Never rely on training memory for model versions, SDK releases, or token pricing. Always verify via live web search before writing or claiming them. As of October 2026 (`verified` 2026-10-29):
+  - **Expensive Frontier Models (what our Scout saves 80–90% exploration cost against):** **`Claude Opus 5.5`** ($4.00/1M input, $20.00/1M output), **`Gemini 4 Argon` (`gemini-4-argon`)** ($2.00–$4.00/1M input, $10.00–$20.00/1M output), and **`GPT-5.6 Sol`** ($4.00/1M input, $20.00/1M output).
+  - **Paid Fast Execution Target (100% Google Runtime):** **`Gemini 3.8 Flash` (`gemini-3.8-flash`)** ($0.75/1M input, $3.75/1M output promo; $1.50/$7.50 standard)—or **`Gemini 4 Argon` (`gemini-4-argon`)** for complex architecture changes.
+  - **Legacy 2025 Models (Do NOT call frontier):** `gemini-2.5-pro` and `gemini-2.5-flash` are legacy 2025 models; never describe them as frontier models.
 
 ## 2. Strict 100% Google-Only Model & SDK Policy (Non-Negotiable)
 - **Prohibited Models:** Never use, import, or configure non-Google LLMs, embeddings, or rerankers (no OpenAI, Anthropic, Qwen, Llama, Mistral, DeepSeek, or Cohere models).
@@ -28,8 +32,8 @@ These rules apply unconditionally to all AI agents (Antigravity, Gemini CLI, Cla
 - **Safety & Guardrails:**
   - Local / Open-Weights: `ShieldGemma 2` (`2B` / `9B`).
   - Enterprise GCP: **Google Cloud Model Armor** + Cloud Sensitive Data Protection (SDP).
-- **Paid Frontier Handoff & Orchestration:**
-  - Frontier Implementation Models: `gemini-2.5-flash` (GA) / `gemini-3.8-flash` (Preview) / `gemini-2.5-pro` via unified `google-genai` SDK (`>=2.31.0`; never legacy `google-generativeai`).
+- **Paid Execution & Frontier Handoff (100% Google Runtime):**
+  - Default Fast Execution Model: **`gemini-3.8-flash`** (and optional escalation to Google frontier **`gemini-4-argon`**) via unified `google-genai` SDK (`>=2.31.0`; never legacy `google-generativeai`). Never describe legacy 2025 `gemini-2.5-pro` / `gemini-2.5-flash` as frontier models.
   - Orchestration: **Google ADK 2.x** (`google-adk >=2.12.0` DAG `Workflow`; never deprecated ADK 1.0).
   - Tool Protocol: **MCP** (`mcp >=2.3.0` using `stdio` or `Streamable HTTP`; never deprecated split HTTP+SSE).
 
