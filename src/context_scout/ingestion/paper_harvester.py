@@ -3,10 +3,13 @@
 Integrates arXiv Atom XML and OpenAlex REST APIs with exponential backoff and offline mock fixtures.
 """
 
+import gzip
+import io
 import json
 import logging
 import random
 import re
+import tarfile
 import time
 import urllib.parse
 import urllib.request
@@ -136,20 +139,192 @@ def build_arxiv_query_url(query: MarketHarvestQuery) -> str:
     return f"http://export.arxiv.org/api/query?{encoded}"
 
 
-def build_openalex_query_url(query: MarketHarvestQuery) -> str:
-    """Constructs URL for OpenAlex works REST API."""
-    concepts_part = "|".join(query.openalex_concepts)
-    keywords_part = " ".join(query.keywords[:3])
-    filter_val = (
-        f"from_publication_date:{query.start_year}-01-01,concepts.display_name.search:{concepts_part}"
-    )
-    params = {
-        "filter": filter_val,
-        "search": keywords_part,
-        "per-page": str(min(query.max_results, 50)),
+OPENALEX_CONCEPT_MAP: Final[dict[str, str]] = {
+    "Market microstructure": "C51926234",
+    "Algorithmic trading": "C78508483",
+    "High-frequency trading": "C24683644",
+    "Stock market": "C2780299701",
+    "Order book": "C2779309563",
+    "Market liquidity": "C183582576",
+    "Transaction cost": "C98965940",
+    "Financial market": "C19244329",
+    "Financial economics": "C106159729",
+    "National Stock Exchange of India": "C2780299701",
+    "Deutsche Börse": "C19244329",
+    "New York Stock Exchange": "C2780299701",
+    "NASDAQ": "C2780299701",
+}
+
+
+def build_openalex_query_url(
+    query: MarketHarvestQuery,
+    sort_by: str = "cited_by_count:desc",
+    email: str = "scout@example.com",
+) -> str:
+    """Constructs a valid URL for OpenAlex works REST API with verified concept IDs and filters."""
+    resolved_concept_ids: list[str] = []
+    for concept in query.openalex_concepts:
+        cleaned = concept.strip()
+        if re.match(r"^C\d+$", cleaned):
+            resolved_concept_ids.append(cleaned)
+        elif cleaned in OPENALEX_CONCEPT_MAP:
+            resolved_concept_ids.append(OPENALEX_CONCEPT_MAP[cleaned])
+
+    # De-duplicate concept IDs preserving order
+    unique_concept_ids = list(dict.fromkeys(resolved_concept_ids))
+
+    filter_terms: list[str] = [
+        f"from_publication_date:{query.start_year}-01-01",
+        "has_fulltext:true",
+        "type:article|preprint",
+        "is_retracted:false",
+    ]
+    if unique_concept_ids:
+        filter_terms.append(f"concepts.id:{'|'.join(unique_concept_ids)}")
+
+    # Format search keywords: quote multi-word terms for exact phrase matching
+    kw_terms = [f'"{kw}"' if " " in kw else kw for kw in query.keywords[:4]]
+    search_query = " OR ".join(kw_terms)
+
+    params: dict[str, str] = {
+        "filter": ",".join(filter_terms),
+        "search": search_query,
+        "sort": sort_by,
+        "per-page": str(min(query.max_results, 200)),
+        "mailto": email,
     }
     encoded = urllib.parse.urlencode(params)
     return f"https://api.openalex.org/works?{encoded}"
+
+
+def resolve_latex_includes(
+    root_name: str, tex_files: dict[str, str], visited: set[str] | None = None
+) -> str:
+    """Recursively inlines \\input, \\include, and \\subfile into root document."""
+    if visited is None:
+        visited = set()
+    if root_name in visited:
+        return ""
+    visited.add(root_name)
+
+    content = tex_files.get(root_name, "")
+
+    def replace_directive(match: re.Match[str]) -> str:
+        target = match.group(1).strip()
+        target = target.strip('"\'{} ')
+        candidates = [
+            target,
+            f"{target}.tex",
+            target.replace("./", ""),
+            f"{target.replace('./', '')}.tex",
+            target.split("/")[-1],
+            f"{target.split('/')[-1]}.tex",
+        ]
+        for cand in candidates:
+            cand_lower = cand.lower()
+            for key in tex_files:
+                if (
+                    key == cand
+                    or key.lower() == cand_lower
+                    or key.endswith("/" + cand)
+                    or key.lower().endswith("/" + cand_lower)
+                ):
+                    sub_text = resolve_latex_includes(key, tex_files, visited)
+                    sub_match = re.search(
+                        r"\\begin\{document\}(.*?)\\end\{document\}", sub_text, re.DOTALL
+                    )
+                    if sub_match:
+                        return sub_match.group(1)
+                    return sub_text
+        return match.group(0)
+
+    merged = re.sub(r"\\(?:input|include|subfile)\s*\{([^}]+)\}", replace_directive, content)
+    return merged
+
+
+def unpack_latex_archive(raw_bytes: bytes) -> str | None:
+    """Extracts and merges multi-file LaTeX sources from an archive or standalone gzip."""
+    if raw_bytes.startswith(b"%PDF"):
+        return None
+
+    tex_files: dict[str, str] = {}
+
+    # 1. Try opening as tar archive (handles .tar.gz, .tar.bz2, .tar)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw_bytes), mode="r:*") as tar:
+            for member in tar.getmembers():
+                if member.isfile() and member.name.lower().endswith(".tex"):
+                    extracted = tar.extractfile(member)
+                    if extracted:
+                        raw_member = extracted.read()
+                        try:
+                            tex_files[member.name] = raw_member.decode("utf-8")
+                        except UnicodeDecodeError:
+                            tex_files[member.name] = raw_member.decode("latin-1", errors="replace")
+    except (tarfile.TarError, gzip.BadGzipFile, EOFError, OSError):
+        pass
+
+    # 2. If no tex files found via tar, try standalone gzip decompression
+    if not tex_files:
+        try:
+            decompressed = gzip.decompress(raw_bytes)
+            # Check if decompressed bytes are themselves a tar file
+            try:
+                with tarfile.open(fileobj=io.BytesIO(decompressed), mode="r:") as tar:
+                    for member in tar.getmembers():
+                        if member.isfile() and member.name.lower().endswith(".tex"):
+                            extracted = tar.extractfile(member)
+                            if extracted:
+                                raw_member = extracted.read()
+                                try:
+                                    tex_files[member.name] = raw_member.decode("utf-8")
+                                except UnicodeDecodeError:
+                                    tex_files[member.name] = raw_member.decode(
+                                        "latin-1", errors="replace"
+                                    )
+            except (tarfile.TarError, OSError):
+                # Single standalone .tex file
+                try:
+                    text = decompressed.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = decompressed.decode("latin-1", errors="replace")
+                if "\\documentclass" in text or "\\begin{document}" in text or "%" in text:
+                    return text
+        except (gzip.BadGzipFile, OSError, UnicodeDecodeError):
+            pass
+
+    if not tex_files:
+        # Check if raw_bytes was already uncompressed text
+        try:
+            plain = raw_bytes.decode("utf-8")
+            if "\\documentclass" in plain or "\\begin{document}" in plain:
+                return plain
+        except UnicodeDecodeError:
+            pass
+        return None
+
+    # 3. Identify root .tex file
+    root_candidate: str | None = None
+    for name, content in tex_files.items():
+        if "\\documentclass" in content and "\\begin{document}" in content:
+            lower = name.lower()
+            if any(k in lower for k in ["main", "ms", "paper", "article"]):
+                root_candidate = name
+                break
+            if root_candidate is None:
+                root_candidate = name
+
+    if not root_candidate:
+        for name, content in tex_files.items():
+            if "\\documentclass" in content or "\\begin{document}" in content:
+                root_candidate = name
+                break
+
+    if not root_candidate:
+        root_candidate = max(tex_files.keys(), key=lambda k: len(tex_files[k]))
+
+    # 4. Recursively resolve \input, \include, and \subfile
+    return resolve_latex_includes(root_candidate, tex_files)
 
 
 def parse_arxiv_atom_feed(xml_text: str, market_scope: MarketRegime) -> list[HarvestedPaper]:
@@ -265,6 +440,25 @@ def parse_openalex_response(
             abstract = _reconstruct_openalex_abstract(typed_inv)
 
         doi = str(item.get("doi") or raw_id)
+        best_oa_loc = item.get("best_oa_location")
+        best_oa_pdf = (
+            best_oa_loc.get("pdf_url")
+            if isinstance(best_oa_loc, dict) and best_oa_loc.get("pdf_url")
+            else None
+        )
+        locations = item.get("locations")
+        oa_locations: list[str] = []
+        if isinstance(locations, list):
+            for loc in locations:
+                if isinstance(loc, dict) and loc.get("pdf_url"):
+                    oa_locations.append(str(loc.get("pdf_url")))
+
+        metadata: dict[str, object] = {
+            "cited_by_count": int(item.get("cited_by_count") or 0),
+            "doi": doi,
+            "best_oa_pdf_url": best_oa_pdf,
+            "oa_locations": oa_locations,
+        }
 
         if doc_id and title:
             papers.append(
@@ -277,6 +471,7 @@ def parse_openalex_response(
                     market_scope=market_scope,
                     source_uri=doi,
                     abstract=abstract,
+                    metadata=metadata,
                 )
             )
 
@@ -356,44 +551,101 @@ class HttpPaperHarvesterClient:
         return papers
 
     def download_source(self, paper: HarvestedPaper) -> HarvestedPaper:
-        """Attempts to retrieve LaTeX source for an arXiv paper."""
+        """Attempts to retrieve LaTeX source for an arXiv paper, falling back to PDF."""
         if paper.source == HarvesterSource.ARXIV and paper.raw_tex_content is None:
-            # arXiv e-print source URL
             arxiv_num = paper.doc_id.replace("arxiv:", "")
             src_url = f"https://arxiv.org/e-print/{arxiv_num}"
+            raw_tex: str | None = None
+            raw_pdf: bytes | None = None
+
+            # 1. Attempt /e-print/ download
             try:
                 req = urllib.request.Request(src_url, headers={"User-Agent": self.user_agent})
                 with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
-                    raw = resp.read()
-                    try:
-                        tex_str = raw.decode("utf-8")
-                        return HarvestedPaper(
-                            doc_id=paper.doc_id,
-                            source=paper.source,
-                            title=paper.title,
-                            authors=paper.authors,
-                            published_date=paper.published_date,
-                            market_scope=paper.market_scope,
-                            source_uri=paper.source_uri,
-                            abstract=paper.abstract,
-                            raw_tex_content=tex_str,
-                            metadata=paper.metadata,
-                        )
-                    except UnicodeDecodeError:
-                        return HarvestedPaper(
-                            doc_id=paper.doc_id,
-                            source=paper.source,
-                            title=paper.title,
-                            authors=paper.authors,
-                            published_date=paper.published_date,
-                            market_scope=paper.market_scope,
-                            source_uri=paper.source_uri,
-                            abstract=paper.abstract,
-                            raw_pdf_bytes=raw,
-                            metadata=paper.metadata,
-                        )
+                    raw_bytes = resp.read()
+                    if raw_bytes.startswith(b"%PDF"):
+                        raw_pdf = raw_bytes
+                    else:
+                        raw_tex = unpack_latex_archive(raw_bytes)
+                        if not raw_tex and raw_bytes.startswith(b"%PDF"):
+                            raw_pdf = raw_bytes
             except Exception as e:
-                logger.warning("Failed to download raw source for %s: %s", paper.doc_id, e)
+                logger.info(
+                    "e-print source unavailable for %s (%s); will attempt PDF fallback",
+                    paper.doc_id,
+                    e,
+                )
+
+            # 2. PDF Fallback if no LaTeX source extracted
+            if not raw_tex and not raw_pdf:
+                pdf_url = f"https://arxiv.org/pdf/{arxiv_num}.pdf"
+                try:
+                    pdf_req = urllib.request.Request(
+                        pdf_url, headers={"User-Agent": self.user_agent}
+                    )
+                    with urllib.request.urlopen(pdf_req, timeout=self.timeout_sec) as resp:
+                        pdf_bytes = resp.read()
+                        if pdf_bytes.startswith(b"%PDF"):
+                            raw_pdf = pdf_bytes
+                except Exception as e:
+                    logger.warning("Failed PDF fallback for %s: %s", paper.doc_id, e)
+
+            return HarvestedPaper(
+                doc_id=paper.doc_id,
+                source=paper.source,
+                title=paper.title,
+                authors=paper.authors,
+                published_date=paper.published_date,
+                market_scope=paper.market_scope,
+                source_uri=paper.source_uri,
+                abstract=paper.abstract,
+                raw_tex_content=raw_tex,
+                raw_pdf_bytes=raw_pdf,
+                metadata=paper.metadata,
+            )
+
+        if (
+            paper.source == HarvesterSource.OPENALEX
+            and paper.raw_tex_content is None
+            and paper.raw_pdf_bytes is None
+        ):
+            best_oa_pdf_url = paper.metadata.get("best_oa_pdf_url")
+            candidate_urls: list[str] = []
+            if isinstance(best_oa_pdf_url, str) and best_oa_pdf_url:
+                candidate_urls.append(best_oa_pdf_url)
+            oa_locs = paper.metadata.get("oa_locations")
+            if isinstance(oa_locs, list):
+                for loc in oa_locs:
+                    if isinstance(loc, str) and loc and loc not in candidate_urls:
+                        candidate_urls.append(loc)
+
+            raw_pdf_oa: bytes | None = None
+            for url in candidate_urls:
+                try:
+                    req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
+                    with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                        pdf_bytes = resp.read()
+                        if pdf_bytes.startswith(b"%PDF"):
+                            raw_pdf_oa = pdf_bytes
+                            break
+                except Exception:
+                    continue
+
+            if raw_pdf_oa:
+                return HarvestedPaper(
+                    doc_id=paper.doc_id,
+                    source=paper.source,
+                    title=paper.title,
+                    authors=paper.authors,
+                    published_date=paper.published_date,
+                    market_scope=paper.market_scope,
+                    source_uri=paper.source_uri,
+                    abstract=paper.abstract,
+                    raw_tex_content=None,
+                    raw_pdf_bytes=raw_pdf_oa,
+                    metadata=paper.metadata,
+                )
+
         return paper
 
 
@@ -569,6 +821,7 @@ __all__ = [
     "DEFAULT_USER_AGENT",
     "FIXTURE_PAPERS",
     "MARKET_QUERY_PRESETS",
+    "OPENALEX_CONCEPT_MAP",
     "HarvestedPaper",
     "HarvesterSource",
     "HttpPaperHarvesterClient",
@@ -579,4 +832,6 @@ __all__ = [
     "build_openalex_query_url",
     "parse_arxiv_atom_feed",
     "parse_openalex_response",
+    "resolve_latex_includes",
+    "unpack_latex_archive",
 ]

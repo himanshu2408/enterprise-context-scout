@@ -278,6 +278,10 @@ class PostgresRLSRepository:
             if hasattr(record.market_scope, "value")
             else str(record.market_scope)
         )
+        doc_title = record.doc_title.replace("\x00", "")
+        section_heading = record.section_heading.replace("\x00", "")
+        contextual_header = record.contextual_header.replace("\x00", "")
+        verbatim_content = record.verbatim_content.replace("\x00", "")
         vec_literal = "[" + ",".join(f"{v:.6f}" for v in record.embedding) + "]"
         conn.execute(
             """
@@ -293,14 +297,14 @@ class PostgresRLSRepository:
                 record.chunk_id,
                 record.domain_id,
                 record.doc_id,
-                record.doc_title,
+                doc_title,
                 record.source_uri,
                 market_val,
                 record.published_date,
                 record.authority_weight,
-                record.section_heading,
-                record.contextual_header,
-                record.verbatim_content,
+                section_heading,
+                contextual_header,
+                verbatim_content,
                 json.dumps(record.metadata_json),
                 record.allowed_scopes,
                 vec_literal,

@@ -14,10 +14,12 @@ from context_scout.ingestion.doc_parser import (
     MATH_BLOCK_PATTERN,
     MD_HEADING_PATTERN,
     MD_TABLE_ROW_PATTERN,
+    PDF_SECTION_PATTERN,
     DocumentChunk,
     LatexDocParser,
     MarkdownTableChunker,
     ParsedSection,
+    PdfDocParser,
     estimate_tokens,
 )
 from context_scout.ingestion.git_merkle_indexer import (
@@ -26,10 +28,18 @@ from context_scout.ingestion.git_merkle_indexer import (
     MerkleSyncStats,
     generate_deterministic_embedding,
 )
+from context_scout.ingestion.harvest_pipeline import (
+    DEFAULT_PAPERS_DIR,
+    QUANT_DOMAIN_ID,
+    QUANT_SCOPE,
+    CorpusHarvestPipeline,
+    sanitize_filename,
+)
 from context_scout.ingestion.paper_harvester import (
     DEFAULT_USER_AGENT,
     FIXTURE_PAPERS,
     MARKET_QUERY_PRESETS,
+    OPENALEX_CONCEPT_MAP,
     HarvestedPaper,
     HarvesterSource,
     HttpPaperHarvesterClient,
@@ -40,6 +50,8 @@ from context_scout.ingestion.paper_harvester import (
     build_openalex_query_url,
     parse_arxiv_atom_feed,
     parse_openalex_response,
+    resolve_latex_includes,
+    unpack_latex_archive,
 )
 from context_scout.ingestion.scepticism_gate import (
     MarketRegimeScepticismGate,
@@ -50,6 +62,7 @@ from context_scout.ingestion.scepticism_gate import (
 __all__ = [
     "CODE_EXTENSIONS",
     "DEFAULT_CONTEXTUALIZER_MODEL",
+    "DEFAULT_PAPERS_DIR",
     "DEFAULT_USER_AGENT",
     "FIXTURE_PAPERS",
     "LATEX_SECTION_PATTERN",
@@ -58,7 +71,12 @@ __all__ = [
     "MATH_BLOCK_PATTERN",
     "MD_HEADING_PATTERN",
     "MD_TABLE_ROW_PATTERN",
+    "OPENALEX_CONCEPT_MAP",
+    "PDF_SECTION_PATTERN",
+    "QUANT_DOMAIN_ID",
+    "QUANT_SCOPE",
     "ContextualizerClient",
+    "CorpusHarvestPipeline",
     "DeterministicContextualizer",
     "DocumentChunk",
     "GemmaContextualizer",
@@ -74,6 +92,7 @@ __all__ = [
     "MockPaperHarvesterClient",
     "PaperHarvesterClient",
     "ParsedSection",
+    "PdfDocParser",
     "ScepticismEvaluationResult",
     "build_arxiv_query_url",
     "build_openalex_query_url",
@@ -84,4 +103,7 @@ __all__ = [
     "generate_deterministic_embedding",
     "parse_arxiv_atom_feed",
     "parse_openalex_response",
+    "resolve_latex_includes",
+    "sanitize_filename",
+    "unpack_latex_archive",
 ]
