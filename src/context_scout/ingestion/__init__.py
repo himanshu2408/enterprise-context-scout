@@ -1,15 +1,87 @@
-"""Ingestion package: Git Merkle indexer and incremental source code graph synchronization."""
+"""Ingestion package: Git Merkle code indexer and Quant research paper harvester (M2/M3)."""
 
+from context_scout.ingestion.contextualizer import (
+    DEFAULT_CONTEXTUALIZER_MODEL,
+    ContextualizerClient,
+    DeterministicContextualizer,
+    GemmaContextualizer,
+    build_situated_context_prompt,
+    clean_situated_header,
+)
+from context_scout.ingestion.doc_parser import (
+    LATEX_SECTION_PATTERN,
+    LATEX_TABLE_PATTERN,
+    MATH_BLOCK_PATTERN,
+    MD_HEADING_PATTERN,
+    MD_TABLE_ROW_PATTERN,
+    DocumentChunk,
+    LatexDocParser,
+    MarkdownTableChunker,
+    ParsedSection,
+    estimate_tokens,
+)
 from context_scout.ingestion.git_merkle_indexer import (
     CODE_EXTENSIONS,
     GitMerkleIndexer,
     MerkleSyncStats,
     generate_deterministic_embedding,
 )
+from context_scout.ingestion.paper_harvester import (
+    DEFAULT_USER_AGENT,
+    FIXTURE_PAPERS,
+    MARKET_QUERY_PRESETS,
+    HarvestedPaper,
+    HarvesterSource,
+    HttpPaperHarvesterClient,
+    MarketHarvestQuery,
+    MockPaperHarvesterClient,
+    PaperHarvesterClient,
+    build_arxiv_query_url,
+    build_openalex_query_url,
+    parse_arxiv_atom_feed,
+    parse_openalex_response,
+)
+from context_scout.ingestion.scepticism_gate import (
+    MarketRegimeScepticismGate,
+    ScepticismEvaluationResult,
+    calculate_effective_friction_floor,
+)
 
 __all__ = [
     "CODE_EXTENSIONS",
+    "DEFAULT_CONTEXTUALIZER_MODEL",
+    "DEFAULT_USER_AGENT",
+    "FIXTURE_PAPERS",
+    "LATEX_SECTION_PATTERN",
+    "LATEX_TABLE_PATTERN",
+    "MARKET_QUERY_PRESETS",
+    "MATH_BLOCK_PATTERN",
+    "MD_HEADING_PATTERN",
+    "MD_TABLE_ROW_PATTERN",
+    "ContextualizerClient",
+    "DeterministicContextualizer",
+    "DocumentChunk",
+    "GemmaContextualizer",
     "GitMerkleIndexer",
+    "HarvestedPaper",
+    "HarvesterSource",
+    "HttpPaperHarvesterClient",
+    "LatexDocParser",
+    "MarkdownTableChunker",
+    "MarketHarvestQuery",
+    "MarketRegimeScepticismGate",
     "MerkleSyncStats",
+    "MockPaperHarvesterClient",
+    "PaperHarvesterClient",
+    "ParsedSection",
+    "ScepticismEvaluationResult",
+    "build_arxiv_query_url",
+    "build_openalex_query_url",
+    "build_situated_context_prompt",
+    "calculate_effective_friction_floor",
+    "clean_situated_header",
+    "estimate_tokens",
     "generate_deterministic_embedding",
+    "parse_arxiv_atom_feed",
+    "parse_openalex_response",
 ]
