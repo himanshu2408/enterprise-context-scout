@@ -1,0 +1,20 @@
+domain_id: "trading_code_scout"
+display_name: "Trading Engine Codebase & Architecture Scout (Model 1)"
+base_model_id: "google/gemma-4-26B-A4B-it"
+contextualizer_model_id: "google/gemma-4-E4B-it"
+lora_adapter_id: "gemma4_26b_code_scout"
+lora_adapter_path: "domains/trading_code_scout/adapters/gemma4_26b_code_scout"
+embedding_model_id: "google/embeddinggemma-2"
+embedding_dimensions: 768
+mcp_read_tools_allowed:
+  - "code_repo_mcp:search_ast_symbols"
+  - "code_repo_mcp:get_symbol_definition"
+  - "code_repo_mcp:get_symbol_callers"
+  - "code_repo_mcp:grep_repo"
+  - "code_repo_mcp:list_github_issues"
+authority_rules:
+  primary_truth_source: "code"
+  require_out_of_sample_check: false
+  require_transaction_cost_check: false
+  freshness_half_life_days: 90
+output_contract: "ImplementationContextPack"
