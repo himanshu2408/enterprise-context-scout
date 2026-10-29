@@ -54,5 +54,5 @@ Milestone 3 is verified complete with 110/110 tests passing across all test suit
   - `uv run mypy --strict src tests`: 0 type errors across 33 source files.
   - `uv run pytest -v`: 110/110 tests passing (100% pass rate in 2.64s).
   - Workspace compliance suite: 102 passed, 0 errors, 0 warnings (100% COMPLIANT).
-  - Pull Request: PR #3 (`feat/m3-quant-research-harvester` -> `main`).
+  - Pull Request: [PR #3](https://github.com/himanshu2408/enterprise-context-scout/pull/3) (`feat/m3-quant-research-harvester` -> `main`).
 
