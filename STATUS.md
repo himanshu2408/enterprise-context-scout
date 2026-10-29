@@ -1,7 +1,7 @@
 # STATUS: Enterprise Context Scout & Multi-Domain Platform
 
 **Last Updated:** 2026-10-29  
-**Active Branch:** `feat/m3-quant-research-harvester`  
+**Active Branch:** `feat/m4-mcp-servers`  
 **Repository:** `https://github.com/himanshu2408/enterprise-context-scout`
 
 ## 1. Milestone Progress Dashboard
@@ -12,8 +12,8 @@
 | **M1: Foundation, Postgres 17 RLS & Contracts** | `pyproject.toml`, `docker-compose.yml`, `sql/001_init_schema.sql`, Pydantic v2 Contracts, `DomainRegistry`, `AdapterPool`, RLS Repositories | **COMPLETE** | `uv run ruff check` + `uv run mypy --strict src` + `uv run pytest tests/test_m1_foundation.py` |
 | **M2: Code Engine (AST + Merkle Sync + Slicer)** | Git Blob-SHA Merkle indexer, `tree-sitter` AST symbol/edge extractor, bounded 1-hop `ASTDependencyExpander` ($\le 3$ callers, $\le 1,500$ tokens), `DeterministicSlicer` | **COMPLETE** | `uv run ruff check` + `uv run mypy --strict src tests` + `uv run pytest -v` (54/54 passing) |
 | **M3: Quant Paper Harvester & Contextual Retrieval** | arXiv (`.tex`/PDF) & OpenAlex harvester (`IN_NSE`, `DE_XETRA`, `US_EQUITY`), 26-concept relevance classifier, 12 negative blocking topics, Local `EmbeddingGemma 2` (768-d MPS/CPU), Lossless LaTeX/MD Chunkers, Contextualizer, 3-way Normalized RRF, Market Scepticism Gate | **COMPLETE** | `uv run ruff check` + `uv run mypy --strict src` + `uv run pytest -v` (158/158 passing, PR #3) |
-| **M4: Enterprise MCP Servers (`mcp` v2.3.0)** | `code_repo_mcp.py` & `quant_corpus_mcp.py` with out-of-band `PrincipalContext` & hard payload caps | **NEXT** | `tests/test_m4_mcp_servers.py` |
-| **M5: Google ADK 2.12 Scout, Pre-Flight Gate & Handoff** | ADK `Workflow` DAG, `LocalGemmaClient`, 4-Check `PreFlightValidator`, `FederatedScoutCoordinator`, `ShieldGemma 2`, Git worktree sandbox | **PENDING** | `tests/test_m5_adk_workflow.py` |
+| **M4: Enterprise MCP Servers (`mcp` v2.3.0) & Security Layer** | `code_repo_mcp.py`, `quant_corpus_mcp.py`, `src/context_scout/security/` (`rbac.py`, `guardrails.py`), trading strategy package, out-of-band `PrincipalContext` & hard payload caps | **COMPLETE** | `uv run ruff check src tests` + `uv run mypy --strict src tests` + `uv run pytest` (260/260 passing, PR #4) |
+| **M5: Google ADK 2.12 Scout, Pre-Flight Gate & Handoff** | ADK `Workflow` DAG, `LocalGemmaClient`, 4-Check `PreFlightValidator`, `FederatedScoutCoordinator`, `ShieldGemma 2`, Git worktree sandbox | **NEXT** | `tests/test_m5_adk_workflow.py` |
 | **M6: Evaluation Harness & OpenTelemetry** | Recall@5 ($\ge 90\%$), Zero-Touch Sufficiency ($\ge 85\%$), Citation Faithfulness ($100\%$), RBAC Red-Team ($100\%$), OTel spans | **PENDING** | `tests/test_m6_eval_harness.py` |
 | **M7: Teacher Distillation & QLoRA Training** | Rejection-sampled + 20% recovery trajectories (`gemini-3.8-flash` / `gemma-4-31B-it`), `mlx-lm` local M5 Pro & Vertex AI `PEFT` trainers | **PENDING** | Before-vs-After QLoRA Benchmark Report |
 | **M8: FastAPI SSE, TypeScript/React UI & CI/CD** | FastAPI streaming backend, strict TS/React enterprise UI, `.gitlab-ci.yml` / GitHub Actions | **PENDING** | End-to-end API + UI test suite |
@@ -72,4 +72,68 @@ Milestone 3 is verified complete with 158/158 tests passing across all 15 test s
   - `uv run mypy tests`: 0 type errors across 15 test files.
   - `uv run pytest -v`: 158 passed in 33.91s across 15 test suites (100% pass rate, 0 failures, 0 skips).
   - Pull Request: [PR #3](https://github.com/himanshu2408/enterprise-context-scout/pull/3) (`feat/m3-quant-research-harvester` -> `main`).
+
+## 4. Milestone 4 Completion Details (Enterprise MCP Servers, Security Layer & Trading Strategy Package)
+
+Milestone 4 is verified complete with 260/260 tests passing across all 18 test suites, including unit, live PostgreSQL 17 Forced RLS integration, adversarial parameter injection, guardrail fuzzing, and payload bounds tests:
+
+### 4.1 Requirement R1: Branch Foundation & MCP Protocol Stack
+- **PR #3 Merged:** M3 Quant Research Harvester merged into `main` (commit `5c64d6a`).
+- **Feature Branch:** Active feature branch `feat/m4-mcp-servers` branched directly from `main`.
+- **MCP Dependency:** Upgraded protocol stack with `mcp>=2.3.0` leveraging official FastMCP / `MCPServer` core abstractions for low-latency JSON-RPC 2.0 transport and native schema validation.
+
+### 4.2 Requirement R2: Enterprise Security Layer (`src/context_scout/security/`)
+- **Out-of-Band Session Principal Binding (`rbac.py`, `SEC-04`):**
+  - Session authentication strictly decoupled from LLM prompt inputs and tool parameters. `PrincipalContext` is bound out-of-band via Python `contextvars.ContextVar` (`bind_session_principal`, `get_current_principal`).
+  - Strict parameter injection defense: `validate_tool_call_arguments` blocks all case-insensitive attempts (`k.lower()`) to pass security attributes (`principal`, `principal_context`, `allowed_scopes`, `user_id`, `role`, `scopes`, `principal_scopes`, `app.principal_scopes`), and rejects NUL bytes (`\x00` in str arguments) with `ValueError`.
+  - Zero parameter leakage in MCP tool schemas: tools take only domain business parameters; identity is resolved out-of-band.
+- **PostgreSQL 17 Forced RLS Integration (`scoped_db_session`):**
+  - Live PostgreSQL 17 session binding via `SET LOCAL app.principal_scopes = %s;` within transaction blocks.
+  - Connection pool safety: Verified across connection pool recycling (`test_postgres_17_connection_pool_scope_isolation`) that returning pooled connections to a shared pool never bleeds principal scopes.
+- **Domain Authorization Gate (`DomainAuthorizationGate`):**
+  - Enforces per-DomainPack tool allow-lists defined in `domain.yaml` (`mcp_read_tools_allowed`).
+  - Canonicalizes tool names and aliases (`search_code_trigram` -> `code_repo_mcp:grep_repo`, `lookup_ast_symbol` -> `code_repo_mcp:search_ast_symbols`).
+  - Unauthorized tool invocations raise `DomainToolAccessDeniedError`.
+- **Content Framing & Guardrails (`guardrails.py`, `SEC-01`, `OPS-01`):**
+  - `PromptInjectionSanitizer`: Detects prompt injection, delimiter breakout attacks, XML/HTML tag spoofing, and system override patterns with normalized threat scoring.
+  - `SecretRedactor`: Regex-based masking for high-entropy secrets (OpenAI/Google API keys, JWT tokens, AWS credentials, RSA/EC private keys) with format-preserving redaction.
+  - `frame_untrusted_content`: Wraps untrusted external data within boundary-delimited tags using cryptographically random nonces to neutralize jailbreaks.
+  - `ShieldGemmaGuardrail`: Integrates with Google ShieldGemma 2 with a deterministic heuristic fallback policy ensuring resilient zero-downtime content classification.
+
+### 4.3 Requirement R3: Code Repo Enterprise MCP Server (`code_repo_mcp.py`)
+- **5 Canonical MCP Tools:**
+  1. `search_code_trigram`: `pg_trgm` similarity search over indexed repository files with Forced RLS.
+  2. `lookup_ast_symbol`: Exact and prefix symbol definitions across language AST trees.
+  3. `expand_ast_1hop_closure`: Bounded 1-hop caller/type dependency closure ($\le 3$ callers, $\le 1,500$ tokens).
+  4. `slice_file_lines`: Byte-exact line slicing with 1-indexed validation, off-by-one detection, and git blob/commit SHA provenance.
+  5. `search_github_issues`: Full-text issue search over historical bug reports and architecture proposals stored in `doc_chunks`.
+- **Realistic Multi-File Trading Strategy Package (`src/context_scout/trading_strategies/`):**
+  - `volatility_garch.py`: Real-time conditional volatility tracking via `GARCH11Model` with constrained quasi-MLE ($\alpha + \beta \le 0.9999$) and stationarity protection.
+  - `kelly_risk_manager.py`: Continuous multi-asset position sizing via `KellyRiskManager` using Ledoit-Wolf linear covariance shrinkage with eigenvalue regularisation floors (`MIN_EIGENVALUE_FLOOR = 1e-6`).
+  - `order_flow_imbalance.py`: Multi-level order book pressure calculation via `OrderFlowImbalanceSignal` (Cont-Kukanov-Stoikov 2014) with exponential depth decay and GARCH scaling.
+  - `pairs_trading_kalman.py`: Cointegration hedge ratio tracking via `KalmanHedgeEstimator` implementing symmetric Joseph-form covariance updates ($(I - KH)P(I - KH)^T + KRK^T$) for numerical stability under market turbulence.
+  - `almgren_chriss_execution.py`: Optimal execution trajectory optimization via `AlmgrenChrissExecutionOptimizer` modeling linear permanent and quadratic temporary market impact, with exact linear TWAP fallback ($x_j = X_0 (1 - t_j / T)$) when risk aversion $\lambda \le 0$.
+- **Live Database Seeding (`seed_code_corpus.py`):**
+  - 43 code files, 227 AST symbols, and 2,431 directed AST edges seeded into PostgreSQL 17 under Forced RLS.
+
+### 4.4 Requirement R4: Quantitative Research Corpus Enterprise MCP Server (`quant_corpus_mcp.py`)
+- **4 Canonical MCP Tools:**
+  1. `search_quant_papers_hybrid`: 3-way Normalized RRF search across lexical BM25, dense 768-d semantic vectors (`EmbeddingGemma 2`), and trigram matches.
+  2. `extract_paper_equations_and_tables`: Lossless extraction of LaTeX mathematical equations and Markdown tables.
+  3. `verify_market_friction_assumptions`: Quantitative Scepticism Gate verifying transaction cost floors ($\ge 15$ bps NSE, $\ge 10$ bps Xetra, $\ge 5$ bps US) and net Sharpe degradation hurdle ($\le 0.50$ fails after costs).
+  4. `compare_cross_market_regimes`: Comparative cross-market structural and regulatory analysis across Indian, German, and US markets.
+- **Scaled Corpus Discovery:**
+  - Full-text access across 14,318 genuine academic chunks from 300 full-text papers (`IN_NSE`, `DE_XETRA`, `US_EQUITY`).
+
+### 4.5 Hard Payload Bounds & Truncation (`common.py`, `SEC-03`)
+- **Item Clamping:** Clamps collection return payloads to at most 10 items (`MAX_PAYLOAD_ITEMS = 10`).
+- **32 KB JSON Cap:** Serialized JSON payload capped at 32,768 bytes (`MAX_PAYLOAD_BYTES = 32_768`).
+- **Truncation Marker:** When payload exceeds cap, trailing items are truncated and a deterministic marker `[PAYLOAD_TRUNCATED_AT_32KB]` is attached to the output payload.
+
+### 4.6 Quality Gates & Verification Metrics
+- `uv run ruff check src tests`: 0 errors.
+- `uv run mypy --strict src tests`: 0 type errors across 56 source files.
+- `uv run pytest`: 260 passed in 44.44s across 18 test suites (100% pass rate, 0 failures, 0 skips).
+- Target Pull Request: PR #4 (`feat/m4-mcp-servers` -> `main`).
+
 
