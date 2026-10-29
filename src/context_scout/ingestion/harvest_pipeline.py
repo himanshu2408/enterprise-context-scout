@@ -30,6 +30,7 @@ from context_scout.ingestion.paper_harvester import (
     QuantRelevanceClassifier,
     build_arxiv_query_url,
     build_openalex_query_url,
+    extract_tex_title_and_abstract,
     parse_arxiv_atom_feed,
     parse_openalex_response,
 )
@@ -91,6 +92,18 @@ class CorpusHarvestPipeline:
             seen_ids = set()
 
         # 1. Existing cached valid full-text files in content_dir / market.value
+        existing_meta: dict[str, dict[str, object]] = {}
+        jsonl_file = self.metadata_dir / f"{market.value}_papers.jsonl"
+        if jsonl_file.exists():
+            for line in jsonl_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.strip():
+                    try:
+                        parsed_item = json.loads(line)
+                        if isinstance(parsed_item, dict) and "doc_id" in parsed_item:
+                            existing_meta[str(parsed_item["doc_id"])] = parsed_item
+                    except json.JSONDecodeError:
+                        pass
+
         market_dir = self.content_dir / market.value
         if market_dir.exists():
             for f in sorted(market_dir.glob("*.*")):
@@ -107,24 +120,70 @@ class CorpusHarvestPipeline:
 
                     tex_content: str | None = None
                     pdf_bytes: bytes | None = None
+                    extracted_title = ""
+                    extracted_abstract = ""
                     if f.suffix == ".tex":
                         tex_content = f.read_text(encoding="utf-8", errors="replace")
                         if len(tex_content.strip()) < 3000:
                             continue
+                        extracted_title, extracted_abstract = extract_tex_title_and_abstract(
+                            tex_content, raw_id.replace("_", " ")
+                        )
                     elif f.suffix == ".pdf":
                         pdf_bytes = f.read_bytes()
                         if not pdf_bytes.startswith(b"%PDF-") or len(pdf_bytes) < 3000:
                             continue
+                        pdf_txt = self.pdf_parser.extract_text(pdf_bytes)
+                        for line in pdf_txt.splitlines():
+                            s_line = line.strip()
+                            if len(s_line) > 12 and not s_line.lower().startswith(
+                                ("arxiv:", "preprint", "page ", "working paper", "1 ", "abstract")
+                            ):
+                                extracted_title = s_line[:160]
+                                break
+
+                    saved = existing_meta.get(doc_id, {})
+                    saved_title = str(saved.get("title", "")).strip()
+                    if (
+                        saved_title
+                        and not saved_title.startswith("arxiv ")
+                        and not saved_title.startswith("openalex ")
+                    ):
+                        final_title = saved_title
+                    else:
+                        final_title = extracted_title or raw_id.replace("_", " ")
+
+                    saved_abs = str(saved.get("abstract", "")).strip()
+                    if (
+                        saved_abs
+                        and saved_abs != "Verified quantitative finance research paper"
+                    ):
+                        final_abstract = saved_abs
+                    else:
+                        final_abstract = (
+                            extracted_abstract or "Verified quantitative finance research paper"
+                        )
+
+                    if doc_id.startswith("arxiv:"):
+                        norm_aid = doc_id.split(":", 1)[1].replace("_", "/")
+                        canonical_uri = f"https://arxiv.org/abs/{norm_aid}"
+                        src_enum = HarvesterSource.ARXIV
+                    elif doc_id.startswith("openalex:"):
+                        canonical_uri = f"https://openalex.org/{doc_id.split(':', 1)[1]}"
+                        src_enum = HarvesterSource.OPENALEX
+                    else:
+                        canonical_uri = f"file://{f}"
+                        src_enum = HarvesterSource.LOCAL_CACHE
 
                     yield HarvestedPaper(
                         doc_id=doc_id,
-                        source=HarvesterSource.LOCAL_CACHE,
-                        title=raw_id.replace("_", " "),
+                        source=src_enum,
+                        title=final_title,
                         authors=["Quantitative Researcher"],
                         published_date=date(2024, 1, 1),
                         market_scope=market,
-                        source_uri=f"file://{f}",
-                        abstract="Verified quantitative finance research paper",
+                        source_uri=canonical_uri,
+                        abstract=final_abstract,
                         raw_tex_content=tex_content,
                         raw_pdf_bytes=pdf_bytes,
                         metadata={"cached": True},

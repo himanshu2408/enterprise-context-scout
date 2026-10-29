@@ -509,28 +509,82 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
             pass
         return None
 
-    # 3. Identify root .tex file
-    root_candidate: str | None = None
-    for name, content in tex_files.items():
+    # 3. Identify root .tex file (scoring out journal guides/templates in subdirectories)
+    def _root_score(item: tuple[str, str]) -> tuple[int, int]:
+        name, content = item
+        lower = name.lower()
+        score = 0
         if "\\documentclass" in content and "\\begin{document}" in content:
-            lower = name.lower()
-            if any(k in lower for k in ["main", "ms", "paper", "article"]):
-                root_candidate = name
-                break
-            if root_candidate is None:
-                root_candidate = name
+            score += 500
+        elif "\\documentclass" in content or "\\begin{document}" in content:
+            score += 200
+        if any(bad in lower for bad in ("guide", "template", "sample", "howto", "instructions")):
+            score -= 1000
+        if "/" not in name:
+            score += 100
+        if any(k in lower for k in ("main", "ms", "paper", "article", "introduction")):
+            score += 50
+        return (score, len(content))
 
-    if not root_candidate:
-        for name, content in tex_files.items():
-            if "\\documentclass" in content or "\\begin{document}" in content:
-                root_candidate = name
-                break
-
-    if not root_candidate:
-        root_candidate = max(tex_files.keys(), key=lambda k: len(tex_files[k]))
+    root_candidate = max(tex_files.items(), key=_root_score)[0]
 
     # 4. Recursively resolve \input, \include, and \subfile
     return resolve_latex_includes(root_candidate, tex_files)
+
+
+def extract_tex_title_and_abstract(
+    tex_content: str, fallback_title: str
+) -> tuple[str, str]:
+    """Extracts clean academic title and abstract from raw LaTeX manuscript source."""
+    clean = re.sub(r"(?<!\\)%.*", "", tex_content)
+    title = ""
+
+    # 1. Standard \title{...}, \Title{...}, \icmltitle{...}, \ShortTitle{...}
+    title_patterns = [
+        r"\\(?:title|Title|icmltitle|ShortTitle|runningtitle)\s*(?:\[[^\]]*\])?\s*\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})+)\}",
+        r"\{\\fontsize\{22\}\{27\}\\selectfont\\bfseries\s*([^}]+)\}",
+        r"\{\\fontsize\{15pt\}\{15pt\}\\textbf\{([^}]+)\}\}",
+        r"\{\\sffamily\\bfseries\\fontsize\{20\}\{22\}\\selectfont\s*([^}]+?)(?:\\par|\})",
+        r"\\begin\{center\}\s*\{\\bf\s+([^}]+)\}",
+    ]
+    for pat in title_patterns:
+        m = re.search(pat, clean, re.DOTALL)
+        if m:
+            raw_t = m.group(1).strip()
+            if raw_t == r"\fulltitle":
+                continue
+            raw_t = re.sub(
+                r"\\(?:thanks|footnote|affil|inst|author|orcidlink)\s*\{(?:[^{}]|\{[^{}]*\})*\}",
+                " ",
+                raw_t,
+            )
+            raw_t = re.sub(r"\\[a-zA-Z]+\s*", " ", raw_t)
+            raw_t = re.sub(r"[\{\}\\\$\n\r\t]+", " ", raw_t)
+            raw_t = re.sub(r"\s+", " ", raw_t).strip(" -:;,.!")
+            if len(raw_t) > 6 and not raw_t.lower().startswith("quantitative finance"):
+                title = raw_t[:220]
+                break
+
+    # 2. Extract abstract
+    abstract = ""
+    abs_m = re.search(r"\\begin\{abstract\}(.*?)\\end\{abstract\}", clean, re.DOTALL)
+    if not abs_m:
+        abs_m = re.search(
+            r"\\abstract\s*\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})+)\}", clean, re.DOTALL
+        )
+    if abs_m:
+        raw_a = abs_m.group(1)
+        raw_a = re.sub(r"\\(?:noindent|vspace|hspace)\s*(?:\{[^}]*\})?", " ", raw_a)
+        raw_a = re.sub(r"\s+", " ", raw_a).strip()
+        if len(raw_a) > 20:
+            abstract = raw_a[:2000]
+
+    if not title and abstract:
+        first_sentence = abstract.split(". ")[0].strip()
+        if len(first_sentence) > 12:
+            title = first_sentence[:140]
+
+    return (title or fallback_title, abstract)
 
 
 def parse_arxiv_atom_feed(xml_text: str, market_scope: MarketRegime) -> list[HarvestedPaper]:
@@ -1117,6 +1171,7 @@ __all__ = [
     "RelevanceVerdict",
     "build_arxiv_query_url",
     "build_openalex_query_url",
+    "extract_tex_title_and_abstract",
     "parse_arxiv_atom_feed",
     "parse_openalex_response",
     "resolve_latex_includes",
