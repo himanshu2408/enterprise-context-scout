@@ -53,6 +53,7 @@ from context_scout.security.guardrails import (
     ShieldGemmaGuardrail,
 )
 from context_scout.security.rbac import DomainAuthorizationGate
+from context_scout.telemetry import ScoutTelemetryTracer
 
 logger = logging.getLogger(__name__)
 
@@ -514,8 +515,41 @@ class ScoutWorkflow:
         supporting_doc_citations: list[DocCitationSpan] | None = None,
         max_bounce_backs: int = 1,
     ) -> ImplementationContextPack | InsufficientContextDiagnostic:
-        """Executes the 4-stage Scout Workflow DAG."""
+        """Executes the 4-stage Scout Workflow DAG with OpenTelemetry instrumentation."""
         active_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
+        tracer = ScoutTelemetryTracer.get_instance()
+        with tracer.trace_workflow(
+            span_name="scout.workflow",
+            domain_id=domain_id,
+            trace_id=active_trace_id,
+            model_id="gemma-4-moe",
+            system="gemma",
+        ) as wf_span:
+            result = self._run_dag(
+                user_prompt=user_prompt,
+                principal=principal,
+                domain_id=domain_id,
+                active_trace_id=active_trace_id,
+                normalized_rrf_score=normalized_rrf_score,
+                doc_chunks=doc_chunks,
+                supporting_doc_citations=supporting_doc_citations,
+                max_bounce_backs=max_bounce_backs,
+            )
+            wf_span.record_pack(result)
+            return result
+
+    def _run_dag(
+        self,
+        user_prompt: str,
+        principal: PrincipalContext,
+        domain_id: str,
+        active_trace_id: str,
+        normalized_rrf_score: float,
+        doc_chunks: dict[str, str] | list[DocChunkRecord] | None,
+        supporting_doc_citations: list[DocCitationSpan] | None,
+        max_bounce_backs: int,
+    ) -> ImplementationContextPack | InsufficientContextDiagnostic:
+        """Executes the 4-stage Scout Workflow DAG."""
 
         # =====================================================================
         # Stage 1: Security Guardrails & Principal Authorization
@@ -781,8 +815,37 @@ class FederatedScoutCoordinator:
         doc_chunks: dict[str, str] | list[DocChunkRecord] | None = None,
         max_bounce_backs: int = 1,
     ) -> ImplementationContextPack | InsufficientContextDiagnostic:
-        """Executes the 2-stage cross-domain federated DAG."""
+        """Executes the 2-stage cross-domain federated DAG with OpenTelemetry instrumentation."""
         active_trace_id = trace_id or f"fed_trace_{uuid.uuid4().hex[:12]}"
+        tracer = ScoutTelemetryTracer.get_instance()
+        with tracer.trace_workflow(
+            span_name="scout.federated_workflow",
+            domain_id="federated_coordinator",
+            trace_id=active_trace_id,
+            model_id="gemma-4-moe",
+            system="gemma",
+        ) as fed_span:
+            result = self._run_federated_dag(
+                user_prompt=user_prompt,
+                principal=principal,
+                active_trace_id=active_trace_id,
+                normalized_rrf_score=normalized_rrf_score,
+                doc_chunks=doc_chunks,
+                max_bounce_backs=max_bounce_backs,
+            )
+            fed_span.record_pack(result)
+            return result
+
+    def _run_federated_dag(
+        self,
+        user_prompt: str,
+        principal: PrincipalContext,
+        active_trace_id: str,
+        normalized_rrf_score: float,
+        doc_chunks: dict[str, str] | list[DocChunkRecord] | None,
+        max_bounce_backs: int,
+    ) -> ImplementationContextPack | InsufficientContextDiagnostic:
+        """Executes the 2-stage cross-domain federated DAG."""
 
         decision = self.guardrail.evaluate(user_prompt, principal=principal)
         if not decision.passed:
