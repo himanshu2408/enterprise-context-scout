@@ -93,6 +93,8 @@ class DomainRegistry:
         self._adapter_pool.register_from_manifest(manifest)
 
     def get(self, domain_id: str) -> DomainPackManifest:
+        if not self._manifests and self._domains_dir.exists():
+            self.load_all()
         if domain_id not in self._manifests:
             raise KeyError(f"Unknown domain_id '{domain_id}'. Registered: {list(self._manifests)}")
         return self._manifests[domain_id]
