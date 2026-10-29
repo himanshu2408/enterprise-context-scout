@@ -74,6 +74,10 @@ enterprise-context-scout/
 │       │   ├── order_flow_imbalance.py # Multi-level OFI with depth decay (Cont et al. 2014)
 │       │   ├── pairs_trading_kalman.py # Kalman hedge ratio tracking with Joseph-form stability
 │       │   └── almgren_chriss_execution.py # Optimal execution trajectory with impact parameters
+│       ├── security/           # Enterprise Out-of-Band RBAC and Guardrails (SEC-04)
+│       │   ├── __init__.py
+│       │   ├── rbac.py         # Out-of-band PrincipalContext binding & DomainAuthorizationGate
+│       │   └── guardrails.py   # PromptInjectionSanitizer, SecretRedactor, ShieldGemmaGuardrail
 │       ├── mcp_servers/        # Enterprise Model Context Protocol servers (mcp v2.3.0)
 │       │   ├── __init__.py
 │       │   ├── common.py       # Hard payload caps (<=10 items, <=32 KB) & out-of-band context
@@ -97,7 +101,9 @@ enterprise-context-scout/
     ├── test_adversarial_m3_chunker_harvester.py # Adversarial stress tests for chunkers & harvesters (17 tests)
     ├── test_adversarial_m3_rrf_scepticism.py # Adversarial stress tests for 3-way RRF & scepticism gate (24 tests)
     ├── test_real_paper_harvest_live.py # Live harvest, PDF fallback, DB persistence & gate integration (6 tests)
-    └── test_m4_mcp_servers.py  # M4 Enterprise MCP servers, live Postgres RLS & bounds tests (18 tests)
+    ├── test_m4_mcp_servers.py  # M4 Enterprise MCP servers, live Postgres RLS & bounds tests (18 tests)
+    ├── test_m4_security.py     # M4 Out-of-band RBAC, domain gate, and guardrail tests (37 tests)
+    └── test_adversarial_security.py # M4 Adversarial security fuzzing and pool isolation tests (47 tests)
 ```
 
 ---
@@ -289,9 +295,73 @@ To validate the retrieval engine under institutional conditions, the automated h
 
 ---
 
-## 6. Local Setup & Installation
+## 6. Milestone 4 Architecture: Enterprise MCP Servers, Security Layer & Trading Strategy Package
 
-### 6.1 Prerequisites
+Milestone 4 establishes production-grade enterprise interfaces implementing the Model Context Protocol (`mcp>=2.3.0`), out-of-band role-based access control, PostgreSQL 17 Forced RLS integration, and institutional quantitative trading strategies.
+
+### 6.1 Enterprise Security Layer & Out-of-Band RBAC (`src/context_scout/security/`, `SEC-04`)
+
+Enterprise agent architectures must guarantee zero privilege escalation and zero parameter injection leakage:
+
+- **Out-of-Band Session Principal Binding (`rbac.py`):**
+  - Session authentication strictly decoupled from LLM prompt inputs and tool parameters. `PrincipalContext` is bound out-of-band via Python `contextvars.ContextVar` (`bind_session_principal`, `get_current_principal`).
+  - Zero parameter injection leakage: `validate_tool_call_arguments` blocks all case-insensitive attempts (`k.lower()`) to pass security attributes (`principal`, `principal_context`, `allowed_scopes`, `user_id`, `role`, `scopes`, `principal_scopes`, `app.principal_scopes`), and rejects NUL bytes (`\x00` in str arguments) with `ValueError`.
+  - Zero parameter exposure: MCP tool schemas expose only domain business arguments; principal identity is never accepted from model generation.
+- **PostgreSQL 17 Forced RLS Integration (`scoped_db_session`):**
+  - Live PostgreSQL 17 session binding via `SET LOCAL app.principal_scopes = %s;` within transaction blocks.
+  - Connection pool scope safety: Verified across connection pool recycling (`test_postgres_17_connection_pool_scope_isolation`) that returning pooled connections to a shared pool never bleeds principal scopes.
+- **Domain Authorization Gate (`DomainAuthorizationGate`):**
+  - Enforces per-DomainPack tool allow-lists defined in `domain.yaml` (`mcp_read_tools_allowed`).
+  - Canonicalizes tool names and aliases (`search_code_trigram` -> `code_repo_mcp:grep_repo`, `lookup_ast_symbol` -> `code_repo_mcp:search_ast_symbols`).
+  - Unauthorized tool invocations raise `DomainToolAccessDeniedError`.
+- **Content Framing & Guardrails (`guardrails.py`, `SEC-01`, `OPS-01`):**
+  - `PromptInjectionSanitizer`: Detects prompt injection, delimiter breakout attacks, XML/HTML tag spoofing, and system override patterns with normalized threat scoring.
+  - `SecretRedactor`: Regex-based masking for high-entropy secrets (OpenAI/Google API keys, JWT tokens, AWS credentials, RSA/EC private keys) with format-preserving redaction.
+  - `frame_untrusted_content`: Wraps untrusted external data within boundary-delimited tags using cryptographically random nonces to neutralize jailbreaks.
+  - `ShieldGemmaGuardrail`: Integrates with Google ShieldGemma 2 with a deterministic heuristic fallback policy ensuring resilient zero-downtime content classification.
+
+### 6.2 Enterprise Code Repository MCP Server (`src/context_scout/mcp_servers/code_repo_mcp.py`)
+
+Provides bounded codebase intelligence over live PostgreSQL 17 under Forced RLS:
+
+- **5 Canonical MCP Tools:**
+  1. `search_code_trigram`: `pg_trgm` similarity search over indexed repository files with Forced RLS.
+  2. `lookup_ast_symbol`: Exact and prefix symbol definitions across language AST trees.
+  3. `expand_ast_1hop_closure`: Bounded 1-hop caller/type dependency closure ($\le 3$ callers, $\le 1,500$ tokens).
+  4. `slice_file_lines`: Byte-exact line slicing with 1-indexed validation, off-by-one detection, and git blob/commit SHA provenance.
+  5. `search_github_issues`: Full-text issue search over historical bug reports and architecture proposals stored in `doc_chunks`.
+- **Realistic Multi-File Trading Strategy Package (`src/context_scout/trading_strategies/`):**
+  - `volatility_garch.py`: Real-time conditional volatility tracking via `GARCH11Model` with constrained quasi-MLE ($\alpha + \beta \le 0.9999$) and stationarity protection.
+  - `kelly_risk_manager.py`: Continuous multi-asset position sizing via `KellyRiskManager` using Ledoit-Wolf linear covariance shrinkage with eigenvalue regularisation floors (`MIN_EIGENVALUE_FLOOR = 1e-6`).
+  - `order_flow_imbalance.py`: Multi-level order book pressure calculation via `OrderFlowImbalanceSignal` (Cont-Kukanov-Stoikov 2014) with exponential depth decay and GARCH scaling.
+  - `pairs_trading_kalman.py`: Cointegration hedge ratio tracking via `KalmanHedgeEstimator` implementing symmetric Joseph-form covariance updates ($(I - KH)P(I - KH)^T + KRK^T$) for numerical stability under market turbulence.
+  - `almgren_chriss_execution.py`: Optimal execution trajectory optimization via `AlmgrenChrissExecutionOptimizer` modeling linear permanent and quadratic temporary market impact, with exact linear TWAP fallback ($x_j = X_0 (1 - t_j / T)$) when risk aversion $\lambda \le 0$.
+- **Live Database Seeding (`seed_code_corpus.py`):**
+  - 43 code files, 227 AST symbols, and 2,431 directed AST edges seeded into PostgreSQL 17 under Forced RLS.
+
+### 6.3 Quantitative Research Corpus MCP Server (`src/context_scout/mcp_servers/quant_corpus_mcp.py`)
+
+Provides high-precision research discovery across 14,318 genuine academic chunks:
+
+- **4 Canonical MCP Tools:**
+  1. `search_quant_papers_hybrid`: 3-way Normalized RRF search across lexical BM25, dense 768-d semantic vectors (`EmbeddingGemma 2`), and trigram matches.
+  2. `extract_paper_equations_and_tables`: Lossless extraction of LaTeX mathematical equations and Markdown tables.
+  3. `verify_market_friction_assumptions`: Quantitative Scepticism Gate verifying transaction cost floors ($\ge 15$ bps NSE, $\ge 10$ bps Xetra, $\ge 5$ bps US) and net Sharpe degradation hurdle ($\le 0.50$ fails after costs).
+  4. `compare_cross_market_regimes`: Comparative cross-market structural and regulatory analysis across Indian, German, and US markets.
+- **Scaled Corpus Discovery:**
+  - Full-text access across 14,318 genuine academic chunks from 300 full-text papers (`IN_NSE`, `DE_XETRA`, `US_EQUITY`).
+
+### 6.4 Hard Payload Bounds & Truncation (`common.py`, `SEC-03`)
+
+- **Item Clamping:** Clamps collection return payloads to at most 10 items (`MAX_PAYLOAD_ITEMS = 10`).
+- **32 KB JSON Cap:** Serialized JSON payload capped at 32,768 bytes (`MAX_PAYLOAD_BYTES = 32_768`).
+- **Truncation Marker:** When payload exceeds cap, trailing items are truncated and a deterministic marker `[PAYLOAD_TRUNCATED_AT_32KB]` is attached to the output payload.
+
+---
+
+## 7. Local Setup & Installation
+
+### 7.1 Prerequisites
 
 - **macOS** or **Linux** workstation.
 - **Python 3.12+** with `uv` package manager (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
@@ -302,7 +372,7 @@ To validate the retrieval engine under institutional conditions, the automated h
   brew services start postgresql@17
   ```
 
-### 6.2 Environment & Database Setup
+### 7.2 Environment & Database Setup
 
 1. **Clone the repository and install dependencies:**
    ```bash
@@ -330,13 +400,13 @@ To validate the retrieval engine under institutional conditions, the automated h
 
 ---
 
-## 7. Verification & Test Suite
+## 8. Verification & Test Suite
 
 The platform enforces zero-trust automated testing across all components:
 
 ```bash
 # 1. Format & Linting Check (Ruff)
-uv run ruff check .
+uv run ruff check src tests
 
 # 2. Strict Static Type Checking (Mypy)
 uv run mypy --strict src tests
@@ -345,7 +415,7 @@ uv run mypy --strict src tests
 uv run pytest -v
 ```
 
-### Test Coverage Highlights (158 Passed Tests, 0 Failures, 0 Skips)
+### Test Coverage Highlights (260 Passed Tests, 0 Failures, 0 Skips)
 
 | Subsystem | Test Module | Tests | Scope & Invariants Tested |
 |:---|:---|:---:|:---|
@@ -364,11 +434,14 @@ uv run pytest -v
 | **M3 Challenger Harvester** | `tests/test_empirical_m3_harvester_parser_challenge.py` | 19 | Empirical full-text LaTeX/PDF validation, 5 arXiv categories, 0 .txt stubs |
 | **M3 Challenger Verification** | `tests/test_empirical_m3_challenger_verification.py` | 23 | Live RLS isolation on $\ge 1,000$ chunks, 3-way RRF fusion, negative topic rejection |
 | **M3 Live Harvest & Ingestion** | `tests/test_real_paper_harvest_live.py` | 6 | Live arXiv tar decompression, PDF fallback, OpenAlex v2, DB persistence & Scepticism Gate |
-| **Total** | **15 Test Suites** | **158** | **100% Pass Rate (0 Failures, 0 Skips, 0 Errors in 33.91s)** |
+| **M4 Enterprise MCP Servers** | `tests/test_m4_mcp_servers.py` | 18 | Live PostgreSQL 17 Forced RLS, canonical tools, payload bounds ($\le 32$ KB), strategy queries |
+| **M4 Security Layer** | `tests/test_m4_security.py` | 37 | Out-of-band principal binding, domain authorization gate, prompt injection & secret guardrails |
+| **M4 Adversarial Security** | `tests/test_adversarial_security.py` | 47 | Adversarial parameter injection fuzzing, connection pool isolation, NUL byte detection, TWAP fallback |
+| **Total** | **18 Test Suites** | **260** | **100% Pass Rate (0 Failures, 0 Skips, 0 Errors in 44.44s)** |
 
 ---
 
-## 8. Security Invariants & Repository Protection
+## 9. Security Invariants & Repository Protection
 
 - **Confidentiality:** No proprietary client names, credentials, or internal metrics are permitted in code, comments, or commit history.
 - **Git Hook Protection:** Local git hooks (`.git/hooks/pre-commit` and `.git/hooks/commit-msg`) enforce regex-based secret scanning, path checks, and word-bounded term blocking on every commit.

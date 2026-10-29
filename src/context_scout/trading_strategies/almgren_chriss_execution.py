@@ -36,10 +36,6 @@ class MarketImpactParameters:
             raise ValueError(
                 f"Volatility sigma must be positive, got {self.annualized_volatility_sigma}"
             )
-        if self.risk_aversion_lambda < 0.0:
-            raise ValueError(
-                f"Risk aversion lambda cannot be negative, got {self.risk_aversion_lambda}"
-            )
 
 
 @dataclass(frozen=True)
@@ -127,25 +123,38 @@ class AlmgrenChrissExecutionOptimizer:
         eta = self.params.temporary_impact_eta
         gamma = self.params.permanent_impact_gamma
 
-        tilde_param = (tau**2 * lambda_val * (hourly_sigma**2)) / eta
-        cosh_arg = (tilde_param + 2.0) / 2.0
-
-        if cosh_arg >= 1.0:
-            kappa = math.acosh(cosh_arg) / tau
-        else:
-            kappa = math.sqrt(max(0.0, (lambda_val * (hourly_sigma**2)) / eta))
-
-        sinh_kappa_t = math.sinh(kappa * total_time)
-        if sinh_kappa_t == 0.0:
-            sinh_kappa_t = 1e-12
-
         steps: list[ExecutionStep] = []
         holdings = [0.0] * (num_steps + 1)
         trades = [0.0] * num_steps
 
-        for j in range(num_steps + 1):
-            t_j = j * tau
-            holdings[j] = total_shares * math.sinh(kappa * (total_time - t_j)) / sinh_kappa_t
+        if lambda_val <= 0.0:
+            kappa = 0.0
+            for j in range(num_steps + 1):
+                t_j = j * tau
+                holdings[j] = total_shares * (1.0 - (t_j / total_time))
+        else:
+            tilde_param = (tau**2 * lambda_val * (hourly_sigma**2)) / eta
+            cosh_arg = (tilde_param + 2.0) / 2.0
+
+            if cosh_arg >= 1.0:
+                kappa = math.acosh(cosh_arg) / tau
+            else:
+                kappa = math.sqrt(max(0.0, (lambda_val * (hourly_sigma**2)) / eta))
+
+            if kappa <= 1e-9:
+                kappa = 0.0
+                for j in range(num_steps + 1):
+                    t_j = j * tau
+                    holdings[j] = total_shares * (1.0 - (t_j / total_time))
+            else:
+                sinh_kappa_t = math.sinh(kappa * total_time)
+                if sinh_kappa_t == 0.0:
+                    sinh_kappa_t = 1e-12
+
+                for j in range(num_steps + 1):
+                    t_j = j * tau
+                    num = total_shares * math.sinh(kappa * (total_time - t_j))
+                    holdings[j] = num / sinh_kappa_t
 
         for j in range(num_steps):
             t_j = j * tau

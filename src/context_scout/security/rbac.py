@@ -1,6 +1,6 @@
 """Enterprise Out-of-Band RBAC and Session Principal Binding (SEC-04)."""
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Final
@@ -90,15 +90,20 @@ def scoped_db_session(
         yield conn
 
 
-def validate_tool_call_arguments(arguments: dict[str, object]) -> None:
+def validate_tool_call_arguments(arguments: Mapping[str, object]) -> None:
     """Ensures PrincipalContext and scopes are not passed as LLM tool arguments (SEC-04)."""
-    intersecting = FORBIDDEN_TOOL_ARGUMENTS.intersection(arguments.keys())
-    if intersecting:
+    forbidden_detected = [k for k in arguments if k.lower() in FORBIDDEN_TOOL_ARGUMENTS]
+    if forbidden_detected:
         raise SecurityError(
-            f"Security parameter injection detected: {sorted(intersecting)}. "
+            f"Security parameter injection detected: {sorted(forbidden_detected)}. "
             "PrincipalContext and authorization scopes cannot be supplied via tool parameters "
             "(SEC-04)."
         )
+    for k, v in arguments.items():
+        if "\x00" in k:
+            raise ValueError(f"NUL byte detected in argument key '{k}'")
+        if isinstance(v, str) and "\x00" in v:
+            raise ValueError(f"NUL byte detected in argument '{k}'")
 
 
 def require_scope(required_scope: str, principal: PrincipalContext | None = None) -> None:
