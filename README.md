@@ -67,6 +67,19 @@ enterprise-context-scout/
 │       │   ├── doc_parser.py   # Lossless LatexDocParser & MarkdownTableChunker
 │       │   ├── contextualizer.py # Anthropic Contextual Retrieval with google/gemma-4-E4B-it
 │       │   └── scepticism_gate.py # Market-Regime Scepticism Gate (statutory friction & citation check)
+│       ├── trading_strategies/ # Realistic multi-file quantitative execution & alpha strategies
+│       │   ├── __init__.py
+│       │   ├── volatility_garch.py # GARCH(1,1) conditional volatility with quasi-MLE
+│       │   ├── kelly_risk_manager.py # Multi-asset Kelly criterion with Ledoit-Wolf shrinkage
+│       │   ├── order_flow_imbalance.py # Multi-level OFI with depth decay (Cont et al. 2014)
+│       │   ├── pairs_trading_kalman.py # Kalman hedge ratio tracking with Joseph-form stability
+│       │   └── almgren_chriss_execution.py # Optimal execution trajectory with impact parameters
+│       ├── mcp_servers/        # Enterprise Model Context Protocol servers (mcp v2.3.0)
+│       │   ├── __init__.py
+│       │   ├── common.py       # Hard payload caps (<=10 items, <=32 KB) & out-of-band context
+│       │   ├── code_repo_mcp.py # Code repository MCP server (5 canonical tools + 5 aliases)
+│       │   ├── quant_corpus_mcp.py # Quant corpus MCP server (4 canonical tools + 3 aliases)
+│       │   └── seed_code_corpus.py # Database seeding engine for strategies and GitHub issues
 │       └── agents/
 │           └── __init__.py     # Agent interfaces and adapter management
 └── tests/
@@ -83,7 +96,8 @@ enterprise-context-scout/
     ├── test_postgres_m3_live.py # M3 PostgreSQL 17 live RLS & 3-way RRF integration tests
     ├── test_adversarial_m3_chunker_harvester.py # Adversarial stress tests for chunkers & harvesters (17 tests)
     ├── test_adversarial_m3_rrf_scepticism.py # Adversarial stress tests for 3-way RRF & scepticism gate (24 tests)
-    └── test_real_paper_harvest_live.py # Live harvest, PDF fallback, DB persistence & gate integration (6 tests)
+    ├── test_real_paper_harvest_live.py # Live harvest, PDF fallback, DB persistence & gate integration (6 tests)
+    └── test_m4_mcp_servers.py  # M4 Enterprise MCP servers, live Postgres RLS & bounds tests (18 tests)
 ```
 
 ---

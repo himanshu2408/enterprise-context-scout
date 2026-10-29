@@ -1,7 +1,7 @@
 # STATUS: Enterprise Context Scout & Multi-Domain Platform
 
 **Last Updated:** 2026-10-29  
-**Active Branch:** `feat/m3-quant-research-harvester`  
+**Active Branch:** `feat/m4-mcp-servers`  
 **Repository:** `https://github.com/himanshu2408/enterprise-context-scout`
 
 ## 1. Milestone Progress Dashboard
@@ -12,8 +12,8 @@
 | **M1: Foundation, Postgres 17 RLS & Contracts** | `pyproject.toml`, `docker-compose.yml`, `sql/001_init_schema.sql`, Pydantic v2 Contracts, `DomainRegistry`, `AdapterPool`, RLS Repositories | **COMPLETE** | `uv run ruff check` + `uv run mypy --strict src` + `uv run pytest tests/test_m1_foundation.py` |
 | **M2: Code Engine (AST + Merkle Sync + Slicer)** | Git Blob-SHA Merkle indexer, `tree-sitter` AST symbol/edge extractor, bounded 1-hop `ASTDependencyExpander` ($\le 3$ callers, $\le 1,500$ tokens), `DeterministicSlicer` | **COMPLETE** | `uv run ruff check` + `uv run mypy --strict src tests` + `uv run pytest -v` (54/54 passing) |
 | **M3: Quant Paper Harvester & Contextual Retrieval** | arXiv (`.tex`/PDF) & OpenAlex harvester (`IN_NSE`, `DE_XETRA`, `US_EQUITY`), 26-concept relevance classifier, 12 negative blocking topics, Local `EmbeddingGemma 2` (768-d MPS/CPU), Lossless LaTeX/MD Chunkers, Contextualizer, 3-way Normalized RRF, Market Scepticism Gate | **COMPLETE** | `uv run ruff check` + `uv run mypy --strict src` + `uv run pytest -v` (158/158 passing, PR #3) |
-| **M4: Enterprise MCP Servers (`mcp` v2.3.0)** | `code_repo_mcp.py` & `quant_corpus_mcp.py` with out-of-band `PrincipalContext` & hard payload caps | **NEXT** | `tests/test_m4_mcp_servers.py` |
-| **M5: Google ADK 2.12 Scout, Pre-Flight Gate & Handoff** | ADK `Workflow` DAG, `LocalGemmaClient`, 4-Check `PreFlightValidator`, `FederatedScoutCoordinator`, `ShieldGemma 2`, Git worktree sandbox | **PENDING** | `tests/test_m5_adk_workflow.py` |
+| **M4: Enterprise MCP Servers (`mcp` v2.3.0)** | `code_repo_mcp.py` & `quant_corpus_mcp.py` with out-of-band `PrincipalContext` & hard payload caps | **COMPLETE** | `uv run ruff check src tests` + `uv run mypy --strict src tests` + `uv run pytest` (213/213 passing) |
+| **M5: Google ADK 2.12 Scout, Pre-Flight Gate & Handoff** | ADK `Workflow` DAG, `LocalGemmaClient`, 4-Check `PreFlightValidator`, `FederatedScoutCoordinator`, `ShieldGemma 2`, Git worktree sandbox | **NEXT** | `tests/test_m5_adk_workflow.py` |
 | **M6: Evaluation Harness & OpenTelemetry** | Recall@5 ($\ge 90\%$), Zero-Touch Sufficiency ($\ge 85\%$), Citation Faithfulness ($100\%$), RBAC Red-Team ($100\%$), OTel spans | **PENDING** | `tests/test_m6_eval_harness.py` |
 | **M7: Teacher Distillation & QLoRA Training** | Rejection-sampled + 20% recovery trajectories (`gemini-3.8-flash` / `gemma-4-31B-it`), `mlx-lm` local M5 Pro & Vertex AI `PEFT` trainers | **PENDING** | Before-vs-After QLoRA Benchmark Report |
 | **M8: FastAPI SSE, TypeScript/React UI & CI/CD** | FastAPI streaming backend, strict TS/React enterprise UI, `.gitlab-ci.yml` / GitHub Actions | **PENDING** | End-to-end API + UI test suite |
@@ -72,4 +72,40 @@ Milestone 3 is verified complete with 158/158 tests passing across all 15 test s
   - `uv run mypy tests`: 0 type errors across 15 test files.
   - `uv run pytest -v`: 158 passed in 33.91s across 15 test suites (100% pass rate, 0 failures, 0 skips).
   - Pull Request: [PR #3](https://github.com/himanshu2408/enterprise-context-scout/pull/3) (`feat/m3-quant-research-harvester` -> `main`).
+
+## 4. Milestone 4 Completion Details (Enterprise MCP Servers & Realistic Trading Code Integration)
+
+Milestone 4 is verified complete with 213/213 tests passing across all test suites, including unit, live PostgreSQL 17 Forced RLS integration, adversarial parameter injection, and payload bounds tests:
+- **Realistic Multi-File Trading Strategy Package (`src/context_scout/trading_strategies/`):**
+  - `volatility_garch.py`: Real-time conditional volatility tracking via `GARCH11Model` with constrained quasi-MLE ($\alpha + \beta \le 0.9999$) and stationarity protection.
+  - `kelly_risk_manager.py`: Continuous multi-asset position sizing via `KellyRiskManager` using Ledoit-Wolf linear covariance shrinkage with eigenvalue regularisation floors (`MIN_EIGENVALUE_FLOOR = 1e-6`).
+  - `order_flow_imbalance.py`: Multi-level order book pressure calculation via `OrderFlowImbalanceSignal` (Cont-Kukanov-Stoikov 2014) with exponential depth decay and GARCH scaling.
+  - `pairs_trading_kalman.py`: Cointegration hedge ratio tracking via `KalmanHedgeEstimator` implementing the symmetric Joseph-form covariance update ($(I - KH)P(I - KH)^T + KRK^T$) for numerical stability under market turbulence.
+  - `almgren_chriss_execution.py`: Optimal execution trajectory optimization via `AlmgrenChrissExecutionOptimizer` modeling linear permanent and quadratic temporary market impact under risk penalties.
+  - All 6 files seeded into live PostgreSQL 17: 43 total code files, 227 AST symbols, and 2,431 directed AST edges.
+- **Enterprise Code Repository MCP Server (`code_repo_mcp.py`):**
+  - Fast, bounded codebase intelligence under Forced RLS using canonical tools:
+    * `search_code_trigram`: `pg_trgm` similarity search over indexed repository files.
+    * `lookup_ast_symbol`: Exact and prefix symbol definitions across language AST trees.
+    * `expand_ast_1hop_closure`: Bounded 1-hop caller/type dependency closure ($\le 3$ callers, $\le 1,500$ tokens).
+    * `slice_file_lines`: Byte-exact line slicing with 1-indexed validation, off-by-one detection, and git blob/commit SHA provenance.
+    * `search_github_issues`: Full-text issue search over historical bug reports and architecture proposals stored in `doc_chunks`.
+  - Legacy backward-compatible aliases: `search_ast_symbols`, `get_symbol_definition`, `get_symbol_callers`, `grep_repo`, `list_github_issues`.
+- **Enterprise Quantitative Corpus MCP Server (`quant_corpus_mcp.py`):**
+  - High-precision research corpus discovery across 14,318 genuine academic chunks:
+    * `search_quant_papers_hybrid`: 3-way Normalized RRF search across lexical BM25, dense 768-d semantic vectors (`EmbeddingGemma 2`), and trigram matches.
+    * `extract_paper_equations_and_tables`: Lossless extraction of LaTeX mathematical equations and Markdown tables.
+    * `verify_market_friction_assumptions`: Quantitative Scepticism Gate verifying transaction cost floors ($\ge 15$ bps NSE, $\ge 10$ bps Xetra, $\ge 5$ bps US) and net Sharpe degradation hurdle ($\le 0.50$ fails after costs).
+    * `compare_cross_market_regimes`: Comparative cross-market structural and regulatory analysis across Indian, German, and US markets.
+  - Legacy backward-compatible aliases: `search_papers_hybrid`, `get_paper_section`, `compare_market_frictions`.
+- **Out-of-Band Security & Payload Guardrails (`common.py`):**
+  - `SEC-04` Out-of-Band Context: Zero schema leakage—`PrincipalContext` and `scopes` are strictly injected via Python `ContextVar` session context and stripped from MCP tool schemas. Parameter injection attempts raise `SecurityError`.
+  - `SEC-03` Hard Payload Caps: Clamps collection outputs to $\le 10$ items and payload size to $\le 32$ KB (32,768 bytes) serialized JSON with `[PAYLOAD_TRUNCATED_AT_32KB]` notification.
+  - `DomainAuthorizationGate`: Verifies domain-level tool execution permissions against domain YAML manifests.
+- **Verification Metrics:**
+  - `uv run ruff check src tests`: 0 errors.
+  - `uv run mypy --strict src tests`: 0 type errors across 55 source files.
+  - `uv run pytest -v tests/test_m4_mcp_servers.py`: 18/18 passed in 8.43s.
+  - `uv run pytest`: 213 passed in 40.29s across 17 test suites (100% pass rate).
+
 
