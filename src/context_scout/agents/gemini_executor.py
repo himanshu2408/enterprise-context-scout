@@ -222,14 +222,20 @@ class GitWorktreeSandbox:
                     cwd=self.repo_root,
                     capture_output=True,
                 )
+            if self.worktree_dir.exists():
+                shutil.rmtree(self.worktree_dir, ignore_errors=True)
+            if not self._is_standalone_clone:
+                subprocess.run(
+                    ["git", "worktree", "prune"],
+                    cwd=self.repo_root,
+                    capture_output=True,
+                )
                 if self.branch_name:
                     subprocess.run(
                         ["git", "branch", "-D", self.branch_name],
                         cwd=self.repo_root,
                         capture_output=True,
                     )
-            if self.worktree_dir.exists():
-                shutil.rmtree(self.worktree_dir, ignore_errors=True)
             self._is_active = False
 
 

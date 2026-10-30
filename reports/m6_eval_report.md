@@ -1,8 +1,8 @@
 # Milestone 6 CI/CD Quality Gate & OpenTelemetry Evaluation Report
 
-**Evaluation Timestamp**: `2026-10-30T00:09:32.769632+00:00`  
+**Evaluation Timestamp**: `2026-10-30T00:33:57.792092+00:00`  
 **Overall CI/CD Pipeline Verdict**: **✅ PASSED**  
-**Execution Runtime**: `9861 ms`  
+**Execution Runtime**: `9892 ms`  
 **OpenTelemetry Spans Collected**: `23`  
 
 ---
@@ -66,16 +66,16 @@
 - **GenAI Conventions**: Adheres strictly to `gen_ai.system`, `gen_ai.request.model`,
   `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.operation.name`.
 - **Operational Spans**:
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `9cefb7b50f588d7efb4ff1102ac9066f`)
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `9cefb7b50f588d7efb4ff1102ac9066f`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `9cefb7b50f588d7efb4ff1102ac9066f`)
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `2f88ce269261c18be4953f4eff535743`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `2f88ce269261c18be4953f4eff535743`)
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `377ce4b5a6af82e751c655e3f42e5a2e`)
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `377ce4b5a6af82e751c655e3f42e5a2e`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `377ce4b5a6af82e751c655e3f42e5a2e`)
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `4e5c5399a3efc4fc4ca7feda8d9de285`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `4e5c5399a3efc4fc4ca7feda8d9de285`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `7ec2f90d60aec1e4fd1a6239505f6f1f`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `7ec2f90d60aec1e4fd1a6239505f6f1f`)
+- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `7ec2f90d60aec1e4fd1a6239505f6f1f`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `e4a80fe893fc7860fda38e353e8927b3`)
+- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `e4a80fe893fc7860fda38e353e8927b3`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `44e15d78d06327c36d07c25e5e45dbdb`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `44e15d78d06327c36d07c25e5e45dbdb`)
+- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `44e15d78d06327c36d07c25e5e45dbdb`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `f5732e41d282200a3473e79106b36032`)
+- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `f5732e41d282200a3473e79106b36032`)
 
 ---
 
