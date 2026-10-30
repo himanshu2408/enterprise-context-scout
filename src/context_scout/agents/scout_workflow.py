@@ -26,6 +26,7 @@ from typing import Any, Final
 
 from context_scout.agents.domain_registry import AdapterPool, AdapterSlot, DomainRegistry
 from context_scout.agents.preflight_gate import (
+    PROMPT_STOPWORDS,
     BoundGraphRepository,
     PreFlightValidator,
 )
@@ -33,6 +34,7 @@ from context_scout.ast_engine.dependency_expander import ASTDependencyExpander
 from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
 from context_scout.config import validate_google_model_id
 from context_scout.db.repositories import (
+    ASTSymbolRecord,
     CodeFileRecord,
     DocChunkRecord,
 )
@@ -53,6 +55,7 @@ from context_scout.security.guardrails import (
     ShieldGemmaGuardrail,
 )
 from context_scout.security.rbac import DomainAuthorizationGate
+from context_scout.telemetry import ScoutTelemetryTracer
 
 logger = logging.getLogger(__name__)
 
@@ -237,47 +240,75 @@ class LocalGemmaClient:
 
         files_by_id: dict[uuid.UUID, CodeFileRecord] = {f.file_id: f for f in visible_files}
 
-        # 1. Match symbols in repository
+        # Identify files explicitly mentioned in prompt
+        mentioned_file_ids = {
+            f.file_id
+            for f in visible_files
+            if f.file_path in candidates_to_search
+            or f.file_path.split("/")[-1] in candidates_to_search
+        }
+
+        # 1. Match symbols in repository with priority ordering
+        t1_exact: list[tuple[ASTSymbolRecord, bool]] = []
+        t2_file_classes: list[tuple[ASTSymbolRecord, bool]] = []
+        t2_file_others: list[tuple[ASTSymbolRecord, bool]] = []
+        t3_subword: list[tuple[ASTSymbolRecord, bool]] = []
+
         for sym in visible_symbols:
             short_name = sym.qualified_name.split(".")[-1]
-            is_prompt_match = (
+            is_exact = (
                 sym.qualified_name in candidates_to_search
                 or short_name in candidates_to_search
-                or any(w in sym.qualified_name for w in candidates_to_search if len(w) > 4)
             )
-            is_feedback_match = (
+            is_feedback = (
                 sym.qualified_name in missing_from_feedback
                 or short_name in missing_from_feedback
             )
+            if is_exact or is_feedback:
+                t1_exact.append((sym, is_feedback))
+            elif sym.file_id in mentioned_file_ids:
+                if sym.symbol_kind in ("class", "interface", "type_alias"):
+                    t2_file_classes.append((sym, False))
+                else:
+                    t2_file_others.append((sym, False))
+            elif any(
+                w in sym.qualified_name
+                for w in candidates_to_search
+                if len(w) > 4 and w.lower() not in PROMPT_STOPWORDS
+            ):
+                t3_subword.append((sym, False))
 
-            if is_prompt_match or is_feedback_match:
-                file_rec = files_by_id.get(sym.file_id)
-                file_path = file_rec.file_path if file_rec else "src/unknown.py"
-                repo_name = file_rec.repo_name if file_rec else "trading-execution"
+        candidate_ordered = t1_exact + t2_file_classes + t2_file_others + t3_subword
 
-                intent = (
-                    ModificationIntent.MODIFY_TARGET
-                    if (is_prompt_match and not is_feedback_match and len(pointers) == 0)
-                    else ModificationIntent.REFERENCE_ONLY
-                )
-                reason = (
-                    f"Remediated via $0 bounce-back feedback: {short_name}"
-                    if is_feedback_match
-                    else f"Located symbol {sym.qualified_name} from user task"
-                )
+        for sym, is_feedback_match in candidate_ordered:
+            short_name = sym.qualified_name.split(".")[-1]
+            file_rec = files_by_id.get(sym.file_id)
+            file_path = file_rec.file_path if file_rec else "src/unknown.py"
+            repo_name = file_rec.repo_name if file_rec else "trading-execution"
 
-                ptr = CodeSlicePointer(
-                    repo_name=repo_name,
-                    file_path=file_path,
-                    start_line=sym.start_line,
-                    end_line=sym.end_line,
-                    qualified_symbol=sym.qualified_name,
-                    selection_reason=reason,
-                    modification_intent=intent,
-                )
-                pointers.append(ptr)
-                covered_symbols.add(sym.qualified_name)
-                covered_symbols.add(short_name)
+            intent = (
+                ModificationIntent.MODIFY_TARGET
+                if (not is_feedback_match and len(pointers) == 0)
+                else ModificationIntent.REFERENCE_ONLY
+            )
+            reason = (
+                f"Remediated via $0 bounce-back feedback: {short_name}"
+                if is_feedback_match
+                else f"Located symbol {sym.qualified_name} from user task"
+            )
+
+            ptr = CodeSlicePointer(
+                repo_name=repo_name,
+                file_path=file_path,
+                start_line=sym.start_line,
+                end_line=sym.end_line,
+                qualified_symbol=sym.qualified_name,
+                selection_reason=reason,
+                modification_intent=intent,
+            )
+            pointers.append(ptr)
+            covered_symbols.add(sym.qualified_name)
+            covered_symbols.add(short_name)
 
         # 2. Match whole files in repository if mentioned
         for f in visible_files:
@@ -514,8 +545,41 @@ class ScoutWorkflow:
         supporting_doc_citations: list[DocCitationSpan] | None = None,
         max_bounce_backs: int = 1,
     ) -> ImplementationContextPack | InsufficientContextDiagnostic:
-        """Executes the 4-stage Scout Workflow DAG."""
+        """Executes the 4-stage Scout Workflow DAG with OpenTelemetry instrumentation."""
         active_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
+        tracer = ScoutTelemetryTracer.get_instance()
+        with tracer.trace_workflow(
+            span_name="scout.workflow",
+            domain_id=domain_id,
+            trace_id=active_trace_id,
+            model_id="gemma-4-moe",
+            system="gemma",
+        ) as wf_span:
+            result = self._run_dag(
+                user_prompt=user_prompt,
+                principal=principal,
+                domain_id=domain_id,
+                active_trace_id=active_trace_id,
+                normalized_rrf_score=normalized_rrf_score,
+                doc_chunks=doc_chunks,
+                supporting_doc_citations=supporting_doc_citations,
+                max_bounce_backs=max_bounce_backs,
+            )
+            wf_span.record_pack(result)
+            return result
+
+    def _run_dag(
+        self,
+        user_prompt: str,
+        principal: PrincipalContext,
+        domain_id: str,
+        active_trace_id: str,
+        normalized_rrf_score: float,
+        doc_chunks: dict[str, str] | list[DocChunkRecord] | None,
+        supporting_doc_citations: list[DocCitationSpan] | None,
+        max_bounce_backs: int,
+    ) -> ImplementationContextPack | InsufficientContextDiagnostic:
+        """Executes the 4-stage Scout Workflow DAG."""
 
         # =====================================================================
         # Stage 1: Security Guardrails & Principal Authorization
@@ -712,7 +776,10 @@ class ScoutWorkflow:
 
         total_slice_chars = sum(len(s.verbatim_code_with_lines) for s in hydrated_slices)
         est_pack_tokens = max(1, int(total_slice_chars / 3.8))
-        local_tokens_consumed = 350 + (120 if final_report != initial_report else 0)
+        total_code_tokens_explored = sum(
+            max(1, int(len(f.raw_content) / 3.8)) for f in visible_files
+        )
+        local_tokens_consumed = max(est_pack_tokens, total_code_tokens_explored)
 
         pack = ImplementationContextPack(
             trace_id=active_trace_id,
@@ -781,8 +848,37 @@ class FederatedScoutCoordinator:
         doc_chunks: dict[str, str] | list[DocChunkRecord] | None = None,
         max_bounce_backs: int = 1,
     ) -> ImplementationContextPack | InsufficientContextDiagnostic:
-        """Executes the 2-stage cross-domain federated DAG."""
+        """Executes the 2-stage cross-domain federated DAG with OpenTelemetry instrumentation."""
         active_trace_id = trace_id or f"fed_trace_{uuid.uuid4().hex[:12]}"
+        tracer = ScoutTelemetryTracer.get_instance()
+        with tracer.trace_workflow(
+            span_name="scout.federated_workflow",
+            domain_id="federated_coordinator",
+            trace_id=active_trace_id,
+            model_id="gemma-4-moe",
+            system="gemma",
+        ) as fed_span:
+            result = self._run_federated_dag(
+                user_prompt=user_prompt,
+                principal=principal,
+                active_trace_id=active_trace_id,
+                normalized_rrf_score=normalized_rrf_score,
+                doc_chunks=doc_chunks,
+                max_bounce_backs=max_bounce_backs,
+            )
+            fed_span.record_pack(result)
+            return result
+
+    def _run_federated_dag(
+        self,
+        user_prompt: str,
+        principal: PrincipalContext,
+        active_trace_id: str,
+        normalized_rrf_score: float,
+        doc_chunks: dict[str, str] | list[DocChunkRecord] | None,
+        max_bounce_backs: int,
+    ) -> ImplementationContextPack | InsufficientContextDiagnostic:
+        """Executes the 2-stage cross-domain federated DAG."""
 
         decision = self.guardrail.evaluate(user_prompt, principal=principal)
         if not decision.passed:
@@ -1002,6 +1098,22 @@ class FederatedScoutCoordinator:
         total_slice_chars = sum(len(s.verbatim_code_with_lines) for s in hydrated_slices)
         est_tokens = max(1, int(total_slice_chars / 3.8)) + 300
 
+        if isinstance(active_chunks, dict):
+            total_doc_tokens = sum(
+                max(1, int(len(v) / 3.8)) for v in active_chunks.values()
+            )
+        elif isinstance(active_chunks, list):
+            total_doc_tokens = sum(
+                max(1, int(len(c.verbatim_content) / 3.8)) for c in active_chunks
+            )
+        else:
+            total_doc_tokens = 0
+
+        total_code_tokens = sum(
+            max(1, int(len(f.raw_content) / 3.8)) for f in visible_files
+        )
+        total_tokens_explored = max(est_tokens, total_doc_tokens + total_code_tokens)
+
         pack = ImplementationContextPack(
             trace_id=active_trace_id,
             domain_id="trading_code_scout",
@@ -1012,7 +1124,7 @@ class FederatedScoutCoordinator:
             supporting_doc_citations=citations,
             quant_strategy_spec=quant_brief,
             preflight_report=report,
-            local_tokens_consumed=650,
+            local_tokens_consumed=total_tokens_explored,
             pack_token_count=est_tokens,
         )
 
