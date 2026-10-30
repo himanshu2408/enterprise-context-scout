@@ -776,7 +776,10 @@ class ScoutWorkflow:
 
         total_slice_chars = sum(len(s.verbatim_code_with_lines) for s in hydrated_slices)
         est_pack_tokens = max(1, int(total_slice_chars / 3.8))
-        local_tokens_consumed = 350 + (120 if final_report != initial_report else 0)
+        total_code_tokens_explored = sum(
+            max(1, int(len(f.raw_content) / 3.8)) for f in visible_files
+        )
+        local_tokens_consumed = max(est_pack_tokens, total_code_tokens_explored)
 
         pack = ImplementationContextPack(
             trace_id=active_trace_id,
@@ -1095,6 +1098,22 @@ class FederatedScoutCoordinator:
         total_slice_chars = sum(len(s.verbatim_code_with_lines) for s in hydrated_slices)
         est_tokens = max(1, int(total_slice_chars / 3.8)) + 300
 
+        if isinstance(active_chunks, dict):
+            total_doc_tokens = sum(
+                max(1, int(len(v) / 3.8)) for v in active_chunks.values()
+            )
+        elif isinstance(active_chunks, list):
+            total_doc_tokens = sum(
+                max(1, int(len(c.verbatim_content) / 3.8)) for c in active_chunks
+            )
+        else:
+            total_doc_tokens = 0
+
+        total_code_tokens = sum(
+            max(1, int(len(f.raw_content) / 3.8)) for f in visible_files
+        )
+        total_tokens_explored = max(est_tokens, total_doc_tokens + total_code_tokens)
+
         pack = ImplementationContextPack(
             trace_id=active_trace_id,
             domain_id="trading_code_scout",
@@ -1105,7 +1124,7 @@ class FederatedScoutCoordinator:
             supporting_doc_citations=citations,
             quant_strategy_spec=quant_brief,
             preflight_report=report,
-            local_tokens_consumed=650,
+            local_tokens_consumed=total_tokens_explored,
             pack_token_count=est_tokens,
         )
 

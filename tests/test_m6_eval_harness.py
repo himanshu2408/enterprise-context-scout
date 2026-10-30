@@ -389,3 +389,59 @@ def test_cli_runner_report_generation(tmp_path: Path) -> None:
     assert "✅ PASSED" in md_text
     assert "Zero-Touch Sufficiency Rate" in md_text
     assert "File & Symbol Recall@5" in md_text
+
+
+def test_cli_runner_postgres_flag(tmp_path: Path) -> None:
+    """Verifies CLI runner with --postgres executes against live PostgreSQL 17."""
+    json_out = tmp_path / "pg_report.json"
+    md_out = tmp_path / "pg_report.md"
+
+    exit_code = main(
+        [
+            "--postgres",
+            "--output-json",
+            str(json_out),
+            "--output-md",
+            str(md_out),
+            "--fail-under-threshold",
+        ]
+    )
+    assert exit_code == 0
+    assert json_out.exists()
+    data = json.loads(json_out.read_text(encoding="utf-8"))
+    assert data["all_passed"] is True
+    # Gate 4 should report genuine candidate exploration > 80%
+    m4 = data["metrics"]["frontier_token_savings_ratio"]
+    assert m4["passed"] is True
+    assert m4["measured_value"] >= 80.0
+
+
+def test_cli_runner_in_memory_flag(tmp_path: Path) -> None:
+    """Verifies CLI runner with --in-memory executes without PostgreSQL requirement."""
+    json_out = tmp_path / "inmem_report.json"
+    md_out = tmp_path / "inmem_report.md"
+
+    exit_code = main(
+        [
+            "--in-memory",
+            "--output-json",
+            str(json_out),
+            "--output-md",
+            str(md_out),
+            "--fail-under-threshold",
+        ]
+    )
+    assert exit_code == 0
+    assert json_out.exists()
+    data = json.loads(json_out.read_text(encoding="utf-8"))
+    assert data["all_passed"] is True
+    m4 = data["metrics"]["frontier_token_savings_ratio"]
+    assert m4["passed"] is True
+    assert m4["measured_value"] >= 80.0
+
+
+def test_cli_runner_mutual_exclusion_error() -> None:
+    """Verifies CLI runner rejects simultaneous --postgres and --in-memory flags."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--postgres", "--in-memory"])
+    assert exc_info.value.code == 2

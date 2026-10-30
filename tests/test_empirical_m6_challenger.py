@@ -697,19 +697,20 @@ class TestGate4FrontierTokenSavings:
         self,
         harness: EvaluationHarness,
     ) -> None:
-        """Validates behavior of max(p.local_tokens_consumed, p.pack_token_count * 5).
+        """Validates elimination of synthetic multiplier and fail-closed behavior.
 
-        When local_tokens_consumed is low or zero, the formula defaults to 5 * pack_token_count,
-        bounding the savings ratio to exactly 80.0%.
+        When local_tokens_consumed is zero (or total_explored is 0), savings ratio must
+        fail closed to 0.0% and passed=False (no synthetic 5x floor boosting to 80.0%).
+        When genuine local tokens are present, savings ratio calculates accurately.
         """
         pack_zero_local = _create_mock_context_pack(
-            task_user_prompt="SAVINGS-FLOOR",
+            task_user_prompt="SAVINGS-ZERO",
             pack_tokens=1000,
             local_tokens=0,
         )
         res_floor = harness.evaluate_frontier_token_savings([pack_zero_local])
-        assert res_floor.measured_value == 80.0
-        assert res_floor.passed is True
+        assert res_floor.measured_value == 0.0
+        assert res_floor.passed is False
 
         pack_high_local = _create_mock_context_pack(
             task_user_prompt="SAVINGS-HIGH",

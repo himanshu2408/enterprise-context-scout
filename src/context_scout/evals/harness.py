@@ -119,6 +119,8 @@ class EvaluationHarness:
         registry: DomainRegistry | None = None,
         tracer: ScoutTelemetryTracer | None = None,
         repo_root: Path | None = None,
+        require_postgres: bool = False,
+        force_in_memory: bool = False,
     ) -> None:
         self.settings = settings or ScoutSettings()
         self.thresholds = thresholds or EvaluationGateThresholds()
@@ -146,15 +148,18 @@ class EvaluationHarness:
         self._connection_manager: RLSConnectionManager | None = None
         if repo is not None:
             self.repo = repo
+        elif force_in_memory:
+            logger.info("EvaluationHarness configured with force_in_memory=True.")
+            self.repo = self._create_populated_in_memory_repo()
         else:
-            self.repo = self._auto_configure_repository()
+            self.repo = self._auto_configure_repository(require_postgres=require_postgres)
 
         self.executor = GeminiImplementationExecutor(
             model_id=DEFAULT_FAST_MODEL_ID,
             require_confirmation=False,
         )
 
-    def _auto_configure_repository(self) -> Any:
+    def _auto_configure_repository(self, require_postgres: bool = False) -> Any:
         """Attempts live PostgreSQL 17 connection, falling back to populated in-memory repo."""
         try:
             mgr = RLSConnectionManager(self.settings.db_app_url)
@@ -169,6 +174,9 @@ class EvaluationHarness:
             logger.info("EvaluationHarness connected to live PostgreSQL 17.")
             return PostgresScoutGraphAdapter(mgr, self.settings)
         except Exception as exc:
+            if require_postgres:
+                logger.error("Live PostgreSQL 17 required but connection failed: %s", exc)
+                raise
             logger.warning(
                 "Live PostgreSQL 17 connection unavailable (%s); using InMemoryRLSRepository.",
                 exc,
@@ -176,7 +184,7 @@ class EvaluationHarness:
             return self._create_populated_in_memory_repo()
 
     def _create_populated_in_memory_repo(self) -> InMemoryRLSRepository:
-        """Creates an in-memory repository populated with trading strategy source files."""
+        """Creates an in-memory repository populated with all context scout source files."""
         repo = InMemoryRLSRepository()
         admin_principal = PrincipalContext(
             user_id="harness_seeder",
@@ -184,13 +192,17 @@ class EvaluationHarness:
             allowed_scopes=["public_eng", "public_quant", "quant_restricted"],
         )
 
-        strategies_dir = self.repo_root / "src" / "context_scout" / "trading_strategies"
-        if strategies_dir.exists():
-            import uuid
+        import re
+        import uuid
 
-            for py_file in strategies_dir.glob("*.py"):
-                content = py_file.read_text(encoding="utf-8")
-                rel_path = f"src/context_scout/trading_strategies/{py_file.name}"
+        scout_src_dir = self.repo_root / "src" / "context_scout"
+        if scout_src_dir.exists():
+            for py_file in sorted(scout_src_dir.rglob("*.py")):
+                try:
+                    content = py_file.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+                rel_path = str(py_file.relative_to(self.repo_root))
                 lines = content.splitlines()
                 f_id = uuid.uuid4()
                 rec = CodeFileRecord(
@@ -208,13 +220,14 @@ class EvaluationHarness:
                 repo.insert_code_file(admin_principal, rec)
 
                 # Extract basic symbols
-                import re
+                module_parts = py_file.relative_to(self.repo_root / "src").with_suffix("").parts
+                mod_dotted = ".".join(module_parts)
 
                 for idx, line in enumerate(lines, start=1):
                     cls_match = re.match(r"^class\s+([A-Za-z0-9_]+)", line)
                     if cls_match:
                         cls_name = cls_match.group(1)
-                        q_name = f"context_scout.trading_strategies.{py_file.stem}.{cls_name}"
+                        q_name = f"{mod_dotted}.{cls_name}"
                         repo.insert_ast_symbol(
                             admin_principal,
                             ASTSymbolRecord(
@@ -233,8 +246,6 @@ class EvaluationHarness:
                         )
 
         # Seed sample doc chunk for quant research
-        import uuid
-
         repo.insert_doc_chunk(
             admin_principal,
             DocChunkRecord(
@@ -614,9 +625,7 @@ class EvaluationHarness:
             )
 
         total_sent = sum(p.pack_token_count for p in packs)
-        total_explored = sum(
-            max(p.local_tokens_consumed, p.pack_token_count * 5) for p in packs
-        )
+        total_explored = sum(p.local_tokens_consumed for p in packs)
 
         savings_ratio = (
             round((1.0 - (total_sent / total_explored)) * 100.0, 2) if total_explored > 0 else 0.0

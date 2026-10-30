@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-29T23:21:24.204761+00:00",
+  "timestamp": "2026-10-30T00:09:32.769632+00:00",
   "all_passed": true,
   "metrics": {
     "zero_touch_sufficiency_rate": {
@@ -119,14 +119,14 @@
     "frontier_token_savings_ratio": {
       "metric_id": "frontier_token_savings_ratio",
       "display_name": "Frontier Token Savings Ratio",
-      "measured_value": 80.0,
+      "measured_value": 97.65,
       "target_threshold": 80.0,
       "comparator": ">=",
       "passed": true,
       "details": {
         "total_context_pack_tokens_sent": 81862,
-        "total_local_tokens_explored": 409310,
-        "tokens_saved": 327448
+        "total_local_tokens_explored": 3484945,
+        "tokens_saved": 3403083
       }
     },
     "rbac_zero_leakage_rate": {
@@ -553,7 +553,7 @@
       }
     }
   },
-  "summary": "Milestone 6 Evaluation Pipeline: ALL GATES PASSED\nZero-Touch Sufficiency Rate: 100.0% (Target: 85.0%) -> PASS\nFile & Symbol Recall@5: 100.0% (Target: 90.0%) -> PASS\nVerbatim Citation Faithfulness: 100.0% (Target: 100.0%) -> PASS\nFrontier Token Savings Ratio: 80.0% (Target: 80.0%) -> PASS\nRBAC Zero-Leakage Rate: 100.0% (Target: 100.0%) -> PASS\nPrompt-Injection Block Rate: 95.45% (Target: 95.0%) -> PASS\nTotal duration: 9719ms, OpenTelemetry spans captured: 23",
-  "total_duration_ms": 9719,
+  "summary": "Milestone 6 Evaluation Pipeline: ALL GATES PASSED\nZero-Touch Sufficiency Rate: 100.0% (Target: 85.0%) -> PASS\nFile & Symbol Recall@5: 100.0% (Target: 90.0%) -> PASS\nVerbatim Citation Faithfulness: 100.0% (Target: 100.0%) -> PASS\nFrontier Token Savings Ratio: 97.65% (Target: 80.0%) -> PASS\nRBAC Zero-Leakage Rate: 100.0% (Target: 100.0%) -> PASS\nPrompt-Injection Block Rate: 95.45% (Target: 95.0%) -> PASS\nTotal duration: 9861ms, OpenTelemetry spans captured: 23",
+  "total_duration_ms": 9861,
   "telemetry_spans_count": 23
 }

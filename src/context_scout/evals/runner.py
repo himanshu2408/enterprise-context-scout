@@ -14,6 +14,7 @@ import logging
 import sys
 from pathlib import Path
 
+from context_scout.evals.golden_dataset import GoldenBenchmarkSuite
 from context_scout.evals.harness import EvaluationHarness, EvaluationRunResult
 from context_scout.telemetry import (
     GEN_AI_OPERATION_NAME,
@@ -169,14 +170,44 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
         help="Exit with code 1 if any of the 6 CI/CD gates fails.",
     )
+    parser.add_argument(
+        "--postgres",
+        action="store_true",
+        default=False,
+        help="Require live PostgreSQL 17 connection (raises if connection fails).",
+    )
+    parser.add_argument(
+        "--in-memory",
+        action="store_true",
+        default=False,
+        help="Force in-memory repository evaluation without requiring PostgreSQL connection.",
+    )
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default=None,
+        help="Optional path to custom GoldenBenchmarkSuite JSON dataset file.",
+    )
 
     args = parser.parse_args(argv)
+
+    if args.postgres and args.in_memory:
+        parser.error("Cannot specify both --postgres and --in-memory simultaneously.")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     logger.info("Starting Milestone 6 Evaluation Harness...")
 
-    harness = EvaluationHarness()
-    result = harness.evaluate_all()
+    harness = EvaluationHarness(
+        require_postgres=args.postgres,
+        force_in_memory=args.in_memory,
+    )
+
+    suite: GoldenBenchmarkSuite | None = None
+    if args.dataset_path:
+        suite_path = Path(args.dataset_path).resolve()
+        suite = GoldenBenchmarkSuite.model_validate_json(suite_path.read_text(encoding="utf-8"))
+
+    result = harness.evaluate_all(suite=suite)
 
     # Create reports directory
     json_path = Path(args.output_json).resolve()
