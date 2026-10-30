@@ -22,6 +22,7 @@ import re
 import urllib.error
 import urllib.request
 import uuid
+from pathlib import Path
 from typing import Any, Final
 
 from context_scout.agents.domain_registry import AdapterPool, AdapterSlot, DomainRegistry
@@ -117,6 +118,38 @@ class LocalGemmaClient:
         """Swaps active LoRA adapter in memory (ARC-02)."""
         self._active_domain_id = domain_id
         return self.get_active_adapter(domain_id)
+
+    def load_adapter(
+        self,
+        domain_id: str,
+        base_dir: Path | str | None = None,
+    ) -> AdapterSlot:
+        """Loads, registers, and verifies domain QLoRA adapter artifacts (ARC-02 & HW-01)."""
+        slot = self.set_active_domain(domain_id)
+        if slot is None:
+            raise KeyError(f"Domain '{domain_id}' not found in AdapterPool")
+        if self.adapter_pool is not None:
+            v_res = self.adapter_pool.verify_adapter(domain_id, base_dir=base_dir)
+            if not v_res.get("is_valid", False):
+                logger.warning(
+                    "Adapter verification warning for '%s': %s",
+                    domain_id,
+                    v_res.get("error_message"),
+                )
+        return slot
+
+    def verify_active_adapter(
+        self,
+        base_dir: Path | str | None = None,
+    ) -> dict[str, Any]:
+        """Verifies currently active domain adapter artifacts on disk."""
+        if not self._active_domain_id or self.adapter_pool is None:
+            return {
+                "domain_id": self._active_domain_id or "none",
+                "is_valid": False,
+                "error_message": "No active domain or AdapterPool configured",
+            }
+        return self.adapter_pool.verify_adapter(self._active_domain_id, base_dir=base_dir)
 
     def is_online(self) -> bool:
         """Probes local MLX server health endpoint."""
@@ -368,6 +401,44 @@ class LocalGemmaClient:
 
         return pointers
 
+    def _call_mlx_quant_brief(
+        self, user_prompt: str, domain_id: str
+    ) -> QuantStrategyBrief | None:
+        """Calls OpenAI-compatible /v1/chat/completions on local MLX Gemma server."""
+        slot = self.get_active_adapter(domain_id)
+        model_name = slot.adapter_id if slot else self.model_id
+        payload = {
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a local quant research scout. Return only a valid JSON object "
+                        "conforming to QuantStrategyBrief schema with keys: strategy_name, "
+                        "target_markets, is_intraday_futures, mathematical_signal_latex, "
+                        "entry_exit_rules, sample_period_years, reported_sharpe_ratio, "
+                        "reported_max_drawdown_pct, transaction_cost_bps_assumed, "
+                        "friction_verdict, market_specific_caveats, known_failure_regimes, "
+                        "verified_citations."
+                    ),
+                },
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.0,
+            "max_tokens": 1536,
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.endpoint_url}/chat/completions",
+            data=data,
+            headers={"Content-Type": "application/json", "User-Agent": "ContextScout-LocalGemma"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            content = body["choices"][0]["message"]["content"]
+            return QuantStrategyBrief.model_validate_json(content)
+
     def generate_quant_brief(
         self,
         user_prompt: str,
@@ -378,6 +449,18 @@ class LocalGemmaClient:
     ) -> QuantStrategyBrief:
         """Generates structured QuantStrategyBrief with verified document citations."""
         self.set_active_domain(domain_id)
+
+        # 1. Attempt live MLX inference if online
+        if not self.offline_mode and self.is_online():
+            try:
+                brief = self._call_mlx_quant_brief(user_prompt, domain_id)
+                if brief is not None:
+                    return brief
+            except Exception as e:
+                logger.warning(
+                    "Local MLX quant inference failed (%s); using deterministic synthesizer",
+                    e,
+                )
 
         bound_repo = BoundGraphRepository(repo)
         active_principal = principal or PrincipalContext(
