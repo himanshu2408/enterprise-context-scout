@@ -38,6 +38,7 @@ from context_scout.schemas.contracts import (
     RoleType,
     VerbatimCodeSlice,
 )
+from context_scout.telemetry import ScoutTelemetryTracer
 
 logger = logging.getLogger(__name__)
 
@@ -676,116 +677,123 @@ class PreFlightValidator:
         active_principal = self._resolve_principal(principal)
         bound_repo = self._resolve_graph_repo(repo, conn=conn)
 
-        # Incorporate verified citations from quant strategy specification if present
-        all_citations: list[DocCitationSpan] = list(active_citations)
-        if active_quant and active_quant.verified_citations:
-            for c in active_quant.verified_citations:
-                if c not in all_citations:
-                    all_citations.append(c)
-
-        # ---------------------------------------------------------------------
-        # Check 1: Internal Symbol Resolution & 1-Hop AST Auto-Closure
-        # ---------------------------------------------------------------------
-        unresolved_symbols, auto_attached_count = self.check_symbol_resolution(
-            code_slices=active_slices,
-            bound_repo=bound_repo,
-            principal=active_principal,
+        tracer = ScoutTelemetryTracer.get_instance()
+        with tracer.trace_preflight(
+            span_name="scout.preflight_gate",
             domain_id=active_domain,
-        )
-        check_1_passed = len(unresolved_symbols) == 0
+            prompt=active_prompt,
+        ) as pf_span:
+            # Incorporate verified citations from quant strategy specification if present
+            all_citations: list[DocCitationSpan] = list(active_citations)
+            if active_quant and active_quant.verified_citations:
+                for c in active_quant.verified_citations:
+                    if c not in all_citations:
+                        all_citations.append(c)
 
-        # ---------------------------------------------------------------------
-        # Check 2: Prompt Identifier Partitioning (VAL-01)
-        # ---------------------------------------------------------------------
-        visible_symbols = bound_repo.list_visible_ast_symbols(active_principal, active_domain)
-        visible_files = bound_repo.list_visible_code_files(active_principal, active_domain)
-
-        missing_reference_identifiers, novel_target_identifiers = (
-            self.partition_prompt_identifiers(
-                user_prompt=active_prompt,
-                visible_symbols=visible_symbols,
-                visible_files=visible_files,
+            # ---------------------------------------------------------------------
+            # Check 1: Internal Symbol Resolution & 1-Hop AST Auto-Closure
+            # ---------------------------------------------------------------------
+            unresolved_symbols, auto_attached_count = self.check_symbol_resolution(
                 code_slices=active_slices,
+                bound_repo=bound_repo,
+                principal=active_principal,
+                domain_id=active_domain,
             )
-        )
-        check_2_passed = len(missing_reference_identifiers) == 0
+            check_1_passed = len(unresolved_symbols) == 0
 
-        # ---------------------------------------------------------------------
-        # Check 3: Normalized RRF Threshold (BLK-01, >= 0.55)
-        # ---------------------------------------------------------------------
-        check_3_passed, final_rrf_score = self.check_rrf_threshold(
-            normalized_rrf_score=normalized_rrf_score,
-            cross_encoder_score=cross_encoder_score,
-        )
+            # ---------------------------------------------------------------------
+            # Check 2: Prompt Identifier Partitioning (VAL-01)
+            # ---------------------------------------------------------------------
+            visible_symbols = bound_repo.list_visible_ast_symbols(active_principal, active_domain)
+            visible_files = bound_repo.list_visible_code_files(active_principal, active_domain)
 
-        # ---------------------------------------------------------------------
-        # Check 4: Verbatim Citation Verification (VAL-02, >= 0.98 overlap)
-        # ---------------------------------------------------------------------
-        citations_verified_100_pct, failed_citation_reasons = self.check_citations(
-            citations=all_citations,
-            doc_chunks=doc_chunks,
-            bound_repo=bound_repo,
-            principal=active_principal,
-            domain_id=active_domain,
-        )
-        check_4_passed = citations_verified_100_pct
-
-        # ---------------------------------------------------------------------
-        # Composite Gate Evaluation & Bounce-Back Feedback Synthesis
-        # ---------------------------------------------------------------------
-        all_passed = check_1_passed and check_2_passed and check_3_passed and check_4_passed
-
-        bounce_back_feedback: str | None = None
-        if not all_passed:
-            feedback_parts = [
-                "Pre-Flight Gate Validation FAILED ($0 Local Bounce-Back Required):"
-            ]
-            if not check_1_passed:
-                feedback_parts.append(
-                    f"- Check 1 (Internal Symbol Resolution): Missing internal dependencies: "
-                    f"{unresolved_symbols}. Please retrieve or auto-expand these symbols "
-                    "before invoking paid execution."
+            missing_reference_identifiers, novel_target_identifiers = (
+                self.partition_prompt_identifiers(
+                    user_prompt=active_prompt,
+                    visible_symbols=visible_symbols,
+                    visible_files=visible_files,
+                    code_slices=active_slices,
                 )
-            if not check_2_passed:
-                feedback_parts.append(
-                    "- Check 2 (Prompt Identifier Partitioning, VAL-01): User prompt referenced "
-                    "existing repository symbols/files that are missing from the context pack: "
-                    f"{missing_reference_identifiers}. "
-                    "Please attach code slices covering these existing items."
-                )
-            if not check_3_passed:
-                feedback_parts.append(
-                    f"- Check 3 (Normalized RRF Score, BLK-01): Top Normalized RRF score "
-                    f"{final_rrf_score:.4f} is below threshold {self.min_rrf_score:.2f} "
-                    f"(and cross-encoder score < {self.cross_encoder_threshold:.2f}). "
-                    "Please broaden search queries or inspect retrieval ranking."
-                )
-            if not check_4_passed:
-                reasons_str = "; ".join(failed_citation_reasons)
-                feedback_parts.append(
-                    "- Check 4 (Verbatim Citation Verification, VAL-02): Citations failed verbatim "
-                    f"verification: {reasons_str}. "
-                    "Ensure quotes match source documents verbatim with >=0.98 token overlap."
-                )
-            bounce_back_feedback = "\n".join(feedback_parts)
+            )
+            check_2_passed = len(missing_reference_identifiers) == 0
 
-        report = PreFlightValidationReport(
-            passed=all_passed,
-            unresolved_symbols=unresolved_symbols,
-            missing_reference_identifiers=missing_reference_identifiers,
-            novel_target_identifiers=novel_target_identifiers,
-            normalized_rrf_score=final_rrf_score,
-            citations_verified_100_pct=citations_verified_100_pct,
-            auto_attached_ast_slices_count=auto_attached_count,
-            bounce_back_feedback=bounce_back_feedback,
-        )
+            # ---------------------------------------------------------------------
+            # Check 3: Normalized RRF Threshold (BLK-01, >= 0.55)
+            # ---------------------------------------------------------------------
+            check_3_passed, final_rrf_score = self.check_rrf_threshold(
+                normalized_rrf_score=normalized_rrf_score,
+                cross_encoder_score=cross_encoder_score,
+            )
 
-        # Mutate pack in-place if provided
-        if pack is not None:
-            pack.code_slices = active_slices
-            pack.preflight_report = report
+            # ---------------------------------------------------------------------
+            # Check 4: Verbatim Citation Verification (VAL-02, >= 0.98 overlap)
+            # ---------------------------------------------------------------------
+            citations_verified_100_pct, failed_citation_reasons = self.check_citations(
+                citations=all_citations,
+                doc_chunks=doc_chunks,
+                bound_repo=bound_repo,
+                principal=active_principal,
+                domain_id=active_domain,
+            )
+            check_4_passed = citations_verified_100_pct
 
-        return report
+            # ---------------------------------------------------------------------
+            # Composite Gate Evaluation & Bounce-Back Feedback Synthesis
+            # ---------------------------------------------------------------------
+            all_passed = check_1_passed and check_2_passed and check_3_passed and check_4_passed
+
+            bounce_back_feedback: str | None = None
+            if not all_passed:
+                feedback_parts = [
+                    "Pre-Flight Gate Validation FAILED ($0 Local Bounce-Back Required):"
+                ]
+                if not check_1_passed:
+                    feedback_parts.append(
+                        f"- Check 1 (Internal Symbol Resolution): Missing internal dependencies: "
+                        f"{unresolved_symbols}. Please retrieve or auto-expand these symbols "
+                        "before invoking paid execution."
+                    )
+                if not check_2_passed:
+                    feedback_parts.append(
+                        "- Check 2 (Prompt Identifier Partitioning, VAL-01): "
+                        "User prompt referenced existing repository symbols/files that are "
+                        f"missing from the context pack: {missing_reference_identifiers}. "
+                        "Please attach code slices covering these existing items."
+                    )
+                if not check_3_passed:
+                    feedback_parts.append(
+                        f"- Check 3 (Normalized RRF Score, BLK-01): Top Normalized RRF score "
+                        f"{final_rrf_score:.4f} is below threshold {self.min_rrf_score:.2f} "
+                        f"(and cross-encoder score < {self.cross_encoder_threshold:.2f}). "
+                        "Please broaden search queries or inspect retrieval ranking."
+                    )
+                if not check_4_passed:
+                    reasons_str = "; ".join(failed_citation_reasons)
+                    feedback_parts.append(
+                        "- Check 4 (Verbatim Citation Verification, VAL-02): Citations failed "
+                        f"verbatim verification: {reasons_str}. "
+                        "Ensure quotes match source documents verbatim with >=0.98 token overlap."
+                    )
+                bounce_back_feedback = "\n".join(feedback_parts)
+
+            report = PreFlightValidationReport(
+                passed=all_passed,
+                unresolved_symbols=unresolved_symbols,
+                missing_reference_identifiers=missing_reference_identifiers,
+                novel_target_identifiers=novel_target_identifiers,
+                normalized_rrf_score=final_rrf_score,
+                citations_verified_100_pct=citations_verified_100_pct,
+                auto_attached_ast_slices_count=auto_attached_count,
+                bounce_back_feedback=bounce_back_feedback,
+            )
+
+            # Mutate pack in-place if provided
+            if pack is not None:
+                pack.code_slices = active_slices
+                pack.preflight_report = report
+
+            pf_span.record_report(report)
+            return report
 
     def create_diagnostic(
         self,

@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import time
 import uuid
 from datetime import UTC, datetime
@@ -43,6 +44,7 @@ from context_scout.schemas.contracts import (
     PrincipalContext,
     VerbatimCodeSlice,
 )
+from context_scout.telemetry import ScoutTelemetryTracer
 
 logger = logging.getLogger(__name__)
 
@@ -220,14 +222,20 @@ class GitWorktreeSandbox:
                     cwd=self.repo_root,
                     capture_output=True,
                 )
+            if self.worktree_dir.exists():
+                shutil.rmtree(self.worktree_dir, ignore_errors=True)
+            if not self._is_standalone_clone:
+                subprocess.run(
+                    ["git", "worktree", "prune"],
+                    cwd=self.repo_root,
+                    capture_output=True,
+                )
                 if self.branch_name:
                     subprocess.run(
                         ["git", "branch", "-D", self.branch_name],
                         cwd=self.repo_root,
                         capture_output=True,
                     )
-            if self.worktree_dir.exists():
-                shutil.rmtree(self.worktree_dir, ignore_errors=True)
             self._is_active = False
 
 
@@ -287,81 +295,90 @@ class GeminiImplementationExecutor:
         test_cmd: list[str] | None = None,
     ) -> tuple[PatchExecutionResult, ExecutionTelemetryRecord]:
         """Runs end-to-end handoff: budget check -> patch synthesis -> sandbox -> telemetry."""
-        start_time = time.perf_counter()
+        tracer = ScoutTelemetryTracer.get_instance()
+        with tracer.trace_executor(
+            span_name="scout.executor.handoff",
+            pack=pack,
+            principal=principal,
+            model_id=self.model_id,
+            system="gemini",
+        ) as exec_span:
+            start_time = time.perf_counter()
 
-        # 1. Enforce Budget Check
-        if conn is not None or repo is not None:
-            self.check_principal_budget(principal, pack, conn=conn, repo=repo)
+            # 1. Enforce Budget Check
+            if conn is not None or repo is not None:
+                self.check_principal_budget(principal, pack, conn=conn, repo=repo)
 
-        # 2. Process Missing Context Requests if any
-        miss_events: list[dict[str, Any]] = []
-        if missing_context_requests:
-            for req in missing_context_requests:
-                miss_event = self._resolve_missing_context(req, pack, repo_root)
-                miss_events.append(miss_event.model_dump())
+            # 2. Process Missing Context Requests if any
+            miss_events: list[dict[str, Any]] = []
+            if missing_context_requests:
+                for req in missing_context_requests:
+                    miss_event = self._resolve_missing_context(req, pack, repo_root)
+                    miss_events.append(miss_event.model_dump())
 
-        # 3. Patch Synthesis (Live API or Deterministic Fallback)
-        patch_diff: str
-        if custom_patch is not None:
-            patch_diff = custom_patch
-        elif self.api_key and genai is not None:
-            patch_diff = self._generate_gemini_patch(pack, repo_root)
-        else:
-            patch_diff = self._generate_deterministic_patch(pack, repo_root)
+            # 3. Patch Synthesis (Live API or Deterministic Fallback)
+            patch_diff: str
+            if custom_patch is not None:
+                patch_diff = custom_patch
+            elif self.api_key and genai is not None:
+                patch_diff = self._generate_gemini_patch(pack, repo_root)
+            else:
+                patch_diff = self._generate_deterministic_patch(pack, repo_root)
 
-        # 4. Worktree Sandbox Execution
-        target_files = self._extract_target_files(patch_diff, pack)
-        patch_applied = False
-        lint_passed = False
-        tests_passed = False
-        confirmed = False
-        exec_details = ""
+            # 4. Worktree Sandbox Execution
+            target_files = self._extract_target_files(patch_diff, pack)
+            patch_applied = False
+            lint_passed = False
+            tests_passed = False
+            confirmed = False
+            exec_details = ""
 
-        with GitWorktreeSandbox(
-            repo_root=repo_root, require_confirmation=self.require_confirmation
-        ) as sandbox:
-            apply_ok, apply_msg = sandbox.apply_patch(patch_diff)
-            patch_applied = apply_ok
-            exec_details = apply_msg
+            with GitWorktreeSandbox(
+                repo_root=repo_root, require_confirmation=self.require_confirmation
+            ) as sandbox:
+                apply_ok, apply_msg = sandbox.apply_patch(patch_diff)
+                patch_applied = apply_ok
+                exec_details = apply_msg
 
-            if apply_ok:
-                l_ok, t_ok, verif_msg = sandbox.run_verification(
-                    lint_cmd=lint_cmd, test_cmd=test_cmd
-                )
-                lint_passed = l_ok
-                tests_passed = t_ok
-                exec_details = f"{apply_msg}\n{verif_msg}"
+                if apply_ok:
+                    l_ok, t_ok, verif_msg = sandbox.run_verification(
+                        lint_cmd=lint_cmd, test_cmd=test_cmd
+                    )
+                    lint_passed = l_ok
+                    tests_passed = t_ok
+                    exec_details = f"{apply_msg}\n{verif_msg}"
 
-                if auto_confirm and (lint_passed and tests_passed):
-                    conf_ok, conf_msg = sandbox.confirm_and_merge(confirmed=True)
-                    confirmed = conf_ok
-                    exec_details += f"\nConfirmation: {conf_msg}"
+                    if auto_confirm and (lint_passed and tests_passed):
+                        conf_ok, conf_msg = sandbox.confirm_and_merge(confirmed=True)
+                        confirmed = conf_ok
+                        exec_details += f"\nConfirmation: {conf_msg}"
 
-        verif_passed = patch_applied and lint_passed and tests_passed
-        result = PatchExecutionResult(
-            success=verif_passed,
-            patch_diff=patch_diff,
-            target_files=target_files,
-            lint_passed=lint_passed,
-            tests_passed=tests_passed,
-            verification_passed=verif_passed,
-            requires_human_confirmation=self.require_confirmation,
-            confirmed=confirmed,
-            details=exec_details,
-        )
+            verif_passed = patch_applied and lint_passed and tests_passed
+            result = PatchExecutionResult(
+                success=verif_passed,
+                patch_diff=patch_diff,
+                target_files=target_files,
+                lint_passed=lint_passed,
+                tests_passed=tests_passed,
+                verification_passed=verif_passed,
+                requires_human_confirmation=self.require_confirmation,
+                confirmed=confirmed,
+                details=exec_details,
+            )
 
-        # 5. ROI & Telemetry Calculation & Persistence
-        latency_ms = int((time.perf_counter() - start_time) * 1000)
-        telemetry = self._calculate_telemetry(pack, principal, miss_events, latency_ms)
+            # 5. ROI & Telemetry Calculation & Persistence
+            latency_ms = int((time.perf_counter() - start_time) * 1000)
+            telemetry = self._calculate_telemetry(pack, principal, miss_events, latency_ms)
 
-        if conn is not None:
-            PostgresRLSRepository().record_execution_telemetry(conn, telemetry)
-        elif isinstance(repo, InMemoryRLSRepository):
-            repo.record_execution_telemetry(telemetry)
-        elif repo is not None and conn is not None:
-            repo.record_execution_telemetry(conn, telemetry)
+            if conn is not None:
+                PostgresRLSRepository().record_execution_telemetry(conn, telemetry)
+            elif isinstance(repo, InMemoryRLSRepository):
+                repo.record_execution_telemetry(telemetry)
+            elif repo is not None and conn is not None:
+                repo.record_execution_telemetry(conn, telemetry)
 
-        return (result, telemetry)
+            exec_span.record_result(result, telemetry)
+            return (result, telemetry)
 
     def _resolve_missing_context(
         self,
@@ -431,11 +448,13 @@ class GeminiImplementationExecutor:
             orig_text = target_path.read_text(encoding="utf-8")
             orig_lines = orig_text.splitlines(keepends=True)
 
-        comment_line = (
-            f"# Context Scout Verified Implementation: {pack.user_task.strip()}\n"
-        )
+        wrapped_lines = textwrap.wrap(pack.user_task.strip(), width=72)
+        comment_lines = [
+            "# Context Scout Verified Implementation:\n",
+            *[f"# {line}\n" for line in wrapped_lines],
+        ]
         insert_pos = min(len(orig_lines), max(0, target_slice.end_line))
-        mod_lines = [*orig_lines[:insert_pos], comment_line, *orig_lines[insert_pos:]]
+        mod_lines = [*orig_lines[:insert_pos], *comment_lines, *orig_lines[insert_pos:]]
 
         diff_iterator = difflib.unified_diff(
             orig_lines,
@@ -449,7 +468,7 @@ class GeminiImplementationExecutor:
                 f"--- a/{target_slice.file_path}\n"
                 f"+++ b/{target_slice.file_path}\n"
                 f"@@ -1,1 +1,2 @@\n"
-                f"+{comment_line}"
+                f"+{''.join(comment_lines)}"
             )
         return diff_text
 

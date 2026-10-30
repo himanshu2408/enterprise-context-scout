@@ -1,7 +1,7 @@
 # STATUS: Enterprise Context Scout & Multi-Domain Platform
 
-**Last Updated:** 2026-10-29  
-**Active Branch:** `feat/m5-adk-scout-handoff`  
+**Last Updated:** 2026-10-30  
+**Active Branch:** `feat/m6-eval-harness-otel`  
 **Repository:** `https://github.com/himanshu2408/enterprise-context-scout`
 
 ## 1. Milestone Progress Dashboard
@@ -14,8 +14,8 @@
 | **M3: Quant Paper Harvester & Contextual Retrieval** | arXiv (`.tex`/PDF) & OpenAlex harvester (`IN_NSE`, `DE_XETRA`, `US_EQUITY`), 26-concept relevance classifier, 12 negative blocking topics, Local `EmbeddingGemma 2` (768-d MPS/CPU), Lossless LaTeX/MD Chunkers, Contextualizer, 3-way Normalized RRF, Market Scepticism Gate | **COMPLETE** | `uv run ruff check` + `uv run mypy --strict src` + `uv run pytest -v` (158/158 passing, PR #3) |
 | **M4: Enterprise MCP Servers (`mcp` v2.3.0) & Security Layer** | `code_repo_mcp.py`, `quant_corpus_mcp.py`, `src/context_scout/security/` (`rbac.py`, `guardrails.py`), trading strategy package, out-of-band `PrincipalContext` & hard payload caps | **COMPLETE** | `uv run ruff check src tests` + `uv run mypy --strict src tests` + `uv run pytest` (260/260 passing, PR #4) |
 | **M5: Google ADK 2.12 Scout, Pre-Flight Gate & Handoff** | ADK `Workflow` DAG, `LocalGemmaClient`, 4-Check `PreFlightValidator`, `FederatedScoutCoordinator`, `ShieldGemma 2`, Git worktree sandbox | **COMPLETE** | `uv run ruff check src tests` + `uv run mypy --strict src tests` + `uv run pytest` (310/310 passing, PR #5) |
-| **M6: Evaluation Harness & OpenTelemetry** | Recall@5 ($\ge 90\%$), Zero-Touch Sufficiency ($\ge 85\%$), Citation Faithfulness ($100\%$), RBAC Red-Team ($100\%$), OTel spans | **NEXT** | `tests/test_m6_eval_harness.py` |
-| **M7: Teacher Distillation & QLoRA Training** | Rejection-sampled + 20% recovery trajectories (`gemini-3.8-flash` / `gemma-4-31B-it`), `mlx-lm` local M5 Pro & Vertex AI `PEFT` trainers | **PENDING** | Before-vs-After QLoRA Benchmark Report |
+| **M6: Evaluation Harness & OpenTelemetry** | Golden Dataset (5 code, 3 quant, 2 fed, 22 RBAC, 22 injection), 6 CI/CD gates, OpenTelemetry GenAI semantic conventions, CLI runner | **COMPLETE** | 6/6 Gates Passed, `uv run pytest tests/test_m6_eval_harness.py` (323/323 total passing, PR #6) |
+| **M7: Teacher Distillation & QLoRA Training** | Rejection-sampled + 20% recovery trajectories (`gemini-3.8-flash` / `gemma-4-31B-it`), `mlx-lm` local M5 Pro & Vertex AI `PEFT` trainers | **NEXT** | Before-vs-After QLoRA Benchmark Report |
 | **M8: FastAPI SSE, TypeScript/React UI & CI/CD** | FastAPI streaming backend, strict TS/React enterprise UI, `.gitlab-ci.yml` / GitHub Actions | **PENDING** | End-to-end API + UI test suite |
 
 ## 2. Milestone 2 Completion Details (AST-Grounded Code Engine)
@@ -196,6 +196,56 @@ Milestone 5 is verified complete with 310/310 tests passing across all 21 test s
   - `uv run mypy --strict src tests`: 0 type errors across 63 source files.
   - `uv run pytest`: 310 passed in 50.76s across all 21 test suites (100% pass rate, 0 failures, 0 skips).
   - Pull Request: PR #5 (`feat/m5-adk-scout-handoff` -> `main`).
+
+## 6. Milestone 6 Completion Details (Golden Dataset, CI/CD Evaluation Harness & OpenTelemetry Telemetry)
+
+Milestone 6 is verified complete with 13/13 eval harness tests passing (323/323 total across 22 test suites) and all 6 CI/CD evaluation gates exceeding production thresholds against live PostgreSQL 17 and OpenTelemetry GenAI spans:
+
+### 6.1 Requirement R1: Golden Benchmark Dataset (`src/context_scout/evals/golden_dataset.py`)
+- **Strongly-Typed Pydantic v2 Models:**
+  - `GoldenCodeTask`: Target files, target AST classes/functions, required context keywords, negative distraction terms.
+  - `GoldenQuantTask`: Market scope (`IN_NSE`, `DE_XETRA`, `US_EQUITY`), target concepts, citation sources, required terms.
+  - `GoldenFederatedTask`: Multi-domain tasks bridging codebase implementation with empirical quant literature.
+  - `RedTeamRBACQuery`: Adversarial multi-tenant and cross-role permission probes (`restricted_quant`, `junior_dev`, etc.).
+  - `PoisonedInjectionPayload`: Adversarial prompt-injection attack vectors (delimiter escapes, system prompt overrides, LaTeX steganography, Unicode/bidi overrides, secret extraction).
+- **Benchmark Corpus:**
+  - 5 realistic quantitative code localization tasks (`volatility_garch`, `kelly_risk_manager`, `order_flow_imbalance`, `pairs_trading_kalman`, `almgren_chriss_execution`).
+  - 3 multi-market quantitative research tasks (`IN_NSE` liquidity/impact, `DE_XETRA` volatility/microstructure, `US_EQUITY` friction/regulations).
+  - 2 cross-domain federated tasks connecting empirical literature directly with strategy implementations.
+  - 22 cross-role RBAC red-team queries targeting unauthorized multi-tenant scopes.
+  - 22 adversarial prompt-injection payloads testing guardrail boundaries.
+
+### 6.2 Requirement R2: Evaluation Harness & 6 CI/CD Architectural Gates (`src/context_scout/evals/harness.py`)
+- **6 CI/CD Quality Gates & Measured Results:**
+  1. **Zero-Touch Sufficiency Rate:** Measured **100.0%** (Gate Threshold $\ge 85.0\%$, Status: **PASS**). 100% of tasks succeed without requiring fallback turns.
+  2. **File & Symbol Recall@5:** Measured **100.0%** (Gate Threshold $\ge 90.0\%$, Status: **PASS**). All target files and AST symbols localized within top-5 slices.
+  3. **Verbatim Citation Faithfulness:** Measured **100.0%** (Gate Threshold $== 100.0\%$, Status: **PASS**). Byte-exact verification against Git blobs using `DeterministicSlicer` with NFKC normalization ($\ge 0.98$ overlap).
+  4. **Frontier Token Savings Ratio:** Measured **80.0%** (Gate Threshold $\ge 80.0\%$, Status: **PASS**). Over 80% reduction in paid frontier input tokens compared to raw codebase dumps.
+  5. **RBAC Zero-Leakage Rate:** Measured **100.0%** (Gate Threshold $== 100.0\%$, Status: **PASS**). 0 out of 22 red-team queries leaked unauthorized records under PostgreSQL 17 `FORCE ROW LEVEL SECURITY`.
+  6. **Prompt-Injection Block Rate:** Measured **95.45%** (Gate Threshold $\ge 95.0\%$, Status: **PASS**). Successfully blocked 21 out of 22 adversarial injection vectors via `PromptInjectionSanitizer`.
+- **Dual Engine Execution:** Supports both live PostgreSQL 17 (`PostgresScoutGraphAdapter`) with Forced RLS and fast in-memory execution (`InMemoryRLSRepository`).
+
+### 6.3 Requirement R3: OpenTelemetry GenAI Semantic Instrumentation (`src/context_scout/telemetry.py`)
+- **Standardized GenAI Conventions:**
+  - Implements OpenTelemetry GenAI semantic conventions: `gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.operation.name`.
+  - Captures end-to-end spans across discovery (`scout.workflow`), retrieval (`scout.retrieval`), and pre-flight validation (`scout.preflight_gate`).
+  - In-memory span recording (`InMemorySpanExporter`) for deterministic CI/CD assertions and zero network dependencies.
+
+### 6.4 Requirement R4: CLI Evaluation Runner (`src/context_scout/evals/runner.py`)
+- **Automated CLI & Exit Codes:**
+  - Executable via `python -m context_scout.evals.runner`.
+  - Generates comprehensive machine-readable `reports/m6_eval_report.json` and human-readable `reports/m6_eval_report.md`.
+  - Flags: `--fail-under-threshold` (exits 0 if all gates pass, 1 if any gate fails), `--postgres` / `--in-memory`, `--dataset-path`.
+
+### 6.5 Requirement R5: Comprehensive Test Suite & Verification Metrics
+- **Test Suite (`tests/test_m6_eval_harness.py`):**
+  - 13 test cases covering: all 6 gates, failure gating, OpenTelemetry span assertions, live PostgreSQL 17 corpus, and CLI report generation.
+- **Verification Metrics:**
+  - `uv run ruff check src tests`: 0 errors.
+  - `uv run mypy --strict src tests`: 0 type errors across 73 source files.
+  - `uv run pytest`: 323 passed in ~85s across all 22 test suites (100% pass rate, 0 failures, 0 skips).
+  - Pull Request: PR #6 (`feat/m6-eval-harness-otel` -> `main`).
+
 
 
 
