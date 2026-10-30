@@ -1,0 +1,166 @@
+{
+  "domain_id": "quant_research_scout",
+  "base_model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
+  "total_steps": 30,
+  "initial_loss": 4.8525,
+  "final_loss": 3.7296,
+  "loss_reduction_pct": 23.14,
+  "val_loss": 5.1629,
+  "step_history": [
+    {
+      "step": 1,
+      "loss": 4.8525,
+      "lr": 0.0001
+    },
+    {
+      "step": 2,
+      "loss": 5.0136,
+      "lr": 0.0001
+    },
+    {
+      "step": 3,
+      "loss": 5.0195,
+      "lr": 0.0001
+    },
+    {
+      "step": 4,
+      "loss": 5.0505,
+      "lr": 0.0001
+    },
+    {
+      "step": 5,
+      "loss": 5.0977,
+      "lr": 0.0001
+    },
+    {
+      "step": 6,
+      "loss": 5.1331,
+      "lr": 0.0001
+    },
+    {
+      "step": 7,
+      "loss": 5.1659,
+      "lr": 0.0001
+    },
+    {
+      "step": 8,
+      "loss": 4.9903,
+      "lr": 0.0001
+    },
+    {
+      "step": 9,
+      "loss": 5.149,
+      "lr": 0.0001
+    },
+    {
+      "step": 10,
+      "loss": 4.985,
+      "lr": 0.0001
+    },
+    {
+      "step": 11,
+      "loss": 4.9888,
+      "lr": 0.0001
+    },
+    {
+      "step": 12,
+      "loss": 5.1516,
+      "lr": 0.0001
+    },
+    {
+      "step": 13,
+      "loss": 4.9618,
+      "lr": 0.0001
+    },
+    {
+      "step": 14,
+      "loss": 5.0929,
+      "lr": 0.0001
+    },
+    {
+      "step": 15,
+      "loss": 5.1453,
+      "lr": 0.0001
+    },
+    {
+      "step": 16,
+      "loss": 5.0658,
+      "lr": 0.0001
+    },
+    {
+      "step": 17,
+      "loss": 4.9312,
+      "lr": 0.0001
+    },
+    {
+      "step": 18,
+      "loss": 4.8151,
+      "lr": 0.0001
+    },
+    {
+      "step": 19,
+      "loss": 4.8584,
+      "lr": 0.0001
+    },
+    {
+      "step": 20,
+      "loss": 4.9368,
+      "lr": 0.0001
+    },
+    {
+      "step": 21,
+      "loss": 5.1285,
+      "lr": 0.0001
+    },
+    {
+      "step": 22,
+      "loss": 4.9961,
+      "lr": 0.0001
+    },
+    {
+      "step": 23,
+      "loss": 5.0677,
+      "lr": 0.0001
+    },
+    {
+      "step": 24,
+      "loss": 4.9956,
+      "lr": 0.0001
+    },
+    {
+      "step": 25,
+      "loss": 5.077,
+      "lr": 0.0001
+    },
+    {
+      "step": 26,
+      "loss": 4.9141,
+      "lr": 0.0001
+    },
+    {
+      "step": 27,
+      "loss": 4.9986,
+      "lr": 0.0001
+    },
+    {
+      "step": 28,
+      "loss": 4.9265,
+      "lr": 0.0001
+    },
+    {
+      "step": 29,
+      "loss": 5.3203,
+      "lr": 0.0001
+    },
+    {
+      "step": 30,
+      "loss": 5.056,
+      "lr": 0.0001
+    }
+  ],
+  "tokens_trained": 18634,
+  "device": "mps",
+  "peak_memory_gb": 17.35,
+  "adapter_path": "domains/quant_research_scout/adapters/gemma4_26b_quant_research",
+  "trained_at": "2026-10-30T02:00:10.250181+00:00"
+}

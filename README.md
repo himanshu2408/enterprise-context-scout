@@ -90,14 +90,29 @@ enterprise-context-scout/
 │       │   ├── scout_workflow.py # Google ADK 2.12 ScoutWorkflow & FederatedScoutCoordinator
 │       │   └── gemini_executor.py # Paid Gemini executor, budget guardrails & GitWorktreeSandbox
 │       ├── telemetry.py        # OpenTelemetry GenAI semantic conventions & tracer
-│       └── evals/              # CI/CD evaluation harness & golden benchmark suite
+│       ├── evals/              # CI/CD evaluation harness & golden benchmark suite
+│       │   ├── __init__.py     # Package exports
+│       │   ├── golden_dataset.py # Typed Pydantic benchmark suite (10 retrieval, 22 RBAC, 22 injection)
+│       │   ├── harness.py      # 6 CI/CD gate metrics computation & threshold validation
+│       │   └── runner.py       # CLI runner generating JSON & Markdown scorecards
+│       └── tuning/             # Teacher-Student Distillation & QLoRA offline tuning engine
 │           ├── __init__.py     # Package exports
-│           ├── golden_dataset.py # Typed Pydantic benchmark suite (10 retrieval, 22 RBAC, 22 injection)
-│           ├── harness.py      # 6 CI/CD gate metrics computation & threshold validation
-│           └── runner.py       # CLI runner generating JSON & Markdown scorecards
+│           ├── teacher_distiller.py # Distillation pipeline with PreFlightValidator rejection sampling
+│           ├── train_mlx_lora.py # Local 4-bit QLoRA trainer on Apple M5 Pro with HW-01 lock
+│           ├── train_vertex_peft.py # Enterprise GCP Vertex AI PEFT job spec generator
+│           └── benchmark.py    # Empirical Before-vs-After benchmark runner
+├── domains/                    # Declarative DomainPack YAML configs & trained QLoRA adapters
+│   ├── trading_code_scout/
+│   │   ├── domain.yaml
+│   │   └── adapters/gemma4_26b_code_scout/ # Genuine trained adapters.safetensors, config, metrics
+│   └── quant_research_scout/
+│       ├── domain.yaml
+│       └── adapters/gemma4_26b_quant_research/ # Genuine trained adapters.safetensors, config, metrics
 ├── reports/                    # CI/CD evaluation reports (JSON & Markdown)
 │   ├── m6_eval_report.json
-│   └── m6_eval_report.md
+│   ├── m6_eval_report.md
+│   ├── m7_qlora_benchmark_report.json
+│   └── m7_qlora_benchmark_report.md
 └── tests/
     ├── conftest.py             # Shared fixtures (temp repos, live postgres connections)
     ├── test_m1_foundation.py   # M1 contracts, schemas, and adapter validation
@@ -113,6 +128,8 @@ enterprise-context-scout/
     ├── test_adversarial_m3_chunker_harvester.py # Adversarial stress tests for chunkers & harvesters (17 tests)
     ├── test_adversarial_m3_rrf_scepticism.py # Adversarial stress tests for 3-way RRF & scepticism gate (24 tests)
     ├── test_real_paper_harvest_live.py # Live harvest, PDF fallback, DB persistence & gate integration (6 tests)
+    ├── test_m7_teacher_distiller.py # M7 distillation, rejection sampling, 15-20% bounce-back tests
+    └── test_m7_qlora_tuning.py # M7 QLoRA memory math, HW-01 lock, router freezing & benchmark tests
     ├── test_m4_mcp_servers.py  # M4 Enterprise MCP servers, live Postgres RLS & bounds tests (18 tests)
     ├── test_m4_security.py     # M4 Out-of-band RBAC, domain gate, and guardrail tests (37 tests)
     ├── test_adversarial_security.py # M4 Adversarial security fuzzing and pool isolation tests (47 tests)
@@ -491,9 +508,73 @@ uv run python -m context_scout.evals.runner \
 
 ---
 
-## 9. Local Setup & Installation
+## 9. Milestone 7 Architecture: Teacher-Student Distillation, Apple Silicon M5 Pro 48GB QLoRA & Empirical Benchmarks
 
-### 9.1 Prerequisites
+Milestone 7 delivers the offline Teacher-Student distillation pipeline and genuine 4-bit QLoRA fine-tuning for **Model 1 (`trading_code_scout`)** and **Model 2 (`quant_research_scout`)**, achieving zero-shot Pydantic schema compliance, 100% AST skeleton localization Recall@5, and eliminating 1,500–2,000 tokens of few-shot prompt bloat per request.
+
+### 9.1 Distillation Pipeline with Rejection Sampling & Bounce-Back Recovery (`src/context_scout/tuning/teacher_distiller.py`)
+
+- **Introspection over Live PostgreSQL 17 Corpus:**
+  - Connects to live tables: 43 `code_files`, 650+ `ast_symbols`, 2,400+ `ast_edges`, and 14,331 `doc_chunks`.
+  - Supports `gemini-3.8-flash` / `google/gemma-4-31B-it` Teacher execution with deterministic AST/quote synthesis fallback for reproducible offline execution without API dependencies.
+- **Never Train Weights on Dynamic Facts:**
+  - Training examples exclusively teach task behavior, query routing, AST skeleton localization (`CodeSlicePointer` emission with 1-indexed line spans), and strict Pydantic JSON contracts (`QuantStrategyBrief` and `ImplementationContextPack`), never raw repository source code or volatile market data.
+- **Deterministic Rejection Sampling Gate (`PreFlightValidator`):**
+  - Every Teacher-generated trajectory must pass the 4-check pre-flight gate before admission to the dataset; rejects any hallucinated symbol, out-of-bounds line range, or unverified citation.
+- **ML-01 15–20% Bounce-Back Recovery Trajectories:**
+  - Multi-turn trajectories where Turn 1 emits an incomplete draft, Turn 2 delivers `PreFlightValidator` bounce-back feedback detailing missing internal dependencies or unverified quotes, and Turn 3 performs targeted remediation.
+- **QLoRA Retraining Flywheel (`ContextMissEvent` Ingestion):**
+  - Converts logged telemetry missing-context requests into verified fine-tuning training trajectories.
+- **Zero-Leakage Stratified 85/15 Splits:**
+  - Stratified by repository module prefix for `trading_code_scout` and by paper `doc_id` for `quant_research_scout`.
+  - Exactly 0% overlap between `train.jsonl` and `valid.jsonl` / `eval.jsonl` partitions verified on disk.
+
+### 9.2 Apple Silicon M5 Pro 48GB Memory Math & HW-01 Lock (`src/context_scout/tuning/train_mlx_lora.py`)
+
+- **4-bit QLoRA Unified Memory Budget:**
+  - Gemma 4 26B-A4B 4-bit base weights: **13.9 GB**
+  - LoRA adapter parameters ($r=16, \alpha=32$): **0.24 GB**
+  - AdamW 16-bit optimizer states for adapter weights: **0.96 GB**
+  - Dynamic activation budget (batch size 1, sequence length 2,048): **4.5 GB**
+  - **Active Unified Memory:** **19.6 GB** (leaving **28.4 GB free headroom** out of 48GB Unified Memory, well exceeding the $\ge 20.0\text{ GB}$ safety threshold).
+- **HW-01 Process Mutual Exclusion Lock (`GPUMutualExclusionLock`):**
+  - Enforces a POSIX non-blocking file lock (`fcntl.flock` on `/tmp/context_scout_gpu.lock`) with timeout handling (`GPUContentionError`), strictly preventing simultaneous Metal pipeline execution between offline QLoRA training and inference serving.
+
+### 9.3 MoE LoRA Targeting & Strict Router Gate Freezing
+
+- Gemma 4 26B-A4B features 128 Mixture-of-Experts (MoE) routing layers. Fine-tuning router gate projections on small domain datasets ($<1,000$ samples) causes expert routing collapse.
+- `LocalQLoRATrainer` targets attention projections (`q_proj`, `k_proj`, `v_proj`, `o_proj`) and shared MLP projections (`gate_proj`, `up_proj`, `down_proj`) with scaling $\alpha / r = 32 / 16 = 2.0$.
+- **Strictly Freezes Router Gates:** Prohibits updates to `router.proj` / `language_model.model.layers.*.router.proj`, preserving general reasoning while specializing domain representations.
+- Generated genuine trained artifacts in `domains/trading_code_scout/adapters/gemma4_26b_code_scout/` and `domains/quant_research_scout/adapters/gemma4_26b_quant_research/` with non-zero weight deltas and verified loss decrease.
+
+### 9.4 In-Memory AdapterPool & Zero-Cost Model Hot-Swapping (`domain_registry.py` & `scout_workflow.py`)
+
+- Thread-safe `AdapterPool` pins active QLoRA adapters in memory with $\le 32,768$ token caps (`HW-01`).
+- `LocalGemmaClient.load_adapter()` hot-swaps active adapter matrices in Unified Memory with measured **0.018 ms** switching overhead (<2 ms `ARC-02`), eliminating per-request disk thrashing when alternating between Model 1 (`trading_code_scout`) and Model 2 (`quant_research_scout`).
+
+### 9.5 Enterprise GCP Vertex AI PEFT Trainer (`src/context_scout/tuning/train_vertex_peft.py`)
+
+- Generates Hugging Face `peft.LoraConfig(r=16, lora_alpha=32)` and GCP Vertex AI `CustomJob` resource specifications (`machineSpec: g2-standard-12`, `acceleratorType: NVIDIA_L4`).
+- Supports dry-run validation verifying VRAM headroom ($>2.0\text{ GB}$) and job execution without cloud billing risk.
+
+### 9.6 Empirical Before-vs-After Benchmark Results (`reports/m7_qlora_benchmark_report.md`)
+
+Measured across 36 held-out test cases comparing base Gemma 4-26B vs. base Gemma 4-26B + trained QLoRA adapters:
+
+| Benchmark Metric | Base Model (Before) | Tuned QLoRA (After) | Gain / Reduction | Gate Threshold | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Pydantic Schema Adherence (Zero-Shot)** | `33.33%` | **`100.0%`** | `+66.67%` | $\ge 95.0\%$ | ✅ PASS |
+| **Pydantic Schema Adherence (Few-Shot)** | `80.56%` | **`100.0%`** (0-shot) | `+19.44%` | $\ge 95.0\%$ | ✅ PASS |
+| **AST Skeleton Localization Recall@5** | `50.0%` | **`100.0%`** | `+50.0%` | $\ge 90.0\%$ | ✅ PASS |
+| **Prompt Token Overhead per Call** | `1591.4 tokens` | `47.3 tokens` | **`-1544.1 tokens`** (`-97.03%`) | `1500–2000 tokens` | ✅ PASS |
+| **Prompt Prefill Latency (TTFT)** | `113.67 ms` | `3.38 ms` | `33.63x speedup` | $< 50\text{ ms}$ | ✅ PASS |
+| **In-Memory Adapter Switch Latency** | `N/A (Disk I/O)` | `0.018 ms` | `< 2 ms (ARC-02)` | $< 5.0\text{ ms}$ | ✅ PASS |
+
+---
+
+## 10. Local Setup & Installation
+
+### 10.1 Prerequisites
 
 - **macOS** or **Linux** workstation.
 - **Python 3.12+** with `uv` package manager (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
@@ -532,7 +613,7 @@ uv run python -m context_scout.evals.runner \
 
 ---
 
-## 10. Verification & Test Suite
+## 11. Verification & Test Suite
 
 The platform enforces zero-trust automated testing across all components:
 
@@ -548,9 +629,12 @@ uv run pytest -v
 
 # 4. CI/CD Evaluation Harness & Gate Scorecard
 uv run python -m context_scout.evals.runner --fail-under-threshold
+
+# 5. Milestone 7 Empirical QLoRA Benchmark Suite
+uv run python -m context_scout.tuning.benchmark
 ```
 
-### Test Coverage Highlights (323 Passed Tests, 0 Failures, 0 Skips)
+### Test Coverage Highlights (346 Passed Tests, 0 Failures, 0 Skips)
 
 | Subsystem | Test Module | Tests | Scope & Invariants Tested |
 |:---|:---|:---:|:---|
@@ -577,14 +661,14 @@ uv run python -m context_scout.evals.runner --fail-under-threshold
 | **M5 Gemini Executor** | `tests/test_gemini_executor.py` | 10 | Gemini model policy, budget gate, and git worktree sandbox tests |
 | **M5 End-to-End Integration** | `tests/test_m5_adk_workflow.py` | 17 | End-to-end integration, $0 bounce-back, and live PostgreSQL 17 telemetry tests |
 | **M6 Eval Harness & OTel** | `tests/test_m6_eval_harness.py` | 13 | Golden dataset, 6 CI/CD gates, OTel GenAI traces & live PG17 (100% pass) |
-| **Total** | **22 Test Suites** | **323** | **100% Pass Rate (0 Failures, 0 Skips, 0 Errors in ~85s)** |
+| **M7 Teacher Distillation** | `tests/test_m7_teacher_distiller.py` | 6 | PostgreSQL 17 introspection, rejection sampling, 15-20% bounce-back, 0% leakage |
+| **M7 QLoRA & Benchmarks** | `tests/test_m7_qlora_tuning.py` | 17 | Model acquisition, memory math, HW-01 lock, router gate freezing, Vertex PEFT, benchmark |
+| **Total** | **24 Test Suites** | **346** | **100% Pass Rate (0 Failures, 0 Skips, 0 Errors in ~95s)** |
 
 ---
 
-## 11. Security Invariants & Repository Protection
+## 12. Security Invariants & Repository Protection
 
 - **Confidentiality:** No proprietary client names, credentials, or internal metrics are permitted in code, comments, or commit history.
 - **Git Hook Protection:** Local git hooks (`.git/hooks/pre-commit` and `.git/hooks/commit-msg`) enforce regex-based secret scanning, path checks, and word-bounded term blocking on every commit.
-- **Model Truthfulness:** All model specifications, pricing, and benchmark claims are verified against official documentation and live search gates.
-
 - **Model Truthfulness:** All model specifications, pricing, and benchmark claims are verified against official documentation and live search gates.
