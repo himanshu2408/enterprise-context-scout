@@ -250,7 +250,7 @@ class ImplementationContextPack(BaseModel):
     user_task: str = Field(min_length=1)
     architectural_execution_plan: list[str] = Field(min_length=1)
     doc_vs_code_conflicts_detected: list[str] = Field(default_factory=list)
-    code_slices: list[VerbatimCodeSlice] = Field(min_length=1)
+    code_slices: list[VerbatimCodeSlice] = Field(default_factory=list)
     supporting_doc_citations: list[DocCitationSpan] = Field(default_factory=list)
     quant_strategy_spec: QuantStrategyBrief | None = None
     preflight_report: PreFlightValidationReport

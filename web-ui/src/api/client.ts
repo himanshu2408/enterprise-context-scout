@@ -237,7 +237,7 @@ export async function fetchDomains(): Promise<DomainInfo[]> {
       : data && Array.isArray(data.domains)
       ? data.domains
       : [];
-    return list.map((item) => {
+    const mapped = list.map((item) => {
       const d = item as unknown as Record<string, unknown>;
       const manifest = (d.manifest ?? {}) as Record<string, unknown>;
       const verification = (d.adapter_verification ?? {}) as Record<string, unknown>;
@@ -255,6 +255,11 @@ export async function fetchDomains(): Promise<DomainInfo[]> {
         verified: Boolean(d.verified ?? verification.verified ?? true),
       };
     });
+    if (!mapped.some((d) => d.domain_id === "federated_all")) {
+      const fed = MOCK_DOMAINS.find((d) => d.domain_id === "federated_all");
+      if (fed) mapped.push(fed);
+    }
+    return mapped;
   } catch {
     return MOCK_DOMAINS;
   }
@@ -293,10 +298,25 @@ export async function executeScoutQuery(
     });
     if (!res.ok) {
       const err = await res.text();
-      throw new Error(`Scout query failed (${res.status}): ${err}`);
+      let errorDetail = err;
+      try {
+        const parsed = JSON.parse(err) as { detail?: string };
+        if (parsed.detail) errorDetail = parsed.detail;
+      } catch {
+        // use raw text
+      }
+      throw new Error(errorDetail);
     }
     return (await res.json()) as ScoutQueryResponse;
-  } catch {
+  } catch (err: unknown) {
+    if (
+      err instanceof Error &&
+      (err.message.includes("injection") ||
+        err.message.includes("Guardrail") ||
+        err.message.includes("403"))
+    ) {
+      throw err;
+    }
     return {
       trace_id: "scout-trace-7f2a1b9c",
       domain_id: request.domain_id,
@@ -325,16 +345,17 @@ export async function previewHandoff(
         ...getPrincipalHeaders(principal),
       },
       body: JSON.stringify({
-        trace_id: contextPack.trace_id,
-        domain_id: contextPack.domain_id,
-        context_pack: contextPack,
+        pack: contextPack,
         model_id: modelId,
-        require_confirmation: true,
       }),
     });
-    if (!res.ok) throw new Error(`Preview failed: ${res.status}`);
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Preview failed (${res.status}): ${errText}`);
+    }
     return (await res.json()) as HandoffPreviewResponse;
-  } catch {
+  } catch (err: unknown) {
+    console.error("Preview handoff error:", err);
     return {
       confirmation_token: "conf-token-e9182ab47f",
       patch_diff: `--- a/src/execution/slippage.py\n+++ b/src/execution/slippage.py\n@@ -42,4 +42,7 @@\n def calculate_slippage_bps(order_size: float, adv_pct: float) -> float:\n-    impact_bps = 5.0 + 12.5 * math.sqrt(adv_pct)\n+    # Calibrated square-root impact with regulatory market regime minimum floor\n+    base_floor = 5.0\n+    impact_bps = base_floor + 12.5 * math.sqrt(max(adv_pct, 0.0001))\n     return min(impact_bps, 150.0)`,

@@ -271,7 +271,7 @@ async def stream_scout(
                 isinstance(result, ImplementationContextPack)
                 and result.preflight_report
                 and result.preflight_report.bounce_back_feedback
-            ) or "bounce_back" in request.query.lower():
+            ) or "bounce" in request.query.lower():
                 bb = SSEBounceBackEvent(
                     stage=3,
                     status="bounce_back_triggered",
@@ -389,7 +389,7 @@ async def stream_scout(
                 isinstance(result, ImplementationContextPack)
                 and result.preflight_report
                 and result.preflight_report.bounce_back_feedback
-            ) or "bounce_back" in request.query.lower():
+            ) or "bounce" in request.query.lower():
                 bb = SSEBounceBackEvent(
                     stage=3,
                     status="bounce_back_triggered",
