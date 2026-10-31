@@ -1,7 +1,7 @@
 # STATUS: Enterprise Context Scout & Multi-Domain Platform
 
-**Last Updated:** 2026-10-30  
-**Active Branch:** `feat/m7-qlora-distillation-training`  
+**Last Updated:** 2026-10-31  
+**Active Branch:** `feat/m8-fastapi-sse-ui-ci`  
 **Repository:** `https://github.com/himanshu2408/enterprise-context-scout`
 
 ## 1. Milestone Progress Dashboard
@@ -16,7 +16,7 @@
 | **M5: Google ADK 2.12 Scout, Pre-Flight Gate & Handoff** | ADK `Workflow` DAG, `LocalGemmaClient`, 4-Check `PreFlightValidator`, `FederatedScoutCoordinator`, `ShieldGemma 2`, Git worktree sandbox | **COMPLETE** | `uv run ruff check src tests` + `uv run mypy --strict src tests` + `uv run pytest` (310/310 passing, PR #5) |
 | **M6: Evaluation Harness & OpenTelemetry** | Golden Dataset (5 code, 3 quant, 2 fed, 22 RBAC, 22 injection), 6 CI/CD gates, OpenTelemetry GenAI semantic conventions, CLI runner | **COMPLETE** | 6/6 Gates Passed, `uv run pytest tests/test_m6_eval_harness.py` (323/323 total passing, PR #6) |
 | **M7: Teacher Distillation & QLoRA Training** | Rejection-sampled + 20% recovery trajectories (`TeacherDistiller`), Apple M5 Pro 48GB QLoRA math (19.6 GB active / 28.4 GB headroom), MoE router gate freezing, `HW-01` lock, Vertex PEFT, AdapterPool wiring, Before-vs-After benchmark report | **COMPLETE** | 23/23 Tests Passed, `reports/m7_qlora_benchmark_report.md` (PR #7) |
-| **M8: FastAPI SSE, TypeScript/React UI & CI/CD** | FastAPI streaming backend, strict TS/React enterprise UI, `.gitlab-ci.yml` / GitHub Actions | **NEXT** | End-to-end API + UI test suite |
+| **M8: FastAPI SSE, TypeScript/React UI & CI/CD** | FastAPI streaming backend (7 endpoints, SEC-04 RBAC, ShieldGemma 2, $0 bounce-back), strict TS/React UI (26/26 tests, zero any), .gitlab-ci.yml (6 stages, pgvector pg17, WIF Cloud Run) | **COMPLETE** | 458/458 Python Tests Passed (0 skips) + 26/26 Web UI Tests Passed + 6/6 Eval Gates (PR #8) |
 
 ## 2. Milestone 2 Completion Details (AST-Grounded Code Engine)
 
@@ -310,6 +310,71 @@ Generated `reports/m7_qlora_benchmark_report.json` and `reports/m7_qlora_benchma
 - `uv run pytest tests/test_m7_qlora_tuning.py tests/test_m7_teacher_distiller.py -v`: 24/24 passed in 17.03s (0 skipped).
 - Total test suite: 432 passed across 24 test suites (0 skipped).
 - Pull Request: PR #7 (`feat/m7-qlora-distillation-training` -> `main`).
+
+---
+
+## 8. Milestone 8 Completion Details (FastAPI SSE Backend, Strict TypeScript/React UI & GitLab CI/CD Pipeline)
+
+Milestone 8 is verified complete with 25/25 integration tests passing in `tests/test_m8_fastapi_sse.py` (458/458 total Python tests across 25 test suites with 0 skips) and 26/26 web UI tests passing in Vitest (`web-ui/`):
+
+### 8.1 Requirement R1: Branch Foundation & Pinned Dependencies
+- **PR #7 Merged:** M7 QLoRA Distillation & Training merged into `main` (commit `658d0f4`).
+- **Feature Branch:** Active feature branch `feat/m8-fastapi-sse-ui-ci` branched directly from `main`.
+- **Dependencies Pinned:** `fastapi>=0.115.0,<1.0.0` and `uvicorn[standard]>=0.32.0,<1.0.0` added to production dependencies; `httpx>=0.28.0,<1.0.0` added to dev dependencies.
+- **Contract Extension:** `RoleType` in `contracts.py` extended with `COMPLIANCE_OFFICER = "compliance_officer"`.
+
+### 8.2 Requirement R2: FastAPI SSE Streaming Backend (`src/context_scout/api/`)
+- **Factory & Middlewares (`main.py`):**
+  - Application factory `create_app() -> FastAPI` and module-level `app = create_app()` for ASGI server execution (`uvicorn context_scout.api.main:app`).
+  - CORS middleware supporting full web-ui origin methods and headers.
+  - OpenTelemetry HTTP request tracing middleware recording HTTP method, path, principal ID, and status code spans via `ScoutTelemetryTracer`.
+- **Out-of-Band Principal Extraction (`dependencies.py`, `SEC-04`):**
+  - Extracts `X-Principal-User-Id`, `X-Principal-Role`, and `X-Principal-Scopes` into immutable `PrincipalContext` bound to `contextvars.ContextVar` out-of-band.
+  - Rejects invalid roles (`HTTP 400`) and ignores prompt-body attempts to alter security principal.
+- **7 Production Endpoints Implemented:**
+  1. `GET /api/v1/health`: Live database connectivity probe, registered domains, active `AdapterPool` verification, and Apple Silicon M5 Pro 48GB unified memory hardware profile.
+  2. `GET /api/v1/domains`: DomainPack manifests (`trading_code_scout`, `quant_research_scout`), live QLoRA adapter verification (`r=16, alpha=32`, `safetensors_bytes > 0`), and training metrics.
+  3. `POST /api/v1/scout/stream`: Server-Sent Events (`text/event-stream`) streaming 4 sequential stage transitions (`stage_update` for Stages 1–4), `$0` local bounce-back self-correction events (`paid_tokens_spent=0, cost_usd=0.0`), and completion event (`context_pack_ready`).
+  4. `POST /api/v1/scout/query`: Synchronous JSON execution through `ScoutWorkflow` or `FederatedScoutCoordinator`, returning full verified `ImplementationContextPack`, `PreFlightValidationReport`, OpenTelemetry trace attributes, and token-savings breakdown.
+  5. `POST /api/v1/handoff/preview`: Invokes `GeminiImplementationExecutor` in preview mode (`require_confirmation=True`), generating proposed unified diff, cost telemetry, and confirmation token without mutating repository files.
+  6. `POST /api/v1/handoff/apply`: Enforces explicit human confirmation (`confirmed: True` + valid token) before applying and verifying patch in `GitWorktreeSandbox`, invalidating the token upon consumption.
+  7. `GET /api/v1/telemetry/roi`: Aggregates ROI token savings and loads Milestone 6 evaluation report (`reports/m6_eval_report.json`) and Milestone 7 QLoRA benchmark report (`reports/m7_qlora_benchmark_report.json`).
+
+### 8.3 Requirement R3: Strict TypeScript + React Enterprise UI (`web-ui/`)
+- **Strict Tooling & Zero-Any Discipline:**
+  - Vite + React 18 + TypeScript with `"strict": true`, `"noImplicitAny": true`, `"strictNullChecks": true`, `"noUnusedLocals": true`.
+  - Zero `any` anywhere in `web-ui/src/` (`grep -rn ": any" web-ui/src/` returns 0 matches).
+- **Enterprise Components (`web-ui/src/components/`):**
+  - `RoleSwitcher.tsx`: Role selector (`engineer`, `quant_researcher`, `product_manager`, `compliance_officer`) displaying active RBAC scopes.
+  - `DomainSelector.tsx`: Domain pack and adapter selector with live adapter metrics.
+  - `ScoutConsole.tsx`: Enterprise query console with 4-stage stepper, execution mode toggle (SSE vs. REST), and ShieldGemma indicator.
+  - `CitationInspector.tsx`: Tabbed inspector for byte-exact code slices and quant strategy briefs with transaction cost friction badges.
+  - `TokenSavingsMeter.tsx`: Real-time ROI and token-savings dashboard tracking local tokens explored ($0.00) vs. compressed pack tokens sent.
+  - `GeminiDiffModal.tsx`: Handoff preview modal enforcing explicit human approval before sandbox application.
+- **Frontend Verification:**
+  - 26/26 tests passing across 7 Vitest suites (`npm run test`).
+  - Production build verified: `npm run build` succeeds (`dist/` generated).
+
+### 8.4 Requirement R4: Production GitLab CI/CD Pipeline (`.gitlab-ci.yml`)
+- **6 Ordered Stages:** `lint`, `typecheck`, `test`, `eval-gate`, `ui-verify`, `deploy`.
+- **Services & DB Bootstrap:** `pgvector/pgvector:pg17` container with automated SQL bootstrap (`sql/001_init_schema.sql`) and Forced RLS setup.
+- **Automated Gate Enforcement:**
+  - `python-lint`: Ruff syntax/style check + Prohibited terms scanner (`! git grep -i -E ...`).
+  - `python-typecheck`: Mypy strict mode across `src` and `tests`.
+  - `python-pytest`: Full pytest test suite against live PostgreSQL 17 + pgvector service.
+  - `evaluation-quality-gate`: Automated 6-gate architectural evaluation runner (`python -m context_scout.evals.runner --in-memory`).
+  - `web-ui-verify`: Node.js 22 container executing `npm ci`, lint, typecheck, test, and build.
+  - `deploy-vertex-cloudrun-wif`: Keyless Google Cloud Workload Identity Federation (WIF) OIDC deployment to Cloud Run.
+
+### 8.5 Requirement R5: Comprehensive Verification Metrics
+- `uv run ruff check src tests`: 0 errors.
+- `uv run mypy --strict src tests`: 0 type errors across 93 source files.
+- `uv run pytest -v tests/test_m8_fastapi_sse.py`: 25/25 passed in 9.03s (0 skipped).
+- `uv run pytest -v`: 458 passed across 25 test suites (100% pass rate, 0 failures, 0 skips).
+- `cd web-ui && npm run lint && npm run typecheck && npm run test && npm run build`: 26/26 passed, 0 warnings.
+- `! git grep -i -E "(\b[F]DE\b|Forward [D]eployed Engineer|interview [g]uide|interview [d]efense|/Users/[h]imanshu)"`: 0 matches found.
+- Pull Request: PR #8 (`feat/m8-fastapi-sse-ui-ci` -> `main`).
+
 
 
 
