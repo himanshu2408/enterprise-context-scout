@@ -40,13 +40,15 @@ When engineering and quantitative research teams deploy commercial frontier mode
 enterprise-context-scout/
 ├── pyproject.toml              # Modern Python 3.12+ project config (ruff, mypy, pytest)
 ├── uv.lock                     # Deterministic pinned dependency lockfile
-├── .gitlab-ci.yml              # Production 6-stage CI/CD pipeline with pgvector & WIF
+├── .github/workflows/ci.yml    # Production 6-stage GitHub Actions CI/CD pipeline with pgvector & WIF
 ├── docker-compose.yml          # PostgreSQL 17 + pgvector container definition
 ├── sql/
 │   └── 001_init_schema.sql     # PostgreSQL 17 DDL: tables, indexes, and FORCE RLS policies
 ├── src/
 │   └── context_scout/
 │       ├── __init__.py         # Package root
+│       ├── config.py           # Environment config & runtime hardware auto-detection
+│       ├── cli.py              # CLI (`uv run context-scout`) to scaffold, distill & train custom domains
 │       ├── api/                # FastAPI SSE streaming backend (M8)
 │       │   ├── __init__.py
 │       │   ├── main.py         # App factory, CORS middleware, OTel request tracing
@@ -524,49 +526,55 @@ uv run python -m context_scout.evals.runner \
 
 ---
 
-## 9. Milestone 7 Architecture: Teacher-Student Distillation, Apple Silicon M5 Pro 48GB QLoRA & Empirical Benchmarks
+## 9. Milestone 7 Architecture: Teacher-Student Distillation, 1-Base-Model + Multi-LoRA Hot-Swapping & Custom Domain CLI
 
-Milestone 7 delivers the offline Teacher-Student distillation pipeline and genuine 4-bit QLoRA fine-tuning for **Model 1 (`trading_code_scout`)** and **Model 2 (`quant_research_scout`)**, achieving zero-shot Pydantic schema compliance, 100% AST skeleton localization Recall@5, and eliminating 1,500–2,000 tokens of few-shot prompt bloat per request.
+Milestone 7 delivers the offline Teacher-Student distillation pipeline, genuine 4-bit RAG-conditioned QLoRA fine-tuning for **`trading_code_scout`** and **`quant_research_scout`**, an in-memory multi-adapter pool over a single frozen base model, and a 3-command CLI so any developer can train a specialized agent on their own codebase or document corpus.
 
-### 9.1 Distillation Pipeline with Rejection Sampling & Bounce-Back Recovery (`src/context_scout/tuning/teacher_distiller.py`)
+### 9.1 How the 1-Base-Model + Multi-Adapter Architecture Runs Underneath (`AdapterPool` & `LocalGemmaClient`)
+
+Instead of running two separate 26B models (which would consume $>31\text{ GB}$ of memory and force slow disk reloads), the platform loads **only 1 frozen base model** (`google/gemma-4-26B-A4B-it`, `15.6 GB` in 4-bit quantization) and hot-swaps lightweight domain QLoRA adapters in memory:
+
+- **Single Shared Base Model (`15.6 GB`):** `google/gemma-4-26B-A4B-it` (MoE: 25.2B total / 3.8B active parameters per token) stays resident once in unified/GPU memory.
+- **2 Lightweight Domain QLoRA Adapters (`9.97 MB` each, `54` tensors):**
+  1. **Adapter 1 — `gemma4_26b_code_scout` (`domains/trading_code_scout`):** Trained on AST symbol graphs, 1-hop dependency closures, and repository file slices to emit exact `CodeSlicePointer` JSON objects.
+  2. **Adapter 2 — `gemma4_26b_quant_research` (`domains/quant_research_scout`):** Trained on retrieved academic paper chunks and market friction rules to emit verified `QuantStrategyBrief` and `DocCitationSpan` JSON objects.
+- **Sub-Millisecond Hot-Swapping (`0.018 ms`):** `AdapterPool` pins all registered domain adapters (`9.97 MB` each) in memory. When a request targets `trading_code_scout`, `quant_research_scout`, or `federated_all` (which runs both sequentially), `LocalGemmaClient.load_adapter()` switches the active low-rank pointer ($h = W_0 x + \frac{\alpha}{r} B A x$) in **0.018 ms** without reloading `W_0`.
+
+### 9.2 Distillation Pipeline with Rejection Sampling & Bounce-Back Recovery (`src/context_scout/tuning/teacher_distiller.py`)
 
 - **Introspection over Live PostgreSQL 17 Corpus:**
-  - Connects to live tables: 43 `code_files`, 650+ `ast_symbols`, 2,400+ `ast_edges`, and 14,331 `doc_chunks`.
+  - Connects to live tables: 91 `code_files`, 841 `ast_symbols`, 11,022 `ast_edges`, and 14,323 `doc_chunks`.
   - Supports `gemini-3.8-flash` / `google/gemma-4-31B-it` Teacher execution with deterministic AST/quote synthesis fallback for reproducible offline execution without API dependencies.
-- **Never Train Weights on Dynamic Facts:**
-  - Training examples exclusively teach task behavior, query routing, AST skeleton localization (`CodeSlicePointer` emission with 1-indexed line spans), and strict Pydantic JSON contracts (`QuantStrategyBrief` and `ImplementationContextPack`), never raw repository source code or volatile market data.
+- **RAG-Conditioned Prompts (Never Memorizing Dynamic Facts):**
+  - Every training prompt embeds the retrieved candidate context (`[RETRIEVED_AST_CANDIDATES]` or `[RETRIEVED_DOC_CHUNKS]`), training the adapter to extract grounded symbols, line spans, and verbatim quotes from retrieved context rather than memorizing static repository text.
 - **Deterministic Rejection Sampling Gate (`PreFlightValidator`):**
   - Every Teacher-generated trajectory must pass the 4-check pre-flight gate before admission to the dataset; rejects any hallucinated symbol, out-of-bounds line range, or unverified citation.
 - **ML-01 15–20% Bounce-Back Recovery Trajectories:**
   - Multi-turn trajectories where Turn 1 emits an incomplete draft, Turn 2 delivers `PreFlightValidator` bounce-back feedback detailing missing internal dependencies or unverified quotes, and Turn 3 performs targeted remediation.
-- **QLoRA Retraining Flywheel (`ContextMissEvent` Ingestion):**
-  - Converts logged telemetry missing-context requests into verified fine-tuning training trajectories.
 - **Zero-Leakage Stratified 85/15 Splits:**
-  - Stratified by repository module prefix for `trading_code_scout` and by paper `doc_id` for `quant_research_scout`.
-  - Exactly 0% overlap between `train.jsonl` and `valid.jsonl` / `eval.jsonl` partitions verified on disk.
+  - Stratified by repository module prefix for `trading_code_scout` and by paper `doc_id` for `quant_research_scout`, with 0% overlap between `train.jsonl` and `valid.jsonl`.
 
-### 9.2 Apple Silicon M5 Pro 48GB Memory Math & HW-01 Lock (`src/context_scout/tuning/train_mlx_lora.py`)
+### 9.3 Runtime Hardware Auto-Detection & Memory Math (`src/context_scout/config.py` & `train_mlx_lora.py`)
 
-- **4-bit QLoRA Unified Memory Budget:**
-  - Gemma 4 26B-A4B 4-bit base weights: **13.9 GB**
-  - LoRA adapter parameters ($r=16, \alpha=32$): **0.24 GB**
+- **Zero Hardware Hardcoding (`detect_hardware_profile()`):**
+  - At startup, `detect_hardware_profile()` automatically queries the host OS (`sysctl` on macOS, `torch.cuda` / `/proc/meminfo` on Linux) to detect CPU/GPU model, physical RAM/VRAM GB, quantization backend (`4-bit (MLX)`, `4-bit (CUDA)`, or `4-bit (PyTorch)`), and dynamically sets a safe `max_kv_tokens` ceiling (`8,192` for $<24\text{ GB}$, `16,384` for $24\text{–}35\text{ GB}$, `32,768` for $\ge 36\text{ GB}$).
+  - Supports explicit `.env` overrides (`SCOUT_HARDWARE_DEVICE`, `SCOUT_HARDWARE_MEMORY_GB`, `SCOUT_LOCAL_MAX_KV_TOKENS`) for containerized or custom deployments.
+- **4-bit QLoRA Memory Budget (`gemma-4-26B-A4B-it`):**
+  - 4-bit base weights: **13.9–15.6 GB**
+  - LoRA adapter parameters ($r=16, \alpha=32$): **9.97 MB** (`0.24 GB` with buffers)
   - AdamW 16-bit optimizer states for adapter weights: **0.96 GB**
-  - Dynamic activation budget (batch size 1, sequence length 2,048): **4.5 GB**
-  - **Active Unified Memory:** **19.6 GB** (leaving **28.4 GB free headroom** out of 48GB Unified Memory, well exceeding the $\ge 20.0\text{ GB}$ safety threshold).
+  - Dynamic activation budget (batch size 1, sequence length 2,048, `--grad-checkpoint`): **4.5 GB**
+  - **Active Peak Training Memory:** **~18.4–19.6 GB**.
 - **HW-01 Process Mutual Exclusion Lock (`GPUMutualExclusionLock`):**
-  - Enforces a POSIX non-blocking file lock (`fcntl.flock` on `/tmp/context_scout_gpu.lock`) with timeout handling (`GPUContentionError`), strictly preventing simultaneous Metal pipeline execution between offline QLoRA training and inference serving.
+  - Enforces a POSIX non-blocking file lock (`fcntl.flock` on `/tmp/context_scout_gpu.lock`) preventing simultaneous GPU execution between offline QLoRA training and inference serving.
 
-### 9.3 MoE LoRA Targeting & Strict Router Gate Freezing
+### 9.4 MoE LoRA Targeting, Strict Router Gate Freezing & 2-Epoch Training Metrics
 
-- Gemma 4 26B-A4B features 128 Mixture-of-Experts (MoE) routing layers. Fine-tuning router gate projections on small domain datasets ($<1,000$ samples) causes expert routing collapse.
-- `LocalQLoRATrainer` targets attention projections (`q_proj`, `k_proj`, `v_proj`, `o_proj`) and shared MLP projections (`gate_proj`, `up_proj`, `down_proj`) with scaling $\alpha / r = 32 / 16 = 2.0$.
-- **Strictly Freezes Router Gates:** Prohibits updates to `router.proj` / `language_model.model.layers.*.router.proj`, preserving general reasoning while specializing domain representations.
-- Generated genuine trained artifacts in `domains/trading_code_scout/adapters/gemma4_26b_code_scout/` and `domains/quant_research_scout/adapters/gemma4_26b_quant_research/` with non-zero weight deltas and verified loss decrease.
-
-### 9.4 In-Memory AdapterPool & Zero-Cost Model Hot-Swapping (`domain_registry.py` & `scout_workflow.py`)
-
-- Thread-safe `AdapterPool` pins active QLoRA adapters in memory with $\le 32,768$ token caps (`HW-01`).
-- `LocalGemmaClient.load_adapter()` hot-swaps active adapter matrices in Unified Memory with measured **0.018 ms** switching overhead (<2 ms `ARC-02`), eliminating per-request disk thrashing when alternating between Model 1 (`trading_code_scout`) and Model 2 (`quant_research_scout`).
+- Gemma 4 26B-A4B features 128 Mixture-of-Experts (MoE) routing layers. Fine-tuning router gate projections on domain datasets causes expert routing collapse.
+- `LocalQLoRATrainer` targets shared attention projections (`q_proj`, `k_proj`, `v_proj`, `o_proj`) and shared MLP projections (`gate_proj`, `up_proj`, `down_proj`) with scaling $\alpha / r = 32 / 16 = 2.0$, while **strictly freezing all 128 MoE router gates** (`router.proj`).
+- **2-Epoch RAG-Conditioned QLoRA Training Results (`mlx-lm` on `mlx-community/gemma-4-26b-a4b-it-4bit`):**
+  - **`trading_code_scout` (`gemma4_26b_code_scout`):** `340` RAG-conditioned train samples (`2` epochs = `680` steps), `train_loss: 1.3588 -> 0.0008`, `val_loss: 0.9424 -> 0.0027`, **100% (3/3)** live `mlx_lm.generate()` JSON schema and exact AST symbol/line-span grounding.
+  - **`quant_research_scout` (`gemma4_26b_quant_research`):** `334` RAG-conditioned train samples (`2` epochs = `668` steps), `train_loss: 1.4734 -> 0.0001`, `val_loss: 1.2806 -> 0.0212`, **100% (3/3)** live `mlx_lm.generate()` JSON schema and exact `chunk_id` / `verbatim_quote` grounding across single-turn and 4-turn bounce-back validation samples.
 
 ### 9.5 Enterprise GCP Vertex AI PEFT Trainer (`src/context_scout/tuning/train_vertex_peft.py`)
 
@@ -586,11 +594,40 @@ Measured across 36 held-out test cases comparing base Gemma 4-26B vs. base Gemma
 | **Prompt Prefill Latency (TTFT)** | `120.76 ms` | `4.04 ms` | `29.89x speedup` | $< 50\text{ ms}$ | ✅ PASS |
 | **In-Memory Adapter Switch Latency** | `N/A (Disk I/O)` | `0.018 ms` | `< 2 ms (ARC-02)` | $< 5.0\text{ ms}$ | ✅ PASS |
 
+### 9.7 Training Your Own Custom Domain Agent in 3 Commands (`uv run context-scout`)
+
+Anyone cloning this repository can create, distill, and fine-tune a brand-new specialized agent on their own codebase or document folder using the built-in `context-scout` CLI (`src/context_scout/cli.py`):
+
+```bash
+# 0. Inspect auto-detected host hardware, quantization backend, and safe KV-cache budget
+uv run context-scout hardware
+
+# 1. Scaffold a new DomainPack (choose --domain-type code or research)
+uv run context-scout init-domain \
+  --domain-id payments_ledger_scout \
+  --domain-type code \
+  --display-name "Payments Ledger Code Scout" \
+  --source-dir /path/to/your/codebase
+
+# 2. Distill RAG-conditioned JSONL training & validation sets from your folder
+uv run context-scout distill \
+  --domain-id payments_ledger_scout \
+  --source-dir /path/to/your/codebase \
+  --num-samples 200
+
+# 3. Train the rank-16 QLoRA adapter (auto-registers in domains/<domain_id>/domain.yaml)
+uv run context-scout train \
+  --domain-id payments_ledger_scout \
+  --iters 400
+```
+
+Once trained, restart the FastAPI server and your new domain automatically appears in `/api/v1/domains` and the React UI `DomainSelector` alongside existing domains.
+
 ---
 
-## 10. Milestone 8 Architecture: FastAPI SSE Backend, Strict TypeScript/React UI & GitLab CI/CD
+## 10. Milestone 8 Architecture: FastAPI SSE Backend, Strict TypeScript/React UI & GitHub Actions CI/CD
 
-Milestone 8 completes the production enterprise operational layer, delivering a low-latency FastAPI SSE streaming backend, a strict TypeScript/React web interface, and an automated 6-stage GitLab CI/CD pipeline with keyless Workload Identity Federation (WIF).
+Milestone 8 completes the production enterprise operational layer, delivering a low-latency FastAPI SSE streaming backend, a strict TypeScript/React web interface, and an automated 6-stage GitHub Actions CI/CD pipeline with keyless Workload Identity Federation (WIF).
 
 ### 10.1 FastAPI SSE Streaming Backend (`src/context_scout/api/`)
 
@@ -600,8 +637,8 @@ The backend is structured around an ASGI application factory (`create_app() -> F
   - Session authentication strictly decouples user identity from LLM prompt inputs. `X-Principal-User-Id`, `X-Principal-Role` (`engineer`, `quant_researcher`, `product_manager`, `compliance_officer`), and `X-Principal-Scopes` are validated and bound to `contextvars.ContextVar` out-of-band.
   - Role-spoofing text in prompt inputs cannot alter the server-side `PrincipalContext`. Invalid roles return `HTTP 400`.
 - **7 Production API Endpoints:**
-  1. `GET /api/v1/health`: Returns service health, database connectivity check, registered domain IDs, active `AdapterPool` verification status, and Apple Silicon M5 Pro 48GB hardware memory profile.
-  2. `GET /api/v1/domains`: Returns registered `DomainPackManifest` configs (`trading_code_scout`, `quant_research_scout`), live adapter verification (`r=16, alpha=32`, `is_moe=True`, `safetensors_bytes > 0`), and training metrics.
+  1. `GET /api/v1/health`: Returns service health, database connectivity check, registered domain IDs, active `AdapterPool` verification status, and auto-detected host hardware memory profile (`detect_hardware_profile()`).
+  2. `GET /api/v1/domains`: Returns registered `DomainPackManifest` configs (`trading_code_scout`, `quant_research_scout`, plus any custom domains), live adapter verification (`r=16, alpha=32`, `is_moe=True`, `safetensors_bytes > 0`), and training metrics.
   3. `POST /api/v1/scout/stream`: Server-Sent Events (`text/event-stream`) streaming 4 sequential stage updates (`Stage 1: Hybrid RRF`, `Stage 2: Gemma 4 Synthesis`, `Stage 3: AST Closure / Friction Gate`, `Stage 4: Pre-Flight Validation`), `$0` bounce-back events, and verified `context_pack_ready` event.
   4. `POST /api/v1/scout/query`: Synchronous JSON execution through `ScoutWorkflow` or `FederatedScoutCoordinator`, returning full verified `ImplementationContextPack`, `PreFlightValidationReport`, OpenTelemetry trace attributes, and token savings breakdown.
   5. `POST /api/v1/handoff/preview`: Invokes `GeminiImplementationExecutor` in preview mode (`require_confirmation=True`), generating proposed unified diff, cost telemetry, and confirmation token without mutating repository files.
@@ -620,17 +657,17 @@ Located in `web-ui/`, built on Vite + React 18 + strict TypeScript (`"strict": t
   - `CitationInspector.tsx`: Tabbed inspector for byte-exact `CodeSlicePointer` slices and `QuantStrategyBrief` academic citations with friction floor badges (`FIN-01`).
   - `TokenSavingsMeter.tsx`: Real-time token-savings meter showing local Gemma 4 tokens explored (`$0.00`), frontier tokens sent, and frontier token savings ratio.
   - `GeminiDiffModal.tsx`: 1-Click implementation handoff modal displaying proposed unified git diff and enforcing human approval before applying to sandbox.
-- **Frontend Verification:** 26/26 component tests passing in Vitest (`npm run test`); production build verified (`npm run build`).
+- **Frontend Verification:** 41/41 component and integration tests passing in Vitest (`npm run test`); production build verified (`npm run build`).
 
-### 10.3 Enterprise GitLab CI/CD Pipeline (`.gitlab-ci.yml`)
+### 10.3 Enterprise GitHub Actions CI/CD Pipeline (`.github/workflows/ci.yml`)
 
-The production `.gitlab-ci.yml` pipeline defines 6 ordered execution stages:
+The production `.github/workflows/ci.yml` pipeline defines 6 ordered jobs on GitHub Actions:
 1. `lint`: Ruff syntax/style check (`uv run ruff check src tests`) and prohibited terms repository hygiene scanner (`! git grep -i -E ...`).
 2. `typecheck`: Strict static typechecking (`uv run mypy --strict src tests`).
 3. `test`: Live PostgreSQL 17 + `pgvector` container service integration tests with automated schema bootstrap (`sql/001_init_schema.sql`) and Forced RLS policy initialization.
 4. `eval-gate`: Automated 6-gate architectural evaluation runner enforcing Zero-Touch Sufficiency $\ge 85\%$, Recall@5 $\ge 90\%$, Citation Faithfulness $100\%$, Token Savings $\ge 80\%$, RBAC Zero-Leakage $100\%$, and Prompt Injection Block $\ge 95\%$.
-5. `ui-verify`: Node.js 22 container executing `npm ci`, `npm run lint`, `npm run typecheck`, `npm run test`, and `npm run build`.
-6. `deploy`: Keyless Google Cloud Workload Identity Federation (WIF) OIDC deployment to Google Cloud Run (no static service account JSON keys, gated on `main` branch with manual approval).
+5. `ui-verify`: Node.js 22 runner executing `npm ci`, `npm run lint`, `npm run typecheck`, `npm run test`, and `npm run build`.
+6. `deploy`: Keyless Google Cloud Workload Identity Federation (WIF) OIDC deployment to Google Cloud Run (no static service account JSON keys, gated on `main` branch with manual dispatch).
 
 ---
 
@@ -638,12 +675,15 @@ The production `.gitlab-ci.yml` pipeline defines 6 ordered execution stages:
 
 ### 11.1 Prerequisites
 
-- **macOS** or **Linux** workstation.
+- **macOS** (Apple Silicon M-series recommended for MLX 4-bit inference/training) or **Linux** (CUDA / CPU) workstation.
 - **Python 3.12+** with `uv` package manager (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
 - **Node.js 20+** and `npm` for web UI.
-- **PostgreSQL 17** with `pgvector` and `pg_trgm` extensions:
+- **PostgreSQL 17** with `pgvector` and `pg_trgm` extensions (via **Docker Desktop** or **Homebrew**):
   ```bash
-  # macOS (Homebrew)
+  # Option A: Docker Compose (runs pgvector/pgvector:pg17 on host port 54329)
+  docker compose up -d postgres
+
+  # Option B: macOS Homebrew (runs on port 5432)
   brew install postgresql@17 pgvector
   brew services start postgresql@17
   ```
@@ -658,14 +698,9 @@ The production `.gitlab-ci.yml` pipeline defines 6 ordered execution stages:
    cd web-ui && npm install && cd ..
    ```
 
-2. **Initialize PostgreSQL database:**
+2. **Initialize PostgreSQL database (if using local Homebrew PostgreSQL on `:5432`; Docker auto-initializes `sql/001_init_schema.sql`):**
    ```bash
-   # Create database and unprivileged application role
    createdb context_scout
-   psql context_scout -c "CREATE USER scout_app_user WITH PASSWORD 'scout_local_dev_pw';"
-   psql context_scout -c "GRANT CONNECT ON DATABASE context_scout TO scout_app_user;"
-
-   # Run schema migration as superuser
    psql context_scout -f sql/001_init_schema.sql
    ```
 
@@ -673,14 +708,18 @@ The production `.gitlab-ci.yml` pipeline defines 6 ordered execution stages:
    ```bash
    cp .env.example .env
    ```
-   Set `SCOUT_DB_APP_URL=postgresql://scout_app_user:scout_local_dev_pw@localhost:5432/context_scout`.
+   - Set `SCOUT_DB_ADMIN_URL` and `SCOUT_DB_APP_URL` (use port `5432` for local Homebrew Postgres or port `54329` for Docker Compose).
+   - Hardware profile (`device`, `memory_gb`, `max_kv_tokens`) is auto-detected at runtime (`uv run context-scout hardware`), and can be optionally overridden via `SCOUT_HARDWARE_DEVICE`, `SCOUT_HARDWARE_MEMORY_GB`, and `SCOUT_LOCAL_MAX_KV_TOKENS`.
 
-4. **Launch Application Servers:**
+4. **Seed Corpus & Launch Application Servers:**
    ```bash
-   # Start FastAPI SSE Backend (port 8000)
-   uv run uvicorn context_scout.api.main:app --host 0.0.0.0 --port 8000 --reload
+   # Seed code AST graph and quant paper chunks into PostgreSQL 17
+   uv run python -m context_scout.mcp_servers.seed_code_corpus
 
-   # Start Vite React Web UI (port 5173)
+   # Start FastAPI SSE Backend (port 8080)
+   uv run uvicorn context_scout.api.main:app --host 127.0.0.1 --port 8080 --reload
+
+   # Start Vite React Web UI (port 5173, proxies /api -> http://127.0.0.1:8080)
    cd web-ui && npm run dev
    ```
 
@@ -688,7 +727,7 @@ The production `.gitlab-ci.yml` pipeline defines 6 ordered execution stages:
 
 ## 12. Verification & Test Suite
 
-The platform enforces zero-trust automated testing across all backend and frontend components:
+The platform enforces zero-trust automated testing across all backend, CLI, worktree feature-build, and frontend components:
 
 ```bash
 # 1. Format & Linting Check (Ruff)
@@ -697,28 +736,28 @@ uv run ruff check src tests
 # 2. Strict Static Type Checking (Mypy)
 uv run mypy --strict src tests
 
-# 3. Comprehensive Unit & Integration Test Suite (Pytest - 458 tests)
+# 3. Comprehensive Unit, Live Postgres, Regression & E2E Feature-Build Suite (Pytest - 536 tests)
 uv run pytest -v
 
-# 4. CI/CD Evaluation Harness & Gate Scorecard (6 architectural gates)
+# 4. End-to-End Worktree Feature Build & Custom Domain CLI Training Verification
+uv run pytest -v tests/test_end_to_end_feature_build.py
+
+# 5. CI/CD Evaluation Harness & Gate Scorecard (6 architectural gates)
 uv run python -m context_scout.evals.runner --in-memory
 
-# 5. Milestone 7 Empirical QLoRA Benchmark Suite
+# 6. Milestone 7 Empirical QLoRA Benchmark Suite
 uv run python -m context_scout.tuning.benchmark
 
-# 6. Web UI Lint, Typecheck, Test, and Build
+# 7. Web UI Lint, Typecheck, Test (41 Vitest tests), and Build
 cd web-ui
 npm run lint
 npm run typecheck
 npm run test
 npm run build
 cd ..
-
-# 7. Repository Hygiene Scanner
-! git grep -i -E "(\b[F]DE\b|Forward [D]eployed Engineer|interview [g]uide|interview [d]efense|/Users/[h]imanshu)"
 ```
 
-### Test Coverage Highlights (458 Passed Python Tests + 26 Passed Web UI Tests, 0 Failures, 0 Skips)
+### Test Coverage Highlights (536 Passed Python Tests + 41 Passed Web UI Tests, 0 Failures, 0 Skips)
 
 | Subsystem | Test Module | Tests | Scope & Invariants Tested |
 |:---|:---|:---:|:---|
@@ -748,8 +787,11 @@ cd ..
 | **M7 Teacher Distillation** | `tests/test_m7_teacher_distiller.py` | 6 | PostgreSQL 17 introspection, rejection sampling, 15-20% bounce-back, 0% leakage |
 | **M7 QLoRA & Benchmarks** | `tests/test_m7_qlora_tuning.py` | 17 | Model acquisition, memory math, HW-01 lock, router gate freezing, Vertex PEFT, benchmark |
 | **M8 FastAPI SSE & CI/CD** | `tests/test_m8_fastapi_sse.py` | 25 | Health, domains, RBAC roles, ShieldGemma, SSE stream, handoff preview/apply, ROI telemetry, repo hygiene |
-| **Python Backend Total** | **25 Test Suites** | **458** | **100% Pass Rate (0 Failures, 0 Skips, 0 Errors in ~170s)** |
-| **Web UI Total (Vitest)** | `web-ui/src/__tests__/*.test.tsx` | **26** | **100% Pass Rate (7 Test Suites, 0 Failures in ~2s)** |
+| **Enterprise Regression Guards** | `tests/test_enterprise_regression_guards.py` | 14 | Permanent regression tests for RAG-conditioned QLoRA, Vite proxy, CI markers, hardware auto-detection |
+| **End-to-End Feature Build & CLI** | `tests/test_end_to_end_feature_build.py` | 2 | Live worktree feature synthesis + behavioral test & 3-command custom-domain CLI training |
+| **Additional Challenging Suites** | `tests/test_adversarial_*.py` / `test_empirical_*.py` | 139 | Deep adversarial & empirical stress suites across M1–M8 |
+| **Python Backend Total** | **31 Test Suites** | **536** | **100% Pass Rate (0 Failures, 0 Skips, 0 Errors)** |
+| **Web UI Total (Vitest)** | `web-ui/src/__tests__/*.test.tsx` | **41** | **100% Pass Rate (9 Test Suites, 0 Failures)** |
 
 ---
 

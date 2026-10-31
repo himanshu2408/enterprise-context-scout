@@ -37,7 +37,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python dependencies
-        run: uv sync
+        run: uv sync --extra dev
 
       - name: Bootstrap PostgreSQL 17 Schema & Forced RLS
         run: |
