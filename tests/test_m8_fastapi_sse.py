@@ -112,12 +112,12 @@ def test_health_endpoint_healthy_and_m5_pro_profile(client: TestClient) -> None:
     assert "trading_code_scout" in adapter_status
     assert "quant_research_scout" in adapter_status
 
-    # Hardware profile for Apple Silicon M5 Pro 48GB
+    # Auto-detected hardware profile (works across Apple Silicon, Linux CUDA, and CI hosts)
     hw = data["hardware_profile"]
-    assert hw["device"] == "Apple Silicon M5 Pro"
-    assert hw["unified_memory"] == "48.0 GB"
-    assert hw["max_kv_tokens"] == 32768
-    assert hw["quantization"] == "4-bit (MLX)"
+    assert isinstance(hw["device"], str) and len(hw["device"]) > 0
+    assert hw["unified_memory"].endswith(" GB")
+    assert hw["max_kv_tokens"] in (8192, 16384, 32768)
+    assert "4-bit" in hw["quantization"]
     assert hw["lora_slots_capacity"] == 4
     assert hw["lora_slots_allocated"] >= 2
 

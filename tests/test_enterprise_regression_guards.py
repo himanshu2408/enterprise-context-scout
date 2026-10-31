@@ -206,3 +206,39 @@ def test_scout_route_matches_hyphenated_bounce_back_prompts() -> None:
     src = inspect.getsource(scout)
     assert '"bounce" in request.query.lower()' in src
     assert '"bounce_back" in request.query.lower()' not in src
+
+
+def test_github_actions_ci_installs_dev_dependencies_and_guards_mlx_markers() -> None:
+    """Guard 13: GitHub Actions CI must install dev tools and gate MLX to Darwin arm64."""
+    ci_yml = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+    assert "uv sync --extra dev" in ci_yml
+    assert "[dependency-groups]" in pyproject
+    assert "sys_platform == 'darwin' and platform_machine == 'arm64'" in pyproject
+
+
+def test_hardware_profile_auto_detects_and_honors_env_overrides_without_hardcoding(
+    monkeypatch: object,
+) -> None:
+    """Guard 14: Hardware profile must auto-detect or respect env overrides (no hardcoding)."""
+    import pytest
+
+    from context_scout.api.routes import health
+    from context_scout.config import detect_hardware_profile
+
+    health_src = inspect.getsource(health)
+    assert "Apple M5 Pro 48GB" not in health_src
+    assert "detect_hardware_profile" in health_src
+
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setenv("SCOUT_HARDWARE_DEVICE", "Linux Workstation (16GB RAM)")
+        mp.setenv("SCOUT_HARDWARE_MEMORY_GB", "16.0")
+        mp.delenv("SCOUT_LOCAL_MAX_KV_TOKENS", raising=False)
+        prof = detect_hardware_profile()
+        assert prof["device"] == "Linux Workstation (16GB RAM)"
+        assert prof["memory_gb"] == 16.0
+        assert prof["max_kv_tokens"] == 8192
+    finally:
+        mp.undo()
+
