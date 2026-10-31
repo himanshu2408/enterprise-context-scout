@@ -242,3 +242,18 @@ def test_hardware_profile_auto_detects_and_honors_env_overrides_without_hardcodi
     finally:
         mp.undo()
 
+
+def test_ci_env_prefix_and_worktree_git_identity_config() -> None:
+    """Guard 15: CI must use SCOUT_DB_* env vars and GitWorktreeSandbox must set git identity."""
+    from context_scout.agents.gemini_executor import GitWorktreeSandbox
+
+    ci_yml = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "SCOUT_DB_ADMIN_URL:" in ci_yml
+    assert "SCOUT_DB_APP_URL:" in ci_yml
+    assert "CONTEXT_SCOUT_DB_" not in ci_yml
+
+    wt_src = inspect.getsource(GitWorktreeSandbox.confirm_and_merge)
+    assert "user.name=" in wt_src
+    assert "user.email=" in wt_src
+
+

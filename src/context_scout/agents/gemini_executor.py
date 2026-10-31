@@ -200,7 +200,16 @@ class GitWorktreeSandbox:
 
         subprocess.run(["git", "add", "-A"], cwd=self.worktree_dir, capture_output=True)
         res = subprocess.run(
-            ["git", "commit", "-m", "Scout implementation: automated verified patch"],
+            [
+                "git",
+                "-c",
+                "user.name=Context Scout",
+                "-c",
+                "user.email=scout@localhost",
+                "commit",
+                "-m",
+                "Scout implementation: automated verified patch",
+            ],
             cwd=self.worktree_dir,
             capture_output=True,
             text=True,
