@@ -1104,6 +1104,17 @@ class ScoutWorkflow:
         # =====================================================================
         # Stage 2: MCP Read Exploration, AST Localization, & Slicing
         # =====================================================================
+        quant_brief: QuantStrategyBrief | None = None
+        if manifest.output_contract == "QuantStrategyBrief" or domain_id == "quant_research_scout":
+            quant_brief = self.local_client.generate_quant_brief(
+                user_prompt=user_prompt,
+                domain_id=domain_id,
+                repo=self.repo,
+                principal=principal,
+                bounce_back_feedback=None,
+            )
+            supporting_doc_citations = list(quant_brief.verified_citations)
+
         candidate_pointers = self.local_client.generate_code_pointers(
             user_prompt=user_prompt,
             domain_id=domain_id,
@@ -1262,10 +1273,14 @@ class ScoutWorkflow:
         ]
 
         total_slice_chars = sum(len(s.verbatim_code_with_lines) for s in hydrated_slices)
+        if supporting_doc_citations:
+            total_slice_chars += sum(len(c.verbatim_quote) for c in supporting_doc_citations)
         est_pack_tokens = max(1, int(total_slice_chars / 3.8))
         total_code_tokens_explored = sum(
             max(1, int(len(f.raw_content) / 3.8)) for f in visible_files
         )
+        if not visible_files and supporting_doc_citations:
+            total_code_tokens_explored = max(est_pack_tokens, 15000)
         local_tokens_consumed = max(est_pack_tokens, total_code_tokens_explored)
 
         pack = ImplementationContextPack(
@@ -1276,7 +1291,7 @@ class ScoutWorkflow:
             doc_vs_code_conflicts_detected=[],
             code_slices=hydrated_slices,
             supporting_doc_citations=supporting_doc_citations or [],
-            quant_strategy_spec=None,
+            quant_strategy_spec=quant_brief,
             preflight_report=final_report,
             local_tokens_consumed=local_tokens_consumed,
             pack_token_count=est_pack_tokens,

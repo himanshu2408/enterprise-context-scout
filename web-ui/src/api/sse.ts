@@ -36,6 +36,25 @@ export function streamScoutWorkflow(options: StreamScoutOptions): () => void {
       });
 
       if (!response.ok || !response.body) {
+        if (response.status === 403) {
+          let errorMsg = "ShieldGemma 2 detected adversarial prompt injection attempt (SEC-01). Request rejected.";
+          try {
+            const errJson = (await response.json()) as { detail?: string };
+            if (errJson.detail) errorMsg = errJson.detail;
+          } catch {
+            // fallback text
+          }
+          onEvent({
+            event: "error",
+            data: {
+              error_code: "SECURITY_GUARDRAIL_TRIGGERED",
+              message: errorMsg,
+              timestamp: new Date().toISOString(),
+            },
+          });
+          onError(new Error(errorMsg));
+          return true;
+        }
         return false;
       }
 
@@ -85,10 +104,12 @@ export function streamScoutWorkflow(options: StreamScoutOptions): () => void {
   };
 
   const runMockStream = async (): Promise<void> => {
+    const queryLower = request.query.toLowerCase();
     const isInjectionTest =
-      request.query.toLowerCase().includes("ignore previous instructions") ||
-      request.query.toLowerCase().includes("drop table") ||
-      request.query.toLowerCase().includes("bypass");
+      queryLower.includes("ignore") && queryLower.includes("instruction") ||
+      queryLower.includes("drop table") ||
+      queryLower.includes("bypass") ||
+      queryLower.includes("gemini_api_key");
 
     const isBounceBackTest =
       request.query.toLowerCase().includes("bounce") ||
@@ -301,7 +322,15 @@ function dispatchTypedEvent(
     case "error":
       onEvent({
         event: "error",
-        data: d as unknown as SSEErrorData,
+        data: {
+          error_code: String(d.error_code ?? d.category ?? "SECURITY_GUARDRAIL_TRIGGERED"),
+          message: String(
+            d.message ??
+              d.rationale ??
+              "ShieldGemma 2 detected adversarial prompt injection attempt (SEC-01). Request rejected."
+          ),
+          timestamp: String(d.timestamp ?? new Date().toISOString()),
+        },
       });
       break;
   }
