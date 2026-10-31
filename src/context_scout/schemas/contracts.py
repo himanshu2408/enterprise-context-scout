@@ -14,6 +14,7 @@ class RoleType(StrEnum):
     ENGINEER = "engineer"
     QUANT_RESEARCHER = "quant_researcher"
     PRODUCT_MANAGER = "product_manager"
+    COMPLIANCE_OFFICER = "compliance_officer"
 
 
 class MarketRegime(StrEnum):
@@ -47,8 +48,7 @@ class FrictionVerdict(StrEnum):
 MARKET_MIN_FRICTION_BPS: Final[dict[MarketRegime, float]] = {
     MarketRegime.INDIA_NSE_BSE: 15.0,
     MarketRegime.GERMANY_XETRA_DAX: 10.0,
-    MarketRegime.US_NYSE_NASDAQ: 5.0,
-    MarketRegime.GLOBAL_MULTI: 10.0,
+    MarketRegime.US_NYSE_NASDAQ: 5.0, MarketRegime.GLOBAL_MULTI: 10.0,
     MarketRegime.INTERNAL_ADR: 0.0,
 }
 

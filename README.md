@@ -40,12 +40,19 @@ When engineering and quantitative research teams deploy commercial frontier mode
 enterprise-context-scout/
 ├── pyproject.toml              # Modern Python 3.12+ project config (ruff, mypy, pytest)
 ├── uv.lock                     # Deterministic pinned dependency lockfile
+├── .gitlab-ci.yml              # Production 6-stage CI/CD pipeline with pgvector & WIF
 ├── docker-compose.yml          # PostgreSQL 17 + pgvector container definition
 ├── sql/
 │   └── 001_init_schema.sql     # PostgreSQL 17 DDL: tables, indexes, and FORCE RLS policies
 ├── src/
 │   └── context_scout/
 │       ├── __init__.py         # Package root
+│       ├── api/                # FastAPI SSE streaming backend (M8)
+│       │   ├── __init__.py
+│       │   ├── main.py         # App factory, CORS middleware, OTel request tracing
+│       │   ├── schemas.py      # Pydantic v2 API request/response and SSE schemas
+│       │   ├── dependencies.py # Out-of-band principal extraction (SEC-04) & token store
+│       │   └── routes/         # Endpoints: health, domains, scout, handoff, telemetry
 │       ├── schemas/
 │       │   ├── __init__.py
 │       │   └── contracts.py    # Pydantic v2 core contracts (CodeSlicePointer, ASTSymbol, etc.)
@@ -101,6 +108,14 @@ enterprise-context-scout/
 │           ├── train_mlx_lora.py # Local 4-bit QLoRA trainer on Apple M5 Pro with HW-01 lock
 │           ├── train_vertex_peft.py # Enterprise GCP Vertex AI PEFT job spec generator
 │           └── benchmark.py    # Empirical Before-vs-After benchmark runner
+├── web-ui/                     # Strict TypeScript + React Enterprise UI (M8)
+│   ├── package.json
+│   ├── tsconfig.json           # strict: true, noImplicitAny: true, zero any
+│   ├── vite.config.ts
+│   ├── src/
+│   │   ├── types/contracts.ts  # Mirroring Pydantic v2 schemas
+│   │   ├── components/         # RoleSwitcher, DomainSelector, ScoutConsole, etc.
+│   │   └── __tests__/          # 26 Vitest component tests (100% pass)
 ├── domains/                    # Declarative DomainPack YAML configs & trained QLoRA adapters
 │   ├── trading_code_scout/
 │   │   ├── domain.yaml
@@ -129,7 +144,7 @@ enterprise-context-scout/
     ├── test_adversarial_m3_rrf_scepticism.py # Adversarial stress tests for 3-way RRF & scepticism gate (24 tests)
     ├── test_real_paper_harvest_live.py # Live harvest, PDF fallback, DB persistence & gate integration (6 tests)
     ├── test_m7_teacher_distiller.py # M7 distillation, rejection sampling, 15-20% bounce-back tests
-    └── test_m7_qlora_tuning.py # M7 QLoRA memory math, HW-01 lock, router freezing & benchmark tests
+    ├── test_m7_qlora_tuning.py # M7 QLoRA memory math, HW-01 lock, router freezing & benchmark tests
     ├── test_m4_mcp_servers.py  # M4 Enterprise MCP servers, live Postgres RLS & bounds tests (18 tests)
     ├── test_m4_security.py     # M4 Out-of-band RBAC, domain gate, and guardrail tests (37 tests)
     ├── test_adversarial_security.py # M4 Adversarial security fuzzing and pool isolation tests (47 tests)
@@ -137,7 +152,8 @@ enterprise-context-scout/
     ├── test_scout_workflow.py  # M5 ADK 4-stage workflow DAG & federated coordinator tests (13 tests)
     ├── test_gemini_executor.py # M5 Gemini model policy, budget gate & worktree tests (10 tests)
     ├── test_m5_adk_workflow.py # M5 End-to-end integration & live Postgres telemetry tests (17 tests)
-    └── test_m6_eval_harness.py # M6 Golden dataset, 6 CI/CD gates, OTel GenAI traces & live PG17 (13 tests)
+    ├── test_m6_eval_harness.py # M6 Golden dataset, 6 CI/CD gates, OTel GenAI traces & live PG17 (13 tests)
+    └── test_m8_fastapi_sse.py  # M8 FastAPI SSE backend, RBAC, ShieldGemma, Handoff & CI/CD (25 tests)
 ```
 
 ---
@@ -572,12 +588,59 @@ Measured across 36 held-out test cases comparing base Gemma 4-26B vs. base Gemma
 
 ---
 
-## 10. Local Setup & Installation
+## 10. Milestone 8 Architecture: FastAPI SSE Backend, Strict TypeScript/React UI & GitLab CI/CD
 
-### 10.1 Prerequisites
+Milestone 8 completes the production enterprise operational layer, delivering a low-latency FastAPI SSE streaming backend, a strict TypeScript/React web interface, and an automated 6-stage GitLab CI/CD pipeline with keyless Workload Identity Federation (WIF).
+
+### 10.1 FastAPI SSE Streaming Backend (`src/context_scout/api/`)
+
+The backend is structured around an ASGI application factory (`create_app() -> FastAPI` in `src/context_scout/api/main.py`), CORS middleware, OpenTelemetry HTTP request tracing, and out-of-band principal extraction:
+
+- **Out-of-Band Principal Extraction (`dependencies.py`, `SEC-04`):**
+  - Session authentication strictly decouples user identity from LLM prompt inputs. `X-Principal-User-Id`, `X-Principal-Role` (`engineer`, `quant_researcher`, `product_manager`, `compliance_officer`), and `X-Principal-Scopes` are validated and bound to `contextvars.ContextVar` out-of-band.
+  - Role-spoofing text in prompt inputs cannot alter the server-side `PrincipalContext`. Invalid roles return `HTTP 400`.
+- **7 Production API Endpoints:**
+  1. `GET /api/v1/health`: Returns service health, database connectivity check, registered domain IDs, active `AdapterPool` verification status, and Apple Silicon M5 Pro 48GB hardware memory profile.
+  2. `GET /api/v1/domains`: Returns registered `DomainPackManifest` configs (`trading_code_scout`, `quant_research_scout`), live adapter verification (`r=16, alpha=32`, `is_moe=True`, `safetensors_bytes > 0`), and training metrics.
+  3. `POST /api/v1/scout/stream`: Server-Sent Events (`text/event-stream`) streaming 4 sequential stage updates (`Stage 1: Hybrid RRF`, `Stage 2: Gemma 4 Synthesis`, `Stage 3: AST Closure / Friction Gate`, `Stage 4: Pre-Flight Validation`), `$0` bounce-back events, and verified `context_pack_ready` event.
+  4. `POST /api/v1/scout/query`: Synchronous JSON execution through `ScoutWorkflow` or `FederatedScoutCoordinator`, returning full verified `ImplementationContextPack`, `PreFlightValidationReport`, OpenTelemetry trace attributes, and token savings breakdown.
+  5. `POST /api/v1/handoff/preview`: Invokes `GeminiImplementationExecutor` in preview mode (`require_confirmation=True`), generating proposed unified diff, cost telemetry, and confirmation token without mutating repository files.
+  6. `POST /api/v1/handoff/apply`: Enforces explicit human confirmation (`confirmed: True` + valid token) before applying patch in `GitWorktreeSandbox`, invalidating token upon consumption.
+  7. `GET /api/v1/telemetry/roi`: Aggregates ROI token savings and loads Milestone 6 evaluation report (`reports/m6_eval_report.json`) and Milestone 7 QLoRA benchmark report (`reports/m7_qlora_benchmark_report.json`).
+
+### 10.2 Strict TypeScript + React Enterprise UI (`web-ui/`)
+
+Located in `web-ui/`, built on Vite + React 18 + strict TypeScript (`"strict": true`, `"noImplicitAny": true`, `"strictNullChecks": true`, zero `any` across codebase):
+
+- **Contracts (`src/types/contracts.ts`):** Strictly typed interfaces mirroring Python Pydantic v2 schemas (`RoleType`, `PrincipalContext`, `CodeSlicePointer`, `DocCitationSpan`, `QuantStrategyBrief`, `ContextPack`, `SSEStageEvent`, `HandoffPreviewResponse`, `ROIMetricsResponse`).
+- **Enterprise Components:**
+  - `RoleSwitcher.tsx`: Interactive role switcher displaying active RBAC/RLS scopes (`public_eng`, `repo:trading_strategies`, `public_quant`, `quant_restricted`, `audit:compliance`).
+  - `DomainSelector.tsx`: DomainPack and QLoRA adapter selector showing adapter status, hot-swap latency (`0.018 ms`), and training loss metrics.
+  - `ScoutConsole.tsx`: Query console with 4-stage stepper, execution mode toggle (SSE Stream vs. REST Sync), and ShieldGemma 2 guardrail badge.
+  - `CitationInspector.tsx`: Tabbed inspector for byte-exact `CodeSlicePointer` slices and `QuantStrategyBrief` academic citations with friction floor badges (`FIN-01`).
+  - `TokenSavingsMeter.tsx`: Real-time token-savings meter showing local Gemma 4 tokens explored (`$0.00`), frontier tokens sent, and frontier token savings ratio.
+  - `GeminiDiffModal.tsx`: 1-Click implementation handoff modal displaying proposed unified git diff and enforcing human approval before applying to sandbox.
+- **Frontend Verification:** 26/26 component tests passing in Vitest (`npm run test`); production build verified (`npm run build`).
+
+### 10.3 Enterprise GitLab CI/CD Pipeline (`.gitlab-ci.yml`)
+
+The production `.gitlab-ci.yml` pipeline defines 6 ordered execution stages:
+1. `lint`: Ruff syntax/style check (`uv run ruff check src tests`) and prohibited terms repository hygiene scanner (`! git grep -i -E ...`).
+2. `typecheck`: Strict static typechecking (`uv run mypy --strict src tests`).
+3. `test`: Live PostgreSQL 17 + `pgvector` container service integration tests with automated schema bootstrap (`sql/001_init_schema.sql`) and Forced RLS policy initialization.
+4. `eval-gate`: Automated 6-gate architectural evaluation runner enforcing Zero-Touch Sufficiency $\ge 85\%$, Recall@5 $\ge 90\%$, Citation Faithfulness $100\%$, Token Savings $\ge 80\%$, RBAC Zero-Leakage $100\%$, and Prompt Injection Block $\ge 95\%$.
+5. `ui-verify`: Node.js 22 container executing `npm ci`, `npm run lint`, `npm run typecheck`, `npm run test`, and `npm run build`.
+6. `deploy`: Keyless Google Cloud Workload Identity Federation (WIF) OIDC deployment to Google Cloud Run (no static service account JSON keys, gated on `main` branch with manual approval).
+
+---
+
+## 11. Local Setup & Installation
+
+### 11.1 Prerequisites
 
 - **macOS** or **Linux** workstation.
 - **Python 3.12+** with `uv` package manager (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
+- **Node.js 20+** and `npm` for web UI.
 - **PostgreSQL 17** with `pgvector` and `pg_trgm` extensions:
   ```bash
   # macOS (Homebrew)
@@ -585,37 +648,47 @@ Measured across 36 held-out test cases comparing base Gemma 4-26B vs. base Gemma
   brew services start postgresql@17
   ```
 
-### 9.2 Environment & Database Setup
+### 11.2 Environment & Database Setup
 
 1. **Clone the repository and install dependencies:**
    ```bash
    git clone https://github.com/himanshu2408/enterprise-context-scout.git
    cd enterprise-context-scout
-   uv sync
+   uv sync --extra dev
+   cd web-ui && npm install && cd ..
    ```
 
 2. **Initialize PostgreSQL database:**
    ```bash
    # Create database and unprivileged application role
-   createdb context_scout_test
-   psql context_scout_test -c "CREATE USER context_scout_app WITH PASSWORD 'scout_test_password';"
-   psql context_scout_test -c "GRANT CONNECT ON DATABASE context_scout_test TO context_scout_app;"
+   createdb context_scout
+   psql context_scout -c "CREATE USER scout_app_user WITH PASSWORD 'scout_local_dev_pw';"
+   psql context_scout -c "GRANT CONNECT ON DATABASE context_scout TO scout_app_user;"
 
    # Run schema migration as superuser
-   psql context_scout_test -f sql/001_init_schema.sql
+   psql context_scout -f sql/001_init_schema.sql
    ```
 
 3. **Configure environment variables (`.env`):**
    ```bash
    cp .env.example .env
    ```
-   Set `DATABASE_URL=postgresql://context_scout_app:scout_test_password@localhost:5432/context_scout_test`.
+   Set `SCOUT_DB_APP_URL=postgresql://scout_app_user:scout_local_dev_pw@localhost:5432/context_scout`.
+
+4. **Launch Application Servers:**
+   ```bash
+   # Start FastAPI SSE Backend (port 8000)
+   uv run uvicorn context_scout.api.main:app --host 0.0.0.0 --port 8000 --reload
+
+   # Start Vite React Web UI (port 5173)
+   cd web-ui && npm run dev
+   ```
 
 ---
 
-## 11. Verification & Test Suite
+## 12. Verification & Test Suite
 
-The platform enforces zero-trust automated testing across all components:
+The platform enforces zero-trust automated testing across all backend and frontend components:
 
 ```bash
 # 1. Format & Linting Check (Ruff)
@@ -624,17 +697,28 @@ uv run ruff check src tests
 # 2. Strict Static Type Checking (Mypy)
 uv run mypy --strict src tests
 
-# 3. Comprehensive Unit & Integration Test Suite (Pytest)
+# 3. Comprehensive Unit & Integration Test Suite (Pytest - 458 tests)
 uv run pytest -v
 
-# 4. CI/CD Evaluation Harness & Gate Scorecard
-uv run python -m context_scout.evals.runner --fail-under-threshold
+# 4. CI/CD Evaluation Harness & Gate Scorecard (6 architectural gates)
+uv run python -m context_scout.evals.runner --in-memory
 
 # 5. Milestone 7 Empirical QLoRA Benchmark Suite
 uv run python -m context_scout.tuning.benchmark
+
+# 6. Web UI Lint, Typecheck, Test, and Build
+cd web-ui
+npm run lint
+npm run typecheck
+npm run test
+npm run build
+cd ..
+
+# 7. Repository Hygiene Scanner
+! git grep -i -E "(\b[F]DE\b|Forward [D]eployed Engineer|interview [g]uide|interview [d]efense|/Users/[h]imanshu)"
 ```
 
-### Test Coverage Highlights (346 Passed Tests, 0 Failures, 0 Skips)
+### Test Coverage Highlights (458 Passed Python Tests + 26 Passed Web UI Tests, 0 Failures, 0 Skips)
 
 | Subsystem | Test Module | Tests | Scope & Invariants Tested |
 |:---|:---|:---:|:---|
@@ -663,12 +747,15 @@ uv run python -m context_scout.tuning.benchmark
 | **M6 Eval Harness & OTel** | `tests/test_m6_eval_harness.py` | 13 | Golden dataset, 6 CI/CD gates, OTel GenAI traces & live PG17 (100% pass) |
 | **M7 Teacher Distillation** | `tests/test_m7_teacher_distiller.py` | 6 | PostgreSQL 17 introspection, rejection sampling, 15-20% bounce-back, 0% leakage |
 | **M7 QLoRA & Benchmarks** | `tests/test_m7_qlora_tuning.py` | 17 | Model acquisition, memory math, HW-01 lock, router gate freezing, Vertex PEFT, benchmark |
-| **Total** | **24 Test Suites** | **346** | **100% Pass Rate (0 Failures, 0 Skips, 0 Errors in ~95s)** |
+| **M8 FastAPI SSE & CI/CD** | `tests/test_m8_fastapi_sse.py` | 25 | Health, domains, RBAC roles, ShieldGemma, SSE stream, handoff preview/apply, ROI telemetry, repo hygiene |
+| **Python Backend Total** | **25 Test Suites** | **458** | **100% Pass Rate (0 Failures, 0 Skips, 0 Errors in ~170s)** |
+| **Web UI Total (Vitest)** | `web-ui/src/__tests__/*.test.tsx` | **26** | **100% Pass Rate (7 Test Suites, 0 Failures in ~2s)** |
 
 ---
 
-## 12. Security Invariants & Repository Protection
+## 13. Security Invariants & Repository Protection
 
 - **Confidentiality:** No proprietary client names, credentials, or internal metrics are permitted in code, comments, or commit history.
 - **Git Hook Protection:** Local git hooks (`.git/hooks/pre-commit` and `.git/hooks/commit-msg`) enforce regex-based secret scanning, path checks, and word-bounded term blocking on every commit.
 - **Model Truthfulness:** All model specifications, pricing, and benchmark claims are verified against official documentation and live search gates.
+

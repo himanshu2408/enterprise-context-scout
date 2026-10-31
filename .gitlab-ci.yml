@@ -1,0 +1,158 @@
+# =============================================================================
+# Enterprise Context Scout: Production GitLab CI/CD Pipeline
+# =============================================================================
+
+stages:
+  - lint
+  - typecheck
+  - test
+  - eval-gate
+  - ui-verify
+  - deploy
+
+default:
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  interruptible: true
+
+variables:
+  UV_CACHE_DIR: "$CI_PROJECT_DIR/.uv-cache"
+  UV_SYSTEM_PYTHON: "1"
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  FF_NETWORK_PER_BUILD: "1"
+
+cache:
+  key: "${CI_COMMIT_REF_SLUG}-uv"
+  paths:
+    - .uv-cache/
+
+# =============================================================================
+# Stage 1: Lint & Repository Hygiene
+# =============================================================================
+python-lint:
+  stage: lint
+  before_script:
+    - command -v git >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends git)
+  script:
+    - uv run ruff check src tests
+    - echo "Executing prohibited terms repository hygiene scanner..."
+    - '! git grep -i -E "(\b[F]DE\b|Forward [D]eployed Engineer|interview [g]uide|interview [d]efense|/Users/[h]imanshu)"'
+
+# =============================================================================
+# Stage 2: Strict Static Typecheck
+# =============================================================================
+python-typecheck:
+  stage: typecheck
+  script:
+    - uv run mypy --strict src tests
+
+# =============================================================================
+# Stage 3: Live PostgreSQL 17 + pgvector Integration Tests
+# =============================================================================
+python-pytest:
+  stage: test
+  services:
+    - name: pgvector/pgvector:pg17
+      alias: postgres
+  variables:
+    POSTGRES_DB: context_scout
+    POSTGRES_USER: scout_admin
+    POSTGRES_PASSWORD: scout_admin_password
+    POSTGRES_HOST_AUTH_METHOD: trust
+    SCOUT_DB_ADMIN_URL: "postgresql://scout_admin:scout_admin_password@postgres:5432/context_scout"
+    SCOUT_DB_APP_URL: "postgresql://scout_app_user:scout_local_dev_pw@postgres:5432/context_scout"
+  before_script:
+    - uv sync --frozen --extra dev
+    - |
+      uv run python -c "
+      import psycopg, time, sys
+      print('Waiting for PostgreSQL 17 service readiness...')
+      for i in range(30):
+          try:
+              conn = psycopg.connect('postgresql://scout_admin:scout_admin_password@postgres:5432/context_scout', connect_timeout=3)
+              conn.autocommit = True
+              with open('sql/001_init_schema.sql', 'r', encoding='utf-8') as f:
+                  conn.execute(f.read())
+              conn.close()
+              print('PostgreSQL 17 schema + Forced RLS successfully initialized.')
+              sys.exit(0)
+          except Exception as exc:
+              time.sleep(1)
+      print('Failed to connect to PostgreSQL 17 service after 30 seconds.')
+      sys.exit(1)
+      "
+  script:
+    - uv run pytest -v
+
+# =============================================================================
+# Stage 4: 6-Gate Architectural Evaluation Quality Gate
+# =============================================================================
+evaluation-quality-gate:
+  stage: eval-gate
+  script:
+    - uv run python -m context_scout.evals.runner --in-memory
+  artifacts:
+    name: "eval-reports-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - reports/m6_eval_report.json
+      - reports/m6_eval_report.md
+    expire_in: 30 days
+
+# =============================================================================
+# Stage 5: React + Strict TypeScript Enterprise UI Verification
+# =============================================================================
+web-ui-verify:
+  stage: ui-verify
+  image: node:22-alpine
+  cache:
+    key: "${CI_COMMIT_REF_SLUG}-npm"
+    paths:
+      - web-ui/node_modules/
+  before_script:
+    - cd web-ui
+  script:
+    - npm ci
+    - npm run lint
+    - npm run typecheck
+    - npm run test
+    - npm run build
+  artifacts:
+    name: "web-ui-dist-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - web-ui/dist/
+    expire_in: 7 days
+
+# =============================================================================
+# Stage 6: Keyless Workload Identity Federation (WIF) Cloud Run Deployment
+# =============================================================================
+deploy-vertex-cloudrun-wif:
+  stage: deploy
+  image: google/cloud-sdk:alpine
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+  id_tokens:
+    GCP_OIDC_TOKEN:
+      aud: "https://iam.googleapis.com/projects/${GCP_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${GCP_WIP_POOL_ID}/providers/${GCP_WIP_PROVIDER_ID}"
+  variables:
+    GCP_REGION: "europe-west3"
+    SERVICE_NAME: "context-scout-api"
+  before_script:
+    - echo "${GCP_OIDC_TOKEN}" > /tmp/oidc_token.jwt
+    - gcloud iam workload-identity-pools create-cred-config
+        projects/${GCP_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${GCP_WIP_POOL_ID}/providers/${GCP_WIP_PROVIDER_ID}
+        --service-account="${GCP_SERVICE_ACCOUNT_EMAIL}"
+        --output-file=/tmp/gcp_cred.json
+        --credential-source-file=/tmp/oidc_token.jwt
+    - gcloud auth login --cred-file=/tmp/gcp_cred.json
+    - gcloud config set project "${GCP_PROJECT_ID}"
+  script:
+    - echo "Keyless Workload Identity Federation authentication successful."
+    - echo "Deploying ${SERVICE_NAME} to Google Cloud Run in ${GCP_REGION}..."
+    - gcloud run deploy "${SERVICE_NAME}"
+        --source .
+        --region "${GCP_REGION}"
+        --platform managed
+        --allow-unauthenticated=false
+        --set-env-vars="PRIMARY_MODEL_ID=google/gemma-4-26B-A4B-it,FRONTIER_MODEL_ID=gemini-3.8-flash"
+        --service-account="${GCP_SERVICE_ACCOUNT_EMAIL}"
