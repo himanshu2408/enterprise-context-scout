@@ -221,8 +221,12 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
             onContextPackReady(pack, telemetry);
           }
         } else if (event.event === "error") {
-          const err = event.data as SSEErrorData;
-          setGuardrailAlert(err.message);
+          const err = event.data as SSEErrorData & { rationale?: string };
+          setGuardrailAlert(
+            err.message ||
+              err.rationale ||
+              "ShieldGemma 2 detected adversarial prompt injection attempt (SEC-01). Request rejected."
+          );
           setStages((prev) =>
             prev.map((s) =>
               s.status === "running" ? { ...s, status: "failed" } : s
