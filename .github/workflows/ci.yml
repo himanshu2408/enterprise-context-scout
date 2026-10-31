@@ -1,0 +1,100 @@
+name: Enterprise Context Scout CI
+
+on:
+  push:
+    branches: ["main", "feat/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  backend-verify:
+    name: Backend Lint, Typecheck & Pytest (PG17 + pgvector)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres_ci_password
+          POSTGRES_DB: context_scout
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CONTEXT_SCOUT_DB_ADMIN_URL: postgresql://postgres:postgres_ci_password@localhost:5432/context_scout
+      CONTEXT_SCOUT_DB_APP_URL: postgresql://app_scout_worker:scout_local_dev_password@localhost:5432/context_scout
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python 3.12
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: uv sync
+
+      - name: Bootstrap PostgreSQL 17 Schema & Forced RLS
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          PGPASSWORD=postgres_ci_password psql -h localhost -U postgres -d context_scout -f sql/001_init_schema.sql
+
+      - name: Run Ruff Linter
+        run: uv run ruff check src tests
+
+      - name: Run Mypy Strict Typechecker
+        run: uv run mypy --strict src tests
+
+      - name: Materialize gitignored QLoRA safetensors on ephemeral CI runner
+        run: |
+          uv run python -c "
+          from pathlib import Path
+          from context_scout.tuning.train_mlx_lora import LocalQLoRATrainer
+          trainer = LocalQLoRATrainer()
+          for d_id, rel in [('trading_code_scout', 'adapters/gemma4_26b_code_scout'), ('quant_research_scout', 'adapters/gemma4_26b_quant_research')]:
+              out = Path('domains') / d_id / rel
+              if not (out / 'adapters.safetensors').exists():
+                  trainer.train(Path('data/tuning') / d_id / 'train.jsonl', Path('data/tuning') / d_id / 'valid.jsonl', out, domain_id=d_id, num_steps=4)
+          "
+
+      - name: Run Backend Test Suite & Evaluation Gate (In-Memory CI Mode)
+        run: |
+          uv run pytest -q -k "not test_real_hf_model_snapshots_and_mlx_gpu_adapters and not TestTeacherDistillerPipeline and not TestLivePostgresCorpus and not TestPostgresDatabaseVerification"
+          uv run python -m context_scout.evals.runner --in-memory
+
+  frontend-verify:
+    name: Frontend Strict TypeScript, ESLint, Vitest & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web-ui
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: web-ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint (--max-warnings 0)
+        run: npm run lint
+
+      - name: Run TypeScript Strict Check
+        run: npm run typecheck
+
+      - name: Run Vitest Suite (41 Tests)
+        run: npm run test
+
+      - name: Build Production Bundle
+        run: npm run build
