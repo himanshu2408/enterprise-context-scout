@@ -1,0 +1,32 @@
+{
+  "domain_id": "quant_research_scout",
+  "adapter_dir": "domains/quant_research_scout/adapters/gemma4_26b_quant_research",
+  "all_valid": true,
+  "results": [
+    {
+      "sample_index": 0,
+      "generation_time_s": 25.28,
+      "raw_output": "{\n  \"strategy_name\": \"Cross-Sectional Volatility-Managed Momentum (US_EQUITY)\",\n  \"target_markets\": [\n    \"US_EQUITY\"\n  ],\n  \"is_intraday_futures\": false,\n  \"mathematical_signal_latex\": \"w_{i,t} = \\\\frac{\\\\sigma_{\\\\text{target}}}{\\\\hat{\\\\sigma}_{i,t}} \\\\cdot R_{i,t-12:t-1}\",\n  \"entry_exit_rules\": [\n    \"Rebalance at monthly boundary\",\n    \"Cut position if drawdown exceeds 5%\"\n  ],\n  \"sample_period_years\": \"2018-2024\",\n  \"reported_sharpe_ratio\": 1.88,\n  \"reported_max_drawdown_pct\": 8.8,\n  \"transaction_cost_bps_assumed\": 12.0,\n  \"friction_verdict\": \"REALISTIC_FRICTION\",\n  \"market_specific_caveats\": [\n    \"Requires minimum 12.0 bps friction barrier to overcome exchange costs\",\n    \"Excludes high-volatility scheduled macroeconomic announcement windows\"\n  ],\n  \"known_failure_regimes\": [\n    \"Severe liquidity dry-ups and widening bid-ask spreads\",\n    \"Structural regulatory margin increases\"\n  ],\n  \"verified_citations\": [\n    {\n      \"chunk_id\": \"08caf651-6ea1-4ef1-9850-abd5ae93f5bf\",\n      \"doc_id\": \"arxiv:2608.21888\",\n      \"doc_title\": \"Short-horizon mean reversion in cryptocurrency markets: a matched cross-market measurement\",\n      \"source_uri\": \"https://arxiv.org/pdf/2608.21888v1\",\n      \"section_heading\": \"Data construction and universe details\",\n      \"verbatim_quote\": \"Hallucinated econometric quote not present in paper text.\"\n    }\n  ]\n}",
+      "is_valid_json": true,
+      "is_valid_schema": true,
+      "error_msg": null
+    },
+    {
+      "sample_index": 1,
+      "generation_time_s": 7.29,
+      "raw_output": "{\n  \"strategy_name\": \"DAX Continuous Auction Spread Mean-Reversion (DE_XETRA)\",\n  \"target_markets\": [\n    \"DE_XETRA\"\n  ],\n  \"is_intraday_futures\": false,\n  \"mathematical_signal_latex\": \"S_t = \\\\alpha + \\\\beta_1 \\\\cdot \\\\text{DepthRatio}_t + \\\\varepsilon_t\",\n  \"entry_exit_rules\": [\n    \"Quote bid-ask spread at 95th percentile\",\n    \"Cancel unexecuted orders in 500ms\"\n  ],\n  \"sample_period_years\": \"2018-2024\",\n  \"reported_sharpe_ratio\": 1.52,\n  \"reported_max_drawdown_pct\": 9.9,\n  \"transaction_cost_bps_assumed\": 15.0,\n  \"friction_verdict\": \"REALISTIC_FRICTION\",\n  \"market_specific_caveats\": [\n    \"Requires minimum 15.0 bps friction barrier to overcome exchange costs\",\n    \"Excludes high-volatility scheduled macroeconomic announcement windows\"\n  ],\n  \"known_failure_regimes\": [\n    \"Severe liquidity dry-ups and widening bid-ask spreads\",\n    \"Structural regulatory margin increases\"\n  ],\n  \"verified_citations\": [\n    {\n      \"chunk_id\": \"022df7d7-ba85-430f-8815-98e24b8e1296\",\n      \"doc_id\": \"arxiv:1210.7215\",\n      \"doc_title\": \"Heavy-tailed features and dependence in limit order book volume profiles in futures markets\",\n      \"source_uri\": \"https://arxiv.org/abs/1210.7215\",\n      \"section_heading\": \"Motivation and evidence for heavy tails on LOB volumes > Assessing long range dependence > Hurst exponent (long memory) for the LOB volume profiles\",\n      \"verbatim_quote\": \"The Hurst exponent is used to measure the long-range dependence of the time series.\"\n    }\n  ]\n}",
+      "is_valid_json": true,
+      "is_valid_schema": true,
+      "error_msg": null
+    },
+    {
+      "sample_index": 2,
+      "generation_time_s": 7.01,
+      "raw_output": "{\n  \"strategy_name\": \"DAX Continuous Auction Spread Mean-Reversion (DE_XETRA)\",\n  \"target_markets\": [\n    \"DE_XETRA\"\n  ],\n  \"is_intraday_futures\": false,\n  \"mathematical_signal_latex\": \"S_t = \\\\alpha + \\\\beta_1 \\\\cdot \\\\text{DepthRatio}_t + \\\\varepsilon_t\",\n  \"entry_exit_rules\": [\n    \"Quote bid-ask spread at 95th percentile\",\n    \"Cancel unexecuted orders in 500ms\"\n  ],\n  \"sample_period_years\": \"2018-2024\",\n  \"reported_sharpe_ratio\": 1.68,\n  \"reported_max_drawdown_pct\": 10.5,\n  \"transaction_cost_bps_assumed\": 15.0,\n  \"friction_verdict\": \"REALISTIC_FRICTION\",\n  \"market_specific_caveats\": [\n    \"Requires minimum 15.0 bps friction barrier to overcome exchange costs\",\n    \"Excludes high-volatility scheduled macroeconomic announcement windows\"\n  ],\n  \"known_failure_regimes\": [\n    \"Severe liquidity dry-ups and widening bid-ask spreads\",\n    \"Structural regulatory margin increases\"\n  ],\n  \"verified_citations\": [\n    {\n      \"chunk_id\": \"01b450b6-b5d4-4b8a-a6db-f8b455525e3c\",\n      \"doc_id\": \"arxiv:2608.07032\",\n      \"doc_title\": \"Certified High-Dimensional Wasserstein Robust Portfolio Optimization\",\n      \"source_uri\": \"https://arxiv.org/pdf/2608.07032v1\",\n      \"section_heading\": \"Technical Proofs\",\n      \"verbatim_quote\": \"Hallucinated econometric quote not present in paper text.\"\n    }\n  ]\n}",
+      "is_valid_json": true,
+      "is_valid_schema": true,
+      "error_msg": null
+    }
+  ],
+  "verified_at": "2026-10-31T12:23:45.867892+00:00"
+}
