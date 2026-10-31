@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ALLOWED_GOOGLE_MODEL_PREFIXES: Final[tuple[str, ...]] = (
     "google/gemma-4-",
+    "mlx-community/gemma-4-",
     "google/embeddinggemma-2",
     "google/shieldgemma-2",
     "gemini-2.5-",
