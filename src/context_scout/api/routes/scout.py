@@ -43,6 +43,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Scout"])
 
 
+def _resolve_federated_doc_chunks(repo: Any, principal: PrincipalContext) -> dict[str, str]:
+    """Resolves visible doc_chunks from live PostgreSQL or InMemory repository under RLS."""
+    chunks_map: dict[str, str] = {
+        "chk_quant_default": (
+            "Order flow imbalance exhibits mean reversion over sub-second horizons."
+        )
+    }
+    if hasattr(repo, "list_visible_doc_chunks"):
+        try:
+            visible = repo.list_visible_doc_chunks(principal, "quant_research_scout")
+            for chk in visible[:50]:
+                chunks_map[str(chk.chunk_id)] = chk.verbatim_content
+        except Exception:
+            pass
+    return chunks_map
+
+
 @router.post("/scout/query", response_model=ScoutQueryResponse)
 def query_scout(
     request: ScoutStreamRequest,
@@ -82,19 +99,15 @@ def query_scout(
         model_id="gemma-4-moe",
         system="gemma",
     ) as span:
-        fallback_doc_chunks = {
-            "chk_quant_default": (
-                "Order flow imbalance exhibits mean reversion over sub-second horizons."
-            )
-        }
         if request.domain_id == "federated_all":
+            fed_doc_chunks = _resolve_federated_doc_chunks(repo, principal)
             coordinator = FederatedScoutCoordinator(registry=registry, repo=repo)
             result = coordinator.run(
                 user_prompt=request.query,
                 principal=principal,
                 trace_id=active_trace_id,
                 normalized_rrf_score=request.normalized_rrf_score,
-                doc_chunks=fallback_doc_chunks,
+                doc_chunks=fed_doc_chunks,
                 max_bounce_backs=request.max_bounce_backs,
             )
         else:
@@ -249,11 +262,7 @@ async def stream_scout(
                 principal=principal,
                 trace_id=active_trace_id,
                 normalized_rrf_score=request.normalized_rrf_score,
-                doc_chunks={
-                    "chk_quant_default": (
-                        "Order flow imbalance exhibits mean reversion over sub-second horizons."
-                    )
-                },
+                doc_chunks=_resolve_federated_doc_chunks(repo, principal),
                 max_bounce_backs=request.max_bounce_backs,
             )
 

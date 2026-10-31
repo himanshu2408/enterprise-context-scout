@@ -60,9 +60,11 @@ def preview_handoff(
     except BudgetExceededError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
-    # 3. Generate patch diff (custom or deterministic/Gemini synthesis)
+    # 3. Generate patch diff (custom, live Gemini API if key set, or deterministic synthesis)
     if request.custom_patch is not None:
         patch_diff = request.custom_patch
+    elif executor.api_key:
+        patch_diff = executor._generate_gemini_patch(request.pack, repo_root)
     else:
         patch_diff = executor._generate_deterministic_patch(request.pack, repo_root)
 
@@ -135,6 +137,15 @@ def apply_handoff(
     )
 
     try:
+        valid_targets = [
+            t for t in record.target_files if (repo_root / t).exists() and t.endswith(".py")
+        ]
+        lint_target_cmd = (
+            ["ruff", "check", *valid_targets]
+            if valid_targets
+            else ["ruff", "check", "src/context_scout/schemas/contracts.py"]
+        )
+        test_target_cmd = ["pytest", "-q", "tests/test_deterministic_slicer.py"]
         result, telemetry = executor.execute_implementation(
             pack=record.pack,
             principal=principal,
@@ -142,8 +153,8 @@ def apply_handoff(
             repo=repo,
             custom_patch=diff_to_apply,
             auto_confirm=True,
-            lint_cmd=["python3", "-c", "import sys; sys.exit(0)"],
-            test_cmd=["python3", "-c", "import sys; sys.exit(0)"],
+            lint_cmd=lint_target_cmd,
+            test_cmd=test_target_cmd,
         )
     except Exception as exc:
         logger.error("Handoff execution failed in worktree sandbox: %s", exc)
