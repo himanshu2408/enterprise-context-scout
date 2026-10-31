@@ -148,3 +148,12 @@ def test_github_actions_workflow_exists_and_valid() -> None:
     assert "backend-verify:" in content
     assert "frontend-verify:" in content
     assert "pgvector/pgvector:pg17" in content
+
+
+def test_vite_proxy_targets_fastapi_port_8080_not_mlx_port_8000() -> None:
+    """Guard 8: vite.config.ts /api proxy must target FastAPI (:8080), never MLX (:8000)."""
+    vite_cfg = Path("web-ui/vite.config.ts")
+    assert vite_cfg.is_file()
+    content = vite_cfg.read_text(encoding="utf-8")
+    assert '"http://127.0.0.1:8080"' in content
+    assert '"http://127.0.0.1:8000"' not in content
