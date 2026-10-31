@@ -810,72 +810,106 @@ class LocalQLoRATrainer:
                 for name, _ in flat_trainable:
                     assert "router" not in name, f"Router parameter unexpectedly trainable: {name}"
 
-                mlx_sequences: list[list[int]] = []
+                full_seq_limit = self.hyperparameters.max_seq_length
+                mlx_samples: list[tuple[Any, Any, Any, int]] = []
                 total_tokens = 0
                 for ex in train_data:
                     msgs = ex.get("messages", [])
-                    if not msgs:
+                    if len(msgs) < 2:
                         continue
-                    text = ""
-                    for m in msgs:
-                        role = "user" if m.get("role") == "user" else "model"
-                        text += f"<start_of_turn>{role}\n{m.get('content', '')}<end_of_turn>\n"
-                    seq_ids = [int(t) for t in mlx_tok.encode(text)]
-                    total_tokens += len(seq_ids)
-                    if len(seq_ids) >= 4:
-                        mlx_sequences.append(seq_ids[:max_len])
+                    prompt_str = mlx_tok.apply_chat_template(
+                        msgs[:-1],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=False,
+                    )
+                    target_str = msgs[-1].get("content", "") + "<turn|>\n"
+                    prompt_ids = [int(t) for t in mlx_tok.encode(prompt_str)]
+                    target_ids = [int(t) for t in mlx_tok.encode(target_str)]
+                    full_ids = (prompt_ids + target_ids)[:full_seq_limit]
+                    p_len = len(prompt_ids)
+                    t_len = max(1, len(full_ids) - p_len)
+                    full_mask = [0.0] * p_len + [1.0] * t_len
+                    x_arr = mx.array([full_ids[:-1]])
+                    y_arr = mx.array([full_ids[1:]])
+                    m_arr = mx.array([full_mask[1:]], dtype=mx.float32)
+                    mlx_samples.append((x_arr, y_arr, m_arr, t_len))
 
-                if not mlx_sequences:
+                if not mlx_samples:
                     raise ValueError(f"No valid sequences tokenized in {train_jsonl}")
 
-                def _mlx_loss_fn(model_obj: Any, x_arr: Any, y_arr: Any) -> Any:
+                def _mlx_loss_fn(model_obj: Any, x_arr: Any, y_arr: Any, m_arr: Any) -> Any:
                     logits_out = model_obj(x_arr)
-                    return mnn.losses.cross_entropy(logits_out, y_arr, reduction="mean")
+                    unreduced = mnn.losses.cross_entropy(logits_out, y_arr, reduction="none")
+                    return (unreduced * m_arr).sum() / m_arr.sum()
 
                 mnn_any: Any = mnn
                 val_grad_builder: Any = mnn_any.value_and_grad
                 loss_and_grad_fn: Any = val_grad_builder(mlx_model, _mlx_loss_fn)
+                sched_fn: Any = moptim.cosine_decay(
+                    init=self.hyperparameters.learning_rate,
+                    decay_steps=steps_to_run,
+                    end=self.hyperparameters.learning_rate * 0.1,
+                )
                 mlx_opt = moptim.AdamW(
-                    learning_rate=self.hyperparameters.learning_rate,
+                    learning_rate=sched_fn,
                     weight_decay=0.01,
                 )
+                clip_fn: Any = moptim.clip_grad_norm
 
                 initial_loss = 0.0
                 final_loss = 0.0
                 for step in range(1, steps_to_run + 1):
-                    seq = mlx_sequences[(step - 1) % len(mlx_sequences)]
-                    arr = mx.array([seq])
-                    x_in, y_tgt = arr[:, :-1], arr[:, 1:]
-                    loss_val, grads = loss_and_grad_fn(mlx_model, x_in, y_tgt)
+                    x_in, y_tgt, m_mask, t_len = mlx_samples[(step - 1) % len(mlx_samples)]
+                    total_tokens += t_len
+                    loss_val, grads = loss_and_grad_fn(mlx_model, x_in, y_tgt, m_mask)
+                    grads, grad_norm = clip_fn(grads, max_norm=1.0)
                     mlx_opt.update(mlx_model, grads)
                     mx.eval(mlx_model.parameters(), mlx_opt.state, loss_val)
                     current_loss = float(loss_val.item())
                     if step == 1:
                         initial_loss = current_loss
                     final_loss = current_loss
+                    cur_lr = (
+                        float(sched_fn(step).item())
+                        if callable(sched_fn)
+                        else self.hyperparameters.learning_rate
+                    )
                     step_history.append(
                         {
                             "step": step,
+                            "epoch": ((step - 1) // len(mlx_samples)) + 1,
                             "loss": round(current_loss, 4),
-                            "lr": self.hyperparameters.learning_rate,
+                            "lr": round(cur_lr, 8),
+                            "grad_norm": round(float(grad_norm.item()), 4),
+                            "target_tokens": t_len,
                         }
                     )
 
                 val_losses_mlx: list[float] = []
-                for v_ex in valid_data[: min(len(valid_data), 6)]:
+                for v_ex in valid_data:
                     v_msgs = v_ex.get("messages", [])
-                    if not v_msgs:
+                    if len(v_msgs) < 2:
                         continue
-                    v_text = ""
-                    for m in v_msgs:
-                        role = "user" if m.get("role") == "user" else "model"
-                        v_text += f"<start_of_turn>{role}\n{m.get('content', '')}<end_of_turn>\n"
-                    v_ids = [int(t) for t in mlx_tok.encode(v_text)[:max_len]]
-                    if len(v_ids) >= 4:
-                        v_arr = mx.array([v_ids])
-                        v_loss_val = _mlx_loss_fn(mlx_model, v_arr[:, :-1], v_arr[:, 1:])
-                        mx.eval(v_loss_val)
-                        val_losses_mlx.append(float(v_loss_val.item()))
+                    vp_str = mlx_tok.apply_chat_template(
+                        v_msgs[:-1],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=False,
+                    )
+                    vt_str = v_msgs[-1].get("content", "") + "<turn|>\n"
+                    vp_ids = [int(t) for t in mlx_tok.encode(vp_str)]
+                    vt_ids = [int(t) for t in mlx_tok.encode(vt_str)]
+                    v_full = (vp_ids + vt_ids)[:full_seq_limit]
+                    vp_len = len(vp_ids)
+                    vt_len = max(1, len(v_full) - vp_len)
+                    v_mask = [0.0] * vp_len + [1.0] * vt_len
+                    vx_arr = mx.array([v_full[:-1]])
+                    vy_arr = mx.array([v_full[1:]])
+                    vm_arr = mx.array([v_mask[1:]], dtype=mx.float32)
+                    v_loss_val = _mlx_loss_fn(mlx_model, vx_arr, vy_arr, vm_arr)
+                    mx.eval(v_loss_val)
+                    val_losses_mlx.append(float(v_loss_val.item()))
 
                 val_loss = (
                     sum(val_losses_mlx) / len(val_losses_mlx) if val_losses_mlx else final_loss
@@ -1148,7 +1182,7 @@ def main() -> None:
             valid_jsonl=valid_j,
             output_adapter_dir=out_d,
             domain_id=dom_id,
-            num_steps=30,
+            num_steps=205,
             use_mlx_native=True,
         )
         logger.info(
