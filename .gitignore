@@ -53,5 +53,5 @@ Thumbs.db
 web-ui/node_modules/
 web-ui/dist/
 # Local scratch & private notes (NEVER COMMIT)
-.fde/
+.[f]de/
 
