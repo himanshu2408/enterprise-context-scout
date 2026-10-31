@@ -134,6 +134,34 @@ def seed_trading_codebase_and_issues(
     total_issues = 0
 
     with mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn:
+        # 0. Ensure domain_packs rows exist on fresh databases before inserting code_files
+        conn.execute(
+            """
+            INSERT INTO domain_packs (
+                domain_id, display_name, lora_adapter_id, primary_truth_source,
+                freshness_half_life_days, config_json
+            )
+            VALUES
+                (
+                    'trading_code_scout',
+                    'Trading Codebase & Architecture Scout',
+                    'gemma4_26b_code_scout',
+                    'code',
+                    90,
+                    '{}'::jsonb
+                ),
+                (
+                    'quant_research_scout',
+                    'Quantitative Research & Strategy Scout',
+                    'gemma4_26b_quant_research',
+                    'document',
+                    180,
+                    '{}'::jsonb
+                )
+            ON CONFLICT (domain_id) DO NOTHING;
+            """
+        )
+
         # 1. Clean existing records for this domain in trading_strategies
         conn.execute(
             """
