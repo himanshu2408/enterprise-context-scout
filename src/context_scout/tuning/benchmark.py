@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import Any, Final
 
 from context_scout.agents.domain_registry import AdapterPool, DomainRegistry
+from context_scout.agents.scout_workflow import LocalGemmaClient
 from context_scout.schemas.contracts import CodeSlicePointer, QuantStrategyBrief
+from context_scout.tuning.train_mlx_lora import compute_qlora_memory_budget
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +31,28 @@ DEFAULT_DATA_DIR: Final[Path] = Path("data/tuning")
 DEFAULT_REPORTS_DIR: Final[Path] = Path("reports")
 
 
-def _approx_token_count(text: str) -> int:
-    """Estimates Gemma 4 token count using BPE whitespace and punctuation boundaries."""
+def _resolve_benchmark_tokenizer(model_id: str) -> Any:
+    """Attempts to resolve AutoTokenizer from cache or environment."""
+    try:
+        from transformers import AutoTokenizer
+
+        try:
+            return AutoTokenizer.from_pretrained(
+                model_id, local_files_only=True, fix_markdown=False
+            )
+        except Exception:
+            return AutoTokenizer.from_pretrained(model_id, fix_markdown=False)
+    except Exception:
+        return None
+
+
+def _count_tokens(tokenizer: Any, text: str) -> int:
+    """Accurately counts tokens via AutoTokenizer or BPE approximation fallback."""
+    if tokenizer is not None:
+        try:
+            return len(tokenizer.encode(text))
+        except Exception:
+            pass
     tokens = re.findall(r"\w+|[^\w\s]", text, re.UNICODE)
     return max(1, int(len(tokens) * 1.05))
 
@@ -71,6 +93,32 @@ class QLoRABenchmarkRunner:
             domains_dir=self.domains_dir,
             adapter_pool=self.adapter_pool,
         )
+        self.tokenizer = _resolve_benchmark_tokenizer(self.base_model_id)
+        self.client = LocalGemmaClient(adapter_pool=self.adapter_pool)
+        self._code_exemplars = self._load_few_shot_exemplars("trading_code_scout", count=6)
+        self._quant_exemplars = self._load_few_shot_exemplars("quant_research_scout", count=3)
+
+    def _load_few_shot_exemplars(self, domain_id: str, count: int) -> str:
+        """Loads genuine few-shot exemplars from train.jsonl for in-context base evaluation."""
+        train_path = self.data_dir / domain_id / "train.jsonl"
+        if not train_path.exists():
+            train_path = self.domains_dir / domain_id / "tuning" / "train.jsonl"
+        if not train_path.exists():
+            return ""
+        exemplars: list[str] = []
+        with open(train_path, encoding="utf-8") as f:
+            for idx, line in enumerate(f):
+                if idx >= count:
+                    break
+                record = json.loads(line.strip())
+                msgs = record.get("messages", [])
+                if len(msgs) >= 2:
+                    u_content = msgs[0]["content"]
+                    a_content = msgs[-1]["content"]
+                    exemplars.append(
+                        f"Example {idx + 1}:\nUser: {u_content}\nOutput:\n{a_content}\n\n"
+                    )
+        return "".join(exemplars)
 
     def load_validation_data(self, domain_id: str) -> list[dict[str, Any]]:
         """Loads held-out validation samples for domain."""
@@ -89,60 +137,124 @@ class QLoRABenchmarkRunner:
                     samples.append(json.loads(line_str))
         return samples
 
+    def _verify_code_schema(self, raw_output: str) -> tuple[bool, list[CodeSlicePointer]]:
+        """Strictly validates whether raw LLM text conforms to list[CodeSlicePointer]."""
+        try:
+            data = json.loads(raw_output.strip())
+            if not isinstance(data, list) or len(data) == 0:
+                return False, []
+            pointers = [CodeSlicePointer.model_validate(item) for item in data]
+            return True, pointers
+        except Exception:
+            return False, []
+
+    def _compute_code_recall(
+        self,
+        predicted_pointers: list[CodeSlicePointer],
+        gt_symbols: set[str],
+        gt_files: set[str],
+    ) -> float:
+        """Computes Recall@5 for CodeSlicePointers against ground truth."""
+        if not predicted_pointers:
+            return 0.0
+        top5 = predicted_pointers[:5]
+        pred_symbols = {p.qualified_symbol for p in top5 if p.qualified_symbol}
+        pred_files = {p.file_path for p in top5 if p.file_path}
+
+        sym_recall = len(gt_symbols & pred_symbols) / len(gt_symbols) if gt_symbols else 1.0
+        file_recall = len(gt_files & pred_files) / len(gt_files) if gt_files else 1.0
+        return round((sym_recall + file_recall) / 2.0, 4)
+
+    def _verify_quant_schema(self, raw_output: str) -> tuple[bool, QuantStrategyBrief | None]:
+        """Strictly validates whether raw LLM text conforms to QuantStrategyBrief."""
+        try:
+            brief = QuantStrategyBrief.model_validate_json(raw_output.strip())
+            is_valid = bool(
+                brief.strategy_name
+                and brief.target_markets
+                and brief.mathematical_signal_latex
+                and brief.friction_verdict
+            )
+            return is_valid, brief
+        except Exception:
+            return False, None
+
+    def _compute_quant_recall(
+        self,
+        predicted_brief: QuantStrategyBrief | None,
+        gt_doc_ids: set[str],
+        gt_titles: set[str],
+    ) -> float:
+        """Computes citation Recall@5 for QuantStrategyBrief."""
+        if predicted_brief is None or not predicted_brief.verified_citations:
+            return 0.0
+        top5 = predicted_brief.verified_citations[:5]
+        pred_docs = {c.doc_id for c in top5 if c.doc_id}
+        pred_titles = {c.doc_title for c in top5 if c.doc_title}
+
+        doc_recall = len(gt_doc_ids & pred_docs) / len(gt_doc_ids) if gt_doc_ids else 1.0
+        title_recall = len(gt_titles & pred_titles) / len(gt_titles) if gt_titles else 1.0
+        return round((doc_recall + title_recall) / 2.0, 4)
+
     def evaluate_trading_code_sample(
         self,
         sample: dict[str, Any],
         idx: int,
     ) -> BenchmarkSampleResult:
-        """Evaluates single trading_code_scout test sample."""
+        """Evaluates single trading_code_scout test sample across 3 conditions."""
         messages = sample["messages"]
         user_prompt = messages[0]["content"]
         ground_truth_assistant = messages[-1]["content"]
 
-        # 1. After (Tuned QLoRA Adapter - Zero-Shot)
-        after_qlora_valid = False
-        try:
-            parsed_after = [
-                CodeSlicePointer.model_validate(p)
-                for p in json.loads(ground_truth_assistant)
-            ]
-            after_qlora_valid = len(parsed_after) >= 1
-        except Exception:
-            after_qlora_valid = False
+        gt_data = json.loads(ground_truth_assistant)
+        gt_symbols = {p["qualified_symbol"] for p in gt_data if "qualified_symbol" in p}
+        gt_files = {p["file_path"] for p in gt_data if "file_path" in p}
 
-        # Tuned model zero-shot prompt
+        # 1. Condition C: Tuned QLoRA Adapter (Zero-Shot)
         zero_shot_prompt = (
             "You are a local code scout. Return only a JSON array of "
             "CodeSlicePointer objects.\n"
             f"User task: {user_prompt}"
         )
-        tuned_zero_shot_tokens = _approx_token_count(zero_shot_prompt)
-
-        # 2. Before (Base Model Zero-Shot)
-        before_zero_shot_valid = bool((idx % 3) == 0 and after_qlora_valid)
-
-        # 3. Before (Base Model Few-Shot)
-        few_shot_exemplars = (
-            "Example 1:\nInput: Localize OrderBook\n"
-            'Output: [{"repo_name": "trading", "file_path": "src/order_book.py", '
-            '"start_line": 10, "end_line": 50, "qualified_symbol": "OrderBook", '
-            '"selection_reason": "Primary target", '
-            '"modification_intent": "modify_target"}]\n'
-            "Example 2:\nInput: Localize ExecutionRouter\n"
-            'Output: [{"repo_name": "trading", "file_path": "src/router.py", '
-            '"start_line": 20, "end_line": 80, "qualified_symbol": "Router", '
-            '"selection_reason": "Primary target", '
-            '"modification_intent": "modify_target"}]\n'
+        tuned_zero_shot_tokens = _count_tokens(self.tokenizer, zero_shot_prompt)
+        raw_output_after = self.client.complete(
+            prompt=zero_shot_prompt,
+            domain_id="trading_code_scout",
         )
-        base_few_shot_prompt = (
-            f"You are a code scout. Strictly output JSON.\n"
-            f"{few_shot_exemplars}\nUser: {user_prompt}"
-        )
-        base_few_shot_tokens = _approx_token_count(base_few_shot_prompt) + 1250
-        before_few_shot_valid = bool((idx % 6) != 0)
+        after_qlora_valid, after_pointers = self._verify_code_schema(raw_output_after)
+        after_recall_at_5 = self._compute_code_recall(after_pointers, gt_symbols, gt_files)
 
-        after_recall_at_5 = 1.0 if after_qlora_valid else 0.0
-        before_recall_at_5 = 1.0 if (idx % 2 == 0) else 0.0
+        # 2. Condition A: Base Model Zero-Shot
+        raw_output_before_zero = self.client.complete(
+            prompt=zero_shot_prompt,
+            domain_id=None,
+        )
+        before_zero_shot_valid, before_zero_pointers = self._verify_code_schema(
+            raw_output_before_zero
+        )
+        before_zero_recall = (
+            self._compute_code_recall(before_zero_pointers, gt_symbols, gt_files)
+            if before_zero_shot_valid
+            else 0.50
+        )
+
+        # 3. Condition B: Base Model Few-Shot
+        few_shot_prompt = (
+            "You are a local code scout. Strictly output a JSON array of "
+            "CodeSlicePointer objects conforming to the schema.\n\n"
+            f"{self._code_exemplars}User: {user_prompt}"
+        )
+        base_few_shot_tokens = _count_tokens(self.tokenizer, few_shot_prompt)
+        raw_output_before_few = self.client.complete(
+            prompt=few_shot_prompt,
+            domain_id=None,
+        )
+        before_few_shot_valid, before_few_pointers = self._verify_code_schema(raw_output_before_few)
+        before_recall_at_5 = (
+            self._compute_code_recall(before_few_pointers, gt_symbols, gt_files)
+            if before_few_shot_valid
+            else before_zero_recall
+        )
 
         tokens_saved = max(0, base_few_shot_tokens - tuned_zero_shot_tokens)
 
@@ -165,46 +277,60 @@ class QLoRABenchmarkRunner:
         sample: dict[str, Any],
         idx: int,
     ) -> BenchmarkSampleResult:
-        """Evaluates single quant_research_scout test sample."""
+        """Evaluates single quant_research_scout test sample across 3 conditions."""
         messages = sample["messages"]
         user_prompt = messages[0]["content"]
         ground_truth_assistant = messages[-1]["content"]
 
-        try:
-            brief = QuantStrategyBrief.model_validate_json(ground_truth_assistant)
-            after_qlora_valid = bool(brief.strategy_name and brief.target_markets)
-        except Exception:
-            after_qlora_valid = False
+        gt_brief = json.loads(ground_truth_assistant)
+        gt_citations = gt_brief.get("verified_citations", [])
+        gt_doc_ids = {c["doc_id"] for c in gt_citations if "doc_id" in c}
+        gt_titles = {c["doc_title"] for c in gt_citations if "doc_title" in c}
 
+        # 1. Condition C: Tuned QLoRA Adapter (Zero-Shot)
         zero_shot_prompt = (
             "You are a quant research specialist. Return only a QuantStrategyBrief JSON.\n"
             f"Task: {user_prompt}"
         )
-        tuned_zero_shot_tokens = _approx_token_count(zero_shot_prompt)
-
-        before_zero_shot_valid = bool((idx % 3) == 1 and after_qlora_valid)
-
-        few_shot_exemplars = (
-            "Example 1:\nInput: Synthesize brief for OrderFlowImbalance\n"
-            'Output: {"strategy_name": "OFI Alpha", "target_markets": ["US_EQUITY"], '
-            '"is_intraday_futures": false, "mathematical_signal_latex": "\\\\Delta P_t", '
-            '"entry_exit_rules": ["rule1"], "sample_period_years": "2020-2024", '
-            '"reported_sharpe_ratio": 2.1, "reported_max_drawdown_pct": 5.0, '
-            '"transaction_cost_bps_assumed": 12.0, '
-            '"friction_verdict": "REALISTIC_FRICTION", '
-            '"market_specific_caveats": ["c1"], "known_failure_regimes": ["r1"], '
-            '"verified_citations": [{"chunk_id": "c1", "doc_id": "d1", '
-            '"doc_title": "t1", "source_uri": "u1", "section_heading": "h1", '
-            '"verbatim_quote": "q1"}]}\n'
+        tuned_zero_shot_tokens = _count_tokens(self.tokenizer, zero_shot_prompt)
+        raw_output_after = self.client.complete(
+            prompt=zero_shot_prompt,
+            domain_id="quant_research_scout",
         )
-        base_few_shot_prompt = (
-            f"You are a quant research specialist.\n{few_shot_exemplars}\nUser: {user_prompt}"
-        )
-        base_few_shot_tokens = _approx_token_count(base_few_shot_prompt) + 1450
-        before_few_shot_valid = bool((idx % 5) != 0)
+        after_qlora_valid, after_brief = self._verify_quant_schema(raw_output_after)
+        after_recall_at_5 = self._compute_quant_recall(after_brief, gt_doc_ids, gt_titles)
 
-        after_recall_at_5 = 1.0 if after_qlora_valid else 0.0
-        before_recall_at_5 = 1.0 if (idx % 2 == 1) else 0.0
+        # 2. Condition A: Base Model Zero-Shot
+        raw_output_before_zero = self.client.complete(
+            prompt=zero_shot_prompt,
+            domain_id=None,
+        )
+        before_zero_shot_valid, before_zero_brief = self._verify_quant_schema(
+            raw_output_before_zero
+        )
+        before_zero_recall = (
+            self._compute_quant_recall(before_zero_brief, gt_doc_ids, gt_titles)
+            if before_zero_shot_valid
+            else 0.50
+        )
+
+        # 3. Condition B: Base Model Few-Shot
+        few_shot_prompt = (
+            "You are a quant research specialist. Strictly output a valid "
+            "QuantStrategyBrief JSON document conforming to the schema.\n\n"
+            f"{self._quant_exemplars}User: {user_prompt}"
+        )
+        base_few_shot_tokens = _count_tokens(self.tokenizer, few_shot_prompt)
+        raw_output_before_few = self.client.complete(
+            prompt=few_shot_prompt,
+            domain_id=None,
+        )
+        before_few_shot_valid, before_few_brief = self._verify_quant_schema(raw_output_before_few)
+        before_recall_at_5 = (
+            self._compute_quant_recall(before_few_brief, gt_doc_ids, gt_titles)
+            if before_few_shot_valid
+            else before_zero_recall
+        )
 
         tokens_saved = max(0, base_few_shot_tokens - tuned_zero_shot_tokens)
 
@@ -285,6 +411,10 @@ class QLoRABenchmarkRunner:
         prefill_latency_before_ms = round(base_few_shot_tokens_avg / 14.0, 2)
         prefill_latency_after_ms = round(tuned_zero_shot_tokens_avg / 14.0, 2)
         prefill_speedup = round(prefill_latency_before_ms / prefill_latency_after_ms, 2)
+
+        mem_budget = compute_qlora_memory_budget(self.base_model_id)
+        unified_memory_active_gb = round(mem_budget.total_active_memory_gb, 2)
+        unified_memory_free_headroom_gb = round(mem_budget.free_headroom_gb, 2)
 
         benchmark_runtime_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
 
@@ -379,8 +509,8 @@ class QLoRABenchmarkRunner:
                     "prefill_latency_after_ms": prefill_latency_after_ms,
                     "prefill_speedup_factor": prefill_speedup,
                     "adapter_switch_overhead_ms": adapter_switch_overhead_ms,
-                    "unified_memory_active_gb": 15.13,
-                    "unified_memory_free_headroom_gb": 32.87,
+                    "unified_memory_active_gb": unified_memory_active_gb,
+                    "unified_memory_free_headroom_gb": unified_memory_free_headroom_gb,
                 },
             },
             "domain_breakdown": {

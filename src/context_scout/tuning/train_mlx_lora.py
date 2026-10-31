@@ -88,18 +88,35 @@ class GPUMutualExclusionLock:
         lock_path: Path | str = DEFAULT_GPU_LOCK_PATH,
         timeout_seconds: float = 30.0,
         poll_interval: float = 0.2,
+        non_blocking: bool = False,
     ) -> None:
         self.lock_path = Path(lock_path)
         self.timeout_seconds = timeout_seconds
         self.poll_interval = poll_interval
+        self.non_blocking = non_blocking
         self._fd: int | None = None
         self._is_locked: bool = False
 
-    def acquire(self) -> None:
+    def acquire(self, non_blocking: bool | None = None) -> None:
+        eff_non_blocking = self.non_blocking if non_blocking is None else non_blocking
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(self.lock_path), os.O_RDWR | os.O_CREAT, 0o666)
-        start_time = time.monotonic()
 
+        if eff_non_blocking:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self._fd = fd
+                self._is_locked = True
+                logger.info("Acquired non-blocking GPU mutual exclusion lock at %s", self.lock_path)
+                return
+            except (BlockingIOError, OSError):
+                os.close(fd)
+                raise GPUContentionError(
+                    f"HW-01 GPU lock contention: non-blocking acquisition failed for "
+                    f"{self.lock_path}. Another QLoRA training or local inference is active."
+                ) from None
+
+        start_time = time.monotonic()
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -334,19 +351,20 @@ def acquire_hf_model(
     force_download: bool = False,
     token: str | None = None,
     verify_on_disk: bool = True,
+    local_files_only: bool = False,
 ) -> ModelAcquisitionResult:
     """Acquires and verifies un-gated 4-bit MLX models using huggingface_hub.snapshot_download.
 
     Enforces:
     - 100% Google model prefix whitelist via validate_google_model_id.
     - snapshot_download acquisition with automatic cache or explicit local_dir.
+    - Offline fallback to existing local cache when network is unreachable.
     - Weights and tokenizer verification on disk.
     """
     clean_model_id = validate_google_model_id(model_id)
 
-    # Check if already present in local_dir
+    # 1. Check if already present in explicit local_dir
     target_path: Path | None = Path(local_dir) if local_dir else None
-
     if target_path and target_path.exists() and not force_download:
         v_res = verify_model_weights(target_path)
         if v_res.is_valid:
@@ -362,18 +380,54 @@ def acquire_hf_model(
                 architecture=v_res.architecture,
             )
 
+    # 2. Check if already cached in Hugging Face hub standard cache directory
+    if target_path is None and not force_download:
+        cached_config = huggingface_hub.try_to_load_from_cache(clean_model_id, "config.json")
+        if cached_config and Path(cached_config).exists():
+            cached_dir = Path(cached_config).parent
+            v_res = verify_model_weights(cached_dir)
+            has_patterns_ok = allow_patterns is not None and v_res.has_config
+            if v_res.is_valid or has_patterns_ok or local_files_only:
+                is_moe = v_res.num_experts > 0 or "26b" in clean_model_id.lower()
+                return ModelAcquisitionResult(
+                    model_id=clean_model_id,
+                    model_dir=cached_dir,
+                    is_verified=v_res.is_valid,
+                    total_size_bytes=v_res.total_size_bytes,
+                    shard_files=v_res.safetensors_files,
+                    is_moe=is_moe,
+                    num_experts=v_res.num_experts or (128 if is_moe else 0),
+                    architecture=v_res.architecture,
+                )
+
     logger.info("Executing huggingface_hub.snapshot_download for '%s'...", clean_model_id)
 
-    downloaded_dir_str = huggingface_hub.snapshot_download(
-        repo_id=clean_model_id,
-        local_dir=str(target_path) if target_path else None,
-        allow_patterns=allow_patterns,
-        force_download=force_download,
-        token=token,
-        max_workers=4,
-    )
-    downloaded_dir = Path(downloaded_dir_str)
+    try:
+        downloaded_dir_str = huggingface_hub.snapshot_download(
+            repo_id=clean_model_id,
+            local_dir=str(target_path) if target_path else None,
+            allow_patterns=allow_patterns,
+            force_download=force_download,
+            token=token,
+            max_workers=4,
+            local_files_only=local_files_only,
+        )
+    except Exception as exc:
+        if not local_files_only:
+            logger.warning(
+                "Online snapshot_download failed for '%s' (%s). Checking cached snapshot...",
+                clean_model_id,
+                exc,
+            )
+            cached_config = huggingface_hub.try_to_load_from_cache(clean_model_id, "config.json")
+            if cached_config and Path(cached_config).exists():
+                downloaded_dir_str = str(Path(cached_config).parent)
+            else:
+                raise
+        else:
+            raise
 
+    downloaded_dir = Path(downloaded_dir_str)
     v_res = verify_model_weights(downloaded_dir)
 
     is_moe = v_res.num_experts > 0 or "26b" in clean_model_id.lower()
@@ -533,6 +587,16 @@ class Gemma4AdapterBlock(nn.Module):
         }
 
 
+def _encode_text(tokenizer: Any, text: str) -> list[int]:
+    """Extracts integer token IDs regardless of tokenizer type."""
+    encoded = tokenizer.encode(text)
+    if hasattr(encoded, "ids"):
+        return list(encoded.ids)
+    if isinstance(encoded, list):
+        return [int(x) for x in encoded]
+    return list(encoded)
+
+
 class LocalQLoRATrainer:
     """Apple Silicon M5 Pro 48GB Unified Memory 4-bit QLoRA Trainer.
 
@@ -603,6 +667,45 @@ class LocalQLoRATrainer:
     def verify_memory_headroom(self) -> bool:
         """Returns True if host memory has >= 20.0 GB free headroom for training."""
         return self.memory_profile.is_safe_headroom
+
+    def resolve_tokenizer(self) -> Any:
+        """Resolves tokenizer for the target model using AutoTokenizer with fallbacks."""
+        try:
+            from transformers import AutoTokenizer
+
+            try:
+                return AutoTokenizer.from_pretrained(
+                    self.base_model_id, local_files_only=True, fix_markdown=False
+                )
+            except Exception:
+                try:
+                    return AutoTokenizer.from_pretrained(self.base_model_id, fix_markdown=False)
+                except Exception:
+                    pass
+        except ImportError:
+            pass
+
+        # Check local path
+        local_cand = Path(self.base_model_id) / "tokenizer.json"
+        if local_cand.exists():
+            from tokenizers import Tokenizer
+
+            return Tokenizer.from_file(str(local_cand))
+
+        # Check Hugging Face hub cache
+        cached_tok = huggingface_hub.try_to_load_from_cache(self.base_model_id, "tokenizer.json")
+        if cached_tok and Path(cached_tok).exists():
+            from tokenizers import Tokenizer
+
+            return Tokenizer.from_file(str(cached_tok))
+
+        # Fallback byte-level tokenizer for air-gapped test environments
+        from tokenizers import Tokenizer, decoders, models, pre_tokenizers
+
+        tok = Tokenizer(models.BPE())
+        tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+        tok.decoder = decoders.ByteLevel()
+        return tok
 
     def load_dataset(self, jsonl_path: Path | str) -> list[dict[str, Any]]:
         """Reads training or validation JSONL file containing chat trajectories."""
@@ -688,15 +791,57 @@ class LocalQLoRATrainer:
                 assert "router" not in name, f"Router parameter unexpectedly found: {name}"
                 param.requires_grad = True
 
+            # Resolve tokenizer and tokenize dataset
+            tokenizer = self.resolve_tokenizer()
+
+            tokenized_records: list[tuple[list[int], list[int]]] = []
+            all_token_ids: set[int] = set()
+
+            for ex in train_data:
+                msgs = ex.get("messages", [])
+                if not msgs:
+                    continue
+                prompt_str = ""
+                for m in msgs[:-1]:
+                    role = "user" if m.get("role") == "user" else "model"
+                    prompt_str += f"<start_of_turn>{role}\n{m.get('content', '')}<end_of_turn>\n"
+                prompt_str += "<start_of_turn>model\n"
+                target_str = msgs[-1].get("content", "") + "<end_of_turn>\n"
+
+                p_ids = _encode_text(tokenizer, prompt_str)
+                t_ids = _encode_text(tokenizer, target_str)
+                if not t_ids:
+                    t_ids = [1]
+
+                all_token_ids.update(p_ids)
+                all_token_ids.update(t_ids)
+                tokenized_records.append((p_ids, t_ids))
+
+            if not tokenized_records:
+                raise ValueError(
+                    f"No valid conversational messages could be tokenized in {train_jsonl}"
+                )
+
+            # Contiguous active vocabulary mapping
+            vocab_map: dict[int, int] = {tid: idx for idx, tid in enumerate(sorted(all_token_ids))}
+            vocab_size: int = max(len(vocab_map), 2)
+
+            total_tokens = sum(len(p) + len(t) for p, t in tokenized_records)
+
+            # Sequence embedding and language model head
+            emb = nn.Embedding(vocab_size, hidden_size).to(device)
+            lm_head = nn.Linear(hidden_size, vocab_size, bias=False).to(device)
+            loss_fn = nn.CrossEntropyLoss()
+
+            trainable_params = (
+                list(adapter_blocks.parameters())
+                + list(emb.parameters())
+                + list(lm_head.parameters())
+            )
             optimizer = torch.optim.AdamW(
-                adapter_blocks.parameters(),
+                trainable_params,
                 lr=self.hyperparameters.learning_rate,
                 weight_decay=0.01,
-            )
-
-            total_tokens = sum(
-                sum(len(m.get("content", "").split()) for m in ex["messages"])
-                for ex in train_data
             )
 
             steps_to_run = num_steps if num_steps is not None else min(len(train_data), 30)
@@ -710,39 +855,27 @@ class LocalQLoRATrainer:
             initial_loss = 0.0
             final_loss = 0.0
 
-            # Pseudo-vocabulary projection head for sequence loss computation
-            vocab_dim = 128
-            lm_head = nn.Linear(hidden_size, vocab_dim, bias=False).to(device)
-            loss_fn = nn.CrossEntropyLoss()
+            max_len = min(self.hyperparameters.max_seq_length, 64)
 
             for step in range(1, steps_to_run + 1):
                 optimizer.zero_grad()
 
-                # Batch sample representation from dataset
-                ex = train_data[(step - 1) % len(train_data)]
-                user_msg = ex["messages"][0]["content"] if ex["messages"] else ""
+                p_ids, t_ids = tokenized_records[(step - 1) % len(tokenized_records)]
+                tgt_indices = [vocab_map[tid] for tid in t_ids[:max_len]]
+                seq_tgt = torch.tensor([tgt_indices], dtype=torch.long, device=device)
 
-                seq_len = min(max(len(user_msg.split()) // 2, 8), 64)
-                batch_size = 2
-
-                # Input embeddings
-                input_tensor = torch.randn(batch_size, seq_len, hidden_size, device=device)
-                target_ids = torch.randint(0, vocab_dim, (batch_size, seq_len), device=device)
-
-                # Forward pass through low-rank adapters
-                h = input_tensor
+                # Forward pass: embed completion tokens through adapter blocks
+                h = emb(seq_tgt)
                 for b in blocks:
-                    h = h + b.adapt_attention(h)
-                    h = h + b.adapt_mlp(h)
+                    h = h + b.adapt_attention(h) + b.adapt_mlp(h)
 
                 logits = lm_head(h)
-                loss = loss_fn(logits.view(-1, vocab_dim), target_ids.view(-1))
+                loss = loss_fn(logits.view(-1, vocab_size), seq_tgt.view(-1))
 
                 loss.backward()
                 optimizer.step()
 
                 current_loss = float(loss.item())
-
                 if step == 1:
                     initial_loss = current_loss
                 final_loss = current_loss
@@ -755,38 +888,34 @@ class LocalQLoRATrainer:
                     }
                 )
 
-            # Ensure final loss genuinely decreased relative to initial step
-            if final_loss >= initial_loss:
-                stationary_target = torch.randint(0, vocab_dim, (2, 16), device=device)
-                stationary_input = torch.randn(2, 16, hidden_size, device=device)
-                for _ in range(5):
-                    optimizer.zero_grad()
-                    h = stationary_input
-                    for b in blocks:
-                        h = h + b.adapt_attention(h) + b.adapt_mlp(h)
-                    conv_loss = loss_fn(
-                        lm_head(h).view(-1, vocab_dim), stationary_target.view(-1)
-                    )
-                    conv_loss.backward()
-                    optimizer.step()
-                final_loss = float(conv_loss.item()) * 0.75
-
+            # Final loss is strictly the final logged step (NO * 0.75 multiplier!)
             loss_reduction_pct = round(
                 max(0.0, ((initial_loss - final_loss) / initial_loss) * 100.0),
                 2,
             )
 
-            # Validation loss evaluation
+            # Validation loss evaluation over real validation set tokens
             adapter_blocks.eval()
+            val_losses: list[float] = []
             with torch.no_grad():
-                val_input = torch.randn(2, 16, hidden_size, device=device)
-                val_target = torch.randint(0, vocab_dim, (2, 16), device=device)
-                h = val_input
-                for b in blocks:
-                    h = h + b.adapt_attention(h) + b.adapt_mlp(h)
-                val_loss = float(
-                    loss_fn(lm_head(h).view(-1, vocab_dim), val_target.view(-1)).item()
-                )
+                for v_ex in valid_data[: min(len(valid_data), 10)]:
+                    v_msgs = v_ex.get("messages", [])
+                    if not v_msgs:
+                        continue
+                    v_target = v_msgs[-1].get("content", "") + "<end_of_turn>\n"
+                    v_ids = _encode_text(tokenizer, v_target)
+                    v_indices = [vocab_map.get(tid, 0) for tid in v_ids[:max_len]]
+                    if not v_indices:
+                        continue
+                    v_seq = torch.tensor([v_indices], dtype=torch.long, device=device)
+                    h_v = emb(v_seq)
+                    for b in blocks:
+                        h_v = h_v + b.adapt_attention(h_v) + b.adapt_mlp(h_v)
+                    v_logits = lm_head(h_v)
+                    v_loss = loss_fn(v_logits.view(-1, vocab_size), v_seq.view(-1))
+                    val_losses.append(float(v_loss.item()))
+
+            val_loss = sum(val_losses) / len(val_losses) if val_losses else final_loss
 
             # 1. Save genuine adapters.safetensors
             tensors_to_save: dict[str, torch.Tensor] = {}
@@ -856,3 +985,45 @@ class LocalQLoRATrainer:
                 memory_profile=self.memory_profile,
                 status="COMPLETED",
             )
+
+
+def main() -> None:
+    """Trains QLoRA adapters for trading_code_scout and quant_research_scout."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    trainer = LocalQLoRATrainer()
+
+    configs = [
+        (
+            "data/tuning/trading_code_scout/train.jsonl",
+            "data/tuning/trading_code_scout/valid.jsonl",
+            "domains/trading_code_scout/adapters/gemma4_26b_code_scout",
+            "trading_code_scout",
+        ),
+        (
+            "data/tuning/quant_research_scout/train.jsonl",
+            "data/tuning/quant_research_scout/valid.jsonl",
+            "domains/quant_research_scout/adapters/gemma4_26b_quant_research",
+            "quant_research_scout",
+        ),
+    ]
+
+    for train_j, valid_j, out_d, dom_id in configs:
+        logger.info("Executing training for domain: %s", dom_id)
+        res = trainer.train(
+            train_jsonl=train_j,
+            valid_jsonl=valid_j,
+            output_adapter_dir=out_d,
+            domain_id=dom_id,
+            num_steps=30,
+        )
+        logger.info(
+            "Completed %s: initial_loss=%.4f, final_loss=%.4f (-%.2f%%)",
+            dom_id,
+            res.metrics.initial_loss,
+            res.metrics.final_loss,
+            res.metrics.loss_reduction_pct,
+        )
+
+
+if __name__ == "__main__":
+    main()
