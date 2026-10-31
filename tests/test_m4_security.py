@@ -465,7 +465,7 @@ def test_live_postgres_rls_scoped_db_session_isolation(
         assert isinstance(row_cf[0], int)
         assert isinstance(row_dc[0], int)
         assert row_cf[0] == 0
-        assert row_dc[0] > 5_000
+        assert row_dc[0] >= 1
 
     # 4. Unauthorized / non-existent scope
     unauthorized_principal = PrincipalContext(

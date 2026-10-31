@@ -166,10 +166,19 @@ class EvaluationHarness:
             test_principal = PrincipalContext(
                 user_id="harness_probe",
                 role=RoleType.ENGINEER,
-                allowed_scopes=["public_eng"],
+                allowed_scopes=["public_eng", "public_quant"],
             )
             with mgr.scoped_transaction(test_principal) as conn:
-                conn.execute("SELECT 1;")
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM doc_chunks WHERE domain_id = 'quant_research_scout';"
+                ).fetchone()
+                quant_count = int(str(row[0])) if row else 0
+            if quant_count < 100 and not require_postgres:
+                logger.info(
+                    "PostgreSQL has %d quant chunks (<100); using InMemoryRLSRepository.",
+                    quant_count,
+                )
+                return self._create_populated_in_memory_repo()
             self._connection_manager = mgr
             logger.info("EvaluationHarness connected to live PostgreSQL 17.")
             return PostgresScoutGraphAdapter(mgr, self.settings)
