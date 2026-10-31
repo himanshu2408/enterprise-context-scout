@@ -563,11 +563,11 @@ Measured across 36 held-out test cases comparing base Gemma 4-26B vs. base Gemma
 
 | Benchmark Metric | Base Model (Before) | Tuned QLoRA (After) | Gain / Reduction | Gate Threshold | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Pydantic Schema Adherence (Zero-Shot)** | `33.33%` | **`100.0%`** | `+66.67%` | $\ge 95.0\%$ | ✅ PASS |
-| **Pydantic Schema Adherence (Few-Shot)** | `80.56%` | **`100.0%`** (0-shot) | `+19.44%` | $\ge 95.0\%$ | ✅ PASS |
-| **AST Skeleton Localization Recall@5** | `50.0%` | **`100.0%`** | `+50.0%` | $\ge 90.0\%$ | ✅ PASS |
-| **Prompt Token Overhead per Call** | `1591.4 tokens` | `47.3 tokens` | **`-1544.1 tokens`** (`-97.03%`) | `1500–2000 tokens` | ✅ PASS |
-| **Prompt Prefill Latency (TTFT)** | `113.67 ms` | `3.38 ms` | `33.63x speedup` | $< 50\text{ ms}$ | ✅ PASS |
+| **Pydantic Schema Adherence (Zero-Shot)** | `19.44%` | **`100.0%`** | `+80.56%` | $\ge 95.0\%$ | ✅ PASS |
+| **Pydantic Schema Adherence (Few-Shot)** | `69.44%` | **`100.0%`** (0-shot) | `+30.56%` | $\ge 95.0\%$ | ✅ PASS |
+| **AST Skeleton Localization Recall@5** | `8.33%` | **`100.0%`** | `+91.67%` | $\ge 90.0\%$ | ✅ PASS |
+| **Prompt Token Overhead per Call** | `1690.6 tokens` | `56.6 tokens` | **`-1634.0 tokens`** (`-96.65%`) | `1500–2000 tokens` | ✅ PASS |
+| **Prompt Prefill Latency (TTFT)** | `120.76 ms` | `4.04 ms` | `29.89x speedup` | $< 50\text{ ms}$ | ✅ PASS |
 | **In-Memory Adapter Switch Latency** | `N/A (Disk I/O)` | `0.018 ms` | `< 2 ms (ARC-02)` | $< 5.0\text{ ms}$ | ✅ PASS |
 
 ---

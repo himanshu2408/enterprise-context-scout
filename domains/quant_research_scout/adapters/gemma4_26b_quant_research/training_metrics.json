@@ -2,165 +2,165 @@
   "domain_id": "quant_research_scout",
   "base_model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
   "total_steps": 30,
-  "initial_loss": 4.8525,
-  "final_loss": 3.7296,
-  "loss_reduction_pct": 23.14,
-  "val_loss": 5.1629,
+  "initial_loss": 7.9279,
+  "final_loss": 0.9766,
+  "loss_reduction_pct": 87.68,
+  "val_loss": 1.1633,
   "step_history": [
     {
       "step": 1,
-      "loss": 4.8525,
+      "loss": 7.9279,
       "lr": 0.0001
     },
     {
       "step": 2,
-      "loss": 5.0136,
+      "loss": 7.613,
       "lr": 0.0001
     },
     {
       "step": 3,
-      "loss": 5.0195,
+      "loss": 7.2534,
       "lr": 0.0001
     },
     {
       "step": 4,
-      "loss": 5.0505,
+      "loss": 6.9945,
       "lr": 0.0001
     },
     {
       "step": 5,
-      "loss": 5.0977,
+      "loss": 6.4517,
       "lr": 0.0001
     },
     {
       "step": 6,
-      "loss": 5.1331,
+      "loss": 6.0287,
       "lr": 0.0001
     },
     {
       "step": 7,
-      "loss": 5.1659,
+      "loss": 5.7049,
       "lr": 0.0001
     },
     {
       "step": 8,
-      "loss": 4.9903,
+      "loss": 5.24,
       "lr": 0.0001
     },
     {
       "step": 9,
-      "loss": 5.149,
+      "loss": 4.9347,
       "lr": 0.0001
     },
     {
       "step": 10,
-      "loss": 4.985,
+      "loss": 4.1446,
       "lr": 0.0001
     },
     {
       "step": 11,
-      "loss": 4.9888,
+      "loss": 4.0869,
       "lr": 0.0001
     },
     {
       "step": 12,
-      "loss": 5.1516,
+      "loss": 3.8219,
       "lr": 0.0001
     },
     {
       "step": 13,
-      "loss": 4.9618,
+      "loss": 3.1744,
       "lr": 0.0001
     },
     {
       "step": 14,
-      "loss": 5.0929,
+      "loss": 3.5894,
       "lr": 0.0001
     },
     {
       "step": 15,
-      "loss": 5.1453,
+      "loss": 3.4012,
       "lr": 0.0001
     },
     {
       "step": 16,
-      "loss": 5.0658,
+      "loss": 2.98,
       "lr": 0.0001
     },
     {
       "step": 17,
-      "loss": 4.9312,
+      "loss": 3.048,
       "lr": 0.0001
     },
     {
       "step": 18,
-      "loss": 4.8151,
+      "loss": 2.2869,
       "lr": 0.0001
     },
     {
       "step": 19,
-      "loss": 4.8584,
+      "loss": 2.34,
       "lr": 0.0001
     },
     {
       "step": 20,
-      "loss": 4.9368,
+      "loss": 2.5671,
       "lr": 0.0001
     },
     {
       "step": 21,
-      "loss": 5.1285,
+      "loss": 2.0714,
       "lr": 0.0001
     },
     {
       "step": 22,
-      "loss": 4.9961,
+      "loss": 1.9586,
       "lr": 0.0001
     },
     {
       "step": 23,
-      "loss": 5.0677,
+      "loss": 2.0157,
       "lr": 0.0001
     },
     {
       "step": 24,
-      "loss": 4.9956,
+      "loss": 1.6745,
       "lr": 0.0001
     },
     {
       "step": 25,
-      "loss": 5.077,
+      "loss": 1.4366,
       "lr": 0.0001
     },
     {
       "step": 26,
-      "loss": 4.9141,
+      "loss": 1.4725,
       "lr": 0.0001
     },
     {
       "step": 27,
-      "loss": 4.9986,
+      "loss": 1.6288,
       "lr": 0.0001
     },
     {
       "step": 28,
-      "loss": 4.9265,
+      "loss": 2.0778,
       "lr": 0.0001
     },
     {
       "step": 29,
-      "loss": 5.3203,
+      "loss": 1.333,
       "lr": 0.0001
     },
     {
       "step": 30,
-      "loss": 5.056,
+      "loss": 0.9766,
       "lr": 0.0001
     }
   ],
-  "tokens_trained": 18634,
+  "tokens_trained": 70245,
   "device": "mps",
   "peak_memory_gb": 17.35,
   "adapter_path": "domains/quant_research_scout/adapters/gemma4_26b_quant_research",
-  "trained_at": "2026-10-30T02:00:10.250181+00:00"
+  "trained_at": "2026-10-31T10:30:23.311592+00:00"
 }

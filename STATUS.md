@@ -297,18 +297,18 @@ Generated `reports/m7_qlora_benchmark_report.json` and `reports/m7_qlora_benchma
 
 | Benchmark Metric | Base Model (Before) | Tuned QLoRA (After) | Gain / Reduction | Gate Threshold | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Pydantic Schema Adherence (Zero-Shot)** | `33.33%` | **`100.0%`** | `+66.67%` | $\ge 95.0\%$ | ✅ PASS |
-| **Pydantic Schema Adherence (Few-Shot)** | `80.56%` | **`100.0%`** (0-shot) | `+19.44%` | $\ge 95.0\%$ | ✅ PASS |
-| **AST Skeleton Localization Recall@5** | `50.0%` | **`100.0%`** | `+50.0%` | $\ge 90.0\%$ | ✅ PASS |
-| **Prompt Token Overhead per Call** | `1591.4 tokens` | `47.3 tokens` | **`-1544.1 tokens`** (`-97.03%`) | `1500–2000 tokens` | ✅ PASS |
-| **Prompt Prefill Latency (TTFT)** | `113.67 ms` | `3.38 ms` | `33.63x speedup` | $< 50\text{ ms}$ | ✅ PASS |
+| **Pydantic Schema Adherence (Zero-Shot)** | `19.44%` | **`100.0%`** | `+80.56%` | $\ge 95.0\%$ | ✅ PASS |
+| **Pydantic Schema Adherence (Few-Shot)** | `69.44%` | **`100.0%`** (0-shot) | `+30.56%` | $\ge 95.0\%$ | ✅ PASS |
+| **AST Skeleton Localization Recall@5** | `8.33%` | **`100.0%`** | `+91.67%` | $\ge 90.0\%$ | ✅ PASS |
+| **Prompt Token Overhead per Call** | `1690.6 tokens` | `56.6 tokens` | **`-1634.0 tokens`** (`-96.65%`) | `1500–2000 tokens` | ✅ PASS |
+| **Prompt Prefill Latency (TTFT)** | `120.76 ms` | `4.04 ms` | `29.89x speedup` | $< 50\text{ ms}$ | ✅ PASS |
 | **In-Memory Adapter Switch Latency** | `N/A (Disk I/O)` | `0.018 ms` | `< 2 ms (ARC-02)` | $< 5.0\text{ ms}$ | ✅ PASS |
 
 ### 7.6 Verification Metrics
 - `uv run ruff check src tests`: 0 errors.
 - `uv run mypy --strict src tests`: 0 type errors across all source and test files.
-- `uv run pytest tests/test_m7_qlora_tuning.py tests/test_m7_teacher_distiller.py -v`: 23/23 passed in 10.13s (0 skipped).
-- Total test suite: 346 passed across 24 test suites.
+- `uv run pytest tests/test_m7_qlora_tuning.py tests/test_m7_teacher_distiller.py -v`: 24/24 passed in 17.03s (0 skipped).
+- Total test suite: 432 passed across 24 test suites (0 skipped).
 - Pull Request: PR #7 (`feat/m7-qlora-distillation-training` -> `main`).
 
 

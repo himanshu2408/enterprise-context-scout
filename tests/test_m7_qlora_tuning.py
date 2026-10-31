@@ -168,6 +168,23 @@ class TestGPUMutualExclusionLock:
         with lock2:
             assert lock2.is_locked()
 
+    def test_lock_non_blocking_immediate_contention(self, tmp_path: Path) -> None:
+        """Verifies non_blocking=True raises GPUContentionError immediately (<100ms)."""
+        import time
+
+        lock_file = tmp_path / "gpu_non_blocking.lock"
+        lock1 = GPUMutualExclusionLock(lock_path=lock_file, timeout_seconds=5.0)
+        lock2 = GPUMutualExclusionLock(lock_path=lock_file, timeout_seconds=5.0, non_blocking=True)
+
+        with lock1:
+            t0 = time.perf_counter()
+            with pytest.raises(GPUContentionError, match="non-blocking acquisition failed"):
+                lock2.acquire()
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            assert elapsed_ms < 100.0, (
+                f"Non-blocking acquire took {elapsed_ms:.2f}ms, expected < 100ms"
+            )
+
 
 class TestMoELoRATargeting:
     """Tests LoRA target modules and strict MoE router gate freezing."""
@@ -358,6 +375,8 @@ class TestDomainAdaptersIntegration:
                 metrics = json.load(f)
             assert metrics["domain_id"] == domain_id
             assert metrics["final_loss"] <= metrics["initial_loss"]
+            assert len(metrics["step_history"]) > 0
+            assert abs(metrics["final_loss"] - metrics["step_history"][-1]["loss"]) < 1e-4
 
     def test_domain_registry_and_adapter_pool_registration(self) -> None:
         """Verifies DomainRegistry registers adapters into AdapterPool."""
@@ -441,7 +460,16 @@ class TestDomainAdaptersIntegration:
         assert 1500.0 <= tokens["tokens_eliminated_avg"] <= 2000.0
         assert tokens["token_reduction_pct"] > 80.0
 
-        # 4. Reports written to disk
+        # 4. Domain breakdowns
+        domains = report_dict["domain_breakdown"]
+        assert "trading_code_scout" in domains
+        assert "quant_research_scout" in domains
+        assert domains["trading_code_scout"]["after_qlora_pass_rate"] >= 95.0
+        assert domains["quant_research_scout"]["after_qlora_pass_rate"] >= 95.0
+        assert domains["trading_code_scout"]["recall_at_5_after"] >= 90.0
+        assert domains["quant_research_scout"]["recall_at_5_after"] >= 90.0
+
+        # 5. Reports written to disk
         assert (tmp_path / "m7_qlora_benchmark_report.json").is_file()
         assert (tmp_path / "m7_qlora_benchmark_report.md").is_file()
         assert "Milestone 7 Empirical QLoRA Benchmark Report" in md_report
