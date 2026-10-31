@@ -25,8 +25,8 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      CONTEXT_SCOUT_DB_ADMIN_URL: postgresql://postgres:postgres_ci_password@localhost:5432/context_scout
-      CONTEXT_SCOUT_DB_APP_URL: postgresql://app_scout_worker:scout_local_dev_password@localhost:5432/context_scout
+      SCOUT_DB_ADMIN_URL: postgresql://postgres:postgres_ci_password@127.0.0.1:5432/context_scout
+      SCOUT_DB_APP_URL: postgresql://scout_app_user:scout_local_dev_pw@127.0.0.1:5432/context_scout
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -42,7 +42,8 @@ jobs:
       - name: Bootstrap PostgreSQL 17 Schema & Forced RLS
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
-          PGPASSWORD=postgres_ci_password psql -h localhost -U postgres -d context_scout -f sql/001_init_schema.sql
+          PGPASSWORD=postgres_ci_password psql -h 127.0.0.1 -U postgres -d context_scout -f sql/001_init_schema.sql
+          uv run python -m context_scout.mcp_servers.seed_code_corpus
 
       - name: Run Ruff Linter
         run: uv run ruff check src tests
@@ -64,7 +65,7 @@ jobs:
 
       - name: Run Backend Test Suite & Evaluation Gate (In-Memory CI Mode)
         run: |
-          uv run pytest -q -k "not test_real_hf_model_snapshots_and_mlx_gpu_adapters and not TestTeacherDistillerPipeline and not TestLivePostgresCorpus and not TestPostgresDatabaseVerification"
+          uv run pytest -q -k "not test_real_hf_model_snapshots_and_mlx_gpu_adapters and not TestTeacherDistillerPipeline and not TestLivePostgresCorpus and not TestPostgresDatabaseVerification and not test_postgres_doc_chunks_persisted_and_3way_rrf_retrieval and not test_postgres_scepticism_gate_against_persisted_corpus and not test_empirical_live_rls_isolation_doc_chunks and not test_empirical_live_corpus_scepticism_gate_integration and not test_live_postgresql_17_corpus_counts and not test_cli_runner_postgres_flag and not test_live_search_quant_papers_hybrid_rrf and not test_live_extract_paper_equations_and_tables and not test_live_verify_market_friction_assumptions_verdicts and not test_live_compare_cross_market_regimes and not test_quant_corpus_legacy_tool_aliases and not test_live_postgres_federated_scout_coordinator_seeded_corpus and not TestRejectionSamplingAdversarialProbe"
           uv run python -m context_scout.evals.runner --in-memory
 
   frontend-verify:

@@ -318,6 +318,32 @@ class LocalGemmaClient:
         """Authentic deterministic completion generator simulating empirical capabilities."""
         if domain_id == "trading_code_scout":
             pointers: list[CodeSlicePointer] = []
+            ast_cand_pat = (
+                r"\[?repo=([^\|\]\s]+)\s*\|\s*file=([^\|\]\s]+)\s*\|\s*"
+                r"symbol=([^\|\]\s]+)\s*\|\s*lines=(\d+)-(\d+)"
+            )
+            for idx_cand, cand_match in enumerate(re.finditer(ast_cand_pat, prompt)):
+                repo_n, f_path, q_sym, s_ln, e_ln = cand_match.groups()
+                pointers.append(
+                    CodeSlicePointer(
+                        repo_name=repo_n.strip(),
+                        file_path=f_path.strip(),
+                        start_line=int(s_ln),
+                        end_line=int(e_ln),
+                        qualified_symbol=q_sym.strip(),
+                        selection_reason=(
+                            f"Target localized from retrieved AST candidate {q_sym.strip()}"
+                        ),
+                        modification_intent=(
+                            ModificationIntent.MODIFY_TARGET
+                            if idx_cand == 0
+                            else ModificationIntent.REFERENCE_ONLY
+                        ),
+                    )
+                )
+            if pointers:
+                return json.dumps([p.model_dump() for p in pointers], indent=2)
+
             found_files = list(
                 dict.fromkeys(re.findall(r"src/context_scout/[A-Za-z0-9_\-\./]+\.py", prompt))
             )
