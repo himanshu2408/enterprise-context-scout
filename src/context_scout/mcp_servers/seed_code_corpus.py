@@ -322,6 +322,71 @@ def seed_trading_codebase_and_issues(
             )
             total_issues += 1
 
+        # 5. Keep all src/context_scout/*.py files in code_files synchronized with disk
+        for extra_py in sorted((root / "src" / "context_scout").rglob("*.py")):
+            rel_p = extra_py.relative_to(root).as_posix()
+            if rel_p.startswith("src/context_scout/trading_strategies/"):
+                continue
+            raw_c = extra_py.read_text(encoding="utf-8")
+            conn.execute(
+                """
+                INSERT INTO code_files (
+                    file_id, domain_id, repo_name, file_path,
+                    git_commit_sha, git_blob_sha, language,
+                    allowed_scopes, raw_content, line_count
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, 'python', %s, %s, %s)
+                ON CONFLICT (domain_id, repo_name, file_path) DO UPDATE SET
+                    git_commit_sha = EXCLUDED.git_commit_sha,
+                    git_blob_sha = EXCLUDED.git_blob_sha,
+                    raw_content = EXCLUDED.raw_content,
+                    line_count = EXCLUDED.line_count,
+                    indexed_at = NOW();
+                """,
+                (
+                    uuid4(),
+                    domain_id,
+                    repo_name,
+                    rel_p,
+                    rev_cmd,
+                    _git_blob_sha(raw_c),
+                    ["public_eng"],
+                    raw_c,
+                    len(raw_c.splitlines()),
+                ),
+            )
+
+    # 6. Ensure at least 1 public_quant doc_chunks row exists on fresh CI databases
+    quant_seed_principal = PrincipalContext(
+        user_id="seed_quant_corpus_indexer",
+        role=RoleType.QUANT_RESEARCHER,
+        allowed_scopes=["public_quant"],
+    )
+    with mgr.scoped_transaction(quant_seed_principal, enable_hnsw_iterative_scan=False) as q_conn:
+        row_qc = q_conn.execute("SELECT count(*) FROM doc_chunks;").fetchone()
+        if row_qc is not None and int(str(row_qc[0])) == 0:
+            q_emb = generate_deterministic_embedding("Order Flow Imbalance market impact")
+            q_vec = "[" + ",".join(f"{v:.6f}" for v in q_emb) + "]"
+            q_conn.execute(
+                """
+                INSERT INTO doc_chunks (
+                    chunk_id, domain_id, doc_id, doc_title, source_uri,
+                    market_scope, published_date, authority_weight,
+                    section_heading, contextual_header, verbatim_content,
+                    metadata_json, allowed_scopes, embedding
+                )
+                VALUES (
+                    %s, 'quant_research_scout', 'arxiv:1310.7514',
+                    'The Price Impact of Order Book Events',
+                    'https://arxiv.org/abs/1310.7514', 'US_EQUITY', %s, 1.0,
+                    '1. Introduction', 'Quant Seed [quant_research_scout]',
+                    'Order flow imbalance explains short-horizon price changes with linear impact.',
+                    '{}'::jsonb, %s, %s::vector
+                );
+                """,
+                (uuid4(), date(2026, 10, 15), ["public_quant"], q_vec),
+            )
+
     return {
         "files_indexed": total_files,
         "symbols_stored": total_symbols,
