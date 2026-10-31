@@ -2,165 +2,165 @@
   "domain_id": "trading_code_scout",
   "base_model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
   "total_steps": 30,
-  "initial_loss": 6.4346,
-  "final_loss": 0.5006,
-  "loss_reduction_pct": 92.22,
-  "val_loss": 0.2982,
+  "initial_loss": 9.625,
+  "final_loss": 1.2578,
+  "loss_reduction_pct": 86.93,
+  "val_loss": 1.9076,
   "step_history": [
     {
       "step": 1,
-      "loss": 6.4346,
+      "loss": 9.625,
       "lr": 0.0001
     },
     {
       "step": 2,
-      "loss": 6.1155,
+      "loss": 9.0,
       "lr": 0.0001
     },
     {
       "step": 3,
-      "loss": 5.7575,
+      "loss": 7.0,
       "lr": 0.0001
     },
     {
       "step": 4,
-      "loss": 5.4026,
+      "loss": 5.1562,
       "lr": 0.0001
     },
     {
       "step": 5,
-      "loss": 5.0699,
+      "loss": 4.3125,
       "lr": 0.0001
     },
     {
       "step": 6,
-      "loss": 4.6515,
+      "loss": 3.4062,
       "lr": 0.0001
     },
     {
       "step": 7,
-      "loss": 4.2669,
+      "loss": 2.75,
       "lr": 0.0001
     },
     {
       "step": 8,
-      "loss": 3.8427,
+      "loss": 2.6562,
       "lr": 0.0001
     },
     {
       "step": 9,
-      "loss": 3.484,
+      "loss": 2.0156,
       "lr": 0.0001
     },
     {
       "step": 10,
-      "loss": 3.0188,
+      "loss": 2.0156,
       "lr": 0.0001
     },
     {
       "step": 11,
-      "loss": 2.6949,
+      "loss": 1.5625,
       "lr": 0.0001
     },
     {
       "step": 12,
-      "loss": 2.3698,
+      "loss": 1.2656,
       "lr": 0.0001
     },
     {
       "step": 13,
-      "loss": 2.2857,
+      "loss": 3.4062,
       "lr": 0.0001
     },
     {
       "step": 14,
-      "loss": 2.0561,
+      "loss": 2.1562,
       "lr": 0.0001
     },
     {
       "step": 15,
-      "loss": 1.872,
+      "loss": 1.6797,
       "lr": 0.0001
     },
     {
       "step": 16,
-      "loss": 1.557,
+      "loss": 1.5938,
       "lr": 0.0001
     },
     {
       "step": 17,
-      "loss": 1.6161,
+      "loss": 1.8906,
       "lr": 0.0001
     },
     {
       "step": 18,
-      "loss": 1.2335,
+      "loss": 1.1797,
       "lr": 0.0001
     },
     {
       "step": 19,
-      "loss": 1.3212,
+      "loss": 1.5,
       "lr": 0.0001
     },
     {
       "step": 20,
-      "loss": 1.1586,
+      "loss": 1.1641,
       "lr": 0.0001
     },
     {
       "step": 21,
-      "loss": 0.9558,
+      "loss": 1.8203,
       "lr": 0.0001
     },
     {
       "step": 22,
-      "loss": 0.9227,
+      "loss": 3.3906,
       "lr": 0.0001
     },
     {
       "step": 23,
-      "loss": 0.7178,
+      "loss": 3.0,
       "lr": 0.0001
     },
     {
       "step": 24,
-      "loss": 0.6713,
+      "loss": 2.6562,
       "lr": 0.0001
     },
     {
       "step": 25,
-      "loss": 0.5469,
+      "loss": 2.2344,
       "lr": 0.0001
     },
     {
       "step": 26,
-      "loss": 0.6627,
+      "loss": 1.8359,
       "lr": 0.0001
     },
     {
       "step": 27,
-      "loss": 0.7435,
+      "loss": 2.5,
       "lr": 0.0001
     },
     {
       "step": 28,
-      "loss": 0.9288,
+      "loss": 2.1406,
       "lr": 0.0001
     },
     {
       "step": 29,
-      "loss": 0.6323,
+      "loss": 2.5625,
       "lr": 0.0001
     },
     {
       "step": 30,
-      "loss": 0.5006,
+      "loss": 1.2578,
       "lr": 0.0001
     }
   ],
   "tokens_trained": 26864,
-  "device": "mps",
-  "peak_memory_gb": 17.35,
+  "device": "mlx:gpu",
+  "peak_memory_gb": 13.56,
   "adapter_path": "domains/trading_code_scout/adapters/gemma4_26b_code_scout",
-  "trained_at": "2026-10-31T10:30:22.125282+00:00"
+  "trained_at": "2026-10-31T11:32:57.995159+00:00"
 }

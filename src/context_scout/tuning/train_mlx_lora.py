@@ -735,12 +735,13 @@ class LocalQLoRATrainer:
         output_adapter_dir: Path | str,
         domain_id: str = "trading_code_scout",
         num_steps: int | None = None,
+        use_mlx_native: bool = False,
     ) -> TrainingRunResult:
         """Executes genuine QLoRA fine-tuning with process mutual exclusion lock (HW-01).
 
         1. Acquires GPUMutualExclusionLock on /tmp/context_scout_gpu.lock.
         2. Ingests train.jsonl and valid.jsonl.
-        3. Initializes low-rank matrix gradient-descent optimization on Metal/MPS.
+        3. Initializes low-rank matrix gradient-descent optimization on Metal/MPS or MLX GPU.
         4. Tracks step loss progression showing loss reduction across steps.
         5. Writes genuine adapters.safetensors, adapter_config.json, and training_metrics.json.
         """
@@ -753,178 +754,304 @@ class LocalQLoRATrainer:
         if not train_data:
             raise ValueError(f"Training dataset is empty at {train_jsonl}")
 
+        lora_keys: list[str] = [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.o_proj",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+        ]
+
         # Hardware Mutual Exclusion Lock (HW-01)
         with GPUMutualExclusionLock(self.lock_path, timeout_seconds=self.lock_timeout):
             logger.info(
-                "Starting QLoRA training for domain '%s' on %s (train=%d, valid=%d)...",
+                "Starting QLoRA training for domain '%s' on %s "
+                "(train=%d, valid=%d, mlx_native=%s)...",
                 domain_id,
                 self.base_model_id,
                 len(train_data),
                 len(valid_data),
-            )
-
-            # Select compute device: MPS (Apple Silicon Metal) -> CPU fallback
-            if torch.backends.mps.is_available():
-                device = torch.device("mps")
-            else:
-                device = torch.device("cpu")
-
-            # Low-rank architecture setup: 4 attention layers + 3 shared MLP layers
-            hidden_size = 2816 if self.is_moe else 2560
-            intermediate_size = 10240
-
-            # Number of layers to adapt (top 4 critical layers for domain routing & schema)
-            num_adapted_layers = 4
-            blocks: list[Gemma4AdapterBlock] = [
-                Gemma4AdapterBlock(
-                    hidden_size=hidden_size,
-                    intermediate_size=intermediate_size,
-                    r=self.hyperparameters.r,
-                    alpha=self.hyperparameters.lora_alpha,
-                )
-                for _ in range(num_adapted_layers)
-            ]
-            adapter_blocks = nn.ModuleList(blocks).to(device)
-
-            # Freeze any potential router modules: verify none exist in adapter blocks
-            for name, param in adapter_blocks.named_parameters():
-                assert "router" not in name, f"Router parameter unexpectedly found: {name}"
-                param.requires_grad = True
-
-            # Resolve tokenizer and tokenize dataset
-            tokenizer = self.resolve_tokenizer()
-
-            tokenized_records: list[tuple[list[int], list[int]]] = []
-            all_token_ids: set[int] = set()
-
-            for ex in train_data:
-                msgs = ex.get("messages", [])
-                if not msgs:
-                    continue
-                prompt_str = ""
-                for m in msgs[:-1]:
-                    role = "user" if m.get("role") == "user" else "model"
-                    prompt_str += f"<start_of_turn>{role}\n{m.get('content', '')}<end_of_turn>\n"
-                prompt_str += "<start_of_turn>model\n"
-                target_str = msgs[-1].get("content", "") + "<end_of_turn>\n"
-
-                p_ids = _encode_text(tokenizer, prompt_str)
-                t_ids = _encode_text(tokenizer, target_str)
-                if not t_ids:
-                    t_ids = [1]
-
-                all_token_ids.update(p_ids)
-                all_token_ids.update(t_ids)
-                tokenized_records.append((p_ids, t_ids))
-
-            if not tokenized_records:
-                raise ValueError(
-                    f"No valid conversational messages could be tokenized in {train_jsonl}"
-                )
-
-            # Contiguous active vocabulary mapping
-            vocab_map: dict[int, int] = {tid: idx for idx, tid in enumerate(sorted(all_token_ids))}
-            vocab_size: int = max(len(vocab_map), 2)
-
-            total_tokens = sum(len(p) + len(t) for p, t in tokenized_records)
-
-            # Sequence embedding and language model head
-            emb = nn.Embedding(vocab_size, hidden_size).to(device)
-            lm_head = nn.Linear(hidden_size, vocab_size, bias=False).to(device)
-            loss_fn = nn.CrossEntropyLoss()
-
-            trainable_params = (
-                list(adapter_blocks.parameters())
-                + list(emb.parameters())
-                + list(lm_head.parameters())
-            )
-            optimizer = torch.optim.AdamW(
-                trainable_params,
-                lr=self.hyperparameters.learning_rate,
-                weight_decay=0.01,
+                use_mlx_native,
             )
 
             steps_to_run = num_steps if num_steps is not None else min(len(train_data), 30)
             step_history: list[dict[str, Any]] = []
-
-            # Set torch seed for reproducibility
-            torch.manual_seed(self.hyperparameters.seed)
-
-            # Real gradient-descent loop
-            adapter_blocks.train()
-            initial_loss = 0.0
-            final_loss = 0.0
-
             max_len = min(self.hyperparameters.max_seq_length, 64)
+            safetensors_path = output_dir / "adapters.safetensors"
 
-            for step in range(1, steps_to_run + 1):
-                optimizer.zero_grad()
+            if use_mlx_native:
+                import mlx.core as mx
+                import mlx.nn as mnn
+                import mlx.optimizers as moptim
+                import mlx_lm
+                from mlx.utils import tree_flatten
+                from mlx_lm.tuner.utils import linear_to_lora_layers
 
-                p_ids, t_ids = tokenized_records[(step - 1) % len(tokenized_records)]
-                tgt_indices = [vocab_map[tid] for tid in t_ids[:max_len]]
-                seq_tgt = torch.tensor([tgt_indices], dtype=torch.long, device=device)
-
-                # Forward pass: embed completion tokens through adapter blocks
-                h = emb(seq_tgt)
-                for b in blocks:
-                    h = h + b.adapt_attention(h) + b.adapt_mlp(h)
-
-                logits = lm_head(h)
-                loss = loss_fn(logits.view(-1, vocab_size), seq_tgt.view(-1))
-
-                loss.backward()
-                optimizer.step()
-
-                current_loss = float(loss.item())
-                if step == 1:
-                    initial_loss = current_loss
-                final_loss = current_loss
-
-                step_history.append(
-                    {
-                        "step": step,
-                        "loss": round(current_loss, 4),
-                        "lr": self.hyperparameters.learning_rate,
-                    }
+                mx.random.seed(self.hyperparameters.seed)
+                loaded_pair: Any = mlx_lm.load(self.base_model_id)
+                mlx_model: Any = loaded_pair[0]
+                mlx_tok: Any = loaded_pair[1]
+                mlx_model.freeze()
+                linear_to_lora_layers(
+                    mlx_model,
+                    num_layers=4,
+                    config={
+                        "rank": self.hyperparameters.r,
+                        "scale": self.hyperparameters.scaling,
+                        "dropout": self.hyperparameters.lora_dropout,
+                        "keys": lora_keys,
+                    },
                 )
 
-            # Final loss is strictly the final logged step (NO * 0.75 multiplier!)
-            loss_reduction_pct = round(
-                max(0.0, ((initial_loss - final_loss) / initial_loss) * 100.0),
-                2,
-            )
+                raw_trainable: Any = tree_flatten(mlx_model.trainable_parameters())
+                flat_trainable: list[tuple[str, Any]] = list(raw_trainable)
+                for name, _ in flat_trainable:
+                    assert "router" not in name, f"Router parameter unexpectedly trainable: {name}"
 
-            # Validation loss evaluation over real validation set tokens
-            adapter_blocks.eval()
-            val_losses: list[float] = []
-            with torch.no_grad():
-                for v_ex in valid_data[: min(len(valid_data), 10)]:
+                mlx_sequences: list[list[int]] = []
+                total_tokens = 0
+                for ex in train_data:
+                    msgs = ex.get("messages", [])
+                    if not msgs:
+                        continue
+                    text = ""
+                    for m in msgs:
+                        role = "user" if m.get("role") == "user" else "model"
+                        text += f"<start_of_turn>{role}\n{m.get('content', '')}<end_of_turn>\n"
+                    seq_ids = [int(t) for t in mlx_tok.encode(text)]
+                    total_tokens += len(seq_ids)
+                    if len(seq_ids) >= 4:
+                        mlx_sequences.append(seq_ids[:max_len])
+
+                if not mlx_sequences:
+                    raise ValueError(f"No valid sequences tokenized in {train_jsonl}")
+
+                def _mlx_loss_fn(model_obj: Any, x_arr: Any, y_arr: Any) -> Any:
+                    logits_out = model_obj(x_arr)
+                    return mnn.losses.cross_entropy(logits_out, y_arr, reduction="mean")
+
+                mnn_any: Any = mnn
+                val_grad_builder: Any = mnn_any.value_and_grad
+                loss_and_grad_fn: Any = val_grad_builder(mlx_model, _mlx_loss_fn)
+                mlx_opt = moptim.AdamW(
+                    learning_rate=self.hyperparameters.learning_rate,
+                    weight_decay=0.01,
+                )
+
+                initial_loss = 0.0
+                final_loss = 0.0
+                for step in range(1, steps_to_run + 1):
+                    seq = mlx_sequences[(step - 1) % len(mlx_sequences)]
+                    arr = mx.array([seq])
+                    x_in, y_tgt = arr[:, :-1], arr[:, 1:]
+                    loss_val, grads = loss_and_grad_fn(mlx_model, x_in, y_tgt)
+                    mlx_opt.update(mlx_model, grads)
+                    mx.eval(mlx_model.parameters(), mlx_opt.state, loss_val)
+                    current_loss = float(loss_val.item())
+                    if step == 1:
+                        initial_loss = current_loss
+                    final_loss = current_loss
+                    step_history.append(
+                        {
+                            "step": step,
+                            "loss": round(current_loss, 4),
+                            "lr": self.hyperparameters.learning_rate,
+                        }
+                    )
+
+                val_losses_mlx: list[float] = []
+                for v_ex in valid_data[: min(len(valid_data), 6)]:
                     v_msgs = v_ex.get("messages", [])
                     if not v_msgs:
                         continue
-                    v_target = v_msgs[-1].get("content", "") + "<end_of_turn>\n"
-                    v_ids = _encode_text(tokenizer, v_target)
-                    v_indices = [vocab_map.get(tid, 0) for tid in v_ids[:max_len]]
-                    if not v_indices:
+                    v_text = ""
+                    for m in v_msgs:
+                        role = "user" if m.get("role") == "user" else "model"
+                        v_text += f"<start_of_turn>{role}\n{m.get('content', '')}<end_of_turn>\n"
+                    v_ids = [int(t) for t in mlx_tok.encode(v_text)[:max_len]]
+                    if len(v_ids) >= 4:
+                        v_arr = mx.array([v_ids])
+                        v_loss_val = _mlx_loss_fn(mlx_model, v_arr[:, :-1], v_arr[:, 1:])
+                        mx.eval(v_loss_val)
+                        val_losses_mlx.append(float(v_loss_val.item()))
+
+                val_loss = (
+                    sum(val_losses_mlx) / len(val_losses_mlx) if val_losses_mlx else final_loss
+                )
+                loss_reduction_pct = round(
+                    max(0.0, ((initial_loss - final_loss) / initial_loss) * 100.0),
+                    2,
+                )
+                peak_mem_gb = round(mx.get_peak_memory() / (1024**3), 2)
+                device_str = "mlx:gpu"
+
+                final_trainable: Any = tree_flatten(mlx_model.trainable_parameters())
+                mlx_tensors_dict: dict[str, Any] = dict(final_trainable)
+                mx.save_safetensors(str(safetensors_path), mlx_tensors_dict)
+            else:
+                # Select compute device: MPS (Apple Silicon Metal) -> CPU fallback
+                if torch.backends.mps.is_available():
+                    device = torch.device("mps")
+                else:
+                    device = torch.device("cpu")
+
+                # Low-rank architecture setup: 4 attention layers + 3 shared MLP layers
+                hidden_size = 2816 if self.is_moe else 2560
+                intermediate_size = 10240
+
+                # Number of layers to adapt (top 4 critical layers for domain routing & schema)
+                num_adapted_layers = 4
+                blocks: list[Gemma4AdapterBlock] = [
+                    Gemma4AdapterBlock(
+                        hidden_size=hidden_size,
+                        intermediate_size=intermediate_size,
+                        r=self.hyperparameters.r,
+                        alpha=self.hyperparameters.lora_alpha,
+                    )
+                    for _ in range(num_adapted_layers)
+                ]
+                adapter_blocks = nn.ModuleList(blocks).to(device)
+
+                # Freeze any potential router modules: verify none exist in adapter blocks
+                for name, param in adapter_blocks.named_parameters():
+                    assert "router" not in name, f"Router parameter unexpectedly found: {name}"
+                    param.requires_grad = True
+
+                # Resolve tokenizer and tokenize dataset
+                tokenizer = self.resolve_tokenizer()
+
+                tokenized_records: list[tuple[list[int], list[int]]] = []
+                all_token_ids: set[int] = set()
+
+                for ex in train_data:
+                    msgs = ex.get("messages", [])
+                    if not msgs:
                         continue
-                    v_seq = torch.tensor([v_indices], dtype=torch.long, device=device)
-                    h_v = emb(v_seq)
+                    prompt_str = ""
+                    for m in msgs[:-1]:
+                        role = "user" if m.get("role") == "user" else "model"
+                        content_str = m.get("content", "")
+                        prompt_str += f"<start_of_turn>{role}\n{content_str}<end_of_turn>\n"
+                    prompt_str += "<start_of_turn>model\n"
+                    target_str = msgs[-1].get("content", "") + "<end_of_turn>\n"
+
+                    p_ids = _encode_text(tokenizer, prompt_str)
+                    t_ids = _encode_text(tokenizer, target_str)
+                    if not t_ids:
+                        t_ids = [1]
+
+                    all_token_ids.update(p_ids)
+                    all_token_ids.update(t_ids)
+                    tokenized_records.append((p_ids, t_ids))
+
+                if not tokenized_records:
+                    raise ValueError(
+                        f"No valid conversational messages could be tokenized in {train_jsonl}"
+                    )
+
+                # Contiguous active vocabulary mapping
+                vocab_map: dict[int, int] = {
+                    tid: idx for idx, tid in enumerate(sorted(all_token_ids))
+                }
+                vocab_size: int = max(len(vocab_map), 2)
+
+                total_tokens = sum(len(p) + len(t) for p, t in tokenized_records)
+
+                # Sequence embedding and language model head
+                emb = nn.Embedding(vocab_size, hidden_size).to(device)
+                lm_head = nn.Linear(hidden_size, vocab_size, bias=False).to(device)
+                loss_fn = nn.CrossEntropyLoss()
+
+                trainable_params = (
+                    list(adapter_blocks.parameters())
+                    + list(emb.parameters())
+                    + list(lm_head.parameters())
+                )
+                optimizer = torch.optim.AdamW(
+                    trainable_params,
+                    lr=self.hyperparameters.learning_rate,
+                    weight_decay=0.01,
+                )
+
+                # Set torch seed for reproducibility
+                torch.manual_seed(self.hyperparameters.seed)
+
+                # Real gradient-descent loop
+                adapter_blocks.train()
+                initial_loss = 0.0
+                final_loss = 0.0
+
+                for step in range(1, steps_to_run + 1):
+                    optimizer.zero_grad()
+
+                    p_ids, t_ids = tokenized_records[(step - 1) % len(tokenized_records)]
+                    tgt_indices = [vocab_map[tid] for tid in t_ids[:max_len]]
+                    seq_tgt = torch.tensor([tgt_indices], dtype=torch.long, device=device)
+
+                    # Forward pass: embed completion tokens through adapter blocks
+                    h = emb(seq_tgt)
                     for b in blocks:
-                        h_v = h_v + b.adapt_attention(h_v) + b.adapt_mlp(h_v)
-                    v_logits = lm_head(h_v)
-                    v_loss = loss_fn(v_logits.view(-1, vocab_size), v_seq.view(-1))
-                    val_losses.append(float(v_loss.item()))
+                        h = h + b.adapt_attention(h) + b.adapt_mlp(h)
 
-            val_loss = sum(val_losses) / len(val_losses) if val_losses else final_loss
+                    logits = lm_head(h)
+                    loss = loss_fn(logits.view(-1, vocab_size), seq_tgt.view(-1))
 
-            # 1. Save genuine adapters.safetensors
-            tensors_to_save: dict[str, torch.Tensor] = {}
-            for layer_idx, b in enumerate(blocks):
-                prefix = f"language_model.model.layers.{layer_idx}"
-                tensors_to_save.update(b.get_lora_tensors(prefix))
+                    loss.backward()
+                    optimizer.step()
 
-            safetensors_path = output_dir / "adapters.safetensors"
-            save_safetensors_file(tensors_to_save, str(safetensors_path))
+                    current_loss = float(loss.item())
+                    if step == 1:
+                        initial_loss = current_loss
+                    final_loss = current_loss
+
+                    step_history.append(
+                        {
+                            "step": step,
+                            "loss": round(current_loss, 4),
+                            "lr": self.hyperparameters.learning_rate,
+                        }
+                    )
+
+                # Final loss is strictly the final logged step (NO * 0.75 multiplier!)
+                loss_reduction_pct = round(
+                    max(0.0, ((initial_loss - final_loss) / initial_loss) * 100.0),
+                    2,
+                )
+
+                # Validation loss evaluation over real validation set tokens
+                adapter_blocks.eval()
+                val_losses: list[float] = []
+                with torch.no_grad():
+                    for v_ex in valid_data[: min(len(valid_data), 10)]:
+                        v_msgs = v_ex.get("messages", [])
+                        if not v_msgs:
+                            continue
+                        v_target = v_msgs[-1].get("content", "") + "<end_of_turn>\n"
+                        v_ids = _encode_text(tokenizer, v_target)
+                        v_indices = [vocab_map.get(tid, 0) for tid in v_ids[:max_len]]
+                        if not v_indices:
+                            continue
+                        v_seq = torch.tensor([v_indices], dtype=torch.long, device=device)
+                        h_v = emb(v_seq)
+                        for b in blocks:
+                            h_v = h_v + b.adapt_attention(h_v) + b.adapt_mlp(h_v)
+                        v_logits = lm_head(h_v)
+                        v_loss = loss_fn(v_logits.view(-1, vocab_size), v_seq.view(-1))
+                        val_losses.append(float(v_loss.item()))
+
+                val_loss = sum(val_losses) / len(val_losses) if val_losses else final_loss
+                peak_mem_gb = self.memory_profile.total_active_memory_gb
+                device_str = str(device)
+
+                # 1. Save genuine adapters.safetensors
+                tensors_to_save: dict[str, torch.Tensor] = {}
+                for layer_idx, b in enumerate(blocks):
+                    prefix = f"language_model.model.layers.{layer_idx}"
+                    tensors_to_save.update(b.get_lora_tensors(prefix))
+
+                save_safetensors_file(tensors_to_save, str(safetensors_path))
 
             # 2. Save adapter_config.json matching Hugging Face PEFT & MLX format
             adapter_config: dict[str, Any] = {
@@ -941,6 +1068,13 @@ class LocalQLoRATrainer:
                 "is_moe": self.is_moe,
                 "bias": "none",
                 "fine_tune_type": "lora",
+                "num_layers": 4,
+                "lora_parameters": {
+                    "rank": self.hyperparameters.r,
+                    "scale": self.hyperparameters.scaling,
+                    "dropout": self.hyperparameters.lora_dropout,
+                    "keys": lora_keys,
+                },
             }
             adapter_config_path = output_dir / "adapter_config.json"
             with open(adapter_config_path, "w", encoding="utf-8") as f:
@@ -957,8 +1091,8 @@ class LocalQLoRATrainer:
                 val_loss=round(val_loss, 4),
                 step_history=step_history,
                 tokens_trained=total_tokens,
-                device=str(device),
-                peak_memory_gb=self.memory_profile.total_active_memory_gb,
+                device=device_str,
+                peak_memory_gb=peak_mem_gb,
                 adapter_path=str(output_dir),
                 trained_at=datetime.now(UTC).isoformat(),
             )
@@ -1015,6 +1149,7 @@ def main() -> None:
             output_adapter_dir=out_d,
             domain_id=dom_id,
             num_steps=30,
+            use_mlx_native=True,
         )
         logger.info(
             "Completed %s: initial_loss=%.4f, final_loss=%.4f (-%.2f%%)",

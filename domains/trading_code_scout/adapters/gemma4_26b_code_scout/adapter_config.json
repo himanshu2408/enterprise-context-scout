@@ -22,5 +22,20 @@
   "num_experts": 128,
   "is_moe": true,
   "bias": "none",
-  "fine_tune_type": "lora"
+  "fine_tune_type": "lora",
+  "num_layers": 4,
+  "lora_parameters": {
+    "rank": 16,
+    "scale": 2.0,
+    "dropout": 0.0,
+    "keys": [
+      "self_attn.q_proj",
+      "self_attn.k_proj",
+      "self_attn.v_proj",
+      "self_attn.o_proj",
+      "mlp.gate_proj",
+      "mlp.up_proj",
+      "mlp.down_proj"
+    ]
+  }
 }

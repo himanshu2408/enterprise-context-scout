@@ -95,6 +95,35 @@ class TestModelAcquisitionAndVerification:
         assert res_valid.num_experts == 128
         assert res_valid.architecture == "Gemma4ForConditionalGeneration"
 
+    def test_real_hf_model_snapshots_and_mlx_gpu_adapters(self) -> None:
+        """Verifies real downloaded HF 4-bit MLX checkpoints and mlx:gpu trained adapters."""
+        moe_res = acquire_hf_model(DEFAULT_MOE_MODEL_ID, local_files_only=True)
+        assert moe_res.is_verified is True
+        assert moe_res.is_moe is True
+        assert moe_res.num_experts == 128
+        assert len(moe_res.shard_files) == 3
+        assert moe_res.total_size_bytes > 14_000_000_000
+
+        dense_res = acquire_hf_model(DEFAULT_DENSE_MODEL_ID, local_files_only=True)
+        assert dense_res.is_verified is True
+        assert dense_res.is_moe is False
+        assert len(dense_res.shard_files) == 1
+        assert dense_res.total_size_bytes > 4_500_000_000
+
+        for adapter_rel in [
+            "domains/trading_code_scout/adapters/gemma4_26b_code_scout",
+            "domains/quant_research_scout/adapters/gemma4_26b_quant_research",
+        ]:
+            adapter_dir = Path(adapter_rel)
+            tensors = load_file(str(adapter_dir / "adapters.safetensors"))
+            assert len(tensors) == 54  # 4 Gemma 4 layers (26..29, layer 29 uses k_eq_v)
+            assert not any("router" in k for k in tensors)
+            with open(adapter_dir / "training_metrics.json", encoding="utf-8") as f:
+                metrics = json.load(f)
+            assert metrics["device"] == "mlx:gpu"
+            assert metrics["final_loss"] < metrics["initial_loss"]
+
+
 
 class TestQLoRAMemoryMath:
     """Tests 4-bit QLoRA unified memory math on Apple Silicon M5 Pro 48GB."""
