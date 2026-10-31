@@ -63,6 +63,10 @@ These rules apply unconditionally to all AI agents (Antigravity, Gemini CLI, Cla
 ## 5. Engineering, Testing & Milestone Execution Standards
 - **Python Stack:** Python `>=3.11`, `uv` (dependency management), `ruff` (lint + format), `mypy --strict`, `pytest`, `pydantic` v2, PostgreSQL 17 (`pgvector`, `pg_trgm`, FTS, RLS).
 - **Web UI Stack:** TypeScript (`"strict": true`, zero `any`), React, ESLint, Vitest.
+- **Git & CI:** Primary Git host and CI is GitHub and GitHub Actions (`.github/workflows/ci.yml`). Never push directly to `main`; use feature branches and Pull Requests (PRs).
+- **Minimal Code & Mandatory Regression Tests:**
+  - Never write more code or files than strictly necessary to solve the task.
+  - Whenever any bug, regression, shortcut, or edge-case issue is found and fixed, ALWAYS add a dedicated regression test covering that exact failure mode so it can never happen again.
 - **Sequential Milestone Discipline (`M1` -> `M8`):**
   - Execute one milestone at a time (`M1` Foundation -> `M2` Code Engine -> `M3` Quant Engine -> `M4` MCP Servers -> `M5` ADK Scout & Handoff -> `M6` Eval Harness -> `M7` QLoRA Distillation & Training -> `M8` FastAPI + React UI + CI).
   - Never claim a file, test, or milestone works without running `uv run ruff check`, `uv run pytest`, and reporting the exact command and output.
