@@ -49,10 +49,42 @@ def get_roi_metrics(
         except Exception:
             m7_report = None
 
-    # Retrieve live execution telemetry records
+    # Retrieve live execution telemetry records (PostgreSQL 17 or InMemoryRLSRepository)
     records: list[ExecutionTelemetryRecord] = []
+    pg_queries = 0
+    pg_local_tokens = 0
+    pg_pack_tokens = 0
+    pg_saved_tokens = 0
+    pg_usd_saved = 0.0
+
     if isinstance(repo, InMemoryRLSRepository):
         records = list(repo._telemetry.values())
+    elif hasattr(repo, "_conn_mgr") or hasattr(repo, "settings"):
+        try:
+            import psycopg
+
+            from context_scout.config import ScoutSettings
+
+            settings = getattr(repo, "settings", None) or ScoutSettings()
+            with psycopg.connect(settings.db_admin_url) as conn:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*),
+                           COALESCE(SUM(local_tokens_read), 0),
+                           COALESCE(SUM(context_pack_tokens_sent), 0),
+                           COALESCE(SUM(paid_tokens_saved), 0),
+                           COALESCE(SUM(estimated_usd_saved), 0.0)
+                    FROM execution_telemetry;
+                    """
+                ).fetchone()
+                if row and int(row[0]) > 0:
+                    pg_queries = int(row[0])
+                    pg_local_tokens = int(row[1])
+                    pg_pack_tokens = int(row[2])
+                    pg_saved_tokens = int(row[3])
+                    pg_usd_saved = float(row[4])
+        except Exception:
+            pass
 
     # Baseline defaults from evaluation benchmarks
     base_queries = 7
@@ -61,11 +93,13 @@ def get_roi_metrics(
     base_saved_tokens = base_local_tokens - base_pack_tokens
     base_usd_saved = round((base_saved_tokens / 1_000_000.0) * 4.00, 4)
 
-    total_queries = base_queries + len(records)
-    total_local = base_local_tokens + sum(r.local_tokens_read for r in records)
-    total_pack = base_pack_tokens + sum(r.context_pack_tokens_sent for r in records)
-    total_saved = base_saved_tokens + sum(r.paid_tokens_saved for r in records)
-    total_usd = base_usd_saved + sum(r.estimated_usd_saved for r in records)
+    total_queries = base_queries + pg_queries + len(records)
+    total_local = base_local_tokens + pg_local_tokens + sum(r.local_tokens_read for r in records)
+    total_pack = (
+        base_pack_tokens + pg_pack_tokens + sum(r.context_pack_tokens_sent for r in records)
+    )
+    total_saved = base_saved_tokens + pg_saved_tokens + sum(r.paid_tokens_saved for r in records)
+    total_usd = base_usd_saved + pg_usd_saved + sum(r.estimated_usd_saved for r in records)
 
     ratio_pct = (
         round((total_saved / max(1, total_local)) * 100.0, 2) if total_local > 0 else 97.65

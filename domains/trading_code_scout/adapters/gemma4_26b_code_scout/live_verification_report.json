@@ -5,28 +5,34 @@
   "results": [
     {
       "sample_index": 0,
-      "generation_time_s": 21.29,
-      "raw_output": "[\n  {\n    \"repo_name\": \"enterprise-context-scout\",\n    \"file_path\": \"src/context_scout/security/rbac.py\",\n    \"start_line\": 53,\n    \"end_line\": 60,\n    \"qualified_symbol\": \"context_scout.security.rbac.bind_session_principal\",\n    \"selection_reason\": \"Target primary symbol bind_session_principal\",\n    \"modification_intent\": \"modify_target\"\n  },\n  {\n    \"repo_name\": \"enterprise-context-scout\",\n    \"file_path\": \"src/context_scout/security/rbac.py\",\n    \"start_line\": 10,\n    \"end_line\": 20,\n    \"qualified_symbol\": \"context_scout.security.rbac._CURRENT_PRINCIPAL\",\n    \"selection_reason\": \"Resolved internal dependency _CURRENT_PRINCIPAL\",\n    \"modification_intent\": \"imported_type\"\n  },\n  {\n    \"repo_name\": \"enterprise-context-scout\",\n    \"file_path\": \"src/context_scout/telemetry/otel.py\",\n    \"start_line\": 1,\n    \"end_line\": 50,\n    \"qualified_symbol\": \"context_scout.telemetry.otel\",\n    \"selection_reason\": \"Resolved external dependency context_scout.telemetry.otel\",\n    \"modification_intent\": \"imported_type\"\n  }\n]",
+      "num_turns": 4,
+      "generation_time_s": 22.22,
+      "raw_output": "[\n  {\n    \"repo_name\": \"enterprise-context-scout\",\n    \"file_path\": \"src/context_scout/telemetry/otel.py\",\n    \"start_line\": 347,\n    \"end_line\": 349,\n    \"qualified_symbol\": \"context_scout.telemetry.otel.ScoutTelemetryTracer.reset\",\n    \"selection_reason\": \"Resolved internal dependency reset\",\n    \"modification_intent\": \"imported_type\"\n  }\n]",
       "is_valid_json": true,
       "is_valid_schema": true,
+      "is_grounded": true,
       "error_msg": null
     },
     {
       "sample_index": 1,
-      "generation_time_s": 3.33,
-      "raw_output": "[\n  {\n    \"repo_name\": \"enterprise-context-scout\",\n    \"file_path\": \"src/context_scout/schemas/contracts.py\",\n    \"start_line\": 166,\n    \"end_line\": 172,\n    \"qualified_symbol\": \"context_scout.schemas.contracts.CodeSlicePointer._validate_line_order\",\n    \"selection_reason\": \"Target primary symbol _validate_line_order\",\n    \"modification_intent\": \"modify_target\"\n  },\n  {\n    \"repo_name\": \"enterprise-context-scout\",\n    \"file_path\": \"src/context_scout/schemas/contracts.py\",\n    \"start_line\": 166,\n    \"end_line\": 172,\n    \"qualified_symbol\": \"context_scout.schemas.contracts.CodeSlicePointer\",\n    \"selection_reason\": \"Resolved internal dependency CodeSlicePointer\",\n    \"modification_intent\": \"imported_type\"\n  }\n]",
+      "num_turns": 4,
+      "generation_time_s": 3.05,
+      "raw_output": "[\n  {\n    \"repo_name\": \"enterprise-context-scout\",\n    \"file_path\": \"src/context_scout/schemas/contracts.py\",\n    \"start_line\": 155,\n    \"end_line\": 172,\n    \"qualified_symbol\": \"context_scout.schemas.contracts.CodeSlicePointer\",\n    \"selection_reason\": \"Resolved internal dependency CodeSlicePointer\",\n    \"modification_intent\": \"imported_type\"\n  },\n  {\n    \"repo_name\": \"enterprise-context-scout\",\n    \"file_path\": \"src/context_scout/schemas/contracts.py\",\n    \"start_line\": 175,\n    \"end_line\": 181,\n    \"qualified_symbol\": \"context_scout.schemas.contracts.VerbatimCodeSlice\",\n    \"selection_reason\": \"Target primary symbol VerbatimCodeSlice\",\n    \"modification_intent\": \"modify_target\"\n  }\n]",
       "is_valid_json": true,
       "is_valid_schema": true,
+      "is_grounded": true,
       "error_msg": null
     },
     {
-      "sample_index": 2,
-      "generation_time_s": 3.26,
-      "raw_output": "[\n  {\n    \"repo_name\": \"enterprise-context-scout\",\n    \"file_path\": \"src/context_scout/schemas/contracts.py\",\n    \"start_line\": 175,\n    \"end_line\": 181,\n    \"qualified_symbol\": \"context_scout.schemas.contracts.VerbatimCodeSlice\",\n    \"selection_reason\": \"Target primary symbol VerbatimCodeSlice\",\n    \"modification_intent\": \"modify_target\"\n  },\n  {\n    \"repo_name\": \"enterprise-context-scout\",\n    \"file_path\": \"src/context_scout/schemas/contracts.py\",\n    \"start_line\": 175,\n    \"end_line\": 181,\n    \"qualified_symbol\": \"context_scout.schemas.contracts.CodeSlicePointer\",\n    \"selection_reason\": \"Resolved internal dependency CodeSlicePointer\",\n    \"modification_intent\": \"imported_type\"\n  }\n]",
+      "sample_index": 17,
+      "num_turns": 2,
+      "generation_time_s": 1.65,
+      "raw_output": "[\n  {\n    \"repo_name\": \"enterprise-context-scout\",\n    \"file_path\": \"src/context_scout/telemetry/otel.py\",\n    \"start_line\": 205,\n    \"end_line\": 349,\n    \"qualified_symbol\": \"context_scout.telemetry.otel.ScoutTelemetryTracer\",\n    \"selection_reason\": \"Identified symbol ScoutTelemetryTracer for requested inspection\",\n    \"modification_intent\": \"modify_target\"\n  }\n]",
       "is_valid_json": true,
       "is_valid_schema": true,
+      "is_grounded": true,
       "error_msg": null
     }
   ],
-  "verified_at": "2026-10-31T12:18:59.742244+00:00"
+  "verified_at": "2026-10-31T16:01:58.897857+00:00"
 }

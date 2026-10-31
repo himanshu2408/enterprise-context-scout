@@ -95,8 +95,8 @@ class QLoRABenchmarkRunner:
         )
         self.tokenizer = _resolve_benchmark_tokenizer(self.base_model_id)
         self.client = LocalGemmaClient(adapter_pool=self.adapter_pool)
-        self._code_exemplars = self._load_few_shot_exemplars("trading_code_scout", count=6)
-        self._quant_exemplars = self._load_few_shot_exemplars("quant_research_scout", count=3)
+        self._code_exemplars = self._load_few_shot_exemplars("trading_code_scout", count=8)
+        self._quant_exemplars = self._load_few_shot_exemplars("quant_research_scout", count=4)
 
     def _load_few_shot_exemplars(self, domain_id: str, count: int) -> str:
         """Loads genuine few-shot exemplars from train.jsonl for in-context base evaluation."""
@@ -113,7 +113,7 @@ class QLoRABenchmarkRunner:
                 record = json.loads(line.strip())
                 msgs = record.get("messages", [])
                 if len(msgs) >= 2:
-                    u_content = msgs[0]["content"]
+                    u_content = msgs[0]["content"].splitlines()[0]
                     a_content = msgs[-1]["content"]
                     exemplars.append(
                         f"Example {idx + 1}:\nUser: {u_content}\nOutput:\n{a_content}\n\n"
