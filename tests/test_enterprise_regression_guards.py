@@ -157,3 +157,52 @@ def test_vite_proxy_targets_fastapi_port_8080_not_mlx_port_8000() -> None:
     content = vite_cfg.read_text(encoding="utf-8")
     assert '"http://127.0.0.1:8080"' in content
     assert '"http://127.0.0.1:8000"' not in content
+
+
+def test_frontend_client_uses_pack_field_and_includes_federated_all() -> None:
+    """Guard 9: client.ts must send 'pack: contextPack' in previewHandoff and federated_all."""
+    client_ts = Path("web-ui/src/api/client.ts").read_text(encoding="utf-8")
+    assert "pack: contextPack," in client_ts
+    assert "context_pack: contextPack," not in client_ts
+    assert '"federated_all"' in client_ts
+
+
+def test_frontend_sse_propagates_403_guardrail_errors_without_mock_swallow() -> None:
+    """Guard 10: web-ui sse.ts must parse HTTP 403 JSON detail and invoke onError directly."""
+    sse_ts = Path("web-ui/src/api/sse.ts").read_text(encoding="utf-8")
+    assert "response.status === 403" in sse_ts
+    assert "SECURITY_GUARDRAIL_TRIGGERED" in sse_ts
+
+
+def test_scout_workflow_hydrates_quant_strategy_spec_for_quant_domain() -> None:
+    """Guard 11: ScoutWorkflow must hydrate quant_strategy_spec for quant_research_scout."""
+    from context_scout.agents.scout_workflow import ScoutWorkflow
+    from context_scout.api.dependencies import (
+        _populate_in_memory_repository,
+        get_domain_registry,
+        get_repo_root,
+    )
+    from context_scout.schemas.contracts import ImplementationContextPack
+
+    repo = _populate_in_memory_repository(get_repo_root())
+    wf = ScoutWorkflow(registry=get_domain_registry(), repo=repo)
+    principal = PrincipalContext(
+        user_id="quant_tester",
+        role=RoleType.QUANT_RESEARCHER,
+        allowed_scopes=["public_quant", "quant_restricted", "corpus:quant_papers"],
+    )
+    res = wf.run(
+        user_prompt="Synthesize a QuantStrategyBrief on Order Flow Imbalance in US equities",
+        principal=principal,
+        domain_id="quant_research_scout",
+    )
+    assert isinstance(res, ImplementationContextPack)
+    assert res.quant_strategy_spec is not None
+    assert len(res.supporting_doc_citations) >= 1
+
+
+def test_scout_route_matches_hyphenated_bounce_back_prompts() -> None:
+    """Guard 12: scout.py must match 'bounce' prompts without requiring underscore."""
+    src = inspect.getsource(scout)
+    assert '"bounce" in request.query.lower()' in src
+    assert '"bounce_back" in request.query.lower()' not in src
