@@ -14,7 +14,7 @@ from context_scout.api.dependencies import (
     get_repo_root,
 )
 from context_scout.api.schemas import HealthResponse
-from context_scout.config import ScoutSettings
+from context_scout.config import ScoutSettings, detect_hardware_profile
 from context_scout.db.session import RLSConnectionManager
 from context_scout.schemas.contracts import PrincipalContext, RoleType
 
@@ -54,15 +54,11 @@ def get_health(
     registered_domains = list(registry.load_all().keys())
     adapter_status: dict[str, Any] = registry.adapter_pool.verify_all_adapters(base_dir=repo_root)
 
-    # Hardware profile for Apple Silicon M5 Pro 48GB
-    hardware_profile = {
-        "device": "Apple Silicon M5 Pro",
-        "unified_memory": "48.0 GB",
-        "max_kv_tokens": 32768,
-        "quantization": "4-bit (MLX)",
-        "lora_slots_allocated": len(registry.adapter_pool.list_slots()),
-        "lora_slots_capacity": 4,
-    }
+    # Auto-detected or .env-configured hardware profile
+    hardware_profile = detect_hardware_profile(
+        settings=settings,
+        lora_slots_allocated=len(registry.adapter_pool.list_slots()),
+    )
 
     overall_status = "healthy"
     for v in adapter_status.values():

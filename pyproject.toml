@@ -31,13 +31,26 @@ dependencies = [
     "opentelemetry-sdk>=1.30.0,<2.0.0",
     "opentelemetry-semantic-conventions>=0.47b0,<1.0.0",
     "huggingface-hub>=2.3.0,<3.0.0",
-    "mlx>=0.22.0,<1.0.0",
-    "mlx-lm>=0.21.0,<1.0.0",
+    "mlx>=0.22.0,<1.0.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-lm>=0.21.0,<1.0.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "fastapi>=0.115.0,<1.0.0",
     "uvicorn[standard]>=0.32.0,<1.0.0",
 ]
 
+[project.scripts]
+context-scout = "context_scout.cli:main"
+
 [project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0,<10.0.0",
+    "pytest-asyncio>=0.24.0,<1.0.0",
+    "ruff>=0.8.0,<1.0.0",
+    "mypy>=1.13.0,<2.0.0",
+    "types-PyYAML>=6.0.12,<7.0.0",
+    "httpx>=0.28.0,<1.0.0",
+]
+
+[dependency-groups]
 dev = [
     "pytest>=8.3.0,<10.0.0",
     "pytest-asyncio>=0.24.0,<1.0.0",
