@@ -91,7 +91,10 @@ class LocalGemmaClient:
         adapter_pool: AdapterPool | None = None,
         timeout_seconds: float = 5.0,
         offline_mode: bool = False,
+        use_live_mlx: bool = False,
     ) -> None:
+        import os
+
         if max_kv_size > MAX_SAFE_KV_SIZE:
             raise ValueError(
                 f"max_kv_size ({max_kv_size}) exceeds Apple M5 Pro 48GB safety cap "
@@ -103,7 +106,11 @@ class LocalGemmaClient:
         self.adapter_pool = adapter_pool
         self.timeout_seconds = timeout_seconds
         self.offline_mode = offline_mode
+        self.use_live_mlx = (
+            use_live_mlx or os.environ.get("CONTEXT_SCOUT_USE_LIVE_MLX", "").strip() == "1"
+        )
         self._active_domain_id: str | None = None
+        self._mlx_cache: dict[str, tuple[Any, Any]] = {}
 
     def get_active_adapter(self, domain_id: str) -> AdapterSlot | None:
         """Retrieves active adapter slot from pool for zero-cost in-memory swapping."""
@@ -170,9 +177,21 @@ class LocalGemmaClient:
         system_instruction: str | None = None,
         max_tokens: int = 1024,
     ) -> str:
-        """Returns raw text completion from live MLX server or deterministic generator."""
+        """Returns raw text completion from live MLX, in-process mlx_lm, or fallback."""
         if domain_id:
             self.set_active_domain(domain_id)
+        if not self.offline_mode and self.use_live_mlx:
+            try:
+                return self._call_in_process_mlx(
+                    prompt=prompt,
+                    domain_id=domain_id,
+                    max_tokens=max_tokens,
+                )
+            except Exception as e:
+                logger.warning(
+                    "In-process MLX completion failed (%s); falling back",
+                    e,
+                )
         if not self.offline_mode and self.is_online():
             try:
                 return self._call_mlx_raw(
@@ -191,6 +210,72 @@ class LocalGemmaClient:
             domain_id=domain_id,
             system_instruction=system_instruction,
         )
+
+    def _call_in_process_mlx(
+        self,
+        prompt: str,
+        domain_id: str | None = None,
+        max_tokens: int = 768,
+    ) -> str:
+        """Executes in-process Metal inference via mlx_lm with GPUMutualExclusionLock."""
+        import mlx_lm
+
+        from context_scout.tuning.train_mlx_lora import GPUMutualExclusionLock
+
+        slot = self.get_active_adapter(domain_id) if domain_id else None
+        adapter_path = str(slot.adapter_path) if slot and slot.adapter_path else None
+        cache_key = f"{domain_id or 'base'}:{adapter_path or 'none'}"
+        mlx_model_id = "mlx-community/gemma-4-26b-a4b-it-4bit"
+
+        with GPUMutualExclusionLock(timeout_seconds=self.timeout_seconds):
+            if cache_key not in self._mlx_cache:
+                if adapter_path and Path(adapter_path).exists():
+                    loaded: Any = mlx_lm.load(mlx_model_id, adapter_path=adapter_path)
+                else:
+                    loaded = mlx_lm.load(mlx_model_id)
+                model, tokenizer = loaded[0], loaded[1]
+                self._mlx_cache[cache_key] = (model, tokenizer)
+            else:
+                model, tokenizer = self._mlx_cache[cache_key]
+
+            user_text = prompt
+            code_prefix = (
+                "You are a local code scout. Return only a JSON array of "
+                "CodeSlicePointer objects.\nUser task: "
+            )
+            quant_prefix = (
+                "You are a quant research specialist. Return only a "
+                "QuantStrategyBrief JSON.\nTask: "
+            )
+            for prefix in (code_prefix, quant_prefix):
+                if user_text.startswith(prefix):
+                    user_text = user_text[len(prefix) :]
+                    break
+
+            try:
+                formatted = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": user_text}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+            except TypeError:
+                formatted = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": user_text}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+
+            raw = str(
+                mlx_lm.generate(
+                    model,
+                    tokenizer,
+                    prompt=formatted,
+                    max_tokens=max_tokens,
+                    verbose=False,
+                )
+            )
+            return raw.replace("<eos>", "").replace("<end_of_turn>", "").strip()
 
     def _call_mlx_raw(
         self,
@@ -233,9 +318,11 @@ class LocalGemmaClient:
         """Authentic deterministic completion generator simulating empirical capabilities."""
         if domain_id == "trading_code_scout":
             pointers: list[CodeSlicePointer] = []
-            found_files = re.findall(r"src/context_scout/[A-Za-z0-9_\-\./]+\.py", prompt)
+            found_files = list(
+                dict.fromkeys(re.findall(r"src/context_scout/[A-Za-z0-9_\-\./]+\.py", prompt))
+            )
             raw_syms = re.findall(r"`([^`]+)`", prompt)
-            clean_syms = [s for s in raw_syms if "/" not in s]
+            clean_syms = list(dict.fromkeys(s for s in raw_syms if "/" not in s))
 
             try:
                 from context_scout.config import ScoutSettings
@@ -347,6 +434,20 @@ class LocalGemmaClient:
 
         if domain_id == "quant_research_scout":
             brief = self.generate_quant_brief(user_prompt=prompt, domain_id="quant_research_scout")
+            chunk_pat = (
+                r"Retrieved Corpus Chunk: \[chunk_id=([^\|]+?) \| doc_id=([^\|]+?) \| "
+                r"title=([^\|]+?) \| uri=([^\|]+?) \| section=([^\|]+?) \| .*?quote=([^\]]+)\]"
+            )
+            retrieved_match = re.search(chunk_pat, prompt)
+            if retrieved_match and brief.verified_citations:
+                cit = brief.verified_citations[0]
+                cit.chunk_id = retrieved_match.group(1).strip()
+                cit.doc_id = retrieved_match.group(2).strip()
+                cit.doc_title = retrieved_match.group(3).strip()
+                cit.source_uri = retrieved_match.group(4).strip()
+                cit.section_heading = retrieved_match.group(5).strip()
+                cit.verbatim_quote = retrieved_match.group(6).strip()
+                return brief.model_dump_json(indent=2)
             titles = re.findall(r"`([^`]+)`", prompt)
             if titles:
                 paper_title = titles[0]

@@ -515,9 +515,15 @@ class TeacherDistiller:
                 )
                 if sym is not None:
                     f_rec = files_by_id[sym.file_id]
-                    prompt = (
+                    val_prompt = (
                         f"Resolve missing compiler dependency `{sym.qualified_name}` needed for "
                         f"{miss_event.reason}. Locate the exact AST code slice in the repository."
+                    )
+                    prompt = (
+                        f"{val_prompt}\n"
+                        f"Retrieved AST Candidate: [repo={f_rec.repo_name} | "
+                        f"file={f_rec.file_path} | symbol={sym.qualified_name} | "
+                        f"lines={sym.start_line}-{sym.end_line} | intent=reference_only]"
                     )
                     ptr = CodeSlicePointer(
                         repo_name=f_rec.repo_name,
@@ -531,7 +537,7 @@ class TeacherDistiller:
                     v_slice = self.slicer.slice_pointer(ptr, f_rec)
                     rep = self.validator.validate(
                         code_slices=[v_slice],
-                        user_prompt=prompt,
+                        user_prompt=val_prompt,
                         domain_id="trading_code_scout",
                         normalized_rrf_score=0.90,
                     )
@@ -583,9 +589,18 @@ class TeacherDistiller:
             clean_src = src_sym.qualified_name.split(".")[-1]
             clean_dep = dep_sym.qualified_name.split(".")[-1]
 
-            user_prompt = (
+            val_user_prompt = (
                 f"Refactor `{clean_src}` to integrate dependency `{clean_dep}` in "
                 f"`{f_src.file_path}` and `{f_dep.file_path}`."
+            )
+            user_prompt = (
+                f"{val_user_prompt}\n"
+                f"Retrieved AST Candidate 1: [repo={f_src.repo_name} | file={f_src.file_path} | "
+                f"symbol={src_sym.qualified_name} | lines={src_sym.start_line}-{src_sym.end_line} "
+                f"| intent=modify_target]\n"
+                f"Retrieved AST Candidate 2: [repo={f_dep.repo_name} | file={f_dep.file_path} | "
+                f"symbol={dep_sym.qualified_name} | lines={dep_sym.start_line}-{dep_sym.end_line} "
+                f"| intent=imported_type]"
             )
             ptr_src = CodeSlicePointer(
                 repo_name=f_src.repo_name,
@@ -609,22 +624,28 @@ class TeacherDistiller:
             v_slice_src = self.slicer.slice_pointer(ptr_src, f_src)
             fail_report = self.validator.validate(
                 code_slices=[v_slice_src],
-                user_prompt=user_prompt,
+                user_prompt=val_user_prompt,
                 domain_id="trading_code_scout",
                 normalized_rrf_score=0.88,
             )
-            feedback = fail_report.bounce_back_feedback or (
+            base_feedback = fail_report.bounce_back_feedback or (
                 "Pre-Flight Gate Validation FAILED ($0 Local Bounce-Back Required):\n"
                 f"- Check 1 (Internal Symbol Resolution): Missing internal dependencies: "
                 f"['{dep_sym.qualified_name}']. "
                 "Please retrieve or auto-expand these symbols before "
                 "invoking paid execution."
             )
+            feedback = (
+                f"{base_feedback}\n"
+                f"Retrieved Missing AST Candidate: [repo={f_dep.repo_name} | "
+                f"file={f_dep.file_path} | symbol={dep_sym.qualified_name} | "
+                f"lines={dep_sym.start_line}-{dep_sym.end_line} | intent=imported_type]"
+            )
 
             v_slice_dep = self.slicer.slice_pointer(ptr_dep, f_dep)
             pass_report = self.validator.validate(
                 code_slices=[v_slice_src, v_slice_dep],
-                user_prompt=user_prompt,
+                user_prompt=val_user_prompt,
                 domain_id="trading_code_scout",
                 normalized_rrf_score=0.88,
             )
@@ -659,9 +680,15 @@ class TeacherDistiller:
             sym_idx += 1
             f_rec = files_by_id[sym.file_id]
             short_name = sym.qualified_name.split(".")[-1]
-            prompt = (
+            val_prompt = (
                 f"Localize the AST code slice for `{short_name}` in `{f_rec.file_path}` "
                 "to review implementation logic and performance."
+            )
+            prompt = (
+                f"{val_prompt}\n"
+                f"Retrieved AST Candidate: [repo={f_rec.repo_name} | "
+                f"file={f_rec.file_path} | symbol={sym.qualified_name} | "
+                f"lines={sym.start_line}-{sym.end_line} | intent=modify_target]"
             )
             ptr = CodeSlicePointer(
                 repo_name=f_rec.repo_name,
@@ -675,7 +702,7 @@ class TeacherDistiller:
             v_slice = self.slicer.slice_pointer(ptr, f_rec)
             pass_report = self.validator.validate(
                 code_slices=[v_slice],
-                user_prompt=prompt,
+                user_prompt=val_prompt,
                 domain_id="trading_code_scout",
                 normalized_rrf_score=0.88,
             )
@@ -843,6 +870,8 @@ class TeacherDistiller:
                     ln.strip()
                     for ln in target_chunk.verbatim_content.splitlines()
                     if len(ln.strip()) >= 30
+                    and not ln.strip().startswith("%")
+                    and len(re.findall(r"[A-Za-z]{3,}", ln)) >= 3
                 ]
                 quote_text = raw_lines[0] if raw_lines else target_chunk.verbatim_content[:120]
 
@@ -882,9 +911,18 @@ class TeacherDistiller:
 
                 # PreFlight validation with chunk lookup
                 chunk_map = {str(target_chunk.chunk_id): target_chunk.verbatim_content}
-                user_prompt = (
+                val_user_prompt = (
                     f"Synthesize a market-friction verified QuantStrategyBrief for "
                     f"`{target_chunk.doc_title}` in the {target_chunk.market_scope.value} regime."
+                )
+                user_prompt = (
+                    f"{val_user_prompt}\n"
+                    f"Retrieved Corpus Chunk: [chunk_id={target_chunk.chunk_id} | "
+                    f"doc_id={target_chunk.doc_id} | title={target_chunk.doc_title} | "
+                    f"uri={target_chunk.source_uri} | section={target_chunk.section_heading} | "
+                    f"strategy={brief.strategy_name} | sharpe={brief.reported_sharpe_ratio} | "
+                    f"mdd={brief.reported_max_drawdown_pct} | bps={cfg['bps']} | "
+                    f"quote={json.dumps(quote_text)}]"
                 )
 
                 # Determine if this example should be Bounce-Back (ML-01)
@@ -907,27 +945,32 @@ class TeacherDistiller:
                     fail_rep = self.validator.validate(
                         quant_strategy_spec=bad_brief,
                         supporting_doc_citations=[bad_citation],
-                        user_prompt=user_prompt,
+                        user_prompt=val_user_prompt,
                         domain_id="quant_research_scout",
                         normalized_rrf_score=0.90,
                         doc_chunks=chunk_map,
                     )
 
-                    feedback = fail_rep.bounce_back_feedback
-                    if not feedback:
-                        feedback = (
+                    base_feedback = fail_rep.bounce_back_feedback
+                    if not base_feedback:
+                        base_feedback = (
                             "Pre-Flight Gate Validation FAILED ($0 Local Bounce-Back Required):\n"
                             "- Check 4 (Verbatim Citation Verification, VAL-02): Citations failed "
                             "verbatim verification: overlap 0.0000 < 0.98. "
                             "Ensure quotes match source documents verbatim with "
                             ">=0.98 token overlap."
                         )
+                    feedback = (
+                        f"{base_feedback}\n"
+                        f"Replace verbatim_quote with exact source quote from chunk "
+                        f"{target_chunk.chunk_id}: {json.dumps(quote_text)}"
+                    )
 
                     # Remediated candidate
                     pass_rep = self.validator.validate(
                         quant_strategy_spec=brief,
                         supporting_doc_citations=[citation],
-                        user_prompt=user_prompt,
+                        user_prompt=val_user_prompt,
                         domain_id="quant_research_scout",
                         normalized_rrf_score=0.90,
                         doc_chunks=chunk_map,
@@ -959,7 +1002,7 @@ class TeacherDistiller:
                     pass_rep = self.validator.validate(
                         quant_strategy_spec=brief,
                         supporting_doc_citations=[citation],
-                        user_prompt=user_prompt,
+                        user_prompt=val_user_prompt,
                         domain_id="quant_research_scout",
                         normalized_rrf_score=0.90,
                         doc_chunks=chunk_map,
@@ -981,12 +1024,13 @@ class TeacherDistiller:
                         )
                         generated_for_split += 1
 
-        train_examples = [
-            {"messages": c["messages"]} for c in all_candidates if not c["is_eval"]
-        ]
-        valid_examples = [
-            {"messages": c["messages"]} for c in all_candidates if c["is_eval"]
-        ]
+        train_candidates = [c for c in all_candidates if not c["is_eval"]]
+        valid_candidates = [c for c in all_candidates if c["is_eval"]]
+        train_candidates.sort(key=lambda x: bool(x["is_bounce_back"]))
+        valid_candidates.sort(key=lambda x: bool(x["is_bounce_back"]))
+
+        train_examples = [{"messages": c["messages"]} for c in train_candidates]
+        valid_examples = [{"messages": c["messages"]} for c in valid_candidates]
 
         total_bounces = sum(1 for c in all_candidates if len(c["messages"]) == 4)
         logger.info(
