@@ -30,6 +30,9 @@ dependencies = [
     "opentelemetry-api>=1.30.0,<2.0.0",
     "opentelemetry-sdk>=1.30.0,<2.0.0",
     "opentelemetry-semantic-conventions>=0.47b0,<1.0.0",
+    "huggingface-hub>=2.3.0,<3.0.0",
+    "mlx>=0.22.0,<1.0.0",
+    "mlx-lm>=0.21.0,<1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -67,6 +70,10 @@ module = [
     "tree_sitter_typescript",
     "scipy",
     "scipy.optimize",
+    "mlx",
+    "mlx.*",
+    "mlx_lm",
+    "mlx_lm.*",
 ]
 ignore_missing_imports = true
 

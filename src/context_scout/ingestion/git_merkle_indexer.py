@@ -63,6 +63,46 @@ class MerkleSyncStats(BaseModel):
     cache_hit: bool
 
 
+def _resolve_commit_sha(repo_dir: Path, ref: str = "HEAD") -> str:
+    """Fast resolution of commit SHA from .git directory with subprocess fallback."""
+    git_dir = repo_dir / ".git"
+    if git_dir.is_dir():
+        try:
+            if ref == "HEAD":
+                head_file = git_dir / "HEAD"
+                if head_file.is_file():
+                    content = head_file.read_text().strip()
+                    if not content.startswith("ref:"):
+                        is_hex = all(c in "0123456789abcdefABCDEF" for c in content)
+                        if len(content) == 40 and is_hex:
+                            return content
+                    else:
+                        ref_path = content.split(":", 1)[1].strip()
+                        target_file = git_dir / ref_path
+                        if target_file.is_file():
+                            ref_sha = target_file.read_text().strip()
+                            if len(ref_sha) == 40:
+                                return ref_sha
+                        packed = git_dir / "packed-refs"
+                        if packed.is_file():
+                            for line in packed.read_text().splitlines():
+                                if line.endswith(" " + ref_path):
+                                    cand = line.split()[0]
+                                    if len(cand) == 40:
+                                        return cand
+        except Exception:
+            pass
+
+    rev_cmd = subprocess.run(
+        ["git", "rev-parse", ref],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return rev_cmd.stdout.strip()
+
+
 class GitMerkleIndexer:
     """Git Blob-SHA Merkle incremental indexer with Tree-Sitter AST extraction."""
 
@@ -71,14 +111,7 @@ class GitMerkleIndexer:
 
     def get_git_tree(self, repo_dir: Path, ref: str = "HEAD") -> tuple[str, dict[str, str]]:
         """Extracts current commit SHA and mapping of {file_path: blob_sha} via git ls-tree."""
-        rev_cmd = subprocess.run(
-            ["git", "rev-parse", ref],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        commit_sha = rev_cmd.stdout.strip()
+        commit_sha = _resolve_commit_sha(repo_dir, ref)
 
         ls_cmd = subprocess.run(
             ["git", "ls-tree", "-r", ref],
