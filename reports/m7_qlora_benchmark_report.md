@@ -1,10 +1,10 @@
 # Milestone 7 Empirical QLoRA Benchmark Report: Base Model vs. Tuned Adapters
 
-**Evaluation Timestamp**: `2026-10-31T10:30:34.868320+00:00`  
+**Evaluation Timestamp**: `2026-10-31T11:34:04.261094+00:00`  
 **Hardware Platform**: `Apple Silicon M5 Pro 48GB Unified Memory`  
 **Base Model**: `mlx-community/gemma-4-26b-a4b-it-4bit`  
 **Overall Benchmark Verdict**: **PASS (All Architectural Gates Met)**  
-**Evaluation Runtime**: `1753.41 ms`  
+**Evaluation Runtime**: `1786.11 ms`  
 **Total Held-Out Samples**: `36`  
 
 ---

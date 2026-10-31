@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-31T10:30:34.868320+00:00",
+  "timestamp": "2026-10-31T11:34:04.261094+00:00",
   "benchmark_suite": "Milestone 7 Before-vs-After QLoRA Distillation Benchmark",
   "hardware": "Apple Silicon M5 Pro 48GB Unified Memory",
   "base_model": "mlx-community/gemma-4-26b-a4b-it-4bit",
@@ -12,22 +12,22 @@
       "domain_id": "quant_research_scout",
       "is_valid": true,
       "adapter_path": "domains/quant_research_scout/adapters/gemma4_26b_quant_research",
-      "safetensors_bytes": 15080136,
+      "safetensors_bytes": 9968093,
       "r": 16,
       "lora_alpha": 32,
       "is_moe": true,
-      "final_loss": 0.9766,
+      "final_loss": 1.7812,
       "error_message": null
     },
     "trading_code_scout": {
       "domain_id": "trading_code_scout",
       "is_valid": true,
       "adapter_path": "domains/trading_code_scout/adapters/gemma4_26b_code_scout",
-      "safetensors_bytes": 15080136,
+      "safetensors_bytes": 9968093,
       "r": 16,
       "lora_alpha": 32,
       "is_moe": true,
-      "final_loss": 0.5006,
+      "final_loss": 1.2578,
       "error_message": null
     }
   },
@@ -95,7 +95,7 @@
       "token_reduction_pct": 97.09
     }
   },
-  "evaluation_runtime_ms": 1753.41,
+  "evaluation_runtime_ms": 1786.11,
   "total_samples_evaluated": 36,
   "sample_details": [
     {
