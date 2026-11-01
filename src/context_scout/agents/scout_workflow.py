@@ -316,7 +316,16 @@ class LocalGemmaClient:
         system_instruction: str | None = None,
     ) -> str:
         """Authentic deterministic completion generator simulating empirical capabilities."""
-        if domain_id == "trading_code_scout":
+        is_custom_code_domain = (
+            domain_id is not None
+            and domain_id != "quant_research_scout"
+            and (
+                domain_id == "trading_code_scout"
+                or "Retrieved AST Candidate:" in prompt
+                or "code" in domain_id
+            )
+        )
+        if is_custom_code_domain:
             pointers: list[CodeSlicePointer] = []
             ast_cand_pat = (
                 r"\[?repo=([^\|\]\s]+)\s*\|\s*file=([^\|\]\s]+)\s*\|\s*"
@@ -458,8 +467,8 @@ class LocalGemmaClient:
                     )
             return json.dumps([p.model_dump() for p in pointers], indent=2)
 
-        if domain_id == "quant_research_scout":
-            brief = self.generate_quant_brief(user_prompt=prompt, domain_id="quant_research_scout")
+        if domain_id is not None and not is_custom_code_domain:
+            brief = self.generate_quant_brief(user_prompt=prompt, domain_id=domain_id)
             chunk_pat = (
                 r"Retrieved Corpus Chunk: \[chunk_id=([^\|]+?) \| doc_id=([^\|]+?) \| "
                 r"title=([^\|]+?) \| uri=([^\|]+?) \| section=([^\|]+?) \| .*?quote=([^\]]+)\]"
@@ -1173,6 +1182,84 @@ class LocalGemmaClient:
             )
         elif "ofi" in prompt_lower or "order flow" in prompt_lower:
             strategy_name = "Order Flow Imbalance Alpha & Micro-Price Strategy"
+        elif domain_id != "quant_research_scout" and chunks:
+            top_chk = chunks[0]
+            strategy_name = (
+                f"{top_chk.doc_title} — {top_chk.section_heading}"
+                if top_chk.section_heading
+                else f"{top_chk.doc_title} Empirical Synthesis"
+            )
+            target_markets = [MarketRegime.GLOBAL_MULTI]
+            combined_text = "\n".join(c.verbatim_content for c in chunks[:3])
+            math_match = re.search(r"\$\$?([^\$\n]{4,120})\$\$?", combined_text)
+            if math_match:
+                signal_latex = math_match.group(1).strip()
+            else:
+                signal_latex = r"E[Y \mid X] = f_{\theta}(\text{DomainContext})"
+
+            corpus_sentences: list[str] = []
+            caveat_sentences: list[str] = []
+            failure_sentences: list[str] = []
+            for chk in chunks[:3]:
+                for raw_ln in chk.verbatim_content.splitlines():
+                    s_ln = raw_ln.strip().lstrip("-*•0123456789. ")
+                    if (
+                        len(s_ln) < 30
+                        or s_ln.startswith("#")
+                        or s_ln.startswith("%")
+                    ):
+                        continue
+                    s_lower = s_ln.lower()
+                    if any(
+                        fk in s_lower
+                        for fk in (
+                            "off-target",
+                            "failure",
+                            "fail",
+                            "degrad",
+                            "instability",
+                            "toxic",
+                            "error",
+                            "loss of",
+                        )
+                    ):
+                        if s_ln not in failure_sentences:
+                            failure_sentences.append(s_ln)
+                    elif (
+                        any(
+                            ck in s_lower
+                            for ck in (
+                                "caveat",
+                                "constraint",
+                                "require",
+                                "threshold",
+                                "control",
+                                "concentration",
+                                "temperature",
+                                "condition",
+                            )
+                        )
+                        and s_ln not in caveat_sentences
+                    ):
+                        caveat_sentences.append(s_ln)
+                    if s_ln not in corpus_sentences:
+                        corpus_sentences.append(s_ln)
+
+            entry_exit_rules = (
+                corpus_sentences[:3]
+                if corpus_sentences
+                else [f"Apply protocol validated in {top_chk.doc_title}"]
+            )
+            market_caveats = (
+                caveat_sentences[:2]
+                if caveat_sentences
+                else [f"Grounded in {top_chk.doc_id} ({top_chk.section_heading})"]
+            )
+            failure_regimes = (
+                failure_sentences[:3]
+                if failure_sentences
+                else ["Out-of-distribution regime shift across experimental conditions"]
+            )
 
         brief = QuantStrategyBrief(
             strategy_name=strategy_name,
@@ -1409,7 +1496,11 @@ class ScoutWorkflow:
             )
             supporting_doc_citations = list(quant_brief.verified_citations)
 
-        if domain_id == "quant_research_scout" or auto_quant_route:
+        if (
+            manifest.output_contract == "QuantStrategyBrief"
+            or domain_id == "quant_research_scout"
+            or auto_quant_route
+        ):
             candidate_pointers = []
         else:
             candidate_pointers = self.local_client.generate_code_pointers(

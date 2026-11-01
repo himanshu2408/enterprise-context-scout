@@ -30,7 +30,7 @@ class AdapterPool:
     (trading_code_scout) and Model 2 (quant_research_scout).
     """
 
-    def __init__(self, max_slots: int = 4, max_kv_tokens: int = 32_768) -> None:
+    def __init__(self, max_slots: int = 16, max_kv_tokens: int = 32_768) -> None:
         if max_kv_tokens > 32_768:
             raise ValueError(
                 f"max_kv_tokens ({max_kv_tokens}) exceeds Apple M5 Pro 48GB safety cap (32768)"
@@ -200,7 +200,7 @@ class DomainRegistry:
         self._adapter_pool.register_from_manifest(manifest)
 
     def get(self, domain_id: str) -> DomainPackManifest:
-        if not self._manifests and self._domains_dir.exists():
+        if domain_id not in self._manifests and self._domains_dir.exists():
             self.load_all()
         if domain_id not in self._manifests:
             raise KeyError(f"Unknown domain_id '{domain_id}'. Registered: {list(self._manifests)}")

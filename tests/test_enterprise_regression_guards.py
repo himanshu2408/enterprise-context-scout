@@ -380,6 +380,129 @@ def test_auto_quant_intent_routing_and_executive_answer_ui() -> None:
     assert 'data-testid="entry-exit-rules-list"' in inspector_tsx
 
 
+def test_custom_biology_and_bioinformatics_domain_end_to_end(tmp_path: Path) -> None:
+    """Guard 19: Custom non-finance domains (Biology research & Bioinformatics code) work E2E."""
+    from context_scout.agents.domain_registry import DomainRegistry
+    from context_scout.agents.scout_workflow import ScoutWorkflow
+    from context_scout.cli import (
+        cmd_distill_custom_domain,
+        cmd_init_domain,
+        cmd_train_domain,
+    )
+    from context_scout.schemas.contracts import ImplementationContextPack
+
+    domains_dir = tmp_path / "domains"
+    data_dir = tmp_path / "data" / "tuning"
+    bio_docs_dir = tmp_path / "bio_corpus"
+    bio_code_dir = tmp_path / "bio_code"
+    bio_docs_dir.mkdir(parents=True, exist_ok=True)
+    bio_code_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Create a realistic CRISPR-Cas9 molecular biology paper
+    (bio_docs_dir / "crispr_cas9_kinetics.md").write_text(
+        "# CRISPR-Cas9 Guide RNA Specificity and Cleavage Kinetics\n\n"
+        "## 2. Thermodynamic Mismatch Penalty Model\n\n"
+        "Cas9 endonuclease cleavage rate decreases exponentially as PAM-proximal seed "
+        "region mismatches destabilize R-loop formation.\n"
+        "The empirical cleavage rate follows $k_{\\text{cleave}} = k_{\\max} \\cdot "
+        "\\exp(-\\Delta G_{\\text{mismatch}} / RT)$ across in-vitro human HEK293T assays.\n"
+        "Experimental assays require 10 mM Mg2+ cofactor concentration and 37C physiological "
+        "temperature control to maintain catalytic HNH domain conformation.\n"
+        "Severe off-target cleavage failure occurs when PAM-distal mismatches at positions "
+        "18-20 fail to trigger conformational R-loop collapse.\n",
+        encoding="utf-8",
+    )
+
+    # 2. Scaffold, distill, and train the custom `crispr_biology_scout` research domain
+    cmd_init_domain(
+        domain_id="crispr_biology_scout",
+        kind="research",
+        display_name="CRISPR & Molecular Biology Research Scout",
+        domains_dir=domains_dir,
+    )
+    distill_res = cmd_distill_custom_domain(
+        domain_id="crispr_biology_scout",
+        source_dir=bio_docs_dir,
+        num_samples=10,
+        domains_dir=domains_dir,
+        data_dir=data_dir,
+    )
+    assert distill_res["train_samples"] >= 8
+    assert (domains_dir / "crispr_biology_scout" / "corpus_index.json").exists()
+
+    train_res = cmd_train_domain(
+        domain_id="crispr_biology_scout",
+        steps=4,
+        domains_dir=domains_dir,
+        data_dir=data_dir,
+    )
+    assert train_res["adapter_verified"] is True
+
+    # 3. Query `crispr_biology_scout` with a natural-language biology question
+    registry = DomainRegistry(domains_dir=domains_dir)
+    wf = ScoutWorkflow(registry=registry, repo=None)
+    principal = PrincipalContext(
+        user_id="bio_researcher",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng", "public_quant"],
+    )
+    bio_pack = wf.run(
+        user_prompt=(
+            "How does Cas9 guide RNA mismatch affect off-target cleavage kinetics "
+            "in CRISPR gene editing?"
+        ),
+        principal=principal,
+        domain_id="crispr_biology_scout",
+    )
+    assert isinstance(bio_pack, ImplementationContextPack)
+    assert bio_pack.preflight_report.passed is True
+    assert len(bio_pack.code_slices) == 0
+    assert bio_pack.quant_strategy_spec is not None
+    assert "CRISPR-Cas9 Guide RNA Specificity" in bio_pack.quant_strategy_spec.strategy_name
+    assert "Order Flow Imbalance" not in bio_pack.quant_strategy_spec.strategy_name
+    assert "k_{\\text{cleave}}" in bio_pack.quant_strategy_spec.mathematical_signal_latex
+    assert any("Cas9" in r or "R-loop" in r for r in bio_pack.quant_strategy_spec.entry_exit_rules)
+    assert any("Mg2+" in c for c in bio_pack.quant_strategy_spec.market_specific_caveats)
+    assert any("off-target" in f for f in bio_pack.quant_strategy_spec.known_failure_regimes)
+
+    # 4. Scaffold, distill, and query a custom `bioinformatics_code_scout` code domain
+    (bio_code_dir / "alignment.py").write_text(
+        "class SmithWatermanScorer:\n"
+        "    \"\"\"Local biological sequence alignment with affine gap penalties.\"\"\"\n\n"
+        "    def score_alignment(self, seq_a: str, seq_b: str, gap_open: float = -10.0) -> float:\n"
+        "        matches = sum(1 for a, b in zip(seq_a, seq_b, strict=False) if a == b)\n"
+        "        return float(matches * 2.0 + gap_open)\n",
+        encoding="utf-8",
+    )
+    cmd_init_domain(
+        domain_id="bioinformatics_code_scout",
+        kind="code",
+        display_name="Bioinformatics Sequence Alignment Code Scout",
+        domains_dir=domains_dir,
+    )
+    cmd_distill_custom_domain(
+        domain_id="bioinformatics_code_scout",
+        source_dir=bio_code_dir,
+        num_samples=8,
+        domains_dir=domains_dir,
+        data_dir=data_dir,
+    )
+    code_pack = wf.run(
+        user_prompt=(
+            "How do we score local sequence alignment affine gap penalties "
+            "in SmithWatermanScorer?"
+        ),
+        principal=principal,
+        domain_id="bioinformatics_code_scout",
+    )
+    assert isinstance(code_pack, ImplementationContextPack)
+    assert code_pack.preflight_report.passed is True
+    assert len(code_pack.code_slices) >= 1
+    assert "SmithWatermanScorer" in code_pack.code_slices[0].qualified_symbol
+    assert "score_alignment" in code_pack.code_slices[0].verbatim_code_with_lines
+
+
+
 
 
 
