@@ -302,16 +302,16 @@ async def stream_scout(
             yield f"event: stage_update\ndata: {s3.model_dump_json()}\n\n"
             await asyncio.sleep(0.01)
 
-            s4 = SSEStageEvent(
-                stage=4,
-                stage_name="Stage 4: Pre-Flight Composite Validation",
-                status="completed",
-                details="Deterministic pre-flight verification passed across both domains",
-            )
-            yield f"event: stage_update\ndata: {s4.model_dump_json()}\n\n"
-            await asyncio.sleep(0.01)
-
             if isinstance(result, ImplementationContextPack):
+                s4 = SSEStageEvent(
+                    stage=4,
+                    stage_name="Stage 4: Pre-Flight Composite Validation",
+                    status="completed",
+                    details="Deterministic pre-flight verification passed across both domains",
+                )
+                yield f"event: stage_update\ndata: {s4.model_dump_json()}\n\n"
+                await asyncio.sleep(0.01)
+
                 local_explored = result.local_tokens_consumed
                 pack_sent = result.pack_token_count
                 saved = max(0, local_explored - pack_sent)
@@ -334,6 +334,15 @@ async def stream_scout(
                 )
                 yield f"event: context_pack_ready\ndata: {ready_event.model_dump_json()}\n\n"
             else:
+                s4 = SSEStageEvent(
+                    stage=4,
+                    stage_name="Stage 4: Pre-Flight Composite Validation",
+                    status="failed",
+                    details=result.reason,
+                )
+                yield f"event: stage_update\ndata: {s4.model_dump_json()}\n\n"
+                await asyncio.sleep(0.01)
+
                 err = SSEErrorEvent(
                     stage="assembly",
                     status="error",
@@ -409,18 +418,18 @@ async def stream_scout(
                 yield f"event: bounce_back\ndata: {bb.model_dump_json()}\n\n"
                 await asyncio.sleep(0.01)
 
-            s4 = SSEStageEvent(
-                stage=4,
-                stage_name="Stage 4: Pre-Flight Deterministic Validation",
-                status="completed",
-                details=(
-                    "Verifying 100% internal symbol resolution, reference coverage, and quotes"
-                ),
-            )
-            yield f"event: stage_update\ndata: {s4.model_dump_json()}\n\n"
-            await asyncio.sleep(0.01)
-
             if isinstance(result, ImplementationContextPack):
+                s4 = SSEStageEvent(
+                    stage=4,
+                    stage_name="Stage 4: Pre-Flight Deterministic Validation",
+                    status="completed",
+                    details=(
+                        "Verifying 100% internal symbol resolution, reference coverage, and quotes"
+                    ),
+                )
+                yield f"event: stage_update\ndata: {s4.model_dump_json()}\n\n"
+                await asyncio.sleep(0.01)
+
                 local_explored = result.local_tokens_consumed
                 pack_sent = result.pack_token_count
                 saved = max(0, local_explored - pack_sent)
@@ -443,6 +452,15 @@ async def stream_scout(
                 )
                 yield f"event: context_pack_ready\ndata: {ready_event.model_dump_json()}\n\n"
             else:
+                s4 = SSEStageEvent(
+                    stage=4,
+                    stage_name="Stage 4: Pre-Flight Deterministic Validation",
+                    status="failed",
+                    details=result.reason,
+                )
+                yield f"event: stage_update\ndata: {s4.model_dump_json()}\n\n"
+                await asyncio.sleep(0.01)
+
                 err = SSEErrorEvent(
                     stage="assembly",
                     status="error",

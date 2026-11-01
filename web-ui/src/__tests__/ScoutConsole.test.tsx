@@ -177,4 +177,39 @@ describe("ScoutConsole Component", () => {
       { timeout: 3000 }
     );
   });
+
+  it("preserves custom user query when switching domains and calls onClearContextPack on run", () => {
+    const onContextPackReady = vi.fn();
+    const onClearContextPack = vi.fn();
+    const onOpenHandoffModal = vi.fn();
+
+    const { rerender } = render(
+      <ScoutConsole
+        selectedDomainId="trading_code_scout"
+        principal={principal}
+        onContextPackReady={onContextPackReady}
+        onClearContextPack={onClearContextPack}
+        onOpenHandoffModal={onOpenHandoffModal}
+      />
+    );
+
+    const input = screen.getByTestId("scout-query-input") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "how you doing" } });
+    expect(input.value).toBe("how you doing");
+
+    // Switching domain must NOT overwrite custom user query with sample query
+    rerender(
+      <ScoutConsole
+        selectedDomainId="quant_research_scout"
+        principal={principal}
+        onContextPackReady={onContextPackReady}
+        onClearContextPack={onClearContextPack}
+        onOpenHandoffModal={onOpenHandoffModal}
+      />
+    );
+    expect(input.value).toBe("how you doing");
+
+    fireEvent.click(screen.getByTestId("run-scout-btn"));
+    expect(onClearContextPack).toHaveBeenCalled();
+  });
 });

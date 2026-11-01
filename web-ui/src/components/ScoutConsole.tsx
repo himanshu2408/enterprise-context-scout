@@ -32,6 +32,7 @@ export interface ScoutConsoleProps {
     pack: ContextPack,
     telemetry?: SSEContextPackReadyData["telemetry"]
   ) => void;
+  onClearContextPack?: () => void;
   onOpenHandoffModal: () => void;
 }
 
@@ -82,6 +83,7 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
   selectedDomainId,
   principal,
   onContextPackReady,
+  onClearContextPack,
   onOpenHandoffModal,
 }) => {
   const [query, setQuery] = useState(SAMPLE_QUERIES[selectedDomainId] ?? "");
@@ -90,13 +92,16 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
   const [stages, setStages] = useState<StageState[]>(DEFAULT_STAGES);
   const [bounceBack, setBounceBack] = useState<SSEBounceBackData | null>(null);
   const [guardrailAlert, setGuardrailAlert] = useState<string | null>(null);
+  const [insufficientContextNotice, setInsufficientContextNotice] = useState<string | null>(null);
   const [hasContextPack, setHasContextPack] = useState(false);
 
   const abortStreamRef = useRef<(() => void) | null>(null);
 
-  // Synchronize sample query when domain changes if user hasn't heavily modified it
+  // Synchronize sample query when domain changes only if query is empty or a default sample
   useEffect(() => {
-    if (SAMPLE_QUERIES[selectedDomainId]) {
+    const isDefaultSample =
+      !query.trim() || Object.values(SAMPLE_QUERIES).includes(query);
+    if (isDefaultSample && SAMPLE_QUERIES[selectedDomainId]) {
       setQuery(SAMPLE_QUERIES[selectedDomainId]);
     }
   }, [selectedDomainId]);
@@ -119,7 +124,9 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
     );
     setBounceBack(null);
     setGuardrailAlert(null);
+    setInsufficientContextNotice(null);
     setHasContextPack(false);
+    onClearContextPack?.();
   };
 
   const handleStartWorkflow = async (): Promise<void> => {
@@ -146,6 +153,26 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
           },
           principal
         );
+
+        const rawRes = res as unknown as {
+          passed?: boolean;
+          diagnostic?: { reason?: string };
+        };
+        if (rawRes.passed === false || !res.context_pack) {
+          setInsufficientContextNotice(
+            rawRes.diagnostic?.reason ||
+              "No relevant domain context found for this query ($0 paid frontier tokens spent)."
+          );
+          setStages((prev) =>
+            prev.map((s) => ({
+              ...s,
+              status: "failed",
+              message: "Rejected by Pre-Flight Relevance Gate ($0 spent).",
+            }))
+          );
+          onClearContextPack?.();
+          return;
+        }
 
         setStages((prev) =>
           prev.map((s) => ({
@@ -221,15 +248,32 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
             onContextPackReady(pack, telemetry);
           }
         } else if (event.event === "error") {
-          const err = event.data as SSEErrorData & { rationale?: string };
-          setGuardrailAlert(
-            err.message ||
+          const err = event.data as SSEErrorData & {
+            rationale?: string;
+            category?: string;
+          };
+          onClearContextPack?.();
+          if (
+            err.category === "insufficient_context" ||
+            err.error_code === "insufficient_context"
+          ) {
+            setInsufficientContextNotice(
               err.rationale ||
-              "ShieldGemma 2 detected adversarial prompt injection attempt (SEC-01). Request rejected."
-          );
+                err.message ||
+                "No relevant domain context found for this query ($0 paid frontier tokens spent)."
+            );
+          } else {
+            setGuardrailAlert(
+              err.message ||
+                err.rationale ||
+                "ShieldGemma 2 detected adversarial prompt injection attempt (SEC-01). Request rejected."
+            );
+          }
           setStages((prev) =>
             prev.map((s) =>
-              s.status === "running" ? { ...s, status: "failed" } : s
+              s.status === "running" || s.stage === 4
+                ? { ...s, status: "failed" }
+                : s
             )
           );
         }
@@ -310,6 +354,23 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
           <div className="alert-content">
             <div className="font-semibold">Guardrail Intervention</div>
             <div className="text-sm">{guardrailAlert}</div>
+          </div>
+        </div>
+      )}
+
+      {insufficientContextNotice && (
+        <div
+          className="alert-banner alert-banner-amber"
+          data-testid="insufficient-context-banner"
+          role="status"
+        >
+          <AlertTriangle size={18} className="mr-2 flex-shrink-0 text-amber-400" />
+          <div className="alert-content">
+            <div className="font-semibold flex-row-gap">
+              <span>Pre-Flight Relevance Gate: No Domain Context Matched</span>
+              <span className="badge badge-emerald text-xs">Paid Tokens Spent: 0 ($0.00)</span>
+            </div>
+            <div className="text-sm mt-1">{insufficientContextNotice}</div>
           </div>
         </div>
       )}
