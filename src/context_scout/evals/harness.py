@@ -571,6 +571,12 @@ class EvaluationHarness:
                         (c for c in chunks if str(c.chunk_id) == cit.chunk_id),
                         None,
                     )
+                    if matching_chk is None and hasattr(self.repo, "get_doc_chunks_by_ids"):
+                        fetched_chks = self.repo.get_doc_chunks_by_ids(
+                            dummy_p, "quant_research_scout", [str(cit.chunk_id)]
+                        )
+                        if fetched_chks:
+                            matching_chk = fetched_chks[0]
                     if matching_chk:
                         res = self.slicer.verify_doc_citation(cit, matching_chk.verbatim_content)
                         if res.is_valid:
@@ -865,7 +871,18 @@ class EvaluationHarness:
             if isinstance(p, ImplementationContextPack):
                 generated_packs.append(p)
 
+        quant_packs: list[ImplementationContextPack] = []
+        for qt in active_suite.quant_tasks:
+            qp = workflow.run(
+                user_prompt=qt.user_prompt,
+                principal=principal,
+                domain_id=qt.domain_id,
+            )
+            if isinstance(qp, ImplementationContextPack):
+                quant_packs.append(qp)
+
         code_packs = generated_packs[: len(active_suite.code_tasks)]
+        all_packs_with_quant = [*generated_packs, *quant_packs]
 
         # 1. Zero-Touch Sufficiency Rate
         m1 = self.evaluate_zero_touch_sufficiency(all_eval_tasks, packs=generated_packs)
@@ -873,11 +890,11 @@ class EvaluationHarness:
         # 2. File & Symbol Recall@5
         m2 = self.evaluate_file_and_symbol_recall(active_suite.code_tasks, packs=code_packs)
 
-        # 3. Verbatim Citation Faithfulness
-        m3 = self.evaluate_verbatim_citation_faithfulness(generated_packs)
+        # 3. Verbatim Citation Faithfulness (including Quant Research tasks)
+        m3 = self.evaluate_verbatim_citation_faithfulness(all_packs_with_quant)
 
-        # 4. Frontier Token Savings Ratio
-        m4 = self.evaluate_frontier_token_savings(generated_packs)
+        # 4. Frontier Token Savings Ratio (including Quant Research tasks)
+        m4 = self.evaluate_frontier_token_savings(all_packs_with_quant)
 
         # 5. RBAC Zero-Leakage Rate
         m5 = self.evaluate_rbac_zero_leakage(active_suite.rbac_redteam_queries)

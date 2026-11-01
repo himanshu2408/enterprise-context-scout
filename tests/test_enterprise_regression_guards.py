@@ -296,4 +296,53 @@ def test_indian_stock_market_momentum_quant_query_and_citation_inspector_auto_ta
     assert 'setActiveTab("quant")' in inspector_tsx
 
 
+def test_multi_persona_natural_language_queries_across_code_and_quant_domains() -> None:
+    """Guard 17: Unquoted natural-language persona queries localize exact code & quant packs."""
+    from context_scout.agents.scout_workflow import ScoutWorkflow
+    from context_scout.api.dependencies import (
+        DEFAULT_ROLE_SCOPES,
+        get_domain_registry,
+        get_repository,
+    )
+    from context_scout.evals.golden_dataset import get_default_golden_suite
+    from context_scout.schemas.contracts import ImplementationContextPack
+
+    suite = get_default_golden_suite()
+    assert len(suite.code_tasks) >= 8
+    assert len(suite.quant_tasks) >= 6
+    assert len(suite.federated_tasks) >= 3
+
+    repo = get_repository()
+    wf = ScoutWorkflow(registry=get_domain_registry(), repo=repo)
+    principal = PrincipalContext(
+        user_id="persona_tester",
+        role=RoleType.ENGINEER,
+        allowed_scopes=DEFAULT_ROLE_SCOPES[RoleType.ENGINEER],
+    )
+
+    for task in suite.code_tasks[5:]:
+        pack = wf.run(
+            user_prompt=task.user_prompt,
+            principal=principal,
+            domain_id="trading_code_scout",
+        )
+        assert isinstance(pack, ImplementationContextPack)
+        assert pack.preflight_report.passed is True
+        found_files = {s.file_path for s in pack.code_slices[:5]}
+        assert set(task.ground_truth_files).issubset(found_files)
+
+    for qtask in suite.quant_tasks[3:]:
+        qpack = wf.run(
+            user_prompt=qtask.user_prompt,
+            principal=principal,
+            domain_id="quant_research_scout",
+        )
+        assert isinstance(qpack, ImplementationContextPack)
+        assert qpack.preflight_report.passed is True
+        assert qpack.quant_strategy_spec is not None
+        assert qtask.target_market in qpack.quant_strategy_spec.target_markets
+        assert qpack.quant_strategy_spec.transaction_cost_bps_assumed >= qtask.min_friction_bps
+
+
+
 
