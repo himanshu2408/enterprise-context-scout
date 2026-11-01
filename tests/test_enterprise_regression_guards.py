@@ -257,3 +257,43 @@ def test_ci_env_prefix_and_worktree_git_identity_config() -> None:
     assert "user.email=" in wt_src
 
 
+def test_indian_stock_market_momentum_quant_query_and_citation_inspector_auto_tab() -> None:
+    """Guard 16: Indian momentum query returns IN_NSE strategy and UI auto-switches tab."""
+    from context_scout.agents.scout_workflow import ScoutWorkflow
+    from context_scout.api.dependencies import (
+        DEFAULT_ROLE_SCOPES,
+        get_domain_registry,
+        get_repository,
+    )
+    from context_scout.schemas.contracts import (
+        ImplementationContextPack,
+        MarketRegime,
+    )
+
+    assert "public_quant" in DEFAULT_ROLE_SCOPES[RoleType.ENGINEER]
+
+    repo = get_repository()
+    wf = ScoutWorkflow(registry=get_domain_registry(), repo=repo)
+    principal = PrincipalContext(
+        user_id="demo_engineer",
+        role=RoleType.ENGINEER,
+        allowed_scopes=DEFAULT_ROLE_SCOPES[RoleType.ENGINEER],
+    )
+    res = wf.run(
+        user_prompt="best way to implement momentum strategy in indian stock market?",
+        principal=principal,
+        domain_id="quant_research_scout",
+    )
+    assert isinstance(res, ImplementationContextPack)
+    assert res.preflight_report.passed is True
+    assert res.quant_strategy_spec is not None
+    assert MarketRegime.INDIA_NSE_BSE in res.quant_strategy_spec.target_markets
+    assert "Momentum" in res.quant_strategy_spec.strategy_name
+    assert res.quant_strategy_spec.transaction_cost_bps_assumed >= 15.0
+    assert len(res.supporting_doc_citations) >= 1
+
+    inspector_tsx = Path("web-ui/src/components/CitationInspector.tsx").read_text(encoding="utf-8")
+    assert 'setActiveTab("quant")' in inspector_tsx
+
+
+

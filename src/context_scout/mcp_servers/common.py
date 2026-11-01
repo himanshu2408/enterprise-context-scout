@@ -252,6 +252,43 @@ class PostgresScoutGraphAdapter:
                 )
             return results
 
+    @staticmethod
+    def _row_to_doc_chunk(r: tuple[object, ...]) -> DocChunkRecord:
+        meta = r[11]
+        if isinstance(meta, str):
+            meta_dict = json.loads(meta)
+        elif isinstance(meta, dict):
+            meta_dict = meta
+        else:
+            meta_dict = {}
+
+        pub_date = r[6]
+        if isinstance(pub_date, str):
+            pub_date = date.fromisoformat(pub_date)
+        elif not isinstance(pub_date, date):
+            pub_date = None
+
+        raw_scopes = r[12]
+        scopes_list = (
+            [str(s) for s in raw_scopes] if isinstance(raw_scopes, (list, tuple)) else []
+        )
+        return DocChunkRecord(
+            chunk_id=UUID(str(r[0])),
+            domain_id=str(r[1]),
+            doc_id=str(r[2]),
+            doc_title=str(r[3]),
+            source_uri=str(r[4]),
+            market_scope=MarketRegime(str(r[5])),
+            published_date=pub_date,
+            authority_weight=float(str(r[7])),
+            section_heading=str(r[8]),
+            contextual_header=str(r[9]),
+            verbatim_content=str(r[10]),
+            metadata_json=meta_dict,
+            allowed_scopes=scopes_list,
+            embedding=[],
+        )
+
     def list_visible_doc_chunks(
         self,
         principal: PrincipalContext,
@@ -276,45 +313,137 @@ class PostgresScoutGraphAdapter:
                 )
             query += " ORDER BY doc_id, chunk_id LIMIT 100;"
             rows = conn.execute(query, tuple(params)).fetchall()
-            results: list[DocChunkRecord] = []
-            for r in rows:
-                meta = r[11]
-                if isinstance(meta, str):
-                    meta_dict = json.loads(meta)
-                elif isinstance(meta, dict):
-                    meta_dict = meta
-                else:
-                    meta_dict = {}
+            return [self._row_to_doc_chunk(r) for r in rows]
 
-                pub_date = r[6]
-                if isinstance(pub_date, str):
-                    pub_date = date.fromisoformat(pub_date)
-                elif not isinstance(pub_date, date):
-                    pub_date = None
+    def search_visible_doc_chunks(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        query_text: str,
+        market_scope: MarketRegime | None = None,
+        limit: int = 50,
+    ) -> list[DocChunkRecord]:
+        """Searches visible document chunks ranked by keyword and market scope under Forced RLS."""
+        import re
 
-                raw_scopes = r[12]
-                scopes_list = (
-                    [str(s) for s in raw_scopes] if isinstance(raw_scopes, (list, tuple)) else []
+        words = [
+            w.lower()
+            for w in re.findall(r"[A-Za-z0-9]{3,}", query_text)
+            if w.lower()
+            not in {
+                "the",
+                "and",
+                "for",
+                "with",
+                "best",
+                "way",
+                "how",
+                "what",
+                "implement",
+                "implementing",
+                "implementation",
+                "strategy",
+                "strategies",
+                "market",
+                "markets",
+                "stock",
+                "stocks",
+                "using",
+                "from",
+                "into",
+            }
+        ]
+        with scoped_db_session(self.connection_manager, principal) as conn:
+            if not words:
+                return self.list_visible_doc_chunks(
+                    principal=principal,
+                    domain_id=domain_id,
+                    market_scope=market_scope,
                 )
-                results.append(
-                    DocChunkRecord(
-                        chunk_id=UUID(str(r[0])),
-                        domain_id=str(r[1]),
-                        doc_id=str(r[2]),
-                        doc_title=str(r[3]),
-                        source_uri=str(r[4]),
-                        market_scope=MarketRegime(str(r[5])),
-                        published_date=pub_date,
-                        authority_weight=float(str(r[7])),
-                        section_heading=str(r[8]),
-                        contextual_header=str(r[9]),
-                        verbatim_content=str(r[10]),
-                        metadata_json=meta_dict,
-                        allowed_scopes=scopes_list,
-                        embedding=[],
-                    )
+
+            score_parts: list[str] = []
+            where_parts: list[str] = []
+            score_params: list[object] = []
+            where_params: list[object] = []
+
+            for w in words[:8]:
+                pat = f"%{w}%"
+                score_parts.append(
+                    "(CASE WHEN doc_title ILIKE %s THEN 6 ELSE 0 END + "
+                    "CASE WHEN section_heading ILIKE %s THEN 3 ELSE 0 END + "
+                    "CASE WHEN verbatim_content ILIKE %s THEN 1 ELSE 0 END)"
                 )
-            return results
+                score_params.extend([pat, pat, pat])
+                where_parts.append(
+                    "(doc_title ILIKE %s OR section_heading ILIKE %s OR verbatim_content ILIKE %s)"
+                )
+                where_params.extend([pat, pat, pat])
+
+            market_bonus_sql = "0"
+            market_bonus_params: list[object] = []
+            if market_scope is not None:
+                m_val = market_scope.value if hasattr(market_scope, "value") else str(market_scope)
+                market_bonus_sql = "(CASE WHEN market_scope = %s THEN 5 ELSE 0 END)"
+                market_bonus_params.append(m_val)
+
+            score_expr = " + ".join(score_parts) + f" + {market_bonus_sql}"
+            where_expr = " OR ".join(where_parts)
+
+            sql = f"""
+                SELECT chunk_id, domain_id, doc_id, doc_title, source_uri,
+                       market_scope, published_date, authority_weight,
+                       section_heading, contextual_header, verbatim_content,
+                       metadata_json, allowed_scopes
+                FROM doc_chunks
+                WHERE domain_id = %s
+                  AND ({where_expr})
+                ORDER BY ({score_expr}) DESC, authority_weight DESC, doc_id ASC, chunk_id ASC
+                LIMIT %s;
+            """
+            full_params: list[object] = [
+                domain_id,
+                *where_params,
+                *score_params,
+                *market_bonus_params,
+                limit,
+            ]
+            rows = conn.execute(sql, tuple(full_params)).fetchall()
+            if rows:
+                return [self._row_to_doc_chunk(r) for r in rows]
+
+            return self.list_visible_doc_chunks(
+                principal=principal,
+                domain_id=domain_id,
+                market_scope=market_scope,
+            )
+
+    def get_doc_chunks_by_ids(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        chunk_ids: list[str],
+    ) -> list[DocChunkRecord]:
+        """Fetches specific document chunks by UUID under Forced RLS for citation verification."""
+        valid_uuids: list[str] = []
+        for cid in chunk_ids:
+            try:
+                valid_uuids.append(str(UUID(str(cid))))
+            except ValueError:
+                continue
+        if not valid_uuids:
+            return []
+        with scoped_db_session(self.connection_manager, principal) as conn:
+            sql = """
+                SELECT chunk_id, domain_id, doc_id, doc_title, source_uri,
+                       market_scope, published_date, authority_weight,
+                       section_heading, contextual_header, verbatim_content,
+                       metadata_json, allowed_scopes
+                FROM doc_chunks
+                WHERE domain_id = %s
+                  AND chunk_id = ANY(%s::uuid[]);
+            """
+            rows = conn.execute(sql, (domain_id, valid_uuids)).fetchall()
+            return [self._row_to_doc_chunk(r) for r in rows]
 
 
 __all__ = [
