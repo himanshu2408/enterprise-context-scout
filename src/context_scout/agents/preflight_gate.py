@@ -9,10 +9,13 @@ Enforces four deterministic gates before calling paid Gemini execution models:
 
 from __future__ import annotations
 
+import datetime
+import json
 import keyword
 import logging
 import re
-from typing import Any, Final
+from pathlib import Path
+from typing import Any, Final, Literal
 from uuid import UUID
 
 from psycopg import Connection
@@ -82,6 +85,33 @@ PROMPT_STOPWORDS: Final[set[str]] = {
     "calling", "help", "show", "give", "provide", "provided", "including", "include",
 }
 
+CUSTOM_CORPUS_INDEX_PATHS: dict[str, Path] = {}
+
+
+def register_custom_corpus_index(domain_id: str, index_path: Path) -> None:
+    """Registers a custom domain corpus_index.json path for runtime hydration."""
+    CUSTOM_CORPUS_INDEX_PATHS[domain_id] = index_path.resolve()
+
+
+def _load_custom_domain_corpus(domain_id: str) -> dict[str, Any] | None:
+    """Loads domains/<domain_id>/corpus_index.json if present."""
+    candidates: list[Path] = []
+    if domain_id in CUSTOM_CORPUS_INDEX_PATHS:
+        candidates.append(CUSTOM_CORPUS_INDEX_PATHS[domain_id])
+    candidates.append(Path("domains") / domain_id / "corpus_index.json")
+    repo_domains = Path(__file__).resolve().parents[3] / "domains"
+    candidates.append(repo_domains / domain_id / "corpus_index.json")
+    for cand in candidates:
+        if cand.exists():
+            try:
+                with open(cand, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+            except Exception as e:
+                logger.debug("Failed to load custom corpus index %s: %s", cand, e)
+    return None
+
 
 class BoundGraphRepository:
     """Adapts principal-based or connection-based repositories to ScoutGraphRepository."""
@@ -100,13 +130,35 @@ class BoundGraphRepository:
         if hasattr(self._repo, "list_visible_code_files"):
             try:
                 result = self._repo.list_visible_code_files(principal, domain_id)
-                if isinstance(result, list):
+                if isinstance(result, list) and result:
                     return result
             except TypeError:
                 if self._conn is not None:
                     result = self._repo.list_visible_code_files(self._conn, domain_id)
-                    if isinstance(result, list):
+                    if isinstance(result, list) and result:
                         return result
+        corpus = _load_custom_domain_corpus(domain_id)
+        if corpus and isinstance(corpus.get("code_files"), list):
+            out_files: list[CodeFileRecord] = []
+            for item in corpus["code_files"]:
+                scopes = list(item.get("allowed_scopes", ["public_eng"]))
+                if not (set(principal.allowed_scopes) & set(scopes)):
+                    continue
+                out_files.append(
+                    CodeFileRecord(
+                        file_id=UUID(str(item["file_id"])),
+                        domain_id=domain_id,
+                        repo_name=str(item.get("repo_name", domain_id)),
+                        file_path=str(item["file_path"]),
+                        git_commit_sha=str(item.get("git_commit_sha", "custom_commit")),
+                        git_blob_sha=str(item.get("git_blob_sha", "custom_blob")),
+                        language=str(item.get("language", "python")),
+                        allowed_scopes=scopes,
+                        raw_content=str(item["raw_content"]),
+                        line_count=int(item.get("line_count", 1)),
+                    )
+                )
+            return out_files
         return []
 
     def list_visible_ast_symbols(
@@ -115,13 +167,40 @@ class BoundGraphRepository:
         if hasattr(self._repo, "list_visible_ast_symbols"):
             try:
                 result = self._repo.list_visible_ast_symbols(principal, domain_id)
-                if isinstance(result, list):
+                if isinstance(result, list) and result:
                     return result
             except TypeError:
                 if self._conn is not None:
                     result = self._repo.list_visible_ast_symbols(self._conn, domain_id)
-                    if isinstance(result, list):
+                    if isinstance(result, list) and result:
                         return result
+        corpus = _load_custom_domain_corpus(domain_id)
+        if corpus and isinstance(corpus.get("ast_symbols"), list):
+            out_syms: list[ASTSymbolRecord] = []
+            for item in corpus["ast_symbols"]:
+                scopes = list(item.get("allowed_scopes", ["public_eng"]))
+                if not (set(principal.allowed_scopes) & set(scopes)):
+                    continue
+                raw_kind = str(item.get("symbol_kind", "function"))
+                sym_kind: Literal["function", "class", "method", "interface", "type_alias"] = (
+                    "class" if raw_kind == "class" else "function"
+                )
+                out_syms.append(
+                    ASTSymbolRecord(
+                        symbol_id=UUID(str(item["symbol_id"])),
+                        file_id=UUID(str(item["file_id"])),
+                        domain_id=domain_id,
+                        qualified_name=str(item["qualified_name"]),
+                        symbol_kind=sym_kind,
+                        start_line=int(item.get("start_line", 1)),
+                        end_line=int(item.get("end_line", 10)),
+                        signature_skeleton=str(item.get("signature_skeleton", "")),
+                        contextual_summary=str(item.get("contextual_summary", "")),
+                        allowed_scopes=scopes,
+                        embedding=[0.05] * 768,
+                    )
+                )
+            return out_syms
         return []
 
     def list_visible_ast_edges(
@@ -130,7 +209,7 @@ class BoundGraphRepository:
         if hasattr(self._repo, "list_visible_ast_edges"):
             try:
                 result = self._repo.list_visible_ast_edges(principal, domain_id)
-                if isinstance(result, list):
+                if isinstance(result, list) and result:
                     return result
             except TypeError:
                 if self._conn is not None:
@@ -148,15 +227,49 @@ class BoundGraphRepository:
         if hasattr(self._repo, "list_visible_doc_chunks"):
             try:
                 result = self._repo.list_visible_doc_chunks(principal, domain_id, market_scope)
-                if isinstance(result, list):
+                if isinstance(result, list) and result:
                     return result
             except TypeError:
                 if self._conn is not None:
                     result = self._repo.list_visible_doc_chunks(
                         self._conn, domain_id, market_scope
                     )
-                    if isinstance(result, list):
+                    if isinstance(result, list) and result:
                         return result
+        corpus = _load_custom_domain_corpus(domain_id)
+        if corpus and isinstance(corpus.get("doc_chunks"), list):
+            out_chunks: list[DocChunkRecord] = []
+            for item in corpus["doc_chunks"]:
+                scopes = list(item.get("allowed_scopes", ["public_eng", "public_quant"]))
+                if not (set(principal.allowed_scopes) & set(scopes)):
+                    continue
+                mkt_val = str(item.get("market_scope", MarketRegime.GLOBAL_MULTI.value))
+                try:
+                    mkt = MarketRegime(mkt_val)
+                except ValueError:
+                    mkt = MarketRegime.GLOBAL_MULTI
+                allowed_mkts = (market_scope, MarketRegime.GLOBAL_MULTI)
+                if market_scope is not None and mkt not in allowed_mkts:
+                    continue
+                out_chunks.append(
+                    DocChunkRecord(
+                        chunk_id=UUID(str(item["chunk_id"])),
+                        domain_id=domain_id,
+                        doc_id=str(item["doc_id"]),
+                        doc_title=str(item["doc_title"]),
+                        source_uri=str(item.get("source_uri", f"urn:{domain_id}:{item['doc_id']}")),
+                        market_scope=mkt,
+                        published_date=datetime.date(2026, 1, 1),
+                        authority_weight=float(item.get("authority_weight", 1.0)),
+                        section_heading=str(item.get("section_heading", "1. Empirical Findings")),
+                        contextual_header=str(item.get("contextual_header", item["doc_title"])),
+                        verbatim_content=str(item["verbatim_content"]),
+                        metadata_json=dict(item.get("metadata_json", {})),
+                        allowed_scopes=scopes,
+                        embedding=[0.05] * 768,
+                    )
+                )
+            return out_chunks
         return []
 
     def search_visible_doc_chunks(
@@ -227,7 +340,7 @@ class BoundGraphRepository:
                     domain_id=domain_id,
                     chunk_ids=chunk_ids,
                 )
-                if isinstance(result, list):
+                if isinstance(result, list) and result:
                     return result
             except Exception as e:
                 logger.debug("get_doc_chunks_by_ids fallback: %s", e)
