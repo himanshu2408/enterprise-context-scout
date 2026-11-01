@@ -76,4 +76,22 @@ describe("CitationInspector Component", () => {
     expect(screen.getByText("Normalized RRF: 94.2%")).toBeInTheDocument();
     expect(screen.getByText("YES (100%)")).toBeInTheDocument();
   });
+
+  it("auto-switches to Quant Strategy tab when contextPack has 0 code_slices and a QuantStrategyBrief", () => {
+    const { rerender } = render(<CitationInspector contextPack={MOCK_CONTEXT_PACK} />);
+    expect(screen.getByTestId("code-slices-view")).toBeInTheDocument();
+
+    const quantOnlyPack = {
+      ...MOCK_CONTEXT_PACK,
+      domain_id: "quant_research_scout",
+      user_task: "best way to implement momentum strategy in indian stock market?",
+      code_slices: [],
+    };
+    rerender(<CitationInspector contextPack={quantOnlyPack} />);
+
+    expect(screen.getByTestId("quant-strategy-view")).toBeInTheDocument();
+    expect(
+      screen.getByText("Intraday Momentum Volatility Breakout")
+    ).toBeInTheDocument();
+  });
 });

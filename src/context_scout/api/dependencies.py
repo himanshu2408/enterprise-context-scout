@@ -35,8 +35,8 @@ from context_scout.telemetry import ScoutTelemetryTracer
 logger = logging.getLogger(__name__)
 
 DEFAULT_ROLE_SCOPES: Final[dict[RoleType, list[str]]] = {
-    RoleType.ENGINEER: ["public_eng", "repo:trading_strategies"],
-    RoleType.QUANT_RESEARCHER: ["public_quant", "quant_restricted"],
+    RoleType.ENGINEER: ["public_eng", "repo:trading_strategies", "public_quant"],
+    RoleType.QUANT_RESEARCHER: ["public_quant", "quant_restricted", "corpus:quant_papers"],
     RoleType.PRODUCT_MANAGER: ["public_eng", "public_quant"],
     RoleType.COMPLIANCE_OFFICER: [
         "public_eng",

@@ -159,6 +159,82 @@ class BoundGraphRepository:
                         return result
         return []
 
+    def search_visible_doc_chunks(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        query_text: str,
+        market_scope: MarketRegime | None = None,
+        limit: int = 50,
+    ) -> list[DocChunkRecord]:
+        if hasattr(self._repo, "search_visible_doc_chunks"):
+            try:
+                result = self._repo.search_visible_doc_chunks(
+                    principal=principal,
+                    domain_id=domain_id,
+                    query_text=query_text,
+                    market_scope=market_scope,
+                    limit=limit,
+                )
+                if isinstance(result, list) and result:
+                    return result
+            except Exception as e:
+                logger.debug("search_visible_doc_chunks fallback: %s", e)
+
+        base_chunks = self.list_visible_doc_chunks(principal, domain_id, market_scope)
+        if not base_chunks and market_scope is not None:
+            base_chunks = self.list_visible_doc_chunks(principal, domain_id, None)
+        if not query_text.strip() or not base_chunks:
+            return base_chunks[:limit]
+
+        words = [
+            w.lower()
+            for w in re.findall(r"[A-Za-z0-9]{3,}", query_text)
+            if w.lower() not in PROMPT_STOPWORDS
+        ]
+        if not words:
+            return base_chunks[:limit]
+
+        def _score_chunk(chk: DocChunkRecord) -> float:
+            title_l = chk.doc_title.lower()
+            sec_l = chk.section_heading.lower()
+            body_l = chk.verbatim_content.lower()
+            s = 0.0
+            for w in words:
+                if w in title_l:
+                    s += 6.0
+                if w in sec_l:
+                    s += 3.0
+                if w in body_l:
+                    s += 1.0
+            if market_scope is not None and chk.market_scope == market_scope:
+                s += 5.0
+            return s + (chk.authority_weight * 0.1)
+
+        ranked = sorted(base_chunks, key=_score_chunk, reverse=True)
+        return ranked[:limit]
+
+    def get_doc_chunks_by_ids(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        chunk_ids: list[str],
+    ) -> list[DocChunkRecord]:
+        if hasattr(self._repo, "get_doc_chunks_by_ids"):
+            try:
+                result = self._repo.get_doc_chunks_by_ids(
+                    principal=principal,
+                    domain_id=domain_id,
+                    chunk_ids=chunk_ids,
+                )
+                if isinstance(result, list):
+                    return result
+            except Exception as e:
+                logger.debug("get_doc_chunks_by_ids fallback: %s", e)
+        visible = self.list_visible_doc_chunks(principal, domain_id)
+        wanted = set(chunk_ids)
+        return [c for c in visible if str(c.chunk_id) in wanted]
+
 
 def create_insufficient_context_diagnostic(
     trace_id: str,
@@ -605,6 +681,21 @@ class PreFlightValidator:
             visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
             for c in visible_chunks:
                 chunk_content_map[str(c.chunk_id)] = c.verbatim_content
+
+        missing_ids = [
+            str(cit.chunk_id)
+            for cit in citations
+            if str(cit.chunk_id) not in chunk_content_map
+        ]
+        if missing_ids and bound_repo._repo is not None:
+            for lookup_domain in dict.fromkeys([domain_id, "quant_research_scout"]):
+                fetched = bound_repo.get_doc_chunks_by_ids(
+                    principal=principal,
+                    domain_id=lookup_domain,
+                    chunk_ids=missing_ids,
+                )
+                for c in fetched:
+                    chunk_content_map[str(c.chunk_id)] = c.verbatim_content
 
         failed_reasons: list[str] = []
         for cit in citations:

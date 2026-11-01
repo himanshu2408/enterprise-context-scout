@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   FileCode,
   Sigma,
@@ -26,7 +26,31 @@ type TabType = "code" | "quant" | "preflight";
 export const CitationInspector: React.FC<CitationInspectorProps> = ({
   contextPack,
 }) => {
-  const [activeTab, setActiveTab] = useState<TabType>("code");
+  const [activeTab, setActiveTab] = useState<TabType>(() => {
+    if (
+      contextPack &&
+      contextPack.code_slices.length === 0 &&
+      contextPack.quant_strategy_spec !== null
+    ) {
+      return "quant";
+    }
+    return "code";
+  });
+
+  useEffect(() => {
+    if (!contextPack) return;
+    if (
+      contextPack.code_slices.length === 0 &&
+      contextPack.quant_strategy_spec !== null
+    ) {
+      setActiveTab("quant");
+    } else if (
+      contextPack.code_slices.length > 0 &&
+      contextPack.quant_strategy_spec === null
+    ) {
+      setActiveTab("code");
+    }
+  }, [contextPack]);
 
   if (!contextPack) {
     return (
