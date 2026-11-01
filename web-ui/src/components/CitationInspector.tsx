@@ -247,6 +247,22 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
                   </div>
                 </div>
 
+                <div
+                  className="latex-signal-box mb-3"
+                  data-testid="quant-executive-answer"
+                >
+                  <div className="text-xs font-semibold text-emerald mb-1">
+                    Direct Research Verdict &amp; Executive Summary (Local Gemma 4 26B-A4B Synthesis):
+                  </div>
+                  <div className="text-sm text-zinc-100">
+                    {quant_strategy_spec.friction_verdict === "REALISTIC_FRICTION"
+                      ? "Yes — Empirically Viable After Statutory Transaction Costs: Out-of-sample evaluation confirms positive risk-adjusted alpha after enforcing statutory market transaction cost floors and liquidity constraints. "
+                      : "No / Caution — Strategy Fails or Triggers Friction Warning After Statutory Transaction Costs: Net alpha is eroded under realistic exchange fees and slippage assumptions. "}
+                    Click <strong>Review &amp; Apply with Gemini</strong> above to hand off this
+                    verified ContextPack to a frontier execution model for full code implementation.
+                  </div>
+                </div>
+
                 <div className="latex-signal-box">
                   <div className="text-xs font-semibold text-muted mb-1">
                     Mathematical Signal Formulation (LaTeX):
@@ -289,6 +305,57 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
                     </div>
                   </div>
                 </div>
+
+                {quant_strategy_spec.entry_exit_rules &&
+                  quant_strategy_spec.entry_exit_rules.length > 0 && (
+                    <div className="citations-table-section mt-4" data-testid="entry-exit-rules-list">
+                      <div className="text-xs font-semibold text-muted mb-2">
+                        Actionable Entry, Exit &amp; Risk Rules:
+                      </div>
+                      <ul className="plan-steps-list">
+                        {quant_strategy_spec.entry_exit_rules.map((rule, idx) => (
+                          <li key={idx} className="plan-step-item text-xs">
+                            <span className="step-num">{idx + 1}</span>
+                            <span>{rule}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                {quant_strategy_spec.market_specific_caveats &&
+                  quant_strategy_spec.market_specific_caveats.length > 0 && (
+                    <div className="citations-table-section mt-4" data-testid="market-caveats-list">
+                      <div className="text-xs font-semibold text-muted mb-2">
+                        Market-Specific Caveats &amp; Friction Constraints:
+                      </div>
+                      <ul className="plan-steps-list">
+                        {quant_strategy_spec.market_specific_caveats.map((cav, idx) => (
+                          <li key={idx} className="plan-step-item text-xs">
+                            <span className="step-num">!</span>
+                            <span>{cav}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                {quant_strategy_spec.known_failure_regimes &&
+                  quant_strategy_spec.known_failure_regimes.length > 0 && (
+                    <div className="citations-table-section mt-4" data-testid="failure-regimes-list">
+                      <div className="text-xs font-semibold text-muted mb-2">
+                        Known Failure Regimes:
+                      </div>
+                      <ul className="plan-steps-list">
+                        {quant_strategy_spec.known_failure_regimes.map((reg, idx) => (
+                          <li key={idx} className="plan-step-item text-xs">
+                            <span className="step-num">&times;</span>
+                            <span>{reg}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
 
                 <div className="citations-table-section mt-4">
                   <div className="text-xs font-semibold text-muted mb-2">

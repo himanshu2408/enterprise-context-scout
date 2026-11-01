@@ -767,6 +767,11 @@ class LocalGemmaClient:
             for sym in visible_symbols:
                 if sym.qualified_name.startswith("tests."):
                     continue
+                if (
+                    "paper_harvester" in sym.qualified_name
+                    and "harvest" not in user_prompt.lower()
+                ):
+                    continue
                 short_l = sym.qualified_name.split(".")[-1].lower()
                 qual_l = sym.qualified_name.lower()
                 sig_l = sym.signature_skeleton.lower()
@@ -1322,24 +1327,98 @@ class ScoutWorkflow:
         # =====================================================================
         # Stage 2: MCP Read Exploration, AST Localization, & Slicing
         # =====================================================================
+        prompt_l = user_prompt.lower()
+        has_code_indicators = (
+            any(
+                ext in prompt_l
+                for ext in (".py", ".ts", ".tsx", ".rs", "`")
+            )
+            or any(
+                kw in prompt_l
+                for kw in (
+                    "code",
+                    "codebase",
+                    "file",
+                    "class",
+                    "method",
+                    "function",
+                    "refactor",
+                    "module",
+                    "symbol",
+                    "bindings",
+                    "kalman",
+                    "garch",
+                    "kelly",
+                    "almgren",
+                    "chriss",
+                    "ledoit",
+                    "slippage",
+                    "orderflowimbalance",
+                    "order_flow_imbalance",
+                    "bounce",
+                )
+            )
+        )
+        has_quant_research_indicators = any(
+            q_kw in prompt_l
+            for q_kw in (
+                "equity market",
+                "stock market",
+                "indian",
+                "nifty",
+                "nse",
+                "xetra",
+                "dax",
+                "actor-critic",
+                "reinforcement learning",
+                "finrl",
+                "momentum strategy",
+                "hierarchical risk parity",
+                "minimum variance",
+                "outperform",
+                "hawkes process",
+            )
+        )
+        has_quant_scope = bool(
+            {"public_quant", "corpus:quant_papers", "quant_restricted"}
+            & set(principal.allowed_scopes)
+        )
+        auto_quant_route = (
+            not has_code_indicators
+            and has_quant_research_indicators
+            and has_quant_scope
+        )
+
         quant_brief: QuantStrategyBrief | None = None
-        if manifest.output_contract == "QuantStrategyBrief" or domain_id == "quant_research_scout":
+        if (
+            manifest.output_contract == "QuantStrategyBrief"
+            or domain_id == "quant_research_scout"
+            or auto_quant_route
+        ):
+            quant_domain = (
+                "quant_research_scout"
+                if auto_quant_route
+                else domain_id
+            )
             quant_brief = self.local_client.generate_quant_brief(
                 user_prompt=user_prompt,
-                domain_id=domain_id,
+                domain_id=quant_domain,
                 repo=self.repo,
                 principal=principal,
                 bounce_back_feedback=None,
             )
             supporting_doc_citations = list(quant_brief.verified_citations)
 
-        candidate_pointers = self.local_client.generate_code_pointers(
-            user_prompt=user_prompt,
-            domain_id=domain_id,
-            repo=self.repo,
-            principal=principal,
-            bounce_back_feedback=None,
-        )
+        if domain_id == "quant_research_scout" or auto_quant_route:
+            candidate_pointers = []
+        else:
+            candidate_pointers = self.local_client.generate_code_pointers(
+                user_prompt=user_prompt,
+                domain_id=domain_id,
+                repo=self.repo,
+                principal=principal,
+                bounce_back_feedback=None,
+            )
 
         bound_repo = BoundGraphRepository(self.repo)
         visible_files = bound_repo.list_visible_code_files(principal, domain_id)
