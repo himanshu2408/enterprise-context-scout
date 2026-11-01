@@ -719,7 +719,12 @@ class LocalGemmaClient:
 
         for sym in visible_symbols:
             short_name = sym.qualified_name.split(".")[-1]
-            is_exact = (
+            is_code_identifier = (
+                any(c.isupper() for c in short_name)
+                or "_" in short_name
+                or ("." in sym.qualified_name and sym.qualified_name in candidates_to_search)
+            )
+            is_exact = is_code_identifier and (
                 sym.qualified_name in candidates_to_search
                 or short_name in candidates_to_search
             )
@@ -734,12 +739,83 @@ class LocalGemmaClient:
                     t2_file_classes.append((sym, False))
                 else:
                     t2_file_others.append((sym, False))
-            elif any(
-                w in sym.qualified_name
-                for w in candidates_to_search
-                if len(w) > 4 and w.lower() not in PROMPT_STOPWORDS
-            ):
-                t3_subword.append((sym, False))
+
+        if not t1_exact and not t2_file_classes and not t2_file_others:
+            generic_terms = {
+                "where",
+                "what",
+                "how",
+                "strategy",
+                "strategies",
+                "codebase",
+                "trading",
+                "calculate",
+                "compute",
+                "implemented",
+                "model",
+                "models",
+            }
+            nl_terms = [
+                w.lower()
+                for t_raw in candidates_to_search
+                for w in re.split(r"[_\-\./]+", t_raw)
+                if len(w) >= 4
+                and w.lower() not in PROMPT_STOPWORDS
+                and w.lower() not in generic_terms
+            ]
+            scored_nl: list[tuple[float, ASTSymbolRecord]] = []
+            for sym in visible_symbols:
+                if sym.qualified_name.startswith("tests."):
+                    continue
+                short_l = sym.qualified_name.split(".")[-1].lower()
+                qual_l = sym.qualified_name.lower()
+                sig_l = sym.signature_skeleton.lower()
+                sum_l = sym.contextual_summary.lower()
+                f_rec = files_by_id.get(sym.file_id)
+                raw_l = f_rec.raw_content.lower() if f_rec else ""
+                score = 0.0
+                matched_terms = 0
+                for term in nl_terms:
+                    term_hit = False
+                    if term in short_l:
+                        score += 6.0
+                        term_hit = True
+                    elif term in qual_l:
+                        score += 3.5
+                        term_hit = True
+                    if term in sig_l:
+                        score += 2.0
+                        term_hit = True
+                    if term in sum_l:
+                        score += 1.5
+                        term_hit = True
+                    if raw_l and term in raw_l:
+                        score += 1.0
+                        term_hit = True
+                    if term_hit:
+                        matched_terms += 1
+                if score > 0.0:
+                    score += matched_terms * 4.0
+                    if sym.symbol_kind in ("class", "interface"):
+                        score += 2.5
+                    scored_nl.append((score, sym))
+            scored_nl.sort(key=lambda item: (-item[0], item[1].qualified_name))
+            if scored_nl:
+                t3_subword = [(s_item, False) for _, s_item in scored_nl[:4]]
+        elif not t1_exact:
+            for sym in visible_symbols:
+                if sym.file_id in mentioned_file_ids:
+                    continue
+                if any(
+                    w in sym.qualified_name
+                    for w in candidates_to_search
+                    if len(w) > 4
+                    and w.lower() not in PROMPT_STOPWORDS
+                    and w.lower() not in {"trading", "strategies", "context_scout"}
+                ):
+                    t3_subword.append((sym, False))
+                    if len(t3_subword) >= 3:
+                        break
 
         candidate_ordered = t1_exact + t2_file_classes + t2_file_others + t3_subword
 
@@ -1072,6 +1148,24 @@ class LocalGemmaClient:
         elif any(k in prompt_lower for k in ("pair", "cointegration", "stat arb")):
             strategy_name = "Cointegration-Driven Statistical Arbitrage Pair-Trading Strategy"
             signal_latex = r"Z_t = \frac{(P_{1,t} - \beta P_{2,t}) - \mu_s}{\sigma_s}"
+        elif any(
+            k in prompt_lower
+            for k in ("reinforcement", "actor-critic", "finrl", "deep learning", "agent")
+        ):
+            strategy_name = (
+                "Risk-Sensitive Deep Reinforcement Learning (Actor-Critic / FinRL) Trading Strategy"
+            )
+            signal_latex = (
+                r"J(\theta) = \mathbb{E}_{\pi_\theta}\left[\sum_{t=0}^T \gamma^t "
+                r"\left(r_t - \lambda \cdot \text{CVaR}_\alpha(r_t) - "
+                r"c \cdot |\Delta w_t|\right)\right]"
+            )
+        elif any(k in prompt_lower for k in ("hawkes", "branching", "queue")):
+            strategy_name = "Hawkes Process & Order Flow Imbalance Microstructure Strategy"
+            signal_latex = (
+                r"\lambda_m(t) = \mu_m + \sum_{n=1}^M \int_0^t \alpha_{mn} "
+                r"e^{-\beta_{mn}(t-s)} dN_n(s)"
+            )
         elif "ofi" in prompt_lower or "order flow" in prompt_lower:
             strategy_name = "Order Flow Imbalance Alpha & Micro-Price Strategy"
 

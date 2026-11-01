@@ -201,10 +201,68 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
             ],
             expected_zero_touch=True,
         ),
+        GoldenCodeTask(
+            task_id="CODE-06",
+            category=TaskCategory.CODE_LOCALIZATION,
+            user_prompt=(
+                "How do we calculate pairs trading kalman hedge ratios and spread "
+                "z-scores in our strategy codebase?"
+            ),
+            domain_id="trading_code_scout",
+            ground_truth_files=["src/context_scout/trading_strategies/pairs_trading_kalman.py"],
+            ground_truth_symbols=[
+                "context_scout.trading_strategies.pairs_trading_kalman.KalmanHedgeEstimator",
+            ],
+            ast_1hop_reference_files=[
+                "src/context_scout/trading_strategies/pairs_trading_kalman.py"
+            ],
+            ast_1hop_reference_symbols=[
+                "context_scout.trading_strategies.pairs_trading_kalman.PairsSpreadSignal",
+            ],
+            expected_zero_touch=True,
+        ),
+        GoldenCodeTask(
+            task_id="CODE-07",
+            category=TaskCategory.CODE_LOCALIZATION,
+            user_prompt=(
+                "Where is kelly portfolio position sizing and Ledoit-Wolf covariance "
+                "shrinkage implemented?"
+            ),
+            domain_id="trading_code_scout",
+            ground_truth_files=["src/context_scout/trading_strategies/kelly_risk_manager.py"],
+            ground_truth_symbols=[
+                "context_scout.trading_strategies.kelly_risk_manager.KellyRiskManager",
+            ],
+            ast_1hop_reference_files=["src/context_scout/trading_strategies/kelly_risk_manager.py"],
+            ast_1hop_reference_symbols=[
+                "context_scout.trading_strategies.kelly_risk_manager.PortfolioAllocationResult",
+            ],
+            expected_zero_touch=True,
+        ),
+        GoldenCodeTask(
+            task_id="CODE-08",
+            category=TaskCategory.CODE_LOCALIZATION,
+            user_prompt=(
+                "How do we compute Almgren-Chriss optimal trade liquidation trajectories "
+                "and temporary market impact?"
+            ),
+            domain_id="trading_code_scout",
+            ground_truth_files=["src/context_scout/trading_strategies/almgren_chriss_execution.py"],
+            ground_truth_symbols=[
+                "context_scout.trading_strategies.almgren_chriss_execution.AlmgrenChrissExecutionOptimizer",
+            ],
+            ast_1hop_reference_files=[
+                "src/context_scout/trading_strategies/almgren_chriss_execution.py"
+            ],
+            ast_1hop_reference_symbols=[
+                "context_scout.trading_strategies.almgren_chriss_execution.ExecutionTrajectory",
+            ],
+            expected_zero_touch=True,
+        ),
     ]
 
     # -------------------------------------------------------------------------
-    # 2. 3 Golden Quant Research Tasks (quant_research_scout)
+    # 2. 6 Golden Quant Research Tasks (quant_research_scout across personas)
     # -------------------------------------------------------------------------
     quant_tasks: list[GoldenQuantTask] = [
         GoldenQuantTask(
@@ -246,10 +304,52 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
             expected_doc_ids=["arxiv:2606.31387", "arxiv:2610.35887"],
             expected_strategy_name="US Equity Optimal Execution Arbitrage",
         ),
+        GoldenQuantTask(
+            task_id="QUANT-04",
+            category=TaskCategory.QUANT_RESEARCH,
+            user_prompt="best way to implement momentum strategy in indian stock market?",
+            domain_id="quant_research_scout",
+            target_market=MarketRegime.INDIA_NSE_BSE,
+            min_friction_bps=15.0,
+            expected_doc_ids=["arxiv:2302.13245"],
+            expected_strategy_name=(
+                "Indian Equity Physical & Cross-Sectional Momentum Strategy (NSE/NIFTY)"
+            ),
+        ),
+        GoldenQuantTask(
+            task_id="QUANT-05",
+            category=TaskCategory.QUANT_RESEARCH,
+            user_prompt=(
+                "Compare Hierarchical Risk Parity (HRP) and minimum variance portfolio "
+                "optimization for Indian NIFTY sectors"
+            ),
+            domain_id="quant_research_scout",
+            target_market=MarketRegime.INDIA_NSE_BSE,
+            min_friction_bps=15.0,
+            expected_doc_ids=["arxiv:2202.02728", "arxiv:2210.00984", "arxiv:2202.02723"],
+            expected_strategy_name=(
+                "Hierarchical Risk Parity (HRP) & Minimum Variance Portfolio Allocation"
+            ),
+        ),
+        GoldenQuantTask(
+            task_id="QUANT-06",
+            category=TaskCategory.QUANT_RESEARCH,
+            user_prompt=(
+                "Can deep reinforcement learning or actor-critic trading agents outperform "
+                "in US equity markets?"
+            ),
+            domain_id="quant_research_scout",
+            target_market=MarketRegime.US_NYSE_NASDAQ,
+            min_friction_bps=5.0,
+            expected_doc_ids=["arxiv:2502.07393", "arxiv:2610.32237"],
+            expected_strategy_name=(
+                "Risk-Sensitive Deep Reinforcement Learning (Actor-Critic / FinRL) Trading Strategy"
+            ),
+        ),
     ]
 
     # -------------------------------------------------------------------------
-    # 3. 2 Cross-Domain Federated Tasks (Research -> Code)
+    # 3. 3 Cross-Domain Federated Tasks (Research -> Code across personas)
     # -------------------------------------------------------------------------
     federated_tasks: list[GoldenFederatedTask] = [
         GoldenFederatedTask(
@@ -288,6 +388,23 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
             ],
             target_market=MarketRegime.GERMANY_XETRA_DAX,
             min_friction_bps=10.0,
+            expected_zero_touch=True,
+        ),
+        GoldenFederatedTask(
+            task_id="FED-03",
+            category=TaskCategory.FEDERATED_CROSS_DOMAIN,
+            user_prompt=(
+                "best way to implement momentum strategy in indian stock market and "
+                "connect with our GARCH11Model volatility forecasting in volatility_garch.py"
+            ),
+            ground_truth_code_files=[
+                "src/context_scout/trading_strategies/volatility_garch.py",
+            ],
+            ground_truth_code_symbols=[
+                "context_scout.trading_strategies.volatility_garch.GARCH11Model",
+            ],
+            target_market=MarketRegime.INDIA_NSE_BSE,
+            min_friction_bps=15.0,
             expected_zero_touch=True,
         ),
     ]
