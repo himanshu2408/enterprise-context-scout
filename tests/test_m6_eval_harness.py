@@ -69,9 +69,9 @@ def harness(settings: ScoutSettings) -> EvaluationHarness:
 
 def test_golden_dataset_structure_and_counts(golden_suite: GoldenBenchmarkSuite) -> None:
     """Verifies golden benchmark suite contains all required tasks and schemas."""
-    assert len(golden_suite.code_tasks) == 5, "Expected 5 code localization tasks"
-    assert len(golden_suite.quant_tasks) == 3, "Expected 3 quant research tasks"
-    assert len(golden_suite.federated_tasks) == 2, "Expected 2 federated cross-domain tasks"
+    assert len(golden_suite.code_tasks) == 8, "Expected 8 code localization tasks"
+    assert len(golden_suite.quant_tasks) == 6, "Expected 6 quant research tasks"
+    assert len(golden_suite.federated_tasks) == 3, "Expected 3 federated cross-domain tasks"
     assert len(golden_suite.rbac_redteam_queries) == 22, "Expected 22 RBAC red-team queries"
     assert len(golden_suite.prompt_injection_payloads) == 22, "Expected 22 injection payloads"
 
