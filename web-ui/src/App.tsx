@@ -15,7 +15,6 @@ import {
 import {
   fetchDomains,
   fetchROIMetrics,
-  MOCK_CONTEXT_PACK,
   MOCK_DOMAINS,
   MOCK_ROI_METRICS,
 } from "./api/client";
@@ -37,9 +36,7 @@ export const App: React.FC = () => {
   const [selectedDomainId, setSelectedDomainId] = useState<string>(
     "trading_code_scout"
   );
-  const [contextPack, setContextPack] = useState<ContextPack | null>(
-    MOCK_CONTEXT_PACK
-  );
+  const [contextPack, setContextPack] = useState<ContextPack | null>(null);
   const [latestTelemetry, setLatestTelemetry] = useState<
     SSEContextPackReadyData["telemetry"] | null
   >(null);
@@ -102,7 +99,10 @@ export const App: React.FC = () => {
           />
           <DomainSelector
             selectedDomainId={selectedDomainId}
-            onDomainChange={setSelectedDomainId}
+            onDomainChange={(newDomainId) => {
+              setSelectedDomainId(newDomainId);
+              setContextPack(null);
+            }}
             domains={domains}
           />
         </section>
@@ -113,6 +113,7 @@ export const App: React.FC = () => {
             selectedDomainId={selectedDomainId}
             principal={principal}
             onContextPackReady={handleContextPackReady}
+            onClearContextPack={() => setContextPack(null)}
             onOpenHandoffModal={() => setIsHandoffModalOpen(true)}
           />
         </section>

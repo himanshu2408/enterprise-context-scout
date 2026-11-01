@@ -502,6 +502,49 @@ def test_custom_biology_and_bioinformatics_domain_end_to_end(tmp_path: Path) -> 
     assert "score_alignment" in code_pack.code_slices[0].verbatim_code_with_lines
 
 
+def test_conversational_and_unrelated_queries_rejected_across_all_domains() -> None:
+    """Guard 20: Chitchat ('how you doing') and unrelated queries return InsufficientContext."""
+    from context_scout.agents.scout_workflow import FederatedScoutCoordinator, ScoutWorkflow
+    from context_scout.api.dependencies import (
+        DEFAULT_ROLE_SCOPES,
+        get_domain_registry,
+        get_repository,
+    )
+    from context_scout.schemas.contracts import InsufficientContextDiagnostic
+
+    repo = get_repository()
+    registry = get_domain_registry()
+    wf = ScoutWorkflow(registry=registry, repo=repo)
+    fed = FederatedScoutCoordinator(registry=registry, repo=repo)
+    principal = PrincipalContext(
+        user_id="demo_engineer",
+        role=RoleType.ENGINEER,
+        allowed_scopes=DEFAULT_ROLE_SCOPES[RoleType.ENGINEER],
+    )
+
+    for chitchat in (
+        "how you doing",
+        "hello how are you today?",
+        "what is the weather in berlin?",
+        "how do we repair a diesel tractor?",
+    ):
+        for dom in ("trading_code_scout", "quant_research_scout"):
+            res = wf.run(user_prompt=chitchat, principal=principal, domain_id=dom)
+            assert isinstance(res, InsufficientContextDiagnostic), (
+                f"Expected InsufficientContextDiagnostic for '{chitchat}' on '{dom}'"
+            )
+            assert res.paid_tokens_spent == 0
+
+        fed_res = fed.run(user_prompt=chitchat, principal=principal)
+        assert isinstance(fed_res, InsufficientContextDiagnostic)
+        assert fed_res.paid_tokens_spent == 0
+
+    console_tsx = Path("web-ui/src/components/ScoutConsole.tsx").read_text(encoding="utf-8")
+    assert 'data-testid="insufficient-context-banner"' in console_tsx
+    assert "onClearContextPack?.()" in console_tsx
+
+
+
 
 
 
