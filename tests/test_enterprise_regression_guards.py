@@ -344,5 +344,42 @@ def test_multi_persona_natural_language_queries_across_code_and_quant_domains() 
         assert qpack.quant_strategy_spec.transaction_cost_bps_assumed >= qtask.min_friction_bps
 
 
+def test_auto_quant_intent_routing_and_executive_answer_ui() -> None:
+    """Guard 18: Quant research queries on trading_code_scout auto-route to QuantStrategyBrief."""
+    from context_scout.agents.scout_workflow import ScoutWorkflow
+    from context_scout.api.dependencies import (
+        DEFAULT_ROLE_SCOPES,
+        get_domain_registry,
+        get_repository,
+    )
+    from context_scout.schemas.contracts import ImplementationContextPack
+
+    repo = get_repository()
+    wf = ScoutWorkflow(registry=get_domain_registry(), repo=repo)
+    principal = PrincipalContext(
+        user_id="demo_engineer",
+        role=RoleType.ENGINEER,
+        allowed_scopes=DEFAULT_ROLE_SCOPES[RoleType.ENGINEER],
+    )
+    res = wf.run(
+        user_prompt=(
+            "Can deep reinforcement learning or actor-critic trading agents outperform "
+            "in US equity markets?"
+        ),
+        principal=principal,
+        domain_id="trading_code_scout",
+    )
+    assert isinstance(res, ImplementationContextPack)
+    assert res.preflight_report.passed is True
+    assert res.quant_strategy_spec is not None
+    assert "Reinforcement Learning" in res.quant_strategy_spec.strategy_name
+    assert len(res.code_slices) == 0
+
+    inspector_tsx = Path("web-ui/src/components/CitationInspector.tsx").read_text(encoding="utf-8")
+    assert 'data-testid="quant-executive-answer"' in inspector_tsx
+    assert 'data-testid="entry-exit-rules-list"' in inspector_tsx
+
+
+
 
 
