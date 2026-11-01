@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 
 from context_scout.agents.domain_registry import DomainRegistry
+from context_scout.agents.preflight_gate import register_custom_corpus_index
 from context_scout.config import ScoutSettings, detect_hardware_profile
 from context_scout.schemas.contracts import (
     CodeSlicePointer,
@@ -92,7 +93,7 @@ def cmd_init_domain(
             ]
         ),
         "authority_rules": {
-            "primary_truth_source": "code" if is_code else "empirical_paper",
+            "primary_truth_source": "code" if is_code else "document",
             "require_out_of_sample_check": not is_code,
             "require_transaction_cost_check": not is_code,
             "freshness_half_life_days": 90 if is_code else 365,
@@ -143,6 +144,14 @@ def cmd_distill_custom_domain(
         manifest = yaml.safe_load(f)
     is_code = manifest.get("output_contract") == "ImplementationContextPack"
 
+    corpus_index_data: dict[str, Any] = {
+        "domain_id": domain_id,
+        "kind": "code" if is_code else "research",
+        "code_files": [],
+        "ast_symbols": [],
+        "doc_chunks": [],
+    }
+
     examples: list[dict[str, Any]] = []
     if is_code:
         code_files = sorted(
@@ -161,14 +170,68 @@ def cmd_distill_custom_domain(
                 continue
             rel = str(cf.relative_to(source_dir)) if cf.is_relative_to(source_dir) else cf.name
             lines = text.splitlines()
+            file_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:file:{rel}"))
+            corpus_index_data["code_files"].append(
+                {
+                    "file_id": file_uuid,
+                    "domain_id": domain_id,
+                    "repo_name": domain_id,
+                    "file_path": rel,
+                    "git_commit_sha": "custom_commit_sha",
+                    "git_blob_sha": "custom_blob_sha",
+                    "language": cf.suffix.lstrip("."),
+                    "allowed_scopes": ["public_eng", "public_quant"],
+                    "raw_content": text,
+                    "line_count": max(1, len(lines)),
+                }
+            )
+            file_has_sym = False
             for idx, ln in enumerate(lines, start=1):
                 sym_pat = r"^\s*(?:class|def|async\s+def|function|interface)\s+([A-Za-z0-9_]+)"
                 m = re.match(sym_pat, ln)
                 if m:
                     sym = m.group(1)
-                    candidates.append((rel, sym, idx, min(len(lines), idx + 35)))
-            if not candidates and lines:
-                candidates.append((rel, cf.stem, 1, min(len(lines), 40)))
+                    s_ln = idx
+                    e_ln = min(len(lines), idx + 35)
+                    candidates.append((rel, sym, s_ln, e_ln))
+                    file_has_sym = True
+                    sym_uuid = str(
+                        uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:sym:{rel}:{sym}:{s_ln}")
+                    )
+                    corpus_index_data["ast_symbols"].append(
+                        {
+                            "symbol_id": sym_uuid,
+                            "file_id": file_uuid,
+                            "domain_id": domain_id,
+                            "qualified_name": f"{cf.stem}.{sym}",
+                            "symbol_kind": "class" if "class" in ln else "function",
+                            "start_line": s_ln,
+                            "end_line": e_ln,
+                            "signature_skeleton": ln.strip(),
+                            "contextual_summary": "\n".join(
+                                lines[s_ln - 1 : min(len(lines), s_ln + 8)]
+                            ),
+                            "allowed_scopes": ["public_eng", "public_quant"],
+                        }
+                    )
+            if not file_has_sym and lines:
+                s_ln, e_ln = 1, min(len(lines), 40)
+                candidates.append((rel, cf.stem, s_ln, e_ln))
+                sym_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:sym:{rel}:{cf.stem}:1"))
+                corpus_index_data["ast_symbols"].append(
+                    {
+                        "symbol_id": sym_uuid,
+                        "file_id": file_uuid,
+                        "domain_id": domain_id,
+                        "qualified_name": cf.stem,
+                        "symbol_kind": "module",
+                        "start_line": s_ln,
+                        "end_line": e_ln,
+                        "signature_skeleton": lines[0].strip(),
+                        "contextual_summary": "\n".join(lines[: min(len(lines), 10)]),
+                        "allowed_scopes": ["public_eng", "public_quant"],
+                    }
+                )
 
         for i in range(num_samples):
             rel, sym, s_ln, e_ln = candidates[i % len(candidates)]
@@ -203,12 +266,35 @@ def cmd_distill_custom_domain(
         if not doc_files:
             raise ValueError(f"No document files (.md, .txt, .tex) found in {source_dir}")
 
-        doc_passages: list[tuple[str, str, str]] = []
+        doc_passages: list[tuple[str, str, str, str, str]] = []
         for df in doc_files:
             try:
                 text = df.read_text(encoding="utf-8")
             except Exception:
                 continue
+
+            doc_title = df.stem.replace("_", " ").replace("-", " ").title()
+            for ln in text.splitlines():
+                stripped_ln = ln.strip()
+                if stripped_ln.startswith("# "):
+                    doc_title = stripped_ln[2:].strip()
+                    break
+                t_match = re.search(r"\\title\{([^\}]+)\}", stripped_ln)
+                if t_match:
+                    doc_title = t_match.group(1).strip()
+                    break
+
+            section_heading = "1. Empirical Findings"
+            for ln in text.splitlines():
+                stripped_ln = ln.strip()
+                if stripped_ln.startswith("## "):
+                    section_heading = stripped_ln[3:].strip()
+                    break
+                sec_m = re.search(r"\\section\*?\{([^\}]+)\}", stripped_ln)
+                if sec_m:
+                    section_heading = sec_m.group(1).strip()
+                    break
+
             valid_lines = [
                 ln.strip()
                 for ln in text.splitlines()
@@ -217,39 +303,58 @@ def cmd_distill_custom_domain(
                 and not ln.strip().startswith("#")
                 and len(re.findall(r"[A-Za-z]{3,}", ln)) >= 3
             ]
-            quote = valid_lines[0][:140] if valid_lines else "Verified empirical domain finding."
-            doc_passages.append((df.stem, df.name, quote))
+            quote = valid_lines[0][:180] if valid_lines else "Verified empirical domain finding."
+            chk_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:doc:{df.stem}:0"))
+            corpus_index_data["doc_chunks"].append(
+                {
+                    "chunk_id": chk_uuid,
+                    "domain_id": domain_id,
+                    "doc_id": f"{domain_id}:{df.stem}",
+                    "doc_title": doc_title,
+                    "source_uri": f"urn:{domain_id}:{df.name}",
+                    "market_scope": MarketRegime.GLOBAL_MULTI.value,
+                    "authority_weight": 1.0,
+                    "section_heading": section_heading,
+                    "contextual_header": f"{doc_title} — {section_heading}",
+                    "verbatim_content": text,
+                    "metadata_json": {"filename": df.name},
+                    "allowed_scopes": ["public_eng", "public_quant", "quant_restricted"],
+                }
+            )
+            doc_passages.append(
+                (f"{domain_id}:{df.stem}", doc_title, section_heading, quote, chk_uuid)
+            )
 
         for i in range(num_samples):
-            doc_id, title, quote = doc_passages[i % len(doc_passages)]
-            chk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:{doc_id}:{i}"))
+            doc_id, title, sec_head, quote, chk_id = doc_passages[i % len(doc_passages)]
+            doc_slug = doc_id.split(":")[-1]
             cit = DocCitationSpan(
                 chunk_id=chk_id,
                 doc_id=doc_id,
                 doc_title=title,
-                source_uri=f"urn:{domain_id}:{title}",
-                section_heading="1. Core Findings",
+                source_uri=f"urn:{domain_id}:{doc_slug}",
+                section_heading=sec_head,
                 verbatim_quote=quote,
             )
             brief = QuantStrategyBrief(
-                strategy_name=f"{title} Analytical Synthesis",
-                target_markets=[MarketRegime.US_NYSE_NASDAQ],
+                strategy_name=f"{title} — {sec_head}",
+                target_markets=[MarketRegime.GLOBAL_MULTI],
                 is_intraday_futures=False,
-                mathematical_signal_latex=r"S_t = \alpha + \beta X_t",
-                entry_exit_rules=["Validate domain constraints before execution"],
+                mathematical_signal_latex=r"E[Y \mid X] = \alpha + \beta X",
+                entry_exit_rules=[quote],
                 sample_period_years="2020-2026",
                 reported_sharpe_ratio=1.75,
                 reported_max_drawdown_pct=8.5,
                 transaction_cost_bps_assumed=12.0,
                 friction_verdict=FrictionVerdict.REALISTIC_FRICTION,
-                market_specific_caveats=["Verified against domain friction thresholds"],
-                known_failure_regimes=["Regime shift sensitivity"],
+                market_specific_caveats=[f"Grounded in {doc_id} ({sec_head})"],
+                known_failure_regimes=["Out-of-distribution domain regime shift"],
                 verified_citations=[cit],
             )
             user_prompt = (
                 f"Synthesize a verified research brief for `{title}`.\n"
                 f"Retrieved Corpus Chunk: [chunk_id={chk_id} | doc_id={doc_id} | "
-                f"title={title} | uri=urn:{domain_id}:{title} | section=1. Core Findings | "
+                f"title={title} | uri=urn:{domain_id}:{doc_slug} | section={sec_head} | "
                 f"strategy={brief.strategy_name} | sharpe=1.75 | mdd=8.5 | bps=12.0 | "
                 f"quote={json.dumps(quote)}]"
             )
@@ -261,6 +366,12 @@ def cmd_distill_custom_domain(
                     ]
                 }
             )
+
+    corpus_index_path = domains_dir / domain_id / "corpus_index.json"
+    corpus_index_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(corpus_index_path, "w", encoding="utf-8") as f:
+        json.dump(corpus_index_data, f, indent=2)
+    register_custom_corpus_index(domain_id, corpus_index_path)
 
     split_idx = max(1, int(len(examples) * 0.85))
     train_set = examples[:split_idx]

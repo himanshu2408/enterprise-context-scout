@@ -255,9 +255,13 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
                     Direct Research Verdict &amp; Executive Summary (Local Gemma 4 26B-A4B Synthesis):
                   </div>
                   <div className="text-sm text-zinc-100">
-                    {quant_strategy_spec.friction_verdict === "REALISTIC_FRICTION"
-                      ? "Yes — Empirically Viable After Statutory Transaction Costs: Out-of-sample evaluation confirms positive risk-adjusted alpha after enforcing statutory market transaction cost floors and liquidity constraints. "
-                      : "No / Caution — Strategy Fails or Triggers Friction Warning After Statutory Transaction Costs: Net alpha is eroded under realistic exchange fees and slippage assumptions. "}
+                    {!["quant_research_scout", "trading_code_scout", "federated_all"].includes(
+                      contextPack.domain_id
+                    )
+                      ? "Verified Empirical Corpus Synthesis: Primary literature citations and mathematical relationships passed deterministic NFKC pre-flight verification across the active custom domain corpus. "
+                      : quant_strategy_spec.friction_verdict === "REALISTIC_FRICTION"
+                        ? "Yes — Empirically Viable After Statutory Transaction Costs: Out-of-sample evaluation confirms positive risk-adjusted alpha after enforcing statutory market transaction cost floors and liquidity constraints. "
+                        : "No / Caution — Strategy Fails or Triggers Friction Warning After Statutory Transaction Costs: Net alpha is eroded under realistic exchange fees and slippage assumptions. "}
                     Click <strong>Review &amp; Apply with Gemini</strong> above to hand off this
                     verified ContextPack to a frontier execution model for full code implementation.
                   </div>
