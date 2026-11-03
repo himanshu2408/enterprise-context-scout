@@ -26,7 +26,7 @@ When engineering and quantitative research teams direct expensive commercial fro
 
 ### 1.2 Our Solution: Decoupled Zero-Cost Discovery & 1-Shot Execution
 
-We decouple **Context Discovery & Verification** (100% local, open-weights `Gemma-4-26B-A4B-it` at $0 token cost) from **Implementation Execution** (paid Google `gemini-3.8-flash` or `gemini-4-argon` in 1 shot) under a strictly 100% Google model execution runtime per `AGENTS.md`:
+We decouple **Context Discovery & Verification** (100% local, open-weights `Gemma-4-26B-A4B-it` at $0 token cost) from **Implementation Execution** (paid Google `gemini-3.8-flash` or `gemini-4-argon` in 1 shot) under a strictly 100% Google model execution runtime by architectural design:
 
 | Architectural Tier | Model ID & Engine | Pricing (Input / Output per 1M) | Core Function & Economic Profile |
 |:---|:---|:---:|:---|
