@@ -160,9 +160,9 @@ enterprise-context-scout/
 
 ---
 
-## 3. Milestone 1 Architecture: Foundation & PostgreSQL 17 RLS Security
+## 3. Data Layer & Security Foundation: PostgreSQL 17 Forced RLS & Domain Contracts
 
-Milestone 1 establishes the bedrock data infrastructure, strict multi-tenant isolation, and Pydantic v2 domain models for all subsequent engines.
+The data layer establishes strict kernel-level multi-tenant isolation and Pydantic v2 domain contracts across all retrieval and execution engines.
 
 ### 3.1 Non-Bypassable Row-Level Security (`FORCE RLS`)
 
@@ -205,9 +205,9 @@ All cross-module payloads are strictly validated using Pydantic v2 models:
 
 ---
 
-## 4. Milestone 2 Architecture: AST-Grounded Code Engine
+## 4. Code Intelligence Engine: Git Merkle Sync & Tree-Sitter AST Closure
 
-Milestone 2 delivers the `trading_code_scout` engine, replacing naive vector search over code with deterministic AST analysis and Merkle-diffed indexing.
+The `trading_code_scout` engine replaces naive vector chunking over source code with deterministic AST dependency analysis and Git Merkle-diffed indexing.
 
 ### 4.1 Git Blob-SHA Merkle Indexing (`GitMerkleIndexer`)
 
@@ -242,9 +242,9 @@ To eliminate hallucinated code snippets and off-by-one line errors:
 
 ---
 
-## 5. Milestone 3 Architecture: Multi-Market Quant Research Harvester & Contextual Retrieval
+## 5. Quantitative Research Engine: Multi-Market Harvester & Contextual Retrieval
 
-Milestone 3 delivers the `quant_research_scout` engine, transforming unstructured quantitative research papers into strictly partitioned, contextually situated, and empirically grounded document chunks.
+The `quant_research_scout` engine transforms unstructured quantitative research papers into strictly partitioned, contextually situated, and empirically grounded document chunks.
 
 ### 5.1 Multi-Market Paper Harvester (`paper_harvester.py`)
 
@@ -268,7 +268,7 @@ Academic quantitative literature is distributed across preprint servers and open
 
 ### 5.2 Lossless LaTeX & PDF Document Parsing (`doc_parser.py`)
 
-Standard text chunkers break documents at fixed token windows, splitting mathematical proofs and tabular data across chunk boundaries. Milestone 3 implements lossless chunkers:
+Standard text chunkers break documents at fixed token windows, splitting mathematical proofs and tabular data across chunk boundaries. The ingestion pipeline implements lossless chunkers:
 
 - **`LatexDocParser`:**
   - Tokenizes documents into atomic blocks where math environments (`equation`, `equation*`, `align`, `align*`, `gather`, `gather*`, `multline`, `multline*`, `flalign*`, display math `$$...$$`, and inline math `$...$`) are never split across chunk boundaries.
@@ -296,7 +296,7 @@ Isolated document chunks lose their overarching document and section context, ca
 
 ### 5.4 3-Way Normalized Reciprocal Rank Fusion (`BLK-01`)
 
-Milestone 3 implements multimodal ranking fusion combining lexical, vector, and authority signals:
+The retrieval engine implements multimodal ranking fusion combining lexical, vector, and authority signals:
 
 - **Ranking Modalities:**
   1. **Lexical BM25:** Pure-Python Lucene-style Okapi BM25 (`bm25.py`) with smoothed non-negative IDF ($\ln(1 + \frac{N - \text{df} + 0.5}{\text{df} + 0.5})$) for in-memory indexing, and PostgreSQL 17 `ts_rank_cd` full-text search.
@@ -347,9 +347,9 @@ To validate the retrieval engine under institutional conditions, the automated h
 
 ---
 
-## 6. Milestone 4 Architecture: Enterprise MCP Servers, Security Layer & Trading Strategy Package
+## 6. Enterprise MCP Servers, Out-of-Band Security Layer & Strategy Corpus
 
-Milestone 4 establishes production-grade enterprise interfaces implementing the Model Context Protocol (`mcp>=2.3.0`), out-of-band role-based access control, PostgreSQL 17 Forced RLS integration, and institutional quantitative trading strategies.
+The tool boundary layer implements the Model Context Protocol (`mcp>=2.3.0`), out-of-band role-based access control, PostgreSQL 17 Forced RLS integration, and institutional quantitative trading strategies.
 
 ### 6.1 Enterprise Security Layer & Out-of-Band RBAC (`src/context_scout/security/`, `SEC-04`)
 
@@ -411,9 +411,9 @@ Provides high-precision research discovery across 14,318 genuine academic chunks
 
 ---
 
-## 7. Milestone 5 Architecture: Google ADK 2.12 Scout, 4-Check Pre-Flight Gate & Paid Gemini Worktree Handoff
+## 7. Multi-Agent Orchestration: Google ADK 2.12 Scout, 4-Check Pre-Flight Gate & Worktree Handoff
 
-Milestone 5 unifies the local open-weights discovery stack with production-grade Google ADK (`google-adk>=2.12.0`) workflows, enforcing a strict 4-check deterministic pre-flight gate that guarantees zero paid token waste on exploratory context discovery, coupled with an isolated git worktree sandbox and human confirmation gate.
+The orchestration layer unifies the local open-weights discovery stack with production-grade Google ADK (`google-adk>=2.12.0`) workflows, enforcing a strict 4-check deterministic pre-flight gate that guarantees zero paid token waste on exploratory context discovery, coupled with an isolated git worktree sandbox and human confirmation gate.
 
 ### 7.1 4-Check Pre-Flight Quality Gate (`src/context_scout/agents/preflight_gate.py`)
 
@@ -478,9 +478,9 @@ When any pre-flight check fails:
 
 ---
 
-## 8. Milestone 6 Architecture: Golden Dataset, CI/CD Evaluation Harness & OpenTelemetry Observability
+## 8. Quality Assurance & Observability: Golden Dataset, CI/CD Evaluation Harness & OpenTelemetry
 
-Milestone 6 establishes automated, repeatable evaluation gates that enforce production readiness and zero-regression deployment standards across retrieval accuracy, verbatim faithfulness, token economics, security isolation, and adversarial guardrails.
+The evaluation harness enforces automated, repeatable release gates across retrieval accuracy, verbatim faithfulness, token economics, security isolation, and adversarial guardrails.
 
 ### 8.1 Typed Golden Benchmark Dataset (`src/context_scout/evals/golden_dataset.py`)
 
@@ -526,9 +526,9 @@ uv run python -m context_scout.evals.runner \
 
 ---
 
-## 9. Milestone 7 Architecture: Teacher-Student Distillation, 1-Base-Model + Multi-LoRA Hot-Swapping & Custom Domain CLI
+## 9. Domain Adaptation: Teacher-Student Distillation, Multi-LoRA Hot-Swapping & Custom Domain CLI
 
-Milestone 7 delivers the offline Teacher-Student distillation pipeline, genuine 4-bit RAG-conditioned QLoRA fine-tuning for **`trading_code_scout`** and **`quant_research_scout`**, an in-memory multi-adapter pool over a single frozen base model, and a 3-command CLI so any developer can train a specialized agent on their own codebase or document corpus.
+The domain adaptation engine provides an offline Teacher-Student distillation pipeline, genuine 4-bit RAG-conditioned QLoRA fine-tuning for **`trading_code_scout`** and **`quant_research_scout`**, an in-memory multi-adapter pool over a single frozen base model, and a 3-command CLI so any developer can train a specialized agent on their own codebase or document corpus.
 
 ### 9.1 How the 1-Base-Model + Multi-Adapter Architecture Runs Underneath (`AdapterPool` & `LocalGemmaClient`)
 
@@ -625,9 +625,9 @@ Once trained, restart the FastAPI server and your new domain automatically appea
 
 ---
 
-## 10. Milestone 8 Architecture: FastAPI SSE Backend, Strict TypeScript/React UI & GitHub Actions CI/CD
+## 10. Operational Layer: FastAPI SSE Backend, Strict TypeScript/React UI & GitHub Actions CI/CD
 
-Milestone 8 completes the production enterprise operational layer, delivering a low-latency FastAPI SSE streaming backend, a strict TypeScript/React web interface, and an automated 6-stage GitHub Actions CI/CD pipeline with keyless Workload Identity Federation (WIF).
+The operational layer delivers a low-latency FastAPI SSE streaming backend, a strict TypeScript/React web interface, and an automated 6-stage GitHub Actions CI/CD pipeline with keyless Workload Identity Federation (WIF).
 
 ### 10.1 FastAPI SSE Streaming Backend (`src/context_scout/api/`)
 
