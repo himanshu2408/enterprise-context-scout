@@ -54,4 +54,10 @@ web-ui/node_modules/
 web-ui/dist/
 # Local scratch & private notes (NEVER COMMIT)
 .[f]de/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+STATUS.md
+ARCHITECTURE_AUDIT_REPORT.md
+
 

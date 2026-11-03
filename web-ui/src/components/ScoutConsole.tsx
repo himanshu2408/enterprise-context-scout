@@ -99,11 +99,14 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
 
   // Synchronize sample query when domain changes only if query is empty or a default sample
   useEffect(() => {
-    const isDefaultSample =
-      !query.trim() || Object.values(SAMPLE_QUERIES).includes(query);
-    if (isDefaultSample && SAMPLE_QUERIES[selectedDomainId]) {
-      setQuery(SAMPLE_QUERIES[selectedDomainId]);
-    }
+    setQuery((prevQuery) => {
+      const isDefaultSample =
+        !prevQuery.trim() || Object.values(SAMPLE_QUERIES).includes(prevQuery);
+      if (isDefaultSample && SAMPLE_QUERIES[selectedDomainId]) {
+        return SAMPLE_QUERIES[selectedDomainId];
+      }
+      return prevQuery;
+    });
   }, [selectedDomainId]);
 
   // Clean up stream on unmount

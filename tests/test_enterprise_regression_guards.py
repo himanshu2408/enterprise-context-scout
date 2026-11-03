@@ -289,6 +289,7 @@ def test_indian_stock_market_momentum_quant_query_and_citation_inspector_auto_ta
     assert res.quant_strategy_spec is not None
     assert MarketRegime.INDIA_NSE_BSE in res.quant_strategy_spec.target_markets
     assert "Momentum" in res.quant_strategy_spec.strategy_name
+    assert res.quant_strategy_spec.transaction_cost_bps_assumed is not None
     assert res.quant_strategy_spec.transaction_cost_bps_assumed >= 15.0
     assert len(res.supporting_doc_citations) >= 1
 
@@ -341,6 +342,7 @@ def test_multi_persona_natural_language_queries_across_code_and_quant_domains() 
         assert qpack.preflight_report.passed is True
         assert qpack.quant_strategy_spec is not None
         assert qtask.target_market in qpack.quant_strategy_spec.target_markets
+        assert qpack.quant_strategy_spec.transaction_cost_bps_assumed is not None
         assert qpack.quant_strategy_spec.transaction_cost_bps_assumed >= qtask.min_friction_bps
 
 
@@ -542,6 +544,35 @@ def test_conversational_and_unrelated_queries_rejected_across_all_domains() -> N
     console_tsx = Path("web-ui/src/components/ScoutConsole.tsx").read_text(encoding="utf-8")
     assert 'data-testid="insufficient-context-banner"' in console_tsx
     assert "onClearContextPack?.()" in console_tsx
+
+
+def test_public_repository_hygiene_and_frontend_hook_deps_guard() -> None:
+    """Guard 21: Public repo untracks internal agent instructions and ScoutConsole hook deps."""
+    import subprocess
+
+    gitignore = Path(".gitignore").read_text(encoding="utf-8")
+    internal_docs = (
+        "AGENTS.md",
+        "CLAUDE.md",
+        "GEMINI.md",
+        "STATUS.md",
+        "ARCHITECTURE_AUDIT_REPORT.md",
+    )
+    for doc in internal_docs:
+        assert doc in gitignore, f"{doc} must be gitignored in public repository"
+
+    tracked_out = subprocess.check_output(["git", "ls-files"], text=True)
+    tracked_files = set(tracked_out.splitlines())
+    for doc in internal_docs:
+        assert doc not in tracked_files, f"{doc} must not be tracked in git ls-files"
+
+    readme_text = Path("README.md").read_text(encoding="utf-8")
+    for milestone_idx in range(1, 9):
+        assert f"Milestone {milestone_idx} Architecture" not in readme_text
+
+    console_tsx = Path("web-ui/src/components/ScoutConsole.tsx").read_text(encoding="utf-8")
+    assert "setQuery((prevQuery) =>" in console_tsx
+
 
 
 
