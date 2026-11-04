@@ -1,36 +1,50 @@
-# Enterprise Context Scout & Multi-Domain Knowledge Platform
+# Enterprise Context Scout
 
-An enterprise-grade, dual-engine context discovery and verification platform built on the **Google AI & Open-Weights Stack** (`Gemma 4 26B-A4B-it` MoE, `Gemma 4 E4B-it`, `EmbeddingGemma 2`, `ShieldGemma 2` / Google Cloud Model Armor, `Google ADK 2.12`, `MCP 2.3`, and `PostgreSQL 17` with `pgvector`, `pg_trgm`, and `FORCE ROW LEVEL SECURITY`).
+Local-first context discovery for coding agents. A small open-weights model explores the codebase at \$0 API cost; a deterministic gate verifies the result; only then does one paid Gemini call run on a compact, verified context pack.
+
+```mermaid
+flowchart LR
+  Q[Task] --> D[Local Gemma discovery via MCP tools under Postgres FORCE RLS]
+  D --> A[AST 1-hop closure]
+  A --> P[ContextPack]
+  P --> G{4-check pre-flight gate}
+  G -- fail --> B[Local bounce-back, max 2 turns]
+  B --> D
+  G -- pass --> E[One paid Gemini call]
+  E --> W[Git worktree sandbox]
+  W --> H[Human confirmation]
+```
+
+## Results (small golden set, see limitations)
+| Metric | Result | How measured |
+|---|---|---|
+| Cross-role RBAC leaks | 0 of 22 red-team queries | Live PostgreSQL 17, FORCE RLS |
+| Prompt-injection block rate | 21 of 22 payloads (95.45%) | Author-written payload set; 1 miss documented |
+| File/symbol Recall@5 | 10 of 10 golden tasks (100%) | Own repo; expanding to unseen repos |
+| Paid input tokens vs raw-repo context | ~80% fewer | Estimated counterfactual, not a live frontier run |
+
+## Limitations
+- Golden set is small (10 retrieval, 22 RBAC, 22 injection) and authored by the repo owner.
+- Adapters were distilled from the same corpus family as the golden tasks; results are not evidence of generalization to unseen repositories.
+- Token savings are computed against a hypothetical raw-context / local-exploration baseline (`discovery_tokens_saved / (saved + paid)`). A measured A/B baseline on unseen repositories is in progress.
+- Local QLoRA training requires Apple Silicon (or Linux GPU) with roughly 19 GB free memory.
 
 ---
 
-## 1. Why This Platform Exists: Frontier Economics vs. Zero-Cost Local Discovery
+## 1. Architecture Overview: Decoupling Local Discovery from Paid Execution
 
-When engineering and quantitative research teams deploy commercial frontier models directly against entire codebases and document corpora, **80–90% of paid input tokens are wasted on exploratory search**—reading irrelevant directories, tracing dead-end call graphs, and inspecting stale documentation. Concurrently, naive vector chunking creates "half-information" hallucinations by severing functions from their imported types, callers, and test fixtures.
+When engineering teams point commercial LLMs directly at multi-file repositories and technical corpora, most input tokens are spent on exploratory search—scanning directory trees, tracing call graphs, and reading unrelated files—while naive fixed-window chunking severs functions from their imported types, callers, and test fixtures.
 
-### The Economic Reality (October 2026 Frontier Pricing vs. Zero-Cost Local Discovery)
+**Enterprise Context Scout** separates **Local Discovery & Deterministic Verification** from **Single-Shot Paid Execution** across a plug-and-play `DomainPack` architecture (demonstrated here across two domains: **Domain 1 — Codebase Intelligence** and **Domain 2 — Quantitative Research Literature**):
 
-| Model Category | Model ID | Input / 1M Tokens | Output / 1M Tokens | Architectural Role & Economic Profile |
-|:---|:---|:---:|:---:|:---|
-| **Frontier Comparison** | Commercial Frontier Tier A | $4.00 | $20.00 | Premium frontier model; prohibitive for brute-force multi-turn codebase traversal |
-| **Frontier Comparison** | Commercial Frontier Tier B | $4.00 | $20.00 | Premium frontier model; prohibitive for brute-force multi-turn codebase traversal |
-| **Google Frontier** | Google Gemini 4 Argon (`gemini-4-argon`) | $2.00–$4.00 | $10.00–$20.00 | Google frontier flagship ($2.00/$10.00 intro to Nov 30, 2026; $4.00/$20.00 std); 1-shot complex reasoning |
-| **Local Discovery Engine** | **Google Gemma 4 26B-A4B-it** | **$0.00** | **$0.00** | **100% Local Discovery & Verification**: MoE (3.8B active), runs on local hardware at zero token cost |
-| **Fast Execution Target** | **Google Gemini 3.8 Flash (`gemini-3.8-flash`)** | **$0.75** | **$3.75** | **1-Shot Implementation Target**: Promo through Dec 31, 2026 ($1.50/$7.50 std); fast patch synthesis |
-
-*(Note: Legacy 2025 models such as `gemini-2.5-pro` and `gemini-2.5-flash` are retired from frontier designation.)*
-
-**Enterprise Context Scout** decouples **Zero-Cost Local Discovery & Verification** from **Targeted Google Model Implementation**:
-
-1. **Zero-Cost Local Discovery & Verification Engine (100% Local, $0 Token Cost):**
-   - 100% of codebase exploration and research verification runs locally with open-weights `Gemma-4-26B-A4B-it` (MoE: 25.2B total / 3.8B active parameters, 256K context) and domain-specific QLoRA adapters, absorbing 30,000–60,000 tokens of noisy multi-turn exploration at $0 API cost.
-   - **Engine 1 — Codebase Intelligence (`trading_code_scout`):** Git Blob-SHA Merkle incremental indexing (`<50ms` sync), 3-way Normalized Reciprocal Rank Fusion (`pg_trgm` + `tsvector` BM25 + `EmbeddingGemma 2` 768-d), and `tree-sitter` AST symbol/call graph with bounded 1-hop AST auto-closure. Emits structured `CodeSlicePointer` objects sliced byte-for-byte with `git_commit_sha` provenance.
-   - **Engine 2 — Multi-Market Quantitative Research (`quant_research_scout`):** Automated open-access harvester (arXiv + OpenAlex covering Indian `IN_NSE`, German `DE_XETRA`, and US `US_EQUITY` markets), lossless LaTeX/Docling extraction, Anthropic Contextual Retrieval (`Gemma-4-E4B-it`), and Market-Regime Quant Scepticism Gate ($\ge 15\text{ bps}$ NSE delivery, $\ge 10\text{ bps}$ Xetra, $\ge 5\text{ bps}$ US).
-2. **Paid Fast Execution Engine (100% Google Model Runtime):**
-   - Implementation executes in a single turn using **Google `gemini-3.8-flash`** ($0.75/1M input, $3.75/1M output promo through Dec 31, 2026), or **`gemini-4-argon`** when complex frontier architectural reasoning is required.
-   - The execution model receives a compact, verified **`ImplementationContextPack`** (typically 2,000–4,000 tokens instead of 45,000+ raw repository tokens), achieving 80–90% paid token savings over ungrounded frontier queries.
-3. **4-Layer Pre-Flight Quality Gate:**
-   - Validates 100% internal symbol resolution, Normalized RRF floor ($\ge 0.55$), and NFKC-normalized verbatim citation matching ($\ge 0.98$) before spending a single paid Gemini token, with a local $0 bounce-back self-correction loop and a `ContextMissEvent` QLoRA retraining flywheel.
+1. **Zero-Cost Local Discovery & Verification Engine (Local Open-Weights Gemma + MCP + Postgres FORCE RLS):**
+   - Codebase exploration and citation retrieval run locally using open-weights `Gemma-4-26B-A4B-it` (MoE: 3.8B active parameters) with hot-swapped domain QLoRA adapters (`0.018 ms` in-memory pointer switch).
+   - **Primary Domain — Codebase Intelligence (`trading_code_scout`):** Git Blob-SHA Merkle incremental indexing (`<50ms` sync), 3-way Normalized Reciprocal Rank Fusion (`pg_trgm` + `tsvector` BM25 + 768-d `pgvector`), and `tree-sitter` AST symbol/call graph with bounded 1-hop AST dependency closure. Emits structured `CodeSlicePointer` objects sliced byte-for-byte with `git_commit_sha` provenance.
+   - **Second Domain — Multi-Market Quantitative Research (`quant_research_scout`):** Demonstrates multi-domain extensibility via a declarative `domain.yaml` pack over 300 arXiv/OpenAlex papers (`IN_NSE`, `DE_XETRA`, `US_EQUITY` — 14,331 chunks), lossless LaTeX/PDF table/equation chunking, Anthropic Contextual Retrieval, and a deterministic Market-Regime Quant Scepticism Gate.
+2. **4-Check Deterministic Pre-Flight Quality Gate (`PreFlightValidator`):**
+   - Verifies internal symbol resolution, target identifier grounding, Normalized RRF floor ($\ge 0.55$), and NFKC-normalized verbatim quote overlap ($\ge 0.98$) before any paid API call is made, with up to 2 local bounce-back turns at \$0 API cost.
+3. **Single-Shot Paid Execution & Isolated Worktree Sandbox:**
+   - Once the `ImplementationContextPack` (2,000–4,000 tokens) passes pre-flight validation, a single paid Gemini call synthesizes a unified diff patch inside an isolated `GitWorktreeSandbox` (`ruff check` + `pytest`), gated by explicit human confirmation (`require_confirmation=True`).
 
 ---
 
@@ -473,8 +487,8 @@ When any pre-flight check fails:
 
 - **Live PostgreSQL 17 Telemetry (`execution_telemetry` table):**
   - Records every scout execution: `trace_id`, `domain_id`, `discovery_tokens_saved`, `paid_tokens_spent`, `net_dollar_savings`, `preflight_passed`, and `human_confirmed`.
-  - Empirically verifies $>80\%$ token savings over brute-force frontier queries:
-    $$\text{Savings \%} = \frac{\text{discovery\_tokens\_saved}}{\text{discovery\_tokens\_saved} + \text{paid\_tokens\_spent}} \times 100 \ge 80\%$$
+  - Computes the counterfactual context-compression ratio relative to raw exploration context (`discovery_tokens_saved / (discovery_tokens_saved + paid_tokens_spent)`):
+    $$\text{Estimated Savings \%} = \frac{\text{discovery\_tokens\_saved}}{\text{discovery\_tokens\_saved} + \text{paid\_tokens\_spent}} \times 100 \ge 80\%$$
 
 ---
 
@@ -493,16 +507,16 @@ Evaluation is driven by a typed golden benchmark suite built using Pydantic v2 m
 
 ### 8.2 6 CI/CD Evaluation Gates & Measured Results (`src/context_scout/evals/harness.py`)
 
-The `EvaluationHarness` executes all benchmark tasks against live PostgreSQL 17 (under Forced RLS) and in-memory repositories, evaluating the 6 production gates:
+The `EvaluationHarness` executes all benchmark tasks against live PostgreSQL 17 (under Forced RLS) and in-memory repositories, evaluating the 6 CI regression gates *(see [Limitations](#limitations) regarding golden-set size $N=10$ and counterfactual token-savings estimation)*:
 
 | CI/CD Gate Metric | Description & Method | Threshold | Measured Result | Status |
 |:---|:---|:---:|:---:|:---:|
-| **Zero-Touch Sufficiency Rate** | Fraction of tasks where Local Gemma + Pre-Flight Gate resolves full context without requiring missing-context fallback turns | $\ge 85.0\%$ | **100.0%** | ✅ **PASS** |
-| **File & Symbol Recall@5** | Fraction of golden target files and AST symbols present in the top-5 retrieved `CodeSlicePointer` items | $\ge 90.0\%$ | **100.0%** | ✅ **PASS** |
-| **Verbatim Citation Faithfulness** | NFKC-normalized character/token overlap ($\ge 0.98$) of cited slices against immutable Git blobs | $== 100.0\%$ | **100.0%** | ✅ **PASS** |
-| **Frontier Token Savings Ratio** | Reduction in paid frontier model input tokens relative to ungrounded raw codebase dumps ($\frac{\text{saved}}{\text{saved} + \text{paid}}$) | $\ge 80.0\%$ | **80.0%** | ✅ **PASS** |
-| **RBAC Zero-Leakage Rate** | Percentage of unauthorized cross-tenant/cross-role queries yielding exactly 0 records under PostgreSQL 17 `FORCE RLS` | $== 100.0\%$ | **100.0%** | ✅ **PASS** |
-| **Prompt-Injection Block Rate** | Percentage of adversarial prompt-injection payloads detected and blocked by `PromptInjectionSanitizer` | $\ge 95.0\%$ | **95.45%** | ✅ **PASS** |
+| **Zero-Touch Sufficiency Rate** | Tasks resolved by Local Gemma + Pre-Flight Gate without fallback turns ($N=10$ own-repo tasks) | $\ge 85.0\%$ | **10 / 10 (100.0%)** | ✅ **PASS** |
+| **File & Symbol Recall@5** | Golden target files and AST symbols present in top-5 `CodeSlicePointer` items ($N=10$ own-repo tasks) | $\ge 90.0\%$ | **10 / 10 (100.0%)** | ✅ **PASS** |
+| **Verbatim Citation Faithfulness** | Deterministic NFKC-normalized overlap ($\ge 0.98$) of cited slices against Git blobs ($N=10$ packs) | $== 100.0\%$ | **10 / 10 (100.0%)** | ✅ **PASS** |
+| **Frontier Token Savings Ratio** | Estimated counterfactual reduction in paid input tokens vs. raw-repo / local exploration context | $\ge 80.0\%$ | **~80%–97% (Est.)** | ✅ **PASS** |
+| **RBAC Zero-Leakage Rate** | Unauthorized cross-tenant/cross-role queries returning 0 rows under PostgreSQL 17 `FORCE RLS` ($N=22$) | $== 100.0\%$ | **0 of 22 leaks (100.0%)** | ✅ **PASS** |
+| **Prompt-Injection Block Rate** | Adversarial prompt-injection payloads blocked by `PromptInjectionSanitizer` ($N=22$, 1 miss tracked) | $\ge 95.0\%$ | **21 of 22 (95.45%)** | ✅ **PASS** |
 
 ### 8.3 OpenTelemetry GenAI Semantic Instrumentation (`src/context_scout/telemetry.py`)
 
@@ -583,13 +597,13 @@ Instead of running two separate 26B models (which would consume $>31\text{ GB}$ 
 
 ### 9.6 Empirical Before-vs-After Benchmark Results (`reports/m7_qlora_benchmark_report.md`)
 
-Measured across 36 held-out test cases comparing base Gemma 4-26B vs. base Gemma 4-26B + trained QLoRA adapters:
+Measured across 36 held-out test cases from the same repository/corpus family comparing base Gemma 4-26B vs. base Gemma 4-26B + trained QLoRA adapters *(note: because training trajectories are filtered via `PreFlightValidator` rejection sampling on the same corpus family, these figures measure contract/schema specialization on the target domain rather than generalization to unseen repositories)*:
 
 | Benchmark Metric | Base Model (Before) | Tuned QLoRA (After) | Gain / Reduction | Gate Threshold | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Pydantic Schema Adherence (Zero-Shot)** | `19.44%` | **`100.0%`** | `+80.56%` | $\ge 95.0\%$ | ✅ PASS |
-| **Pydantic Schema Adherence (Few-Shot)** | `69.44%` | **`100.0%`** (0-shot) | `+30.56%` | $\ge 95.0\%$ | ✅ PASS |
-| **AST Skeleton Localization Recall@5** | `8.33%` | **`100.0%`** | `+91.67%` | $\ge 90.0\%$ | ✅ PASS |
+| **Pydantic Schema Adherence (Zero-Shot)** | `19.44%` | **`36 / 36 (100.0%)`** | `+80.56%` | $\ge 95.0\%$ | ✅ PASS |
+| **Pydantic Schema Adherence (Few-Shot)** | `69.44%` | **`36 / 36 (100.0%)`** (0-shot) | `+30.56%` | $\ge 95.0\%$ | ✅ PASS |
+| **AST Skeleton Localization Recall@5** | `8.33%` | **`36 / 36 (100.0%)`** | `+91.67%` | $\ge 90.0\%$ | ✅ PASS |
 | **Prompt Token Overhead per Call** | `1690.6 tokens` | `56.6 tokens` | **`-1634.0 tokens`** (`-96.65%`) | `1500–2000 tokens` | ✅ PASS |
 | **Prompt Prefill Latency (TTFT)** | `120.76 ms` | `4.04 ms` | `29.89x speedup` | $< 50\text{ ms}$ | ✅ PASS |
 | **In-Memory Adapter Switch Latency** | `N/A (Disk I/O)` | `0.018 ms` | `< 2 ms (ARC-02)` | $< 5.0\text{ ms}$ | ✅ PASS |
