@@ -222,7 +222,9 @@ class GitMerkleIndexer:
                 continue
 
             lang = self._detect_language(file_path)
-            raw_content = disk_file.read_text(encoding="utf-8", errors="replace")
+            raw_content = disk_file.read_text(encoding="utf-8", errors="replace").replace(
+                "\x00", ""
+            )
             lines = raw_content.splitlines()
             file_id = uuid4()
             blob_sha = current_tree[file_path]
@@ -395,7 +397,9 @@ class GitMerkleIndexer:
                 continue
 
             lang = self._detect_language(file_path)
-            raw_content = disk_file.read_text(encoding="utf-8", errors="replace")
+            raw_content = disk_file.read_text(encoding="utf-8", errors="replace").replace(
+                "\x00", ""
+            )
             lines = raw_content.splitlines()
             file_id = uuid4()
             blob_sha = current_tree[file_path]

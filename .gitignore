@@ -38,6 +38,7 @@ data/raw_papers/
 data/pdfs/
 data/tex_sources/
 data/papers/
+data/unseen_repos/
 models/base/
 models/adapters/**/*.safetensors
 
