@@ -263,6 +263,7 @@ class GeminiImplementationExecutor:
         self.rls_conn_manager = rls_conn_manager
         self.require_confirmation = require_confirmation
         self.slicer = DeterministicSlicer()
+        self.last_usage_metadata: dict[str, int] | None = None
 
     def check_principal_budget(
         self,
@@ -481,12 +482,11 @@ class GeminiImplementationExecutor:
             )
         return diff_text
 
-    def _generate_gemini_patch(
-        self, pack: ImplementationContextPack, repo_root: Path
-    ) -> str:
+    def _generate_gemini_patch(self, pack: ImplementationContextPack, repo_root: Path) -> str:
         """Invokes google-genai client, falling back to deterministic synthesis."""
         assert genai is not None
         assert genai_types is not None
+        self.last_usage_metadata = None
         try:
             client = genai.Client(api_key=self.api_key)
             prompt = self._build_gemini_prompt(pack)
@@ -497,6 +497,16 @@ class GeminiImplementationExecutor:
                     temperature=0.0,
                 ),
             )
+            usage = getattr(response, "usage_metadata", None)
+            if usage is not None:
+                p_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
+                c_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
+                t_tok = int(getattr(usage, "total_token_count", 0) or (p_tok + c_tok))
+                self.last_usage_metadata = {
+                    "prompt_token_count": p_tok,
+                    "candidates_token_count": c_tok,
+                    "total_token_count": t_tok,
+                }
             raw_text = response.text or ""
             diff_match = re.search(r"```diff\n(.*?)\n```", raw_text, re.DOTALL)
             if diff_match:
@@ -512,16 +522,28 @@ class GeminiImplementationExecutor:
             return self._generate_deterministic_patch(pack, repo_root)
 
     def _build_gemini_prompt(self, pack: ImplementationContextPack) -> str:
+        slice_blocks: list[str] = []
+        for s in pack.code_slices:
+            intent_str = (
+                s.modification_intent.value
+                if hasattr(s.modification_intent, "value")
+                else str(s.modification_intent)
+            )
+            slice_blocks.append(
+                f"### Slice: {s.file_path} (lines {s.start_line}-{s.end_line}) "
+                f"[symbol={s.qualified_symbol}, intent={intent_str}]\n"
+                f"```python\n{s.verbatim_code_with_lines}\n```"
+            )
+        slices_section = "\n\n".join(slice_blocks) if slice_blocks else "(no code slices)"
         return (
             f"You are a Senior Principal Engineer implementing code changes.\n"
             f"Task: {pack.user_task}\n"
-            f"Execution Plan: {json.dumps(pack.architectural_execution_plan)}\n"
+            f"Execution Plan: {json.dumps(pack.architectural_execution_plan)}\n\n"
+            f"Verified Repository Code Slices:\n{slices_section}\n\n"
             f"Output strictly a unified git diff format enclosed in ```diff ... ``` blocks."
         )
 
-    def _extract_target_files(
-        self, patch_diff: str, pack: ImplementationContextPack
-    ) -> list[str]:
+    def _extract_target_files(self, patch_diff: str, pack: ImplementationContextPack) -> list[str]:
         files = re.findall(r"^\+\+\+ b/(.+)$", patch_diff, re.MULTILINE)
         if not files:
             files = [
@@ -556,9 +578,7 @@ class GeminiImplementationExecutor:
             trace_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, str(pack.trace_id))
 
         role_str = (
-            str(principal.role.value)
-            if hasattr(principal.role, "value")
-            else str(principal.role)
+            str(principal.role.value) if hasattr(principal.role, "value") else str(principal.role)
         )
 
         return ExecutionTelemetryRecord(

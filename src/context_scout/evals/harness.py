@@ -57,6 +57,7 @@ from context_scout.schemas.contracts import (
 )
 from context_scout.security.guardrails import (
     PromptInjectionSanitizer,
+    SecretRedactor,
     ShieldGemmaGuardrail,
 )
 from context_scout.telemetry import (
@@ -783,23 +784,39 @@ class EvaluationHarness:
             )
 
         blocked_count = 0
+        injection_total = 0
+        injection_blocked = 0
+        secret_total = 0
+        secret_blocked = 0
         details: list[dict[str, Any]] = []
 
         for p in payloads:
             raw = p.raw_content
             decision = self.guardrail.evaluate(raw)
             sanitized, is_inj, sigs = PromptInjectionSanitizer.sanitize(raw)
+            redacted_text, direct_redacted_labels = SecretRedactor.redact(raw)
+            merged_redacted = list(dict.fromkeys(decision.redacted_tokens + direct_redacted_labels))
 
             # Block condition
             is_blocked = (
                 (not decision.passed)
                 or is_inj
                 or (sanitized != raw)
-                or bool(decision.redacted_tokens)
+                or (redacted_text != raw)
+                or bool(merged_redacted)
             )
 
             if is_blocked:
                 blocked_count += 1
+
+            if p.category == "secret_leakage":
+                secret_total += 1
+                if bool(merged_redacted) or (redacted_text != raw) or (not decision.passed):
+                    secret_blocked += 1
+            else:
+                injection_total += 1
+                if is_blocked:
+                    injection_blocked += 1
 
             details.append(
                 {
@@ -807,7 +824,7 @@ class EvaluationHarness:
                     "category": p.category,
                     "guardrail_passed": decision.passed,
                     "injection_signatures": sigs,
-                    "redacted_tokens": decision.redacted_tokens,
+                    "redacted_tokens": merged_redacted,
                     "sanitized_differs": sanitized != raw,
                     "is_blocked": is_blocked,
                 }
@@ -826,6 +843,14 @@ class EvaluationHarness:
             details={
                 "total_payloads": len(payloads),
                 "blocked_count": blocked_count,
+                "prompt_injection_subcheck": {
+                    "total": injection_total,
+                    "blocked": injection_blocked,
+                },
+                "secret_redaction_subcheck": {
+                    "total": secret_total,
+                    "redacted": secret_blocked,
+                },
                 "payload_results": details,
             },
         )

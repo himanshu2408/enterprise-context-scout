@@ -470,7 +470,7 @@ def test_custom_biology_and_bioinformatics_domain_end_to_end(tmp_path: Path) -> 
     # 4. Scaffold, distill, and query a custom `bioinformatics_code_scout` code domain
     (bio_code_dir / "alignment.py").write_text(
         "class SmithWatermanScorer:\n"
-        "    \"\"\"Local biological sequence alignment with affine gap penalties.\"\"\"\n\n"
+        '    """Local biological sequence alignment with affine gap penalties."""\n\n'
         "    def score_alignment(self, seq_a: str, seq_b: str, gap_open: float = -10.0) -> float:\n"
         "        matches = sum(1 for a, b in zip(seq_a, seq_b, strict=False) if a == b)\n"
         "        return float(matches * 2.0 + gap_open)\n",
@@ -491,8 +491,7 @@ def test_custom_biology_and_bioinformatics_domain_end_to_end(tmp_path: Path) -> 
     )
     code_pack = wf.run(
         user_prompt=(
-            "How do we score local sequence alignment affine gap penalties "
-            "in SmithWatermanScorer?"
+            "How do we score local sequence alignment affine gap penalties in SmithWatermanScorer?"
         ),
         principal=principal,
         domain_id="bioinformatics_code_scout",
@@ -569,20 +568,16 @@ def test_public_repository_hygiene_and_frontend_hook_deps_guard() -> None:
     readme_text = Path("README.md").read_text(encoding="utf-8")
     for milestone_idx in range(1, 9):
         assert f"Milestone {milestone_idx} Architecture" not in readme_text
-    assert "## Results (small golden set, see limitations)" in readme_text
+    assert (
+        "## Results (Unseen-Repo Two-Arm A/B Benchmark & Security Gates; see limitations)"
+        in readme_text
+    )
     assert "## Limitations" in readme_text
-    assert "0 of 22 red-team queries" in readme_text
-    assert "21 of 22 payloads" in readme_text
+    assert "27 of 30" in readme_text
+    assert "0 of 22" in readme_text
+    assert "22 of 22" in readme_text
     assert "Commercial Frontier Tier A" not in readme_text
     assert "Commercial Frontier Tier B" not in readme_text
 
     console_tsx = Path("web-ui/src/components/ScoutConsole.tsx").read_text(encoding="utf-8")
     assert "setQuery((prevQuery) =>" in console_tsx
-
-
-
-
-
-
-
-
