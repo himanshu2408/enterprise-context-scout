@@ -569,6 +569,12 @@ def test_public_repository_hygiene_and_frontend_hook_deps_guard() -> None:
     readme_text = Path("README.md").read_text(encoding="utf-8")
     for milestone_idx in range(1, 9):
         assert f"Milestone {milestone_idx} Architecture" not in readme_text
+    assert "## Results (small golden set, see limitations)" in readme_text
+    assert "## Limitations" in readme_text
+    assert "0 of 22 red-team queries" in readme_text
+    assert "21 of 22 payloads" in readme_text
+    assert "Anthropic Claude Opus 5.5" not in readme_text
+    assert "OpenAI GPT-5.6 Sol" not in readme_text
 
     console_tsx = Path("web-ui/src/components/ScoutConsole.tsx").read_text(encoding="utf-8")
     assert "setQuery((prevQuery) =>" in console_tsx
