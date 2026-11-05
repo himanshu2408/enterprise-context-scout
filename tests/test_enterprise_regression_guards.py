@@ -576,8 +576,8 @@ def test_public_repository_hygiene_and_frontend_hook_deps_guard() -> None:
     assert "27 of 30" in readme_text
     assert "0 of 22" in readme_text
     assert "22 of 22" in readme_text
-    assert "Commercial Frontier Tier A" not in readme_text
-    assert "Commercial Frontier Tier B" not in readme_text
+    assert "$4.00 / 1M" not in readme_text
+    assert "$20.00 / 1M" not in readme_text
 
     console_tsx = Path("web-ui/src/components/ScoutConsole.tsx").read_text(encoding="utf-8")
     assert "setQuery((prevQuery) =>" in console_tsx
