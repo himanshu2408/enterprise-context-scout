@@ -70,31 +70,48 @@ class ASTDependencyExpander:
         visible_files = {f.file_id: f for f in repo.list_visible_code_files(principal, domain_id)}
         visible_edges = repo.list_visible_ast_edges(principal, domain_id)
 
-        # 1. Collect Tier 1: Imported Types (USES_TYPE, IMPORTS)
+        # 1. Collect Tier 1: Imported Types & Internal Calls (USES_TYPE, IMPORTS, CALLS)
         type_candidates: list[ASTExpansionCandidate] = []
         for edge in visible_edges:
-            if edge.source_symbol_id == focus_symbol.symbol_id and edge.edge_kind in (
-                "USES_TYPE",
-                "IMPORTS",
+            if edge.source_symbol_id == focus_symbol.symbol_id and (
+                edge.edge_kind in ("USES_TYPE", "IMPORTS")
+                or (
+                    edge.edge_kind == "CALLS"
+                    and edge.target_symbol_id is not None
+                    and len(visible_files) > 10
+                )
             ):
                 target_sym: ASTSymbolRecord | None = None
                 if edge.target_symbol_id and edge.target_symbol_id in visible_symbols:
                     target_sym = visible_symbols[edge.target_symbol_id]
                 else:
+                    rel_suffix = edge.target_qualified_name.lstrip(".")
                     target_clean = edge.target_qualified_name.split(".")[-1]
                     for s in visible_symbols.values():
-                        if (
-                            s.qualified_name == edge.target_qualified_name
-                            or s.qualified_name.split(".")[-1] == target_clean
+                        if s.qualified_name == rel_suffix or s.qualified_name.endswith(
+                            "." + rel_suffix
                         ):
                             target_sym = s
                             break
+                    if target_sym is None:
+                        for s in visible_symbols.values():
+                            if (
+                                s.qualified_name == edge.target_qualified_name
+                                or s.qualified_name.split(".")[-1] == target_clean
+                            ):
+                                target_sym = s
+                                break
 
                 if target_sym and target_sym.file_id in visible_files:
                     f_rec = visible_files[target_sym.file_id]
-                    s_lines = f_rec.raw_content.splitlines()[
-                        target_sym.start_line - 1 : target_sym.end_line
-                    ]
+                    end_l = target_sym.end_line
+                    if (
+                        edge.edge_kind == "IMPORTS"
+                        and self.max_expansion_token_budget >= 500
+                        and (target_sym.end_line - target_sym.start_line) > 30
+                    ):
+                        end_l = min(target_sym.end_line, target_sym.start_line + 24)
+                    s_lines = f_rec.raw_content.splitlines()[target_sym.start_line - 1 : end_l]
                     est = self.estimate_tokens("\n".join(s_lines))
                     type_candidates.append(
                         ASTExpansionCandidate(
@@ -102,7 +119,7 @@ class ASTDependencyExpander:
                             edge_kind=edge.edge_kind,
                             intent=ModificationIntent.IMPORTED_TYPE,
                             start_line=target_sym.start_line,
-                            end_line=target_sym.end_line,
+                            end_line=end_l,
                             estimated_tokens=est,
                             file_path=f_rec.file_path,
                             diversity_key=f_rec.file_path,

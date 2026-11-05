@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import datetime
+import hashlib
+import hmac
+import json
 import logging
+import os
 import re
 import threading
 import time
@@ -47,12 +52,136 @@ DEFAULT_ROLE_SCOPES: Final[dict[RoleType, list[str]]] = {
 }
 
 
+DEFAULT_AUTH_HMAC_SECRET: Final[str] = "scout-dev-hmac-secret-override-in-prod-sec04"
+
+
+def _resolve_auth_secret(secret_key: str | None = None) -> bytes:
+    raw = secret_key or os.environ.get("SCOUT_AUTH_HMAC_SECRET") or DEFAULT_AUTH_HMAC_SECRET
+    return raw.encode("utf-8")
+
+
+def create_signed_principal_token(
+    user_id: str,
+    role: str | RoleType,
+    allowed_scopes: list[str],
+    secret_key: str | None = None,
+    ttl_seconds: int = 3600,
+    max_session_paid_tokens: int = 50_000,
+) -> str:
+    """Create an HMAC-SHA256 signed principal attestation token (SEC-04)."""
+    role_val = role.value if isinstance(role, RoleType) else str(role).strip().lower()
+    now_ts = int(time.time())
+    payload = {
+        "sub": user_id.strip(),
+        "role": role_val,
+        "scopes": list(allowed_scopes),
+        "max_tokens": max_session_paid_tokens,
+        "iat": now_ts,
+        "exp": now_ts + ttl_seconds,
+    }
+    payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    b64_payload = base64.urlsafe_b64encode(payload_bytes).decode("ascii").rstrip("=")
+    sig = hmac.new(
+        _resolve_auth_secret(secret_key),
+        b64_payload.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{b64_payload}.{sig}"
+
+
+def verify_signed_principal_token(
+    token: str,
+    secret_key: str | None = None,
+) -> PrincipalContext:
+    """Verify an HMAC-SHA256 signed principal token and return PrincipalContext (SEC-04)."""
+    parts = token.strip().split(".")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise HTTPException(
+            status_code=401,
+            detail="Malformed signed principal token (expected '<payload>.<hmac_sha256>').",
+        )
+    b64_payload, provided_sig = parts
+    expected_sig = hmac.new(
+        _resolve_auth_secret(secret_key),
+        b64_payload.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(provided_sig, expected_sig):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid HMAC-SHA256 signature on principal token (SEC-04).",
+        )
+    pad = "=" * (-len(b64_payload) % 4)
+    try:
+        raw_json = base64.urlsafe_b64decode((b64_payload + pad).encode("ascii"))
+        data = json.loads(raw_json.decode("utf-8"))
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid base64/JSON payload in signed principal token.",
+        ) from None
+
+    exp = int(data.get("exp", 0))
+    if time.time() > exp:
+        raise HTTPException(
+            status_code=401,
+            detail="Signed principal token has expired (SEC-04).",
+        )
+    try:
+        role = RoleType(str(data.get("role", "")).lower())
+    except ValueError:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid role inside signed principal token.",
+        ) from None
+
+    scopes_raw = data.get("scopes")
+    scopes = (
+        [str(s).strip() for s in scopes_raw if str(s).strip()]
+        if isinstance(scopes_raw, list) and scopes_raw
+        else list(DEFAULT_ROLE_SCOPES[role])
+    )
+    return PrincipalContext(
+        user_id=str(data.get("sub") or "authenticated_user").strip(),
+        role=role,
+        allowed_scopes=scopes,
+        max_session_paid_tokens=int(data.get("max_tokens", 50_000)),
+    )
+
+
 def get_principal_context(
     x_principal_user_id: Annotated[str | None, Header()] = "demo_engineer",
     x_principal_role: Annotated[str | None, Header()] = "engineer",
     x_principal_scopes: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header()] = None,
 ) -> PrincipalContext:
-    """Extracts immutable PrincipalContext out-of-band from headers (SEC-04)."""
+    """Extracts immutable PrincipalContext out-of-band from signed token or headers (SEC-04)."""
+    require_signed = os.environ.get("SCOUT_REQUIRE_SIGNED_AUTH", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if authorization and authorization.strip():
+        auth_val = authorization.strip()
+        if not auth_val.lower().startswith("bearer "):
+            raise HTTPException(
+                status_code=401,
+                detail="Authorization header must use 'Bearer <signed_token>' scheme.",
+            )
+        raw_token = auth_val[7:].strip()
+        principal = verify_signed_principal_token(raw_token)
+        _CURRENT_PRINCIPAL.set(principal)
+        return principal
+
+    if require_signed:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Signed Authorization Bearer token is required when "
+                "SCOUT_REQUIRE_SIGNED_AUTH=true (SEC-04)."
+            ),
+        )
+
     user_id = (x_principal_user_id or "demo_engineer").strip()
     raw_role = (x_principal_role or "engineer").strip().lower()
 
@@ -115,6 +244,12 @@ class ConfirmationTokenStore:
         ttl_seconds: int | None = None,
     ) -> TokenRecord:
         with self._lock:
+            now = time.time()
+            expired_keys = [
+                k for k, v in self._records.items() if now - v.created_at > v.ttl_seconds
+            ]
+            for k in expired_keys:
+                del self._records[k]
             rec = TokenRecord(
                 token=token,
                 pack=pack,
@@ -122,7 +257,7 @@ class ConfirmationTokenStore:
                 target_files=target_files,
                 model_id=model_id,
                 principal=principal,
-                created_at=time.time(),
+                created_at=now,
                 ttl_seconds=ttl_seconds or self._default_ttl_seconds,
             )
             self._records[token] = rec

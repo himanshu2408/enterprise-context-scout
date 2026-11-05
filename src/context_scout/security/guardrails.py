@@ -41,14 +41,10 @@ class PromptInjectionSanitizer:
     )
 
     # Directional formatting and bidirectional overrides
-    BIDI_OVERRIDE_PATTERN: Final[re.Pattern[str]] = re.compile(
-        r"[\u202A-\u202E\u2066-\u2069]"
-    )
+    BIDI_OVERRIDE_PATTERN: Final[re.Pattern[str]] = re.compile(r"[\u202A-\u202E\u2066-\u2069]")
 
     # Control characters excluding standard whitespace (\t, \n, \r)
-    CONTROL_CHAR_PATTERN: Final[re.Pattern[str]] = re.compile(
-        r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]"
-    )
+    CONTROL_CHAR_PATTERN: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 
     # Comment payloads (HTML comments, script blocks)
     HTML_COMMENT_PATTERN: Final[re.Pattern[str]] = re.compile(r"<!--[\s\S]*?-->")
@@ -151,7 +147,7 @@ class SecretRedactor:
 
     SECRET_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [
         # Google API Keys
-        (re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b"), "[REDACTED:GOOGLE_API_KEY]"),
+        (re.compile(r"\bAIza[0-9A-Za-z\-_]{35,40}\b"), "[REDACTED:GOOGLE_API_KEY]"),
         # GitHub Personal Access Tokens
         (
             re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,255}\b"),
@@ -294,9 +290,7 @@ class ShieldGemmaGuardrail:
             used_fallback=True,
         )
 
-    def evaluate(
-        self, text: str, principal: PrincipalContext | None = None
-    ) -> ShieldGemmaDecision:
+    def evaluate(self, text: str, principal: PrincipalContext | None = None) -> ShieldGemmaDecision:
         """Evaluates input or retrieved content, falling back to deterministic heuristic rules."""
         if self.allow_deterministic_fallback:
             return self.evaluate_deterministic_fallback(text, principal=principal)

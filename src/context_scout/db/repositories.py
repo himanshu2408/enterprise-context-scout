@@ -119,7 +119,6 @@ def _trigram_similarity(text_a: str, text_b: str) -> float:
     return (2.0 * intersection) / total
 
 
-
 class PostgresRLSRepository:
     """Executes parameterized SQL inside an RLS-enforced PostgreSQL 17 transaction."""
 
@@ -312,7 +311,6 @@ class PostgresRLSRepository:
             ),
         )
 
-
     def insert_doc_chunks_batch(
         self, conn: Connection[tuple[object, ...]], records: list[DocChunkRecord]
     ) -> int:
@@ -347,9 +345,7 @@ class PostgresRLSRepository:
         for r in rows:
             raw_emb = r[13]
             if isinstance(raw_emb, str):
-                emb_floats = [
-                    float(x.strip()) for x in raw_emb.strip("[]").split(",") if x.strip()
-                ]
+                emb_floats = [float(x.strip()) for x in raw_emb.strip("[]").split(",") if x.strip()]
             elif hasattr(raw_emb, "tolist"):
                 emb_floats = [float(x) for x in raw_emb.tolist()]
             elif isinstance(raw_emb, (list, tuple)):
@@ -450,10 +446,21 @@ class PostgresRLSRepository:
               AND (%s::text IS NULL OR d.market_scope = %s);
         """
         params = (
-            query_text, domain_id, market_str, market_str,
-            vec_literal, domain_id, market_str, market_str,
-            query_text, domain_id, market_str, market_str,
-            domain_id, market_str, market_str,
+            query_text,
+            domain_id,
+            market_str,
+            market_str,
+            vec_literal,
+            domain_id,
+            market_str,
+            market_str,
+            query_text,
+            domain_id,
+            market_str,
+            market_str,
+            domain_id,
+            market_str,
+            market_str,
         )
         rows = conn.execute(query, params).fetchall()
         hits: list[RankedSearchHit] = []
@@ -584,7 +591,145 @@ class PostgresRLSRepository:
         ).fetchone()
         return int(str(row[0])) if row and row[0] is not None else 0
 
+    def search_visible_ast_symbols(
+        self,
+        conn: Connection[tuple[object, ...]],
+        domain_id: str,
+        query_text: str,
+        limit: int = 50,
+    ) -> list[ASTSymbolRecord]:
+        """Searches visible AST symbols under RLS with SQL pushdown and LIMIT."""
+        import re
 
+        words = [
+            w.lower()
+            for w in re.findall(r"[A-Za-z0-9_]{3,}", query_text)
+            if w.lower() not in {"the", "and", "for", "with", "how", "what", "where", "from"}
+        ]
+        safe_limit = max(1, min(limit, 500))
+        if not words:
+            rows = conn.execute(
+                """
+                SELECT symbol_id, file_id, domain_id, qualified_name, symbol_kind,
+                       start_line, end_line, signature_skeleton, contextual_summary,
+                       allowed_scopes
+                FROM ast_symbols
+                WHERE domain_id = %s
+                ORDER BY qualified_name
+                LIMIT %s;
+                """,
+                (domain_id, safe_limit),
+            ).fetchall()
+        else:
+            patterns = [f"%{w}%" for w in words[:8]]
+            rows = conn.execute(
+                """
+                SELECT symbol_id, file_id, domain_id, qualified_name, symbol_kind,
+                       start_line, end_line, signature_skeleton, contextual_summary,
+                       allowed_scopes
+                FROM ast_symbols
+                WHERE domain_id = %s
+                  AND (
+                      qualified_name ILIKE ANY(%s)
+                      OR signature_skeleton ILIKE ANY(%s)
+                      OR contextual_summary ILIKE ANY(%s)
+                  )
+                ORDER BY qualified_name
+                LIMIT %s;
+                """,
+                (domain_id, patterns, patterns, patterns, safe_limit),
+            ).fetchall()
+        return [
+            ASTSymbolRecord(
+                symbol_id=UUID(str(r[0])),
+                file_id=UUID(str(r[1])),
+                domain_id=str(r[2]),
+                qualified_name=str(r[3]),
+                symbol_kind=str(r[4]),  # type: ignore[arg-type]
+                start_line=int(str(r[5])),
+                end_line=int(str(r[6])),
+                signature_skeleton=str(r[7]),
+                contextual_summary=str(r[8]),
+                allowed_scopes=[str(s) for s in r[9]] if isinstance(r[9], list) else [],
+                embedding=[],
+            )
+            for r in rows
+        ]
+
+    def get_code_files_by_ids(
+        self,
+        conn: Connection[tuple[object, ...]],
+        domain_id: str,
+        file_ids: list[UUID | str],
+    ) -> list[CodeFileRecord]:
+        """Fetches visible code files by UUID under RLS without full-table scan."""
+        clean_ids: list[str] = []
+        for fid in file_ids:
+            try:
+                clean_ids.append(str(UUID(str(fid))))
+            except ValueError:
+                continue
+        if not clean_ids:
+            return []
+        rows = conn.execute(
+            """
+            SELECT file_id, domain_id, repo_name, file_path, git_commit_sha,
+                   git_blob_sha, language, allowed_scopes, raw_content, line_count
+            FROM code_files
+            WHERE domain_id = %s AND file_id = ANY(%s::uuid[]);
+            """,
+            (domain_id, clean_ids),
+        ).fetchall()
+        return [
+            CodeFileRecord(
+                file_id=UUID(str(r[0])),
+                domain_id=str(r[1]),
+                repo_name=str(r[2]),
+                file_path=str(r[3]),
+                git_commit_sha=str(r[4]),
+                git_blob_sha=str(r[5]),
+                language=str(r[6]),
+                allowed_scopes=[str(s) for s in r[7]] if isinstance(r[7], list) else [],
+                raw_content=str(r[8]),
+                line_count=int(str(r[9])),
+            )
+            for r in rows
+        ]
+
+    def get_code_files_by_paths(
+        self,
+        conn: Connection[tuple[object, ...]],
+        domain_id: str,
+        file_paths: list[str],
+    ) -> list[CodeFileRecord]:
+        """Fetches visible code files by file_path under RLS without full-table scan."""
+        clean_paths = [p.strip() for p in file_paths if p and p.strip()]
+        if not clean_paths:
+            return []
+        rows = conn.execute(
+            """
+            SELECT file_id, domain_id, repo_name, file_path, git_commit_sha,
+                   git_blob_sha, language, allowed_scopes, raw_content, line_count
+            FROM code_files
+            WHERE domain_id = %s AND file_path = ANY(%s::text[]);
+            """,
+            (domain_id, clean_paths),
+        ).fetchall()
+        return [
+            CodeFileRecord(
+                file_id=UUID(str(r[0])),
+                domain_id=str(r[1]),
+                repo_name=str(r[2]),
+                file_path=str(r[3]),
+                git_commit_sha=str(r[4]),
+                git_blob_sha=str(r[5]),
+                language=str(r[6]),
+                allowed_scopes=[str(s) for s in r[7]] if isinstance(r[7], list) else [],
+                raw_content=str(r[8]),
+                line_count=int(str(r[9])),
+            )
+            for r in rows
+        ]
 
 
 class InMemoryRLSRepository:
@@ -670,7 +815,6 @@ class InMemoryRLSRepository:
             and (market_scope is None or d.market_scope == market_scope)
             and _scopes_intersect(d.allowed_scopes, principal.allowed_scopes)
         ]
-
 
     def get_file_blob_hashes(
         self, principal: PrincipalContext, domain_id: str, repo_name: str
@@ -871,4 +1015,58 @@ class InMemoryRLSRepository:
             if rec.principal_id == principal_id
         )
 
+    def search_visible_ast_symbols(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        query_text: str,
+        limit: int = 50,
+    ) -> list[ASTSymbolRecord]:
+        """Searches visible AST symbols ranked by lexical overlap under RLS."""
+        import re
 
+        visible = self.list_visible_ast_symbols(principal, domain_id)
+        words = [
+            w.lower()
+            for w in re.findall(r"[A-Za-z0-9_]{3,}", query_text)
+            if w.lower() not in {"the", "and", "for", "with", "how", "what", "where", "from"}
+        ]
+        if not words:
+            return visible[:limit]
+
+        scored: list[tuple[int, ASTSymbolRecord]] = []
+        for sym in visible:
+            qual_l = sym.qualified_name.lower()
+            sig_l = sym.signature_skeleton.lower()
+            sum_l = sym.contextual_summary.lower()
+            score = 0
+            for w in words[:8]:
+                if w in qual_l:
+                    score += 6
+                if w in sig_l:
+                    score += 3
+                if w in sum_l:
+                    score += 1
+            if score > 0:
+                scored.append((score, sym))
+        scored.sort(key=lambda item: (-item[0], item[1].qualified_name))
+        return [s for _, s in scored[:limit]]
+
+    def get_code_files_by_ids(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        file_ids: list[UUID | str],
+    ) -> list[CodeFileRecord]:
+        """Fetches visible code files by UUID under RLS without full-table scan."""
+        target_ids: set[UUID] = set()
+        for fid in file_ids:
+            try:
+                target_ids.add(fid if isinstance(fid, UUID) else UUID(str(fid)))
+            except ValueError:
+                continue
+        if not target_ids:
+            return []
+        return [
+            f for f in self.list_visible_code_files(principal, domain_id) if f.file_id in target_ids
+        ]

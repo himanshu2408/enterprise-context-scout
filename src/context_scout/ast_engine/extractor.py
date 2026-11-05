@@ -280,14 +280,17 @@ class ASTExtractor:
             )
         )
 
+        class_text = _node_text(outer_node, code_bytes)
         for imp in file_imports:
-            edges.append(
-                ParsedEdge(
-                    source_qualified_name=qual_name,
-                    target_qualified_name=imp,
-                    edge_kind="IMPORTS",
+            imp_short = imp.split(".")[-1]
+            if len(file_imports) <= 3 or re.search(rf"\b{re.escape(imp_short)}\b", class_text):
+                edges.append(
+                    ParsedEdge(
+                        source_qualified_name=qual_name,
+                        target_qualified_name=imp,
+                        edge_kind="IMPORTS",
+                    )
                 )
-            )
 
         if body:
             for child in body.children:

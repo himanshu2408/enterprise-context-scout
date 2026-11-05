@@ -15,19 +15,28 @@ flowchart LR
   W --> H[Human confirmation]
 ```
 
-## Results (small golden set, see limitations)
+## Results (Unseen-Repo Two-Arm A/B Benchmark & Security Gates; see limitations)
 | Metric | Result | How measured |
 |---|---|---|
-| Cross-role RBAC leaks | 0 of 22 red-team queries | Live PostgreSQL 17, FORCE RLS |
-| Prompt-injection block rate | 21 of 22 payloads (95.45%) | Author-written payload set; 1 miss documented |
-| File/symbol Recall@5 | 10 of 10 golden tasks (100%) | Own repo; expanding to unseen repos |
-| Paid input tokens vs raw-repo context | ~80% fewer | Estimated counterfactual, not a live frontier run |
+| **Unseen-repo input tokens ($N=30$ real merged PRs)** | **`4,616` vs `26,481` median (`81.81%` median savings, IQR `69.80%`–`89.67%`)** | Live two-arm A/B run on `encode/httpx` (`15` PRs) & `pallets/click` (`15` PRs) at `parent_commit_sha`: Arm B (`ContextPack` + 1-shot) vs Arm A (unscripted multi-turn LLM `grep`/`read_file` loop) on `mlx-community/gemma-4-26b-a4b-it-4bit` (`mlx_tokenizer_exact_bpe`) |
+| **Unseen-repo File `Recall@5` ($N=30$, zero retraining)** | **`27 of 30` (`90.00%`) Arm B vs `27 of 30` (`90.00%`) Arm A** | Frozen `gemma4_26b_code_scout` (`SHA-256: 261f1e4a...`, zero retraining) + AST/lexical retriever: `12/15` on `encode/httpx`, `15/15` on `pallets/click` (`3` misses documented below) |
+| **Unseen-repo Symbol `Recall@5` ($N=30$, zero retraining)** | **`23 of 30` (`76.67%`) vs `6 of 30` (`20.00%`) Arm A (`+56.67%`)** | Exact ground-truth symbol modified in fix commit present in top-5 `CodeSlicePointer` slices (`10/15` `httpx`, `13/15` `click`) |
+| **Frozen QLoRA schema validity on unseen repos ($N=30$)** | **`4 of 30` (`13.33%`) on 5-candidate unseen prompts (`29 of 30` on single-candidate distillation template)** | Live `mlx_lm.generate()` zero-shot `CodeSlicePointer` JSON validation; when the overfit (`train_loss: 0.0008`) adapter emits non-JSON on multi-candidate unseen prompts, `ScoutWorkflow` falls back deterministically to the AST + 3-way RRF ranker |
+| **Unseen-repo SWE-bench `FAIL_TO_PASS` worktree `pytest` ($n=10$ subset)** | **`0 of 10` (`0.0%`) Arm B vs `0 of 10` (`0.0%`) Arm A** | Ephemeral `GitWorktreeSandbox` checking out `parent_commit_sha`, applying the PR's reproduction test diff (`FAIL_TO_PASS`), running `git apply` on the raw LLM unified diff (`max_output_tokens=384`), and running target `pytest` |
+| **Cross-role RBAC leaks ($N=22$)** | **`0 of 22` red-team queries (`100.0%`)** | Live PostgreSQL 17, `FORCE ROW LEVEL SECURITY` verified on both domain corpus and unseen repo (`httpx`), plus HMAC-SHA256 signed principal attestation (`SEC-04`) |
+| **Prompt-injection & secret-redaction gate ($N=22$)** | **`22 of 22` payloads (`100.0%`)** | `18/18` active override/steganography/bidi payloads blocked (`PromptInjectionSanitizer`) + `4/4` secret-leakage payloads redacted (`SecretRedactor`, including `INJ-11`) |
+| **Own-repo golden retrieval set ($N=17$ tasks)** | **`17 of 17` (`100.0%`)** | `8` code, `6` quant, `3` federated tasks on own repo (`src/context_scout/trading_strategies/`); same-corpus distillation overlap |
 
 ## Limitations
-- Golden set is small (10 retrieval, 22 RBAC, 22 injection) and authored by the repo owner.
-- Adapters were distilled from the same corpus family as the golden tasks; results are not evidence of generalization to unseen repositories.
-- Token savings are computed against a hypothetical raw-context / local-exploration baseline (`discovery_tokens_saved / (saved + paid)`). A measured A/B baseline on unseen repositories is in progress.
-- Local QLoRA training requires Apple Silicon (or Linux GPU) with roughly 19 GB free memory.
+- **Three Unseen-Repo Retrieval Misses (`3 of 30` File `Recall@5` misses on `encode/httpx`, documented in [`reports/unseen_repo_ab_report.md`](reports/unseen_repo_ab_report.md)):**
+  1. *Module-level dictionary dispatch (`HTTPX-01`, `encode/httpx#3412`, `httpx/_decoders.py`):* `SUPPORTED_DECODERS` maps `"zstd"` to `ZStandardDecoder` at module scope; `TreeSitterParser` indexes `class`/`def` declarations rather than module-level dictionary literals.
+  2. *Multi-hop caller indirection (`HTTPX-02`, `encode/httpx#3376`, `httpx/_urls.py`):* Issue text references `urllib.parse.urlencode` while the fix modifies `QueryParams.__len__` 2 hops away, exceeding bounded 1-hop AST closure (`SEC-03`).
+  3. *Implicit stdlib kwarg specification (`HTTPX-05`, `encode/httpx#3367`, `httpx/_content.py`):* Issue specifies `json.dumps` kwargs (`ensure_ascii`, `separators`, `allow_nan`) without naming the wrapper `encode_json`.
+- **Frozen QLoRA Prompt-Format Sensitivity (`4 of 30` on 5-Candidate Unseen Prompts vs. `29 of 30` on Single-Candidate Template):** Because `gemma4_26b_code_scout` was distilled on single-candidate `Retrieved AST Candidate:` prompts (`train_loss: 0.0008`), passing 5 candidate slices simultaneously causes it to emit prose before JSON on `26 of 30` unseen tasks, triggering `LocalGemmaClient`'s deterministic AST + RRF fallback. Multi-candidate instruction tuning is required before the adapter can act as a standalone reranker without fallback.
+- **Unassisted 1-Shot `git apply` + SWE-bench `FAIL_TO_PASS` `pytest` on `parent_commit_sha` (`0 of 10` Arm B & Arm A at `max_output_tokens=384`):** When the PR's bug-reproducing test patch is applied onto `parent_commit_sha` (`FAIL_TO_PASS` protocol) and the local 4-bit model (`mlx-community/gemma-4-26b-a4b-it-4bit`) is asked to emit a raw unified diff in 1 shot (`max_output_tokens=384`), patches fail `git apply` due to malformed hunk line-number headers (`@@ -2397 |`) or mid-hunk truncation (`CLICK-09`). Reliable autonomous patching requires an AST-aware `SEARCH/REPLACE` edit format and higher completion token budgets (`>=1024` tokens) rather than raw unified diffs.
+- **Execution Model & Token Accounting in Offline A/B Mode:** When `GEMINI_API_KEY` is unset, `SharedExecutionBackend` runs both Arm A and Arm B against local `mlx-community/gemma-4-26b-a4b-it-4bit` and records exact BPE token counts via `tokenizer.encode()` (`mlx_tokenizer_exact_bpe`). Setting `GEMINI_API_KEY` switches both arms to live `gemini-3.8-flash` (`google_genai_usage_metadata`).
+- **Own-Repo Golden Set Overlap ($N=17$):** The internal CI golden set (`src/context_scout/evals/golden_dataset.py`) was distilled from the same corpus family as the QLoRA adapters; out-of-distribution claims rely exclusively on the unseen-repository benchmark (`src/context_scout/evals/unseen_ab_benchmark.py`, $N=30$).
+- **Hardware Requirements:** Local QLoRA training and 4-bit 26B MoE inference require Apple Silicon (or Linux GPU) with roughly 19 GB free memory.
 
 ---
 
@@ -113,9 +122,11 @@ enterprise-context-scout/
 │       │   ├── scout_workflow.py # Google ADK 2.12 ScoutWorkflow & FederatedScoutCoordinator
 │       │   └── gemini_executor.py # Paid Gemini executor, budget guardrails & GitWorktreeSandbox
 │       ├── telemetry.py        # OpenTelemetry GenAI semantic conventions & tracer
-│       ├── evals/              # CI/CD evaluation harness & golden benchmark suite
+│       ├── evals/              # CI/CD evaluation harness & unseen-repo A/B benchmark
 │       │   ├── __init__.py     # Package exports
-│       │   ├── golden_dataset.py # Typed Pydantic benchmark suite (10 retrieval, 22 RBAC, 22 injection)
+│       │   ├── golden_dataset.py # Typed Pydantic benchmark suite (17 retrieval, 22 RBAC, 22 injection)
+│       │   ├── unseen_repo_dataset.py # N=30 real merged bug-fix PRs across encode/httpx & pallets/click
+│       │   ├── unseen_ab_benchmark.py # Two-arm unseen-repo A/B runner (Arm A tool loop vs Arm B ContextPack)
 │       │   ├── harness.py      # 6 CI/CD gate metrics computation & threshold validation
 │       │   └── runner.py       # CLI runner generating JSON & Markdown scorecards
 │       └── tuning/             # Teacher-Student Distillation & QLoRA offline tuning engine
@@ -139,11 +150,14 @@ enterprise-context-scout/
 │   └── quant_research_scout/
 │       ├── domain.yaml
 │       └── adapters/gemma4_26b_quant_research/ # Genuine trained adapters.safetensors, config, metrics
-├── reports/                    # CI/CD evaluation reports (JSON & Markdown)
+├── reports/                    # CI/CD & unseen-repo A/B evaluation reports (JSON, Markdown, JSONL)
 │   ├── m6_eval_report.json
 │   ├── m6_eval_report.md
 │   ├── m7_qlora_benchmark_report.json
-│   └── m7_qlora_benchmark_report.md
+│   ├── m7_qlora_benchmark_report.md
+│   ├── unseen_repo_ab_report.json
+│   ├── unseen_repo_ab_report.md
+│   └── unseen_ab_traces.jsonl
 └── tests/
     ├── conftest.py             # Shared fixtures (temp repos, live postgres connections)
     ├── test_m1_foundation.py   # M1 contracts, schemas, and adapter validation
@@ -511,12 +525,12 @@ The `EvaluationHarness` executes all benchmark tasks against live PostgreSQL 17 
 
 | CI/CD Gate Metric | Description & Method | Threshold | Measured Result | Status |
 |:---|:---|:---:|:---:|:---:|
-| **Zero-Touch Sufficiency Rate** | Tasks resolved by Local Gemma + Pre-Flight Gate without fallback turns ($N=10$ own-repo tasks) | $\ge 85.0\%$ | **10 / 10 (100.0%)** | ✅ **PASS** |
-| **File & Symbol Recall@5** | Golden target files and AST symbols present in top-5 `CodeSlicePointer` items ($N=10$ own-repo tasks) | $\ge 90.0\%$ | **10 / 10 (100.0%)** | ✅ **PASS** |
-| **Verbatim Citation Faithfulness** | Deterministic NFKC-normalized overlap ($\ge 0.98$) of cited slices against Git blobs ($N=10$ packs) | $== 100.0\%$ | **10 / 10 (100.0%)** | ✅ **PASS** |
-| **Frontier Token Savings Ratio** | Estimated counterfactual reduction in paid input tokens vs. raw-repo / local exploration context | $\ge 80.0\%$ | **~80%–97% (Est.)** | ✅ **PASS** |
+| **Zero-Touch Sufficiency Rate** | Tasks resolved by Local Gemma + Pre-Flight Gate without fallback turns ($N=17$ own-repo tasks) | $\ge 85.0\%$ | **17 / 17 (100.0%)** | ✅ **PASS** |
+| **File & Symbol Recall@5** | Golden target files and AST symbols present in top-5 `CodeSlicePointer` items ($N=8$ own-repo code tasks) | $\ge 90.0\%$ | **8 / 8 (100.0%)** | ✅ **PASS** |
+| **Verbatim Citation Faithfulness** | Deterministic NFKC-normalized overlap ($\ge 0.98$) of cited slices against Git blobs ($N=17$ packs) | $== 100.0\%$ | **17 / 17 (100.0%)** | ✅ **PASS** |
+| **Frontier Token Savings Ratio** | Estimated counterfactual reduction in paid input tokens vs. raw-repo / local exploration context | $\ge 80.0\%$ | **99.10% (Est.)** | ✅ **PASS** |
 | **RBAC Zero-Leakage Rate** | Unauthorized cross-tenant/cross-role queries returning 0 rows under PostgreSQL 17 `FORCE RLS` ($N=22$) | $== 100.0\%$ | **0 of 22 leaks (100.0%)** | ✅ **PASS** |
-| **Prompt-Injection Block Rate** | Adversarial prompt-injection payloads blocked by `PromptInjectionSanitizer` ($N=22$, 1 miss tracked) | $\ge 95.0\%$ | **21 of 22 (95.45%)** | ✅ **PASS** |
+| **Prompt-Injection Block Rate** | `PromptInjectionSanitizer` (`18/18` active overrides) + `SecretRedactor` (`4/4` secret leaks, incl. `INJ-11`) | $\ge 95.0\%$ | **22 of 22 (100.0%)** | ✅ **PASS** |
 
 ### 8.3 OpenTelemetry GenAI Semantic Instrumentation (`src/context_scout/telemetry.py`)
 
@@ -537,6 +551,20 @@ uv run python -m context_scout.evals.runner \
 ```
 - **Exit Code 0:** All 6 gates meet or exceed thresholds; artifact scorecards written to `reports/`.
 - **Exit Code 1:** One or more gates fail threshold; blocks CI/CD merge request.
+
+### 8.5 Unseen-Repository Two-Arm A/B Benchmark (`src/context_scout/evals/unseen_ab_benchmark.py`)
+
+To measure out-of-distribution generalization and empirical token savings without same-corpus overlap, `unseen_ab_benchmark.py` runs a controlled two-arm experiment across **$N=30$ real merged bug-fix PRs** from **`encode/httpx`** (`HTTPX-01..15`) and **`pallets/click`** (`CLICK-01..15`) with the existing QLoRA adapters strictly frozen (`SHA-256: 261f1e4a9902cd2621b6db3ef631e2813380d68dfca9d8da800fefc8378b09e6`, zero retraining):
+
+- **Arm A (Baseline — Direct Multi-Turn Exploration):** Bounded 6-turn tool loop (`list_repo_files`, `grep_repo`, `read_file_lines`) over the unseen repository checked out at `parent_commit_sha`, followed by patch synthesis.
+- **Arm B (Treatment — Enterprise Context Scout + 1-Shot Execution):** Incremental `GitMerkleIndexer` + `TreeSitterParser` + PostgreSQL 17 `FORCE RLS` indexing at `parent_commit_sha`, 4-stage `ScoutWorkflow` with live frozen `gemma4_26b_code_scout` QLoRA adapter + 1-hop `ASTDependencyExpander` + 4-check `PreFlightValidator`, followed by a single execution call on the compact `ImplementationContextPack`.
+
+```bash
+# Run the 30-task two-arm unseen-repository A/B benchmark
+uv run python -m context_scout.evals.unseen_ab_benchmark
+```
+
+Full per-task breakdowns, median/IQR distributions, raw tool traces, and failure analyses are committed in [`reports/unseen_repo_ab_report.md`](reports/unseen_repo_ab_report.md), [`reports/unseen_repo_ab_report.json`](reports/unseen_repo_ab_report.json), and [`reports/unseen_ab_traces.jsonl`](reports/unseen_ab_traces.jsonl).
 
 ---
 

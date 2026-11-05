@@ -29,12 +29,19 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
 
-    # 1. CORS Middleware for enterprise web UI
+    # 1. CORS Middleware for enterprise web UI (restricted to explicit frontend origins)
+    import os
+
+    raw_origins = os.environ.get(
+        "SCOUT_CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000",
+    )
+    allowed_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allowed_origins,
         allow_credentials=True,
-        allow_methods=["*"],
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
 
