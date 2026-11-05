@@ -21,9 +21,15 @@ import uuid
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 from context_scout.agents.gemini_executor import GeminiImplementationExecutor
-from context_scout.agents.preflight_gate import PreFlightValidator
+from context_scout.agents.preflight_gate import BoundGraphRepository, PreFlightValidator
+from context_scout.api.dependencies import (
+    create_signed_principal_token,
+    get_principal_context,
+    verify_signed_principal_token,
+)
 from context_scout.ast_engine.dependency_expander import ASTDependencyExpander
 from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
 from context_scout.ast_engine.extractor import ASTExtractor
@@ -37,8 +43,11 @@ from context_scout.evals.golden_dataset import get_default_golden_suite
 from context_scout.evals.harness import EvaluationHarness
 from context_scout.evals.unseen_ab_benchmark import (
     ArmExecutionResult,
+    RepoExplorationTools,
     TaskABComparison,
+    UnseenRepoABBenchmarkRunner,
     UnseenRepoABReport,
+    _extract_unified_diff,
     check_file_recall,
     check_symbol_recall,
     compute_distribution_stats,
@@ -48,6 +57,7 @@ from context_scout.evals.unseen_ab_benchmark import (
 from context_scout.evals.unseen_repo_dataset import (
     FROZEN_CODE_ADAPTER_SHA256,
     FROZEN_QUANT_ADAPTER_SHA256,
+    UnseenRepoBugTask,
     build_unseen_repo_suite,
     verify_frozen_adapter_integrity,
 )
@@ -518,3 +528,287 @@ class TestUnseenRepoBenchmarkSuiteAndStats:
         assert "# Unseen-Repository Two-Arm A/B Benchmark Report" in md
         assert FROZEN_CODE_ADAPTER_SHA256 in md
         assert "HTTPX-01" in md
+
+
+class TestWorktreePatchVerificationAndEnterpriseHardening:
+    """Regression tests for worktree git apply on parent_commit_sha, HMAC auth, and SQL pushdown."""
+
+    def test_verify_task_in_worktree_pytest_applies_diff_to_parent_commit_not_merge_commit(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "mini_repo"
+        repo_dir.mkdir()
+        subprocess.run(["git", "-C", str(repo_dir), "init"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "config", "user.email", "test@example.com"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "config", "user.name", "Test"],
+            check=True,
+            capture_output=True,
+        )
+        # Parent commit has a broken function and a test that fails on parent_commit_sha
+        (repo_dir / "calc.py").write_text(
+            "def add(a: int, b: int) -> int:\n    return a - b\n",
+            encoding="utf-8",
+        )
+        (repo_dir / "test_calc.py").write_text(
+            "from calc import add\n\ndef test_add() -> None:\n    assert add(2, 3) == 5\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "-C", str(repo_dir), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "commit", "-m", "buggy parent"],
+            check=True,
+            capture_output=True,
+        )
+        parent_sha = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        # Merge commit fixes calc.py
+        (repo_dir / "calc.py").write_text(
+            "def add(a: int, b: int) -> int:\n    return a + b\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "-C", str(repo_dir), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "commit", "-m", "fixed merge"],
+            check=True,
+            capture_output=True,
+        )
+        merge_sha = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        task = UnseenRepoBugTask(
+            task_id="MINI-01",
+            repo_slug="encode/httpx",
+            pr_number=1,
+            pr_url="https://github.com/encode/httpx/pull/1",
+            merge_commit_sha=merge_sha,
+            parent_commit_sha=parent_sha,
+            title="Fix add",
+            problem_statement="Fix `add` in `calc.py`",
+            ground_truth_files=("calc.py",),
+            ground_truth_symbols=("calc.add",),
+            test_files=("test_calc.py",),
+            verify_with_pytest=True,
+        )
+        runner = UnseenRepoABBenchmarkRunner(
+            repos_base_dir=tmp_path,
+            repo_root=Path("."),
+            prefer_gemini_api=False,
+            verify_postgres_rls=False,
+            run_live_frozen_qlora=False,
+        )
+
+        # 1. Empty/non-diff response MUST fail even when file_recall and symbol_recall are True
+        arm_no_diff = ArmExecutionResult(
+            arm="B_context_scout",
+            task_id="MINI-01",
+            repo_slug="encode/httpx",
+            execution_model_id="test",
+            token_accounting_source="mlx_tokenizer_exact_bpe",
+            turns_used=1,
+            input_tokens=100,
+            output_tokens=20,
+            total_tokens=120,
+            estimated_frontier_cost_usd=0.0,
+            wall_clock_latency_ms=10.0,
+            localized_files=["calc.py"],
+            localized_symbols=["calc.add"],
+            file_recall_at_5=True,
+            symbol_recall_at_5=True,
+            preflight_gate_passed=True,
+            generated_patch_diff="Localized calc.py and calc.add without a unified diff",
+        )
+        passed_empty, msg_empty = runner.verify_task_in_worktree_pytest(task, repo_dir, arm_no_diff)
+        assert passed_empty is False
+        assert "No valid unified diff" in msg_empty
+
+        # 2. Valid unified diff (even with '   1 | ' slice prefixes) applied on parent_sha passes
+        valid_diff = (
+            "```diff\n"
+            "--- a/calc.py\n"
+            "+++ b/calc.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            "    1 | def add(a: int, b: int) -> int:\n"
+            "-   2 |     return a - b\n"
+            "+   2 |     return a + b\n"
+            "```"
+        )
+        assert "return a + b" in _extract_unified_diff(valid_diff)
+        arm_with_diff = arm_no_diff.model_copy(update={"generated_patch_diff": valid_diff})
+        passed_valid, msg_valid = runner.verify_task_in_worktree_pytest(
+            task, repo_dir, arm_with_diff
+        )
+        assert passed_valid is True, f"Expected pytest pass on patched parent, got: {msg_valid}"
+
+    def test_hmac_signed_principal_token_and_require_signed_auth_enforcement(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        token = create_signed_principal_token(
+            user_id="alice_sec",
+            role=RoleType.QUANT_RESEARCHER,
+            allowed_scopes=["public_quant", "quant_restricted"],
+            secret_key="unit-test-hmac-secret",
+            ttl_seconds=300,
+        )
+        principal = verify_signed_principal_token(token, secret_key="unit-test-hmac-secret")
+        assert principal.user_id == "alice_sec"
+        assert principal.role == RoleType.QUANT_RESEARCHER
+        assert "quant_restricted" in principal.allowed_scopes
+
+        # Tampered signature must raise HTTP 401
+        with pytest.raises(HTTPException) as exc_info:
+            verify_signed_principal_token(token + "00", secret_key="unit-test-hmac-secret")
+        assert exc_info.value.status_code == 401
+
+        # Expired token must raise HTTP 401
+        expired_tok = create_signed_principal_token(
+            user_id="alice_sec",
+            role=RoleType.ENGINEER,
+            allowed_scopes=["public_eng"],
+            secret_key="unit-test-hmac-secret",
+            ttl_seconds=-10,
+        )
+        with pytest.raises(HTTPException) as exc_exp:
+            verify_signed_principal_token(expired_tok, secret_key="unit-test-hmac-secret")
+        assert exc_exp.value.status_code == 401
+
+        # When SCOUT_REQUIRE_SIGNED_AUTH=true, unsigned X-Principal-* headers are rejected with 401
+        monkeypatch.setenv("SCOUT_REQUIRE_SIGNED_AUTH", "true")
+        monkeypatch.setenv("SCOUT_AUTH_HMAC_SECRET", "unit-test-hmac-secret")
+        with pytest.raises(HTTPException) as exc_unsigned:
+            get_principal_context(
+                x_principal_user_id="spoofed_admin",
+                x_principal_role="compliance_officer",
+                x_principal_scopes="quant_restricted",
+                authorization=None,
+            )
+        assert exc_unsigned.value.status_code == 401
+
+        # Valid Bearer token succeeds under SCOUT_REQUIRE_SIGNED_AUTH=true
+        authed = get_principal_context(authorization=f"Bearer {token}")
+        assert authed.user_id == "alice_sec"
+        assert authed.role == RoleType.QUANT_RESEARCHER
+
+    def test_bounded_ast_symbol_search_and_commit_isolated_merkle_indexing(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "iso_repo"
+        repo_dir.mkdir()
+        subprocess.run(["git", "-C", str(repo_dir), "init"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "config", "user.email", "test@example.com"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "config", "user.name", "Test"],
+            check=True,
+            capture_output=True,
+        )
+        (repo_dir / "engine.py").write_text("def compute_alpha() -> int:\n    return 1\n")
+        subprocess.run(["git", "-C", str(repo_dir), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "commit", "-m", "c1"], check=True, capture_output=True
+        )
+        sha1 = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        (repo_dir / "engine.py").write_text("def compute_beta() -> int:\n    return 2\n")
+        subprocess.run(["git", "-C", str(repo_dir), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "commit", "-m", "c2"], check=True, capture_output=True
+        )
+        sha2 = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        mem_repo = InMemoryRLSRepository()
+        principal = PrincipalContext(
+            user_id="test_eng",
+            role=RoleType.ENGINEER,
+            allowed_scopes=["public_eng"],
+        )
+        indexer = GitMerkleIndexer()
+        indexer.sync_in_memory(
+            repo_dir=repo_dir,
+            repo=mem_repo,
+            principal=principal,
+            domain_id="trading_code_scout",
+            repo_name="iso_repo",
+            ref=sha1,
+            isolate_by_commit=True,
+        )
+        indexer.sync_in_memory(
+            repo_dir=repo_dir,
+            repo=mem_repo,
+            principal=principal,
+            domain_id="trading_code_scout",
+            repo_name="iso_repo",
+            ref=sha2,
+            isolate_by_commit=True,
+        )
+
+        # Both commit snapshots coexist without overwriting each other
+        all_files = mem_repo.list_visible_code_files(principal, "trading_code_scout")
+        repo_names = {f.repo_name for f in all_files}
+        assert f"iso_repo@{sha1[:12]}" in repo_names
+        assert f"iso_repo@{sha2[:12]}" in repo_names
+
+        bound = BoundGraphRepository(mem_repo)
+        alpha_hits = bound.search_visible_ast_symbols(
+            principal, "trading_code_scout", "compute_alpha", limit=5
+        )
+        assert len(alpha_hits) == 1
+        assert "compute_alpha" in alpha_hits[0].qualified_name
+
+        fetched_files = bound.get_code_files_by_ids(
+            principal, "trading_code_scout", [alpha_hits[0].file_id]
+        )
+        assert len(fetched_files) == 1
+        assert fetched_files[0].repo_name == f"iso_repo@{sha1[:12]}"
+
+    def test_context_only_diff_and_sibling_path_traversal_rejected(self, tmp_path: Path) -> None:
+        # Context-only truncated diff (e.g., CLICK-09 docstring hunk without +/- lines) is rejected
+        context_only_diff = (
+            "```diff\n"
+            "--- a/src/click/_utils.py\n"
+            "+++ b/src/click/_utils.py\n"
+            "@@ -12,7 +12,7 @@\n"
+            "         `PEP 661 - Sentinel Values <https://peps.python.org/pep-0661/>`_.\n"
+            '     """\n'
+            "```"
+        )
+        assert _extract_unified_diff(context_only_diff) == ""
+
+        # Sibling directory prefix traversal (e.g., /tmp/repo vs /tmp/repo_secrets) is blocked
+        repo_dir = tmp_path / "repo"
+        sibling_dir = tmp_path / "repo_secrets"
+        repo_dir.mkdir()
+        sibling_dir.mkdir()
+        secret_file = sibling_dir / "key.py"
+        secret_file.write_text("SECRET = 'top_secret'\n", encoding="utf-8")
+
+        tools = RepoExplorationTools(repo_dir=repo_dir, source_subdir=".")
+        out = tools.read_file_lines("../repo_secrets/key.py", 1, 10)
+        assert out.startswith("File not found:")
+        assert "top_secret" not in out

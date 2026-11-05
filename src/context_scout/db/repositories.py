@@ -119,7 +119,6 @@ def _trigram_similarity(text_a: str, text_b: str) -> float:
     return (2.0 * intersection) / total
 
 
-
 class PostgresRLSRepository:
     """Executes parameterized SQL inside an RLS-enforced PostgreSQL 17 transaction."""
 
@@ -312,7 +311,6 @@ class PostgresRLSRepository:
             ),
         )
 
-
     def insert_doc_chunks_batch(
         self, conn: Connection[tuple[object, ...]], records: list[DocChunkRecord]
     ) -> int:
@@ -347,9 +345,7 @@ class PostgresRLSRepository:
         for r in rows:
             raw_emb = r[13]
             if isinstance(raw_emb, str):
-                emb_floats = [
-                    float(x.strip()) for x in raw_emb.strip("[]").split(",") if x.strip()
-                ]
+                emb_floats = [float(x.strip()) for x in raw_emb.strip("[]").split(",") if x.strip()]
             elif hasattr(raw_emb, "tolist"):
                 emb_floats = [float(x) for x in raw_emb.tolist()]
             elif isinstance(raw_emb, (list, tuple)):
@@ -450,10 +446,21 @@ class PostgresRLSRepository:
               AND (%s::text IS NULL OR d.market_scope = %s);
         """
         params = (
-            query_text, domain_id, market_str, market_str,
-            vec_literal, domain_id, market_str, market_str,
-            query_text, domain_id, market_str, market_str,
-            domain_id, market_str, market_str,
+            query_text,
+            domain_id,
+            market_str,
+            market_str,
+            vec_literal,
+            domain_id,
+            market_str,
+            market_str,
+            query_text,
+            domain_id,
+            market_str,
+            market_str,
+            domain_id,
+            market_str,
+            market_str,
         )
         rows = conn.execute(query, params).fetchall()
         hits: list[RankedSearchHit] = []
@@ -585,8 +592,6 @@ class PostgresRLSRepository:
         return int(str(row[0])) if row and row[0] is not None else 0
 
 
-
-
 class InMemoryRLSRepository:
     """Deterministic in-memory twin enforcing identical RLS scope intersection and 3-way RRF.
 
@@ -670,7 +675,6 @@ class InMemoryRLSRepository:
             and (market_scope is None or d.market_scope == market_scope)
             and _scopes_intersect(d.allowed_scopes, principal.allowed_scopes)
         ]
-
 
     def get_file_blob_hashes(
         self, principal: PrincipalContext, domain_id: str, repo_name: str
@@ -871,4 +875,58 @@ class InMemoryRLSRepository:
             if rec.principal_id == principal_id
         )
 
+    def search_visible_ast_symbols(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        query_text: str,
+        limit: int = 50,
+    ) -> list[ASTSymbolRecord]:
+        """Searches visible AST symbols ranked by lexical overlap under RLS."""
+        import re
 
+        visible = self.list_visible_ast_symbols(principal, domain_id)
+        words = [
+            w.lower()
+            for w in re.findall(r"[A-Za-z0-9_]{3,}", query_text)
+            if w.lower() not in {"the", "and", "for", "with", "how", "what", "where", "from"}
+        ]
+        if not words:
+            return visible[:limit]
+
+        scored: list[tuple[int, ASTSymbolRecord]] = []
+        for sym in visible:
+            qual_l = sym.qualified_name.lower()
+            sig_l = sym.signature_skeleton.lower()
+            sum_l = sym.contextual_summary.lower()
+            score = 0
+            for w in words[:8]:
+                if w in qual_l:
+                    score += 6
+                if w in sig_l:
+                    score += 3
+                if w in sum_l:
+                    score += 1
+            if score > 0:
+                scored.append((score, sym))
+        scored.sort(key=lambda item: (-item[0], item[1].qualified_name))
+        return [s for _, s in scored[:limit]]
+
+    def get_code_files_by_ids(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        file_ids: list[UUID | str],
+    ) -> list[CodeFileRecord]:
+        """Fetches visible code files by UUID under RLS without full-table scan."""
+        target_ids: set[UUID] = set()
+        for fid in file_ids:
+            try:
+                target_ids.add(fid if isinstance(fid, UUID) else UUID(str(fid)))
+            except ValueError:
+                continue
+        if not target_ids:
+            return []
+        return [
+            f for f in self.list_visible_code_files(principal, domain_id) if f.file_id in target_ids
+        ]

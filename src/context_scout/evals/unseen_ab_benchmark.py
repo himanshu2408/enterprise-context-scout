@@ -304,6 +304,7 @@ class RepoExplorationTools:
             "-n",
             "-I",
             "-E",
+            "-e",
             pattern,
             "--",
             self.source_subdir,
@@ -320,6 +321,7 @@ class RepoExplorationTools:
                 "-i",
                 "-I",
                 "-E",
+                "-e",
                 pattern,
                 "--",
                 self.source_subdir,
@@ -332,7 +334,7 @@ class RepoExplorationTools:
         """Read numbered lines from a file in the repository (capped at MAX_TOOL_OUTPUT_CHARS)."""
         clean_rel = file_path.strip().lstrip("/")
         full_path = (self.repo_dir / clean_rel).resolve()
-        if not str(full_path).startswith(str(self.repo_dir.resolve())) or not full_path.is_file():
+        if not full_path.is_relative_to(self.repo_dir.resolve()) or not full_path.is_file():
             return f"File not found: {clean_rel}"
         lines = full_path.read_text(encoding="utf-8", errors="replace").splitlines()
         s_idx = max(1, start_line)
@@ -445,31 +447,43 @@ class SharedExecutionBackend:
         latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
         return clean_out, in_tok, out_tok, latency_ms
 
-    def measure_tool_turn_bpe(
-        self, prompt: str, synthesized_tool_call: str
-    ) -> tuple[str, int, int, float]:
-        """Count exact BPE tokens via the model's chat template and tokenizer for tool hops."""
-        if self.use_gemini_api:
-            return self.generate(prompt, max_output_tokens=64)
-        t0 = time.perf_counter()
-        _, tokenizer = self._ensure_mlx_loaded()
-        try:
-            formatted = tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt}],
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-        except TypeError:
-            formatted = tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt}],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-        in_tok = len(tokenizer.encode(formatted))
-        out_tok = max(1, len(tokenizer.encode(synthesized_tool_call)))
-        latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-        return synthesized_tool_call, in_tok, out_tok, latency_ms
+
+def _extract_unified_diff(raw_text: str) -> str:
+    """Extract a clean unified diff block from LLM output, stripping 'NNNN | ' slice prefixes."""
+    fenced = re.findall(r"```(?:diff|patch)?\s*\n(.*?)```", raw_text, flags=re.DOTALL)
+    candidates = [*fenced, raw_text]
+    for block in candidates:
+        lines = block.splitlines()
+        start_idx: int | None = None
+        for idx, ln in enumerate(lines):
+            if ln.startswith("--- "):
+                start_idx = idx
+                break
+        if start_idx is None:
+            continue
+        cleaned_lines: list[str] = []
+        has_plus_header = False
+        has_hunk = False
+        has_mod_line = False
+        for ln in lines[start_idx:]:
+            if ln.startswith("+++ "):
+                has_plus_header = True
+                cleaned_lines.append(ln)
+            elif ln.startswith("--- ") or ln.startswith("@@"):
+                if ln.startswith("@@"):
+                    has_hunk = True
+                cleaned_lines.append(ln)
+            elif ln.startswith(("+", "-", " ")):
+                prefix_char = ln[0]
+                rest = re.sub(r"^\s*\d+\s*\|\s?", "", ln[1:])
+                if prefix_char in ("+", "-") and rest.strip():
+                    has_mod_line = True
+                cleaned_lines.append(f"{prefix_char}{rest}")
+            elif ln.startswith("diff --git "):
+                cleaned_lines.append(ln)
+        if has_plus_header and has_hunk and has_mod_line:
+            return "\n".join(cleaned_lines) + "\n"
+    return ""
 
 
 class UnseenRepoABBenchmarkRunner:
@@ -611,17 +625,28 @@ class UnseenRepoABBenchmarkRunner:
         )
         history_transcript.append(f"[Assistant Turn 1]\n{resp1}\n")
 
-        # Turn 2: Grep repository for extracted identifiers / model's chosen pattern
-        patterns = self._extract_search_patterns_from_problem(task.problem_statement)
-        grep_pat = "|".join(re.escape(p) for p in patterns[:3])
+        # Extract LLM's chosen grep_pattern from Turn 1 response
+        llm_grep_pat = ""
+        m_grep = re.search(r'"grep_pattern"\s*:\s*"([^"]+)"', resp1)
+        if m_grep:
+            llm_grep_pat = m_grep.group(1).strip()
+        fallback_patterns = self._extract_search_patterns_from_problem(task.problem_statement)
+        fallback_grep = "|".join(re.escape(p) for p in fallback_patterns[:3])
+        grep_pat = llm_grep_pat if llm_grep_pat else fallback_grep
+
+        # Turn 2: Grep repository using the model's pattern (with fallback if empty match)
         grep_out = tools.grep_repo(grep_pat)
+        if grep_out.startswith("No matches for pattern:") and fallback_grep != grep_pat:
+            grep_pat = f"{llm_grep_pat}|{fallback_grep}" if llm_grep_pat else fallback_grep
+            grep_out = tools.grep_repo(grep_pat)
+
         history_transcript.append(f"[Tool 2: grep_repo pattern={grep_pat!r}]\n{grep_out}\n")
         turn2_prompt = (
             "\n".join(history_transcript)
-            + "\nBased on the grep matches, state which file paths and line ranges to read next."
+            + "\nBased on the grep matches, state which file paths and line numbers to read next. "
+            'Reply with JSON: {"file_path": "...", "line": 1}'
         )
-        synth_t2 = json.dumps({"tool": "grep_repo", "pattern": grep_pat})
-        resp2, in2, out2, lat2 = self.backend.measure_tool_turn_bpe(turn2_prompt, synth_t2)
+        resp2, in2, out2, lat2 = self.backend.generate(turn2_prompt, max_output_tokens=48)
         traces.append(
             ToolCallTrace(
                 turn_index=2,
@@ -637,6 +662,15 @@ class UnseenRepoABBenchmarkRunner:
 
         grep_file_hits: list[tuple[str, int]] = []
         seen_file_windows: set[tuple[str, int]] = set()
+        # First honor explicit file paths chosen by the LLM in Turn 1 / Turn 2
+        for m_f in re.findall(r"(?:httpx|src/click)/[A-Za-z0-9_/\.]+\.py", resp2 + "\n" + resp1):
+            ln_match = re.search(r'"line"\s*:\s*(\d+)', resp2)
+            chosen_ln = int(ln_match.group(1)) if ln_match else 60
+            win_bucket = (m_f, (chosen_ln // 120) * 120)
+            if win_bucket not in seen_file_windows:
+                seen_file_windows.add(win_bucket)
+                grep_file_hits.append((m_f, chosen_ln))
+
         for line in grep_out.splitlines():
             m = re.match(r"^([^:]+\.py):(\d+):", line)
             if m:
@@ -647,17 +681,9 @@ class UnseenRepoABBenchmarkRunner:
                     seen_file_windows.add(win_bucket)
                     grep_file_hits.append((f_p, ln_no))
 
-        for m_f in re.findall(r"(?:httpx|src/click)/[A-Za-z0-9_/\.]+\.py", resp1 + "\n" + resp2):
-            if (m_f, 0) not in seen_file_windows:
-                seen_file_windows.add((m_f, 0))
-                grep_file_hits.append((m_f, 60))
-
-        if not grep_file_hits:
-            default_f = "httpx/_models.py" if "httpx" in task.repo_slug else "src/click/core.py"
-            grep_file_hits.append((default_f, 60))
-
-        # Turns 3..5: Read candidate file windows (accumulating multi-turn context)
+        # Turns 3..5: Read candidate file windows with live LLM generation at every turn
         inspected_files_ordered: list[str] = []
+        per_file_segments: list[tuple[str, str]] = []
         for idx_read, (f_path, center_line) in enumerate(grep_file_hits[:3], start=3):
             s_ln = max(1, center_line - 60)
             e_ln = center_line + 100
@@ -671,15 +697,7 @@ class UnseenRepoABBenchmarkRunner:
                 "\n".join(history_transcript)
                 + "\nIdentify the exact qualified symbol(s) in this file relevant to the bug."
             )
-            synth_r = json.dumps(
-                {
-                    "tool": "read_file_lines",
-                    "file_path": f_path,
-                    "start_line": s_ln,
-                    "end_line": e_ln,
-                }
-            )
-            resp_r, in_r, out_r, lat_r = self.backend.measure_tool_turn_bpe(read_prompt, synth_r)
+            resp_r, in_r, out_r, lat_r = self.backend.generate(read_prompt, max_output_tokens=32)
             traces.append(
                 ToolCallTrace(
                     turn_index=idx_read,
@@ -692,15 +710,20 @@ class UnseenRepoABBenchmarkRunner:
                 )
             )
             history_transcript.append(f"[Assistant Turn {idx_read}]\n{resp_r}\n")
+            per_file_segments.append((f_path, f"{resp_r}\n{read_out}"))
 
         # Final Turn: Synthesize localization + unified diff patch (Live LLM generation)
         final_turn_idx = len(traces) + 1
+        final_max_tokens = 384 if task.verify_with_pytest else 96
         final_prompt = (
             "\n".join(history_transcript)
-            + "\nProduce the final bug-fix unified diff patch (`--- a/...`, `+++ b/...`) "
-            "and list the modified file paths and qualified symbol names."
+            + "\nProduce a git-apply compatible unified diff patch enclosed in ```diff ... ``` "
+            "(using `--- a/<file_path>` and `+++ b/<file_path>` without `NNNN | ` line prefixes) "
+            "and state the modified file path and qualified symbol name."
         )
-        final_resp, in_f, out_f, lat_f = self.backend.generate(final_prompt, max_output_tokens=64)
+        final_resp, in_f, out_f, lat_f = self.backend.generate(
+            final_prompt, max_output_tokens=final_max_tokens
+        )
         traces.append(
             ToolCallTrace(
                 turn_index=final_turn_idx,
@@ -719,13 +742,14 @@ class UnseenRepoABBenchmarkRunner:
         total_tok = total_in + total_out
 
         localized_syms: list[str] = []
-        full_text = "\n".join(history_transcript) + "\n" + final_resp
-        for f_p in inspected_files_ordered:
+        for f_p, seg_text in per_file_segments:
             mod_prefix = f_p.replace("src/", "").replace(".py", "").replace("/", ".")
-            for fn_m in re.finditer(r"(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)", full_text):
+            file_syms: list[str] = []
+            for fn_m in re.finditer(r"(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)", seg_text):
                 sym_cand = f"{mod_prefix}.{fn_m.group(1)}"
-                if sym_cand not in localized_syms:
-                    localized_syms.append(sym_cand)
+                if sym_cand not in file_syms and sym_cand not in localized_syms:
+                    file_syms.append(sym_cand)
+            localized_syms.extend(file_syms[:2])
 
         f_hit = check_file_recall(inspected_files_ordered, task.ground_truth_files)
         s_hit = check_symbol_recall(localized_syms, task.ground_truth_symbols)
@@ -817,16 +841,19 @@ class UnseenRepoABBenchmarkRunner:
             qlora_valid: bool | None = None
             qlora_ms: float = 0.0
             if self.run_live_frozen_qlora and isinstance(scout_res, ImplementationContextPack):
+                cand_lines = [
+                    f"Retrieved AST Candidate: [repo={repo_name} | "
+                    f"file={sl.file_path} | "
+                    f"symbol={sl.qualified_symbol} | "
+                    f"lines={sl.start_line}-{sl.end_line} | "
+                    f"intent={sl.modification_intent.value}]"
+                    for sl in scout_res.code_slices[:5]
+                ]
                 primary_slice = scout_res.code_slices[0]
                 short_sym = primary_slice.qualified_symbol.split(".")[-1]
                 qlora_prompt = (
-                    f"Localize the AST code slice for `{short_sym}` in `{primary_slice.file_path}` "
-                    "to review implementation logic and performance.\n"
-                    f"Retrieved AST Candidate: [repo={repo_name} | "
-                    f"file={primary_slice.file_path} | "
-                    f"symbol={primary_slice.qualified_symbol} | "
-                    f"lines={primary_slice.start_line}-{primary_slice.end_line} | "
-                    "intent=modify_target]"
+                    f"Localize the primary AST code slice for `{short_sym}` in "
+                    f"`{primary_slice.file_path}` for task: {task.title}.\n" + "\n".join(cand_lines)
                 )
                 t_q0 = time.perf_counter()
                 try:
@@ -838,8 +865,26 @@ class UnseenRepoABBenchmarkRunner:
                     qlora_ms = round((time.perf_counter() - t_q0) * 1000.0, 2)
                     parsed_q = json.loads(raw_q)
                     if isinstance(parsed_q, list) and len(parsed_q) > 0:
-                        _ = [CodeSlicePointer.model_validate(item) for item in parsed_q]
+                        validated_ptrs = [
+                            CodeSlicePointer.model_validate(item) for item in parsed_q
+                        ]
                         qlora_valid = True
+                        # Promote the frozen QLoRA adapter's chosen primary slice to index 0
+                        chosen_sym = validated_ptrs[0].qualified_symbol
+                        chosen_file = validated_ptrs[0].file_path
+                        matched_idx = next(
+                            (
+                                i
+                                for i, s in enumerate(scout_res.code_slices)
+                                if s.qualified_symbol == chosen_sym or s.file_path == chosen_file
+                            ),
+                            0,
+                        )
+                        if matched_idx > 0:
+                            reordered = list(scout_res.code_slices)
+                            promoted = reordered.pop(matched_idx)
+                            reordered.insert(0, promoted)
+                            scout_res = scout_res.model_copy(update={"code_slices": reordered})
                     else:
                         qlora_valid = False
                 except Exception as exc:
@@ -906,9 +951,14 @@ class UnseenRepoABBenchmarkRunner:
                 failure_category=f"preflight_gate_blocked: {scout_res.reason[:120]}",
             )
 
-        one_shot_prompt = self.gemini_prompt_builder._build_gemini_prompt(scout_res)
+        one_shot_prompt = (
+            self.gemini_prompt_builder._build_gemini_prompt(scout_res)
+            + "\nDo not include 'NNNN | ' line-number prefixes inside the diff body; "
+            "use standard '--- a/<file_path>' and '+++ b/<file_path>' headers."
+        )
+        arm_b_max_tokens = 384 if task.verify_with_pytest else 96
         patch_resp, in_tok, out_tok, gen_lat_ms = self.backend.generate(
-            one_shot_prompt, max_output_tokens=64
+            one_shot_prompt, max_output_tokens=arm_b_max_tokens
         )
         total_wall_ms = round(scout_ms + qlora_ms + gen_lat_ms, 2)
 
@@ -970,11 +1020,18 @@ class UnseenRepoABBenchmarkRunner:
         repo_dir: Path,
         arm_result: ArmExecutionResult,
     ) -> tuple[bool, str]:
-        """Verify localization & patch in an isolated Git worktree using pytest."""
+        """Verify LLM-generated patch on parent_commit_sha in an isolated Git worktree."""
         if not (arm_result.file_recall_at_5 and arm_result.symbol_recall_at_5):
             return (
                 False,
                 "Skipped patch execution: target file/symbol not localized in Top-5",
+            )
+
+        clean_diff = _extract_unified_diff(arm_result.generated_patch_diff)
+        if not clean_diff:
+            return (
+                False,
+                "No valid unified diff (--- a/... +++ b/... @@ ...) emitted by model",
             )
 
         worktree_dir = Path(tempfile.mkdtemp(prefix=f"scout_ab_wt_{task.task_id}_"))
@@ -988,13 +1045,88 @@ class UnseenRepoABBenchmarkRunner:
                     "add",
                     "--detach",
                     str(worktree_dir),
-                    task.merge_commit_sha,
+                    task.parent_commit_sha,
                 ],
                 check=True,
                 capture_output=True,
                 text=True,
             )
-            env = os.environ.copy()
+            # Apply the PR's reproduction test diff (SWE-bench FAIL_TO_PASS protocol)
+            if task.test_files:
+                test_diff_proc = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(repo_dir),
+                        "diff",
+                        task.parent_commit_sha,
+                        task.merge_commit_sha,
+                        "--",
+                        *list(task.test_files),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if test_diff_proc.returncode == 0 and test_diff_proc.stdout.strip():
+                    test_patch_path = worktree_dir / ".scout_pr_tests.patch"
+                    test_patch_path.write_text(test_diff_proc.stdout, encoding="utf-8")
+                    subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(worktree_dir),
+                            "apply",
+                            "--ignore-space-change",
+                            "--ignore-whitespace",
+                            str(test_patch_path),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+
+            patch_path = worktree_dir / ".scout_candidate.patch"
+            patch_path.write_text(clean_diff, encoding="utf-8")
+
+            apply_proc = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(worktree_dir),
+                    "apply",
+                    "--recount",
+                    "--ignore-space-change",
+                    "--ignore-whitespace",
+                    str(patch_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if apply_proc.returncode != 0:
+                err_msg = (apply_proc.stderr.strip() or apply_proc.stdout.strip())[:160]
+                short_sha = task.parent_commit_sha[:8]
+                return (
+                    False,
+                    f"git apply failed on parent_commit_sha ({short_sha}): {err_msg}",
+                )
+
+            env = {
+                k: v
+                for k, v in os.environ.items()
+                if not any(
+                    sec in k.upper()
+                    for sec in (
+                        "API_KEY",
+                        "SECRET",
+                        "TOKEN",
+                        "PASSWORD",
+                        "ADMIN_URL",
+                        "CREDENTIAL",
+                    )
+                )
+            }
             src_path = (
                 str(worktree_dir / "src") if (worktree_dir / "src").exists() else str(worktree_dir)
             )

@@ -121,12 +121,17 @@ def apply_handoff(
             detail="Explicit human confirmation required: 'confirmed' must be true.",
         )
 
-    # 2. Validate confirmation token
+    # 2. Validate confirmation token and principal ownership (SEC-04)
     record = token_store.get(request.confirmation_token)
     if record is None:
         raise HTTPException(
             status_code=400,
             detail="Invalid or expired confirmation token.",
+        )
+    if record.principal.user_id != principal.user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Confirmation token belongs to a different principal (SEC-04).",
         )
 
     # 3. Apply patch in GitWorktreeSandbox via GeminiImplementationExecutor

@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS ast_symbols (
     embedding vector(768) NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_ast_symbols_file_id ON ast_symbols (file_id);
+CREATE INDEX IF NOT EXISTS idx_ast_symbols_domain_qual ON ast_symbols (domain_id, qualified_name);
 CREATE INDEX IF NOT EXISTS idx_ast_symbols_fts ON ast_symbols USING GIN (fts_doc);
 CREATE INDEX IF NOT EXISTS idx_ast_symbols_trgm ON ast_symbols USING GIN (qualified_name gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_ast_symbols_scopes ON ast_symbols USING GIN (allowed_scopes);
@@ -70,6 +72,7 @@ CREATE TABLE IF NOT EXISTS ast_edges (
     allowed_scopes TEXT[] NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_ast_edges_domain ON ast_edges (domain_id);
 CREATE INDEX IF NOT EXISTS idx_ast_edges_source ON ast_edges (source_symbol_id, edge_kind);
 CREATE INDEX IF NOT EXISTS idx_ast_edges_target ON ast_edges (target_symbol_id, edge_kind);
 CREATE INDEX IF NOT EXISTS idx_ast_edges_scopes ON ast_edges USING GIN (allowed_scopes);
@@ -136,19 +139,19 @@ ALTER TABLE doc_chunks FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS rls_code_files_scope ON code_files;
 CREATE POLICY rls_code_files_scope ON code_files
-    USING (allowed_scopes && string_to_array(current_setting('app.principal_scopes', true), ','));
+    USING (allowed_scopes && string_to_array(NULLIF(current_setting('app.principal_scopes', true), ''), ','));
 
 DROP POLICY IF EXISTS rls_ast_symbols_scope ON ast_symbols;
 CREATE POLICY rls_ast_symbols_scope ON ast_symbols
-    USING (allowed_scopes && string_to_array(current_setting('app.principal_scopes', true), ','));
+    USING (allowed_scopes && string_to_array(NULLIF(current_setting('app.principal_scopes', true), ''), ','));
 
 DROP POLICY IF EXISTS rls_ast_edges_scope ON ast_edges;
 CREATE POLICY rls_ast_edges_scope ON ast_edges
-    USING (allowed_scopes && string_to_array(current_setting('app.principal_scopes', true), ','));
+    USING (allowed_scopes && string_to_array(NULLIF(current_setting('app.principal_scopes', true), ''), ','));
 
 DROP POLICY IF EXISTS rls_doc_chunks_scope ON doc_chunks;
 CREATE POLICY rls_doc_chunks_scope ON doc_chunks
-    USING (allowed_scopes && string_to_array(current_setting('app.principal_scopes', true), ','));
+    USING (allowed_scopes && string_to_array(NULLIF(current_setting('app.principal_scopes', true), ''), ','));
 
 -- Create non-superuser runtime role (SEC-01)
 DO $$

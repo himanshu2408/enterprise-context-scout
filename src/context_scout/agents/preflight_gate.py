@@ -551,6 +551,57 @@ class BoundGraphRepository:
         wanted = set(chunk_ids)
         return [c for c in visible if str(c.chunk_id) in wanted]
 
+    def search_visible_ast_symbols(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        query_text: str,
+        limit: int = 50,
+    ) -> list[ASTSymbolRecord]:
+        if hasattr(self._repo, "search_visible_ast_symbols"):
+            try:
+                result = self._repo.search_visible_ast_symbols(
+                    principal=principal,
+                    domain_id=domain_id,
+                    query_text=query_text,
+                    limit=limit,
+                )
+                if isinstance(result, list):
+                    return result
+            except Exception as e:
+                logger.debug("search_visible_ast_symbols fallback: %s", e)
+        visible = self.list_visible_ast_symbols(principal, domain_id)
+        if not query_text.strip():
+            return visible[:limit]
+        q_l = query_text.strip().lower()
+        matched = [
+            s
+            for s in visible
+            if q_l in s.qualified_name.lower() or q_l in s.signature_skeleton.lower()
+        ]
+        return matched[:limit]
+
+    def get_code_files_by_ids(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        file_ids: list[UUID | str],
+    ) -> list[CodeFileRecord]:
+        if hasattr(self._repo, "get_code_files_by_ids"):
+            try:
+                result = self._repo.get_code_files_by_ids(
+                    principal=principal,
+                    domain_id=domain_id,
+                    file_ids=file_ids,
+                )
+                if isinstance(result, list):
+                    return result
+            except Exception as e:
+                logger.debug("get_code_files_by_ids fallback: %s", e)
+        visible = self.list_visible_code_files(principal, domain_id)
+        wanted = {str(fid) for fid in file_ids}
+        return [f for f in visible if str(f.file_id) in wanted]
+
 
 def create_insufficient_context_diagnostic(
     trace_id: str,
