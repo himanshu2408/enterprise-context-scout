@@ -646,16 +646,15 @@ class TestTelemetryAndHygiene:
         assert "m7_qlora_benchmark_report" in data
 
     def test_repository_hygiene_zero_prohibited_terms(self) -> None:
-        """Scans repository git files for prohibited terms."""
+        """Scans repository git files for hardcoded workstation paths or secret keys."""
         repo_root = get_repo_root()
-        pattern = (
-            r"(\b[F]DE\b|Forward [D]eployed Engineer|interview [g]uide|"
-            r"interview [d]efense|/Users/[h]imanshu)"
-        )
+        pattern = r"(/[U]sers/[A-Za-z0-9_-]+|AIza[0-9A-Za-z_-]{35})"
         result = subprocess.run(
-            ["git", "grep", "-i", "-E", pattern],
+            ["git", "grep", "-E", pattern],
             cwd=repo_root,
             capture_output=True,
             text=True,
         )
-        assert result.returncode == 1, f"Found prohibited terms in repository:\n{result.stdout}"
+        assert result.returncode == 1, (
+            f"Found prohibited paths/secrets in repository:\n{result.stdout}"
+        )

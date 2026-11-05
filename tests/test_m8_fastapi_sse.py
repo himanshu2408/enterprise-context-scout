@@ -665,21 +665,17 @@ def test_telemetry_roi_metrics_and_eval_reports(client: TestClient) -> None:
 
 
 def test_repository_hygiene_zero_prohibited_terms() -> None:
-    """Verifies zero prohibited terms exist across git-tracked repository files."""
+    """Verifies zero hardcoded workstation paths or API keys exist across tracked files."""
     repo_root = get_repo_root()
-    # Character class pattern so this test file itself does not match the literal pattern
-    pattern = (
-        r"(\b[F]DE\b|Forward [D]eployed Engineer|interview [g]uide|"
-        r"interview [d]efense|/Users/[h]imanshu)"
-    )
+    pattern = r"(/[U]sers/[A-Za-z0-9_-]+|AIza[0-9A-Za-z_-]{35})"
 
     result = subprocess.run(
-        ["git", "grep", "-i", "-E", pattern],
+        ["git", "grep", "-E", pattern],
         cwd=repo_root,
         capture_output=True,
         text=True,
     )
     # git grep returns code 1 when no matches are found
     assert result.returncode == 1, (
-        f"Found prohibited terms in repository:\n{result.stdout}"
+        f"Found prohibited paths/secrets in repository:\n{result.stdout}"
     )

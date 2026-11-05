@@ -15,10 +15,7 @@
 When engineering and quantitative research teams direct expensive commercial frontier models across large multi-file repositories and dense research corpora, two catastrophic economic and reliability failure modes occur:
 
 1. **Massive Token & Cost Burn on Exploration (80–90% Waste):**
-   In typical multi-turn coding and investigation tasks, 80–90% of input tokens are burned purely on exploratory search—scanning directory trees, reading unedited files, inspecting obsolete comments, and tracing cross-file imports (`reported` / `inferred` from SWE-bench & Agentless cost profiles, [arXiv:2407.01489](https://arxiv.org/abs/2407.01489)). Running multi-turn exploration loops on premium frontier models rapidly exhausts enterprise budgets:
-   - **Anthropic Claude Opus 5.5:** $4.00 / 1M input tokens, $20.00 / 1M output tokens.
-   - **OpenAI GPT-5.6 Sol:** $4.00 / 1M input tokens, $20.00 / 1M output tokens.
-   - **Google Gemini 4 Argon (`gemini-4-argon`):** $2.00–$4.00 / 1M input tokens ($2.00 introductory through Nov 30, 2026; $4.00 standard), $10.00–$20.00 / 1M output tokens ($10.00 introductory; $20.00 standard).
+   In typical multi-turn coding and investigation tasks, 80–90% of input tokens are burned purely on exploratory search—scanning directory trees, reading unedited files, inspecting obsolete comments, and tracing cross-file imports (`reported` / `inferred` from SWE-bench & Agentless cost profiles, [arXiv:2407.01489](https://arxiv.org/abs/2407.01489)). Running multi-turn exploration loops directly on paid cloud reasoning models rapidly exhausts engineering budgets.
    *(Note: Legacy 2025 models such as `gemini-2.5-pro` and `gemini-2.5-flash` are retired from frontier status and superseded by October 2026 architectures.)*
 
 2. **"Half-Information" Hallucinations:**
@@ -28,13 +25,11 @@ When engineering and quantitative research teams direct expensive commercial fro
 
 We decouple **Context Discovery & Verification** (100% local, open-weights `Gemma-4-26B-A4B-it` at $0 token cost) from **Implementation Execution** (paid Google `gemini-3.8-flash` or `gemini-4-argon` in 1 shot) under a strictly 100% Google model execution runtime by architectural design:
 
-| Architectural Tier | Model ID & Engine | Pricing (Input / Output per 1M) | Core Function & Economic Profile |
-|:---|:---|:---:|:---|
-| **Frontier Reference (Market)** | Anthropic Claude Opus 5.5 | $4.00 / $20.00 | High-cost external frontier; prohibited from runtime, baseline for savings |
-| **Frontier Reference (Market)** | OpenAI GPT-5.6 Sol | $4.00 / $20.00 | High-cost external frontier; prohibited from runtime, baseline for savings |
-| **Google Frontier Reasoning** | Google Gemini 4 Argon (`gemini-4-argon`) | $2.00–$4.00 / $10.00–$20.00 | Premium Google frontier model; reserved for 1-shot complex architectural refactors |
-| **Local Discovery Engine** | **Google Gemma 4 26B-A4B-it** (MoE, 3.8B Active) | **$0.00 / $0.00** | **100% Local Discovery & Verification**: Absorbs 30k–60k exploration tokens at $0 API cost |
-| **Fast Execution Engine** | **Google Gemini 3.8 Flash (`gemini-3.8-flash`)** | **$0.75 / $3.75** (promo to Dec 31, 2026; $1.50/$7.50 std) | **1-Shot Code Execution**: Generates patches from compact 2k–4k verified `ImplementationContextPack` |
+| Architectural Tier | Model ID & Engine | Core Function & Economic Profile |
+|:---|:---|:---|
+| **Google Frontier Reasoning** | Google Gemini 4 Argon (`gemini-4-argon`) | Reserved for 1-shot complex architectural refactors |
+| **Local Discovery Engine** | **Google Gemma 4 26B-A4B-it** (MoE, 3.8B Active) | **100% Local Discovery & Verification**: Absorbs 30k–60k exploration tokens at $0 API cost |
+| **Fast Execution Engine** | **Google Gemini 3.8 Flash (`gemini-3.8-flash`)** | **1-Shot Code Execution**: Generates patches from compact 2k–4k verified `ImplementationContextPack` |
 
 1. **Zero-Cost Local Scouting (`Gemma-4-26B-A4B-it` + Domain QLoRA Cartridges):** Absorbs 30,000–60,000 tokens of noisy multi-hop search, AST skeleton inspection, and paper analysis locally ($0 API cost), emitting **structured pointers** (`repo`, `commit_sha`, `file_path`, `start_line`, `end_line`) rather than re-typing code from memory.
 2. **Deterministic Byte-for-Byte Slicing & 1-Hop AST Auto-Closure:** Pure Python + `tree-sitter` slices exact lines from Git and mechanically attaches imported types, direct callers, and matching test fixtures—eliminating "half-information" before a single paid Gemini token is spent.

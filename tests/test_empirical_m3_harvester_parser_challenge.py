@@ -481,19 +481,18 @@ def test_adversarial_pdf_parser_on_real_academic_corpus_pdfs() -> None:
 
 
 def test_adversarial_forbidden_strings_audit() -> None:
-    """Scans all Python source files in context_scout for prohibited terms."""
-    forbidden_terms = [
-        " ".join(["Forward", "Deployed", "Engineer"]),
-        " ".join(["interview", "guide"]),
-        " ".join(["interview", "defense"]),
+    """Scans all Python source files in context_scout for hardcoded workstation paths or secrets."""
+    forbidden_patterns = [
+        r"/[U]sers/[A-Za-z0-9_-]+",
+        r"AIza[0-9A-Za-z\-_]{35}",
     ]
     src_dir = Path("src/context_scout")
     violations: list[str] = []
 
     for py_file in src_dir.rglob("*.py"):
         content = py_file.read_text(encoding="utf-8")
-        for term in forbidden_terms:
-            if re.search(rf"\b{re.escape(term)}\b", content, re.IGNORECASE):
-                violations.append(f"{py_file}: contains '{term}'")
+        for pat in forbidden_patterns:
+            if re.search(pat, content):
+                violations.append(f"{py_file}: matches forbidden pattern '{pat}'")
 
     assert not violations, f"Forbidden strings found in source files: {violations}"

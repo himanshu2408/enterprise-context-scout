@@ -167,7 +167,7 @@ class DistributionStats(BaseModel):
 
 
 class UnseenRepoABReport(BaseModel):
-    """Complete Staff-Reviewer unseen-repository A/B benchmark report."""
+    """Complete two-arm unseen-repository A/B benchmark report."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1387,7 +1387,7 @@ class UnseenRepoABBenchmarkRunner:
 
 
 def format_unseen_ab_markdown_report(report: UnseenRepoABReport) -> str:
-    """Render a Staff-Reviewer-grade Markdown report from an UnseenRepoABReport."""
+    """Render a Markdown report from an UnseenRepoABReport."""
     a_in = report.arm_a_input_tokens
     b_in = report.arm_b_input_tokens
     a_tot = report.arm_a_total_tokens
