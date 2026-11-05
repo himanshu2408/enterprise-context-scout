@@ -23,7 +23,10 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from context_scout.agents.gemini_executor import GeminiImplementationExecutor
+from context_scout.agents.gemini_executor import (
+    GeminiImplementationExecutor,
+    apply_search_replace_or_hunk_blocks,
+)
 from context_scout.agents.preflight_gate import BoundGraphRepository, PreFlightValidator
 from context_scout.api.dependencies import (
     create_signed_principal_token,
@@ -812,3 +815,26 @@ class TestWorktreePatchVerificationAndEnterpriseHardening:
         out = tools.read_file_lines("../repo_secrets/key.py", 1, 10)
         assert out.startswith("File not found:")
         assert "top_secret" not in out
+
+    def test_search_replace_and_hunk_fallback_patch_application(self, tmp_path: Path) -> None:
+        wt_dir = tmp_path / "wt_sr"
+        wt_dir.mkdir()
+        target_f = wt_dir / "mod.py"
+        target_f.write_text(
+            "def compute(x: int) -> int:\n    if x is None:\n        return -1\n    return x * 2\n",
+            encoding="utf-8",
+        )
+        sr_patch = (
+            "### File: mod.py\n"
+            "<<<<<<< SEARCH\n"
+            "   2 |     if x is None:\n"
+            "   3 |         return -1\n"
+            "=======\n"
+            "    if x is None:\n"
+            "        return 0\n"
+            ">>>>>>> REPLACE\n"
+        )
+        ok, msg = apply_search_replace_or_hunk_blocks(sr_patch, wt_dir)
+        assert ok is True
+        assert "SEARCH/REPLACE" in msg
+        assert "return 0" in target_f.read_text(encoding="utf-8")

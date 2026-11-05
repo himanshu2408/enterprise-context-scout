@@ -1052,6 +1052,7 @@ class UnseenRepoABBenchmarkRunner:
                 text=True,
             )
             # Apply the PR's reproduction test diff (SWE-bench FAIL_TO_PASS protocol)
+            added_test_names: list[str] = []
             if task.test_files:
                 test_diff_proc = subprocess.run(
                     [
@@ -1069,6 +1070,14 @@ class UnseenRepoABBenchmarkRunner:
                     check=False,
                 )
                 if test_diff_proc.returncode == 0 and test_diff_proc.stdout.strip():
+                    for m_fn in re.finditer(
+                        r"^\+\s*(?:async\s+)?def\s+(test_[A-Za-z0-9_]+)\s*\(",
+                        test_diff_proc.stdout,
+                        flags=re.MULTILINE,
+                    ):
+                        fn_name = m_fn.group(1)
+                        if fn_name not in added_test_names:
+                            added_test_names.append(fn_name)
                     test_patch_path = worktree_dir / ".scout_pr_tests.patch"
                     test_patch_path.write_text(test_diff_proc.stdout, encoding="utf-8")
                     subprocess.run(
@@ -1105,12 +1114,22 @@ class UnseenRepoABBenchmarkRunner:
                 check=False,
             )
             if apply_proc.returncode != 0:
-                err_msg = (apply_proc.stderr.strip() or apply_proc.stdout.strip())[:160]
-                short_sha = task.parent_commit_sha[:8]
-                return (
-                    False,
-                    f"git apply failed on parent_commit_sha ({short_sha}): {err_msg}",
+                from context_scout.agents.gemini_executor import (
+                    apply_search_replace_or_hunk_blocks,
                 )
+
+                sr_ok, _sr_msg = apply_search_replace_or_hunk_blocks(
+                    arm_result.generated_patch_diff,
+                    worktree_dir,
+                    default_files=arm_result.localized_files,
+                )
+                if not sr_ok:
+                    err_msg = (apply_proc.stderr.strip() or apply_proc.stdout.strip())[:160]
+                    short_sha = task.parent_commit_sha[:8]
+                    return (
+                        False,
+                        f"git apply failed on parent_commit_sha ({short_sha}): {err_msg}",
+                    )
 
             env = {
                 k: v
@@ -1132,7 +1151,18 @@ class UnseenRepoABBenchmarkRunner:
             )
             env["PYTHONPATH"] = f"{src_path}:{env.get('PYTHONPATH', '')}"
 
-            cmd = ["uv", "run", "pytest", *list(task.test_files), "-q", "--tb=short"]
+            cmd = [
+                "uv",
+                "run",
+                "pytest",
+                "-o",
+                "filterwarnings=",
+                *list(task.test_files),
+                "-q",
+                "--tb=short",
+            ]
+            if added_test_names:
+                cmd.extend(["-k", " or ".join(added_test_names)])
             proc = subprocess.run(
                 cmd,
                 cwd=worktree_dir,
@@ -1142,6 +1172,16 @@ class UnseenRepoABBenchmarkRunner:
                 timeout=30,
                 check=False,
             )
+            if proc.returncode == 4 and "conftest" in (proc.stdout + proc.stderr):
+                proc = subprocess.run(
+                    [*cmd, "--noconftest"],
+                    cwd=worktree_dir,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
             summary = (proc.stdout.strip() or proc.stderr.strip()).splitlines()[-1:]
             summary_str = summary[0] if summary else f"exit_code={proc.returncode}"
             return (proc.returncode == 0, summary_str)

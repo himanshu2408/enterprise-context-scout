@@ -602,6 +602,27 @@ class BoundGraphRepository:
         wanted = {str(fid) for fid in file_ids}
         return [f for f in visible if str(f.file_id) in wanted]
 
+    def get_code_files_by_paths(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        file_paths: list[str],
+    ) -> list[CodeFileRecord]:
+        if hasattr(self._repo, "get_code_files_by_paths"):
+            try:
+                result = self._repo.get_code_files_by_paths(
+                    principal=principal,
+                    domain_id=domain_id,
+                    file_paths=file_paths,
+                )
+                if isinstance(result, list):
+                    return result
+            except Exception as e:
+                logger.debug("get_code_files_by_paths fallback: %s", e)
+        visible = self.list_visible_code_files(principal, domain_id)
+        wanted = {p.strip() for p in file_paths if p and p.strip()}
+        return [f for f in visible if f.file_path in wanted]
+
 
 def create_insufficient_context_diagnostic(
     trace_id: str,

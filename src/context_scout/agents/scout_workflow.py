@@ -1742,8 +1742,12 @@ class ScoutWorkflow:
             )
 
         bound_repo = BoundGraphRepository(self.repo)
+        pointer_paths = list({p.file_path for p in candidate_pointers})
+        targeted_files = bound_repo.get_code_files_by_paths(principal, domain_id, pointer_paths)
         visible_files = bound_repo.list_visible_code_files(principal, domain_id)
-        files_by_path: dict[str, CodeFileRecord] = {f.file_path: f for f in visible_files}
+        files_by_path: dict[str, CodeFileRecord] = {
+            f.file_path: f for f in [*visible_files, *targeted_files]
+        }
 
         hydrated_slices: list[VerbatimCodeSlice] = []
         for ptr in candidate_pointers:
@@ -1780,8 +1784,15 @@ class ScoutWorkflow:
         visible_symbols = bound_repo.list_visible_ast_symbols(principal, domain_id)
         for slice_item in list(hydrated_slices):
             if slice_item.modification_intent == ModificationIntent.MODIFY_TARGET:
+                pushed_syms = bound_repo.search_visible_ast_symbols(
+                    principal, domain_id, slice_item.qualified_symbol, limit=10
+                )
                 sym_rec = next(
-                    (s for s in visible_symbols if s.qualified_name == slice_item.qualified_symbol),
+                    (
+                        s
+                        for s in [*pushed_syms, *visible_symbols]
+                        if s.qualified_name == slice_item.qualified_symbol
+                    ),
                     None,
                 )
                 if sym_rec is not None:
