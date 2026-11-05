@@ -35,8 +35,8 @@ python-lint:
     - command -v git >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends git)
   script:
     - uv run ruff check src tests
-    - echo "Executing prohibited terms repository hygiene scanner..."
-    - '! git grep -i -E "((/[U]sers/[A-Za-z0-9_-]+|AIza[0-9A-Za-z_-]{35})"'
+    - echo "Executing repository path and secret hygiene scanner..."
+    - '! git grep -E "(/[U]sers/[A-Za-z0-9_-]+|AIza[0-9A-Za-z_-]{35})"'
 
 # =============================================================================
 # Stage 2: Strict Static Typecheck
