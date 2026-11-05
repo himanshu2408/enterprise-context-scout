@@ -257,12 +257,14 @@ async def stream_scout(
             await asyncio.sleep(0.01)
 
             coordinator = FederatedScoutCoordinator(registry=registry, repo=repo)
-            result = coordinator.run(
+            fed_chunks = await asyncio.to_thread(_resolve_federated_doc_chunks, repo, principal)
+            result = await asyncio.to_thread(
+                coordinator.run,
                 user_prompt=request.query,
                 principal=principal,
                 trace_id=active_trace_id,
                 normalized_rrf_score=request.normalized_rrf_score,
-                doc_chunks=_resolve_federated_doc_chunks(repo, principal),
+                doc_chunks=fed_chunks,
                 max_bounce_backs=request.max_bounce_backs,
             )
 
@@ -384,7 +386,8 @@ async def stream_scout(
             await asyncio.sleep(0.01)
 
             workflow = ScoutWorkflow(registry=registry, repo=repo)
-            result = workflow.run(
+            result = await asyncio.to_thread(
+                workflow.run,
                 user_prompt=request.query,
                 principal=principal,
                 domain_id=request.domain_id,

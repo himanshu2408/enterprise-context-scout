@@ -73,19 +73,115 @@ DEFAULT_LOCAL_GEMMA_MODEL: Final[str] = "google/gemma-4-26B-A4B-it"
 MAX_SAFE_KV_SIZE: Final[int] = 32_768  # Apple M5 Pro 48GB unified memory cap (HW-01)
 
 CONVERSATIONAL_AND_GENERIC_WORDS: Final[set[str]] = {
-    "hello", "hey", "hi", "how", "are", "you", "your", "yours", "doing", "going",
-    "today", "tomorrow", "yesterday", "morning", "afternoon", "evening", "night",
-    "good", "fine", "okay", "great", "nice", "thanks", "thank", "please", "weather",
-    "joke", "funny", "name", "who", "what", "where", "when", "why", "which",
-    "feeling", "sup", "wassup", "chat", "talk", "tell", "something", "someone",
-    "anybody", "there", "here", "status", "ping", "help", "berlin", "london",
-    "paris", "munich", "coffee", "lunch", "dinner", "food", "movie", "music",
-    "game", "sports", "football", "soccer", "the", "and", "for", "not", "but",
-    "with", "from", "this", "that", "these", "those", "have", "has", "had",
-    "does", "did", "will", "would", "could", "should", "can", "may", "might",
-    "about", "into", "onto", "over", "under", "again", "further", "then", "once",
-    "bake", "cake", "chocolate", "recipe", "cooking", "vacation", "holiday",
-    "repair", "diesel", "tractor", "washing", "machine", "laundry", "haircut",
+    "hello",
+    "hey",
+    "hi",
+    "how",
+    "are",
+    "you",
+    "your",
+    "yours",
+    "doing",
+    "going",
+    "today",
+    "tomorrow",
+    "yesterday",
+    "morning",
+    "afternoon",
+    "evening",
+    "night",
+    "good",
+    "fine",
+    "okay",
+    "great",
+    "nice",
+    "thanks",
+    "thank",
+    "please",
+    "weather",
+    "joke",
+    "funny",
+    "name",
+    "who",
+    "what",
+    "where",
+    "when",
+    "why",
+    "which",
+    "feeling",
+    "sup",
+    "wassup",
+    "chat",
+    "talk",
+    "tell",
+    "something",
+    "someone",
+    "anybody",
+    "there",
+    "here",
+    "status",
+    "ping",
+    "help",
+    "berlin",
+    "london",
+    "paris",
+    "munich",
+    "coffee",
+    "lunch",
+    "dinner",
+    "food",
+    "movie",
+    "music",
+    "game",
+    "sports",
+    "football",
+    "soccer",
+    "the",
+    "and",
+    "for",
+    "not",
+    "but",
+    "with",
+    "from",
+    "this",
+    "that",
+    "these",
+    "those",
+    "have",
+    "has",
+    "had",
+    "does",
+    "did",
+    "will",
+    "would",
+    "could",
+    "should",
+    "can",
+    "may",
+    "might",
+    "about",
+    "into",
+    "onto",
+    "over",
+    "under",
+    "again",
+    "further",
+    "then",
+    "once",
+    "bake",
+    "cake",
+    "chocolate",
+    "recipe",
+    "cooking",
+    "vacation",
+    "holiday",
+    "repair",
+    "diesel",
+    "tractor",
+    "washing",
+    "machine",
+    "laundry",
+    "haircut",
 }
 
 
@@ -100,8 +196,7 @@ def _evaluate_query_domain_relevance(
     substantive = [
         t
         for t in raw_tokens
-        if t.lower() not in PROMPT_STOPWORDS
-        and t.lower() not in CONVERSATIONAL_AND_GENERIC_WORDS
+        if t.lower() not in PROMPT_STOPWORDS and t.lower() not in CONVERSATIONAL_AND_GENERIC_WORDS
     ]
     if not substantive:
         return (
@@ -261,6 +356,8 @@ class LocalGemmaClient:
 
         from context_scout.tuning.train_mlx_lora import GPUMutualExclusionLock
 
+        if domain_id:
+            self.set_active_domain(domain_id)
         slot = self.get_active_adapter(domain_id) if domain_id else None
         adapter_path = str(slot.adapter_path) if slot and slot.adapter_path else None
         cache_key = f"{domain_id or 'base'}:{adapter_path or 'none'}"
@@ -324,6 +421,8 @@ class LocalGemmaClient:
         max_tokens: int = 1024,
     ) -> str:
         """Calls /v1/chat/completions on local MLX Gemma server and returns raw text."""
+        if domain_id:
+            self.set_active_domain(domain_id)
         slot = self.get_active_adapter(domain_id) if domain_id else None
         model_name = slot.adapter_id if slot else self.model_id
         messages: list[dict[str, str]] = []
@@ -465,9 +564,7 @@ class LocalGemmaClient:
                 logger.debug("Database AST resolution fallback error: %s", e)
 
             if not pointers:
-                f_path = (
-                    found_files[0] if found_files else "src/context_scout/schemas/contracts.py"
-                )
+                f_path = found_files[0] if found_files else "src/context_scout/schemas/contracts.py"
                 sym = clean_syms[0] if clean_syms else "CodeSlicePointer"
                 if not sym.startswith("context_scout.") and "src/context_scout/" in f_path:
                     mod = f_path.replace("src/", "").replace(".py", "").replace("/", ".")
@@ -678,9 +775,7 @@ class LocalGemmaClient:
             bounce_back_feedback=bounce_back_feedback,
         )
 
-    def _call_mlx_code_pointers(
-        self, user_prompt: str, domain_id: str
-    ) -> list[CodeSlicePointer]:
+    def _call_mlx_code_pointers(self, user_prompt: str, domain_id: str) -> list[CodeSlicePointer]:
         """Calls OpenAI-compatible /v1/chat/completions on local MLX Gemma server."""
         slot = self.get_active_adapter(domain_id)
         model_name = slot.adapter_id if slot else self.model_id
@@ -745,9 +840,25 @@ class LocalGemmaClient:
                 if clean:
                     missing_from_feedback.add(clean)
 
-        # Extract candidates from prompt
+        # Extract candidates from prompt (including backticks and dotted parts)
+        prompt_without_fences = re.sub(r"```.*?```", " ", user_prompt, flags=re.DOTALL)
+        raw_backticks = re.findall(r"`([^`\n]+)`", prompt_without_fences)
+        backtick_syms: set[str] = set()
+        for bt in raw_backticks:
+            cleaned_bt = bt.strip(" `'\";:(),")
+            if cleaned_bt.endswith("()"):
+                cleaned_bt = cleaned_bt[:-2].strip()
+            if cleaned_bt and not any(ch.isspace() for ch in cleaned_bt):
+                backtick_syms.add(cleaned_bt)
+                if "." in cleaned_bt:
+                    backtick_syms.update(p for p in cleaned_bt.split(".") if len(p) >= 3)
+
         prompt_words = re.findall(r"[A-Za-z0-9_\-\./]+", user_prompt)
-        candidates_to_search = set(prompt_words) | missing_from_feedback
+        ident_words = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", prompt_without_fences)
+        candidates_to_search = (
+            set(prompt_words) | set(ident_words) | backtick_syms | missing_from_feedback
+        )
+        first_line = user_prompt.splitlines()[0] if user_prompt else ""
 
         files_by_id: dict[uuid.UUID, CodeFileRecord] = {f.file_id: f for f in visible_files}
 
@@ -766,18 +877,26 @@ class LocalGemmaClient:
         t3_subword: list[tuple[ASTSymbolRecord, bool]] = []
 
         for sym in visible_symbols:
-            short_name = sym.qualified_name.split(".")[-1]
+            if len(visible_files) > 15 and sym.qualified_name.startswith(("tests.", "examples.")):
+                continue
+            parts = sym.qualified_name.split(".")
+            short_name = parts[-1]
+            two_part = ".".join(parts[-2:]) if len(parts) >= 2 else sym.qualified_name
             is_code_identifier = (
                 any(c.isupper() for c in short_name)
                 or "_" in short_name
+                or short_name in backtick_syms
+                or two_part in candidates_to_search
                 or ("." in sym.qualified_name and sym.qualified_name in candidates_to_search)
             )
             is_exact = is_code_identifier and (
                 sym.qualified_name in candidates_to_search
+                or two_part in candidates_to_search
                 or short_name in candidates_to_search
             )
             is_feedback = (
                 sym.qualified_name in missing_from_feedback
+                or two_part in missing_from_feedback
                 or short_name in missing_from_feedback
             )
             if is_exact or is_feedback:
@@ -788,7 +907,26 @@ class LocalGemmaClient:
                 else:
                     t2_file_others.append((sym, False))
 
-        if not t1_exact and not t2_file_classes and not t2_file_others:
+        if len(visible_files) > 15 and len(t1_exact) > 1:
+
+            def _t1_priority(item: tuple[ASTSymbolRecord, bool]) -> tuple[int, int, int, str]:
+                s_rec, is_fb = item
+                s_parts = s_rec.qualified_name.split(".")
+                s_short = s_parts[-1]
+                s_two = ".".join(s_parts[-2:]) if len(s_parts) >= 2 else s_rec.qualified_name
+                in_title = int(s_short in first_line or s_two in first_line)
+                is_two_match = int(s_two in backtick_syms or s_two in missing_from_feedback)
+                is_specific = int("_" in s_short or s_rec.symbol_kind in ("function", "method"))
+                return (
+                    -int(is_fb),
+                    -is_two_match,
+                    -(in_title * 2 + is_specific),
+                    s_rec.qualified_name,
+                )
+
+            t1_exact.sort(key=_t1_priority)
+
+        if (not t1_exact and not t2_file_classes and not t2_file_others) or len(visible_files) > 15:
             generic_terms = {
                 "where",
                 "what",
@@ -803,42 +941,90 @@ class LocalGemmaClient:
                 "model",
                 "models",
             }
-            nl_terms = [
+            nl_terms = list(
+                dict.fromkeys(
+                    w.lower()
+                    for t_raw in candidates_to_search
+                    for w in re.split(r"[_\-\./]+", t_raw)
+                    if len(w) >= 3
+                    and w.lower() not in PROMPT_STOPWORDS
+                    and w.lower() not in generic_terms
+                    and not w.isdigit()
+                )
+            )
+            title_terms = {
                 w.lower()
-                for t_raw in candidates_to_search
-                for w in re.split(r"[_\-\./]+", t_raw)
-                if len(w) >= 4
-                and w.lower() not in PROMPT_STOPWORDS
-                and w.lower() not in generic_terms
-            ]
+                for w in re.findall(r"[A-Za-z0-9]+", first_line)
+                if len(w) >= 3 and w.lower() not in PROMPT_STOPWORDS
+            }
+            backtick_terms_l = {
+                w.lower()
+                for bt in backtick_syms
+                for w in re.split(r"[_\-\./]+", bt)
+                if len(w) >= 3 and w.lower() not in PROMPT_STOPWORDS
+            }
+            body_search_terms = title_terms | backtick_terms_l
+            file_lines_by_id: dict[uuid.UUID, list[str]] = (
+                {f.file_id: f.raw_content.splitlines() for f in visible_files}
+                if len(visible_files) > 15
+                else {}
+            )
             scored_nl: list[tuple[float, ASTSymbolRecord]] = []
             for sym in visible_symbols:
-                if sym.qualified_name.startswith("tests."):
+                if sym.qualified_name.startswith(("tests.", "examples.")):
                     continue
-                if (
-                    "paper_harvester" in sym.qualified_name
-                    and "harvest" not in user_prompt.lower()
-                ):
+                if "paper_harvester" in sym.qualified_name and "harvest" not in user_prompt.lower():
+                    continue
+                if ".evals." in sym.qualified_name and "eval" not in user_prompt.lower():
                     continue
                 short_l = sym.qualified_name.split(".")[-1].lower()
                 qual_l = sym.qualified_name.lower()
                 sig_l = sym.signature_skeleton.lower()
                 sum_l = sym.contextual_summary.lower()
+                body_l = ""
+                if (
+                    file_lines_by_id
+                    and sym.file_id in file_lines_by_id
+                    and not sym.qualified_name.startswith("context_scout.")
+                ):
+                    f_lines = file_lines_by_id[sym.file_id]
+                    if (sym.end_line - sym.start_line) <= 120:
+                        w_start = max(0, sym.start_line - 6)
+                        w_end = min(len(f_lines), sym.end_line + 18)
+                        body_l = "\n".join(f_lines[w_start:w_end]).lower()
                 score = 0.0
                 matched_terms = 0
                 for term in nl_terms:
+                    if len(term) < 4 and term not in {
+                        "url",
+                        "uri",
+                        "asi",
+                        "wsgi",
+                        "ssl",
+                        "tls",
+                        "cli",
+                        "env",
+                        "eof",
+                        "raw",
+                        "pct",
+                    }:
+                        continue
+                    term_weight = 1.5 if term in title_terms else 1.0
                     term_hit = False
                     if term in short_l:
-                        score += 6.0
+                        score += 6.0 * term_weight
                         term_hit = True
                     elif term in qual_l:
-                        score += 3.5
+                        score += 3.5 * term_weight
                         term_hit = True
                     if term in sig_l:
-                        score += 2.0
+                        score += 2.0 * term_weight
                         term_hit = True
                     if term in sum_l:
-                        score += 1.5
+                        score += 1.5 * term_weight
+                        term_hit = True
+                    if body_l and term in body_search_terms and term in body_l:
+                        score += 3.0 * term_weight
                         term_hit = True
                     if term_hit:
                         matched_terms += 1
@@ -849,7 +1035,20 @@ class LocalGemmaClient:
                     scored_nl.append((score, sym))
             scored_nl.sort(key=lambda item: (-item[0], item[1].qualified_name))
             if scored_nl:
-                t3_subword = [(s_item, False) for _, s_item in scored_nl[:4]]
+                existing_t1_ids = {s.symbol_id for s, _ in t1_exact}
+                limit_nl = 4 if not t1_exact else 3
+                t3_subword = []
+                parent_counts: dict[str, int] = {}
+                for _, s_item in scored_nl:
+                    if s_item.symbol_id in existing_t1_ids:
+                        continue
+                    parent_key = ".".join(s_item.qualified_name.split(".")[:3])
+                    if parent_counts.get(parent_key, 0) >= 2 and s_item.symbol_kind != "class":
+                        continue
+                    parent_counts[parent_key] = parent_counts.get(parent_key, 0) + 1
+                    t3_subword.append((s_item, False))
+                    if len(t3_subword) >= limit_nl:
+                        break
         elif not t1_exact:
             for sym in visible_symbols:
                 if sym.file_id in mentioned_file_ids:
@@ -866,6 +1065,10 @@ class LocalGemmaClient:
                         break
 
         candidate_ordered = t1_exact + t2_file_classes + t2_file_others + t3_subword
+        if len(visible_files) > 15 and len(candidate_ordered) > 5:
+            feedback_items = [item for item in candidate_ordered if item[1]]
+            non_feedback = [item for item in candidate_ordered if not item[1]]
+            candidate_ordered = (feedback_items + non_feedback)[:5]
 
         for sym, is_feedback_match in candidate_ordered:
             short_name = sym.qualified_name.split(".")[-1]
@@ -900,10 +1103,7 @@ class LocalGemmaClient:
         # 2. Match whole files in repository if mentioned
         for f in visible_files:
             file_name = f.file_path.split("/")[-1]
-            if (
-                f.file_path in candidates_to_search
-                or file_name in candidates_to_search
-            ):
+            if f.file_path in candidates_to_search or file_name in candidates_to_search:
                 if any(p.file_path == f.file_path for p in pointers):
                     continue
 
@@ -955,9 +1155,7 @@ class LocalGemmaClient:
 
         return pointers
 
-    def _call_mlx_quant_brief(
-        self, user_prompt: str, domain_id: str
-    ) -> QuantStrategyBrief | None:
+    def _call_mlx_quant_brief(self, user_prompt: str, domain_id: str) -> QuantStrategyBrief | None:
         """Calls OpenAI-compatible /v1/chat/completions on local MLX Gemma server."""
         slot = self.get_active_adapter(domain_id)
         model_name = slot.adapter_id if slot else self.model_id
@@ -1067,9 +1265,7 @@ class LocalGemmaClient:
             if not snippet:
                 continue
             clean_lines = [
-                ln.strip()
-                for ln in snippet.splitlines()
-                if not _is_noisy_latex_line(ln)
+                ln.strip() for ln in snippet.splitlines() if not _is_noisy_latex_line(ln)
             ]
             candidates = [
                 *clean_lines,
@@ -1186,9 +1382,7 @@ class LocalGemmaClient:
                     "Exit at horizon K or trailing volatility stop-loss",
                 ]
         elif any(k in prompt_lower for k in ("portfolio", "hrp", "optimization", "variance")):
-            strategy_name = (
-                "Hierarchical Risk Parity (HRP) & Minimum Variance Portfolio Allocation"
-            )
+            strategy_name = "Hierarchical Risk Parity (HRP) & Minimum Variance Portfolio Allocation"
             signal_latex = (
                 r"w_i^{\text{HRP}} = \frac{\tilde{w}_i}{\sum_j \tilde{w}_j}, "
                 r"\quad D_{i,j} = \sqrt{\frac{1}{2}(1 - \rho_{i,j})}"
@@ -1237,11 +1431,7 @@ class LocalGemmaClient:
             for chk in chunks[:3]:
                 for raw_ln in chk.verbatim_content.splitlines():
                     s_ln = raw_ln.strip().lstrip("-*•0123456789. ")
-                    if (
-                        len(s_ln) < 30
-                        or s_ln.startswith("#")
-                        or s_ln.startswith("%")
-                    ):
+                    if len(s_ln) < 30 or s_ln.startswith("#") or s_ln.startswith("%"):
                         continue
                     s_lower = s_ln.lower()
                     if any(
@@ -1465,35 +1655,31 @@ class ScoutWorkflow:
         # Stage 2: MCP Read Exploration, AST Localization, & Slicing
         # =====================================================================
         prompt_l = user_prompt.lower()
-        has_code_indicators = (
-            any(
-                ext in prompt_l
-                for ext in (".py", ".ts", ".tsx", ".rs", "`")
-            )
-            or any(
-                kw in prompt_l
-                for kw in (
-                    "code",
-                    "codebase",
-                    "file",
-                    "class",
-                    "method",
-                    "function",
-                    "refactor",
-                    "module",
-                    "symbol",
-                    "bindings",
-                    "kalman",
-                    "garch",
-                    "kelly",
-                    "almgren",
-                    "chriss",
-                    "ledoit",
-                    "slippage",
-                    "orderflowimbalance",
-                    "order_flow_imbalance",
-                    "bounce",
-                )
+        has_code_indicators = any(
+            ext in prompt_l for ext in (".py", ".ts", ".tsx", ".rs", "`")
+        ) or any(
+            kw in prompt_l
+            for kw in (
+                "code",
+                "codebase",
+                "file",
+                "class",
+                "method",
+                "function",
+                "refactor",
+                "module",
+                "symbol",
+                "bindings",
+                "kalman",
+                "garch",
+                "kelly",
+                "almgren",
+                "chriss",
+                "ledoit",
+                "slippage",
+                "orderflowimbalance",
+                "order_flow_imbalance",
+                "bounce",
             )
         )
         has_quant_research_indicators = any(
@@ -1521,9 +1707,7 @@ class ScoutWorkflow:
             & set(principal.allowed_scopes)
         )
         auto_quant_route = (
-            not has_code_indicators
-            and has_quant_research_indicators
-            and has_quant_scope
+            not has_code_indicators and has_quant_research_indicators and has_quant_scope
         )
 
         quant_brief: QuantStrategyBrief | None = None
@@ -1532,11 +1716,7 @@ class ScoutWorkflow:
             or domain_id == "quant_research_scout"
             or auto_quant_route
         ):
-            quant_domain = (
-                "quant_research_scout"
-                if auto_quant_route
-                else domain_id
-            )
+            quant_domain = "quant_research_scout" if auto_quant_route else domain_id
             quant_brief = self.local_client.generate_quant_brief(
                 user_prompt=user_prompt,
                 domain_id=quant_domain,
@@ -1562,8 +1742,12 @@ class ScoutWorkflow:
             )
 
         bound_repo = BoundGraphRepository(self.repo)
+        pointer_paths = list({p.file_path for p in candidate_pointers})
+        targeted_files = bound_repo.get_code_files_by_paths(principal, domain_id, pointer_paths)
         visible_files = bound_repo.list_visible_code_files(principal, domain_id)
-        files_by_path: dict[str, CodeFileRecord] = {f.file_path: f for f in visible_files}
+        files_by_path: dict[str, CodeFileRecord] = {
+            f.file_path: f for f in [*visible_files, *targeted_files]
+        }
 
         hydrated_slices: list[VerbatimCodeSlice] = []
         for ptr in candidate_pointers:
@@ -1600,8 +1784,15 @@ class ScoutWorkflow:
         visible_symbols = bound_repo.list_visible_ast_symbols(principal, domain_id)
         for slice_item in list(hydrated_slices):
             if slice_item.modification_intent == ModificationIntent.MODIFY_TARGET:
+                pushed_syms = bound_repo.search_visible_ast_symbols(
+                    principal, domain_id, slice_item.qualified_symbol, limit=10
+                )
                 sym_rec = next(
-                    (s for s in visible_symbols if s.qualified_name == slice_item.qualified_symbol),
+                    (
+                        s
+                        for s in [*pushed_syms, *visible_symbols]
+                        if s.qualified_name == slice_item.qualified_symbol
+                    ),
                     None,
                 )
                 if sym_rec is not None:
@@ -2069,9 +2260,7 @@ class FederatedScoutCoordinator:
         est_tokens = max(1, int(total_slice_chars / 3.8)) + 300
 
         if isinstance(active_chunks, dict):
-            total_doc_tokens = sum(
-                max(1, int(len(v) / 3.8)) for v in active_chunks.values()
-            )
+            total_doc_tokens = sum(max(1, int(len(v) / 3.8)) for v in active_chunks.values())
         elif isinstance(active_chunks, list):
             total_doc_tokens = sum(
                 max(1, int(len(c.verbatim_content) / 3.8)) for c in active_chunks
@@ -2079,9 +2268,7 @@ class FederatedScoutCoordinator:
         else:
             total_doc_tokens = 0
 
-        total_code_tokens = sum(
-            max(1, int(len(f.raw_content) / 3.8)) for f in visible_files
-        )
+        total_code_tokens = sum(max(1, int(len(f.raw_content) / 3.8)) for f in visible_files)
         total_tokens_explored = max(est_tokens, total_doc_tokens + total_code_tokens)
 
         pack = ImplementationContextPack(

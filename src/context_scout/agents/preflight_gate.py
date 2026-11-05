@@ -49,40 +49,245 @@ logger = logging.getLogger(__name__)
 PYTHON_KEYWORDS: Final[set[str]] = set(keyword.kwlist)
 
 TYPESCRIPT_KEYWORDS: Final[set[str]] = {
-    "abstract", "any", "as", "asserts", "async", "await", "boolean", "break",
-    "case", "catch", "class", "const", "constructor", "continue", "debugger",
-    "declare", "default", "delete", "do", "else", "enum", "export", "extends",
-    "false", "finally", "for", "from", "function", "get", "if", "implements",
-    "import", "in", "infer", "instanceof", "interface", "is", "keyof", "let",
-    "module", "namespace", "never", "new", "null", "number", "object", "of",
-    "package", "private", "protected", "public", "readonly", "require", "return",
-    "set", "static", "string", "super", "switch", "symbol", "this", "throw",
-    "true", "try", "type", "typeof", "undefined", "unique", "unknown", "var",
-    "void", "while", "with", "yield",
+    "abstract",
+    "any",
+    "as",
+    "asserts",
+    "async",
+    "await",
+    "boolean",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "constructor",
+    "continue",
+    "debugger",
+    "declare",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "from",
+    "function",
+    "get",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "infer",
+    "instanceof",
+    "interface",
+    "is",
+    "keyof",
+    "let",
+    "module",
+    "namespace",
+    "never",
+    "new",
+    "null",
+    "number",
+    "object",
+    "of",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "require",
+    "return",
+    "set",
+    "static",
+    "string",
+    "super",
+    "switch",
+    "symbol",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "type",
+    "typeof",
+    "undefined",
+    "unique",
+    "unknown",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
 }
 
 PROMPT_STOPWORDS: Final[set[str]] = {
-    "implement", "implementation", "implementing", "create", "creating", "created",
-    "refactor", "refactoring", "refactored", "add", "adding", "added", "modify",
-    "modifying", "modified", "update", "updating", "updated", "fix", "fixing",
-    "fixed", "build", "building", "built", "remove", "removing", "removed",
-    "delete", "deleting", "deleted", "change", "changing", "changed", "ensure",
-    "ensuring", "ensured", "verify", "verifying", "verified", "test", "tests",
-    "testing", "tested", "function", "functions", "method", "methods", "class",
-    "classes", "module", "modules", "package", "packages", "file", "files",
-    "code", "slice", "slices", "symbol", "symbols", "target", "targets",
-    "reference", "references", "existing", "novel", "pack", "packs", "scout",
-    "context", "check", "checks", "checking", "checked", "error", "errors",
-    "using", "used", "use", "from", "with", "into", "onto", "about", "between",
-    "before", "after", "under", "above", "please", "should", "would", "could",
-    "must", "will", "can", "then", "when", "where", "which", "that", "this",
-    "these", "those", "have", "has", "had", "having", "does", "did", "doing",
-    "make", "made", "making", "need", "needed", "want", "wanted", "write",
-    "writing", "written", "read", "reading", "run", "running", "also", "only",
-    "just", "both", "either", "neither", "all", "any", "some", "none", "each",
-    "every", "more", "most", "other", "another", "such", "than", "like", "same",
-    "different", "new", "now", "here", "there", "well", "call", "calls", "called",
-    "calling", "help", "show", "give", "provide", "provided", "including", "include",
+    "implement",
+    "implementation",
+    "implementing",
+    "create",
+    "creating",
+    "created",
+    "refactor",
+    "refactoring",
+    "refactored",
+    "add",
+    "adding",
+    "added",
+    "modify",
+    "modifying",
+    "modified",
+    "update",
+    "updating",
+    "updated",
+    "fix",
+    "fixing",
+    "fixed",
+    "build",
+    "building",
+    "built",
+    "remove",
+    "removing",
+    "removed",
+    "delete",
+    "deleting",
+    "deleted",
+    "change",
+    "changing",
+    "changed",
+    "ensure",
+    "ensuring",
+    "ensured",
+    "verify",
+    "verifying",
+    "verified",
+    "test",
+    "tests",
+    "testing",
+    "tested",
+    "function",
+    "functions",
+    "method",
+    "methods",
+    "class",
+    "classes",
+    "module",
+    "modules",
+    "package",
+    "packages",
+    "file",
+    "files",
+    "code",
+    "slice",
+    "slices",
+    "symbol",
+    "symbols",
+    "target",
+    "targets",
+    "reference",
+    "references",
+    "existing",
+    "novel",
+    "pack",
+    "packs",
+    "scout",
+    "context",
+    "check",
+    "checks",
+    "checking",
+    "checked",
+    "error",
+    "errors",
+    "using",
+    "used",
+    "use",
+    "from",
+    "with",
+    "into",
+    "onto",
+    "about",
+    "between",
+    "before",
+    "after",
+    "under",
+    "above",
+    "please",
+    "should",
+    "would",
+    "could",
+    "must",
+    "will",
+    "can",
+    "then",
+    "when",
+    "where",
+    "which",
+    "that",
+    "this",
+    "these",
+    "those",
+    "have",
+    "has",
+    "had",
+    "having",
+    "does",
+    "did",
+    "doing",
+    "make",
+    "made",
+    "making",
+    "need",
+    "needed",
+    "want",
+    "wanted",
+    "write",
+    "writing",
+    "written",
+    "read",
+    "reading",
+    "run",
+    "running",
+    "also",
+    "only",
+    "just",
+    "both",
+    "either",
+    "neither",
+    "all",
+    "any",
+    "some",
+    "none",
+    "each",
+    "every",
+    "more",
+    "most",
+    "other",
+    "another",
+    "such",
+    "than",
+    "like",
+    "same",
+    "different",
+    "new",
+    "now",
+    "here",
+    "there",
+    "well",
+    "call",
+    "calls",
+    "called",
+    "calling",
+    "help",
+    "show",
+    "give",
+    "provide",
+    "provided",
+    "including",
+    "include",
 }
 
 CUSTOM_CORPUS_INDEX_PATHS: dict[str, Path] = {}
@@ -231,9 +436,7 @@ class BoundGraphRepository:
                     return result
             except TypeError:
                 if self._conn is not None:
-                    result = self._repo.list_visible_doc_chunks(
-                        self._conn, domain_id, market_scope
-                    )
+                    result = self._repo.list_visible_doc_chunks(self._conn, domain_id, market_scope)
                     if isinstance(result, list) and result:
                         return result
         corpus = _load_custom_domain_corpus(domain_id)
@@ -348,6 +551,78 @@ class BoundGraphRepository:
         wanted = set(chunk_ids)
         return [c for c in visible if str(c.chunk_id) in wanted]
 
+    def search_visible_ast_symbols(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        query_text: str,
+        limit: int = 50,
+    ) -> list[ASTSymbolRecord]:
+        if hasattr(self._repo, "search_visible_ast_symbols"):
+            try:
+                result = self._repo.search_visible_ast_symbols(
+                    principal=principal,
+                    domain_id=domain_id,
+                    query_text=query_text,
+                    limit=limit,
+                )
+                if isinstance(result, list):
+                    return result
+            except Exception as e:
+                logger.debug("search_visible_ast_symbols fallback: %s", e)
+        visible = self.list_visible_ast_symbols(principal, domain_id)
+        if not query_text.strip():
+            return visible[:limit]
+        q_l = query_text.strip().lower()
+        matched = [
+            s
+            for s in visible
+            if q_l in s.qualified_name.lower() or q_l in s.signature_skeleton.lower()
+        ]
+        return matched[:limit]
+
+    def get_code_files_by_ids(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        file_ids: list[UUID | str],
+    ) -> list[CodeFileRecord]:
+        if hasattr(self._repo, "get_code_files_by_ids"):
+            try:
+                result = self._repo.get_code_files_by_ids(
+                    principal=principal,
+                    domain_id=domain_id,
+                    file_ids=file_ids,
+                )
+                if isinstance(result, list):
+                    return result
+            except Exception as e:
+                logger.debug("get_code_files_by_ids fallback: %s", e)
+        visible = self.list_visible_code_files(principal, domain_id)
+        wanted = {str(fid) for fid in file_ids}
+        return [f for f in visible if str(f.file_id) in wanted]
+
+    def get_code_files_by_paths(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        file_paths: list[str],
+    ) -> list[CodeFileRecord]:
+        if hasattr(self._repo, "get_code_files_by_paths"):
+            try:
+                result = self._repo.get_code_files_by_paths(
+                    principal=principal,
+                    domain_id=domain_id,
+                    file_paths=file_paths,
+                )
+                if isinstance(result, list):
+                    return result
+            except Exception as e:
+                logger.debug("get_code_files_by_paths fallback: %s", e)
+        visible = self.list_visible_code_files(principal, domain_id)
+        wanted = {p.strip() for p in file_paths if p and p.strip()}
+        return [f for f in visible if f.file_path in wanted]
+
 
 def create_insufficient_context_diagnostic(
     trace_id: str,
@@ -446,21 +721,27 @@ class PreFlightValidator:
         if not user_prompt:
             return set(), set()
 
-        # 1. Backticked tokens (`symbol_or_path`)
-        backtick_tokens = set(re.findall(r"`([^`]+)`", user_prompt))
+        # 1. Backticked tokens (`symbol_or_path`), ignoring multi-line fenced code blocks
+        prompt_without_fences = re.sub(r"```.*?```", " ", user_prompt, flags=re.DOTALL)
+        backtick_tokens = set(re.findall(r"`([^`\n]+)`", prompt_without_fences))
 
         # 2. File paths (e.g., src/strategies/order_flow.py or models.py)
         file_path_pattern = (
             r"(?:[a-zA-Z0-9_\-\./]+/[a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+|"
             r"[a-zA-Z0-9_\-\.]+\.(?:py|ts|tsx|js|jsx|json|md|sql|yaml|yml|toml))"
         )
-        path_tokens = set(re.findall(file_path_pattern, user_prompt))
+        path_tokens = set(re.findall(file_path_pattern, prompt_without_fences))
 
         explicit_tokens: set[str] = set()
         for tok in backtick_tokens | path_tokens:
             cleaned = tok.strip(" `'\";:(),")
-            if cleaned and len(cleaned) >= 2:
-                explicit_tokens.add(cleaned)
+            if cleaned.endswith("()"):
+                cleaned = cleaned[:-2].strip()
+            if not cleaned or len(cleaned) < 2:
+                continue
+            if any(ch.isspace() for ch in cleaned):
+                continue
+            explicit_tokens.add(cleaned)
 
         # 3. Candidate identifiers from prompt body
         raw_words = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", user_prompt)
@@ -504,9 +785,14 @@ class PreFlightValidator:
         known_symbols_by_name: dict[str, ASTSymbolRecord] = {}
         known_symbols_by_short: dict[str, ASTSymbolRecord] = {}
         for sym in visible_symbols:
+            if len(visible_files) > 15 and sym.qualified_name.startswith(("tests.", "examples.")):
+                continue
             known_symbols_by_name[sym.qualified_name] = sym
-            short_name = sym.qualified_name.split(".")[-1]
+            parts = sym.qualified_name.split(".")
+            short_name = parts[-1]
             known_symbols_by_short[short_name] = sym
+            if len(parts) >= 2:
+                known_symbols_by_name[".".join(parts[-2:])] = sym
 
         known_files_by_path: dict[str, CodeFileRecord] = {}
         known_files_by_name: dict[str, CodeFileRecord] = {}
@@ -519,9 +805,22 @@ class PreFlightValidator:
         novel_target_identifiers: list[str] = []
 
         for candidate in sorted(all_candidates):
+            is_explicit = candidate in explicit_candidates
+            is_code_shaped = (
+                any(c.isupper() for c in candidate[1:])
+                or "_" in candidate
+                or "." in candidate
+                or (
+                    candidate[0].isupper()
+                    and len(candidate) >= 4
+                    and candidate in known_symbols_by_short
+                    and known_symbols_by_short[candidate].symbol_kind
+                    in ("class", "interface", "type_alias")
+                )
+            )
             # Check if candidate matches an existing symbol or file in repository index
-            is_existing_symbol = (
-                candidate in known_symbols_by_name or candidate in known_symbols_by_short
+            is_existing_symbol = candidate in known_symbols_by_name or (
+                candidate in known_symbols_by_short and (is_explicit or is_code_shaped)
             )
             is_existing_file = (
                 candidate in known_files_by_path
@@ -542,9 +841,9 @@ class PreFlightValidator:
                         covered = True
                         break
                     # Symbol span coverage
-                    sym_match = known_symbols_by_name.get(
+                    sym_match = known_symbols_by_name.get(candidate) or known_symbols_by_short.get(
                         candidate
-                    ) or known_symbols_by_short.get(candidate)
+                    )
                     if sym_match is not None:
                         f_match = known_files_by_path.get(s.file_path)
                         if (
@@ -694,15 +993,31 @@ class PreFlightValidator:
                 target_sym: ASTSymbolRecord | None = None
                 if edge.target_symbol_id and edge.target_symbol_id in visible_symbols_by_id:
                     target_sym = visible_symbols_by_id[edge.target_symbol_id]
-                else:
+                elif edge.target_symbol_id is None:
+                    if edge.edge_kind == "CALLS":
+                        continue
+                    rel_suffix = edge.target_qualified_name.lstrip(".")
                     target_clean = edge.target_qualified_name.split(".")[-1]
                     for sym_rec in visible_symbols:
-                        if (
-                            sym_rec.qualified_name == edge.target_qualified_name
-                            or sym_rec.qualified_name.split(".")[-1] == target_clean
+                        if sym_rec.qualified_name == rel_suffix or sym_rec.qualified_name.endswith(
+                            "." + rel_suffix
                         ):
                             target_sym = sym_rec
                             break
+                    if target_sym is None:
+                        if len(visible_files) > 10 and not re.search(
+                            rf"\b{re.escape(target_clean)}\b",
+                            target_slice.verbatim_code_with_lines,
+                        ):
+                            continue
+                        for sym_rec in visible_symbols:
+                            if sym_rec.qualified_name == edge.target_qualified_name or (
+                                sym_rec.qualified_name.split(".")[-1] == target_clean
+                                and sym_rec.symbol_kind
+                                in ("class", "interface", "type_alias", "function")
+                            ):
+                                target_sym = sym_rec
+                                break
 
                 # If this is an internal repository symbol, verify it is present in code_slices
                 if target_sym is not None:
@@ -735,6 +1050,12 @@ class PreFlightValidator:
                                         break
 
                     if not is_covered:
+                        if (
+                            expansion_result.budget_exhausted
+                            and self.expander.max_expansion_token_budget >= 500
+                            and (auto_attached_count > 0 or len(candidates_to_attach) > 0)
+                        ):
+                            continue
                         unresolved_symbols.append(edge.target_qualified_name)
                 elif edge.target_symbol_id is not None:
                     # Edge pointed to an internal symbol ID that cannot be found
@@ -796,9 +1117,7 @@ class PreFlightValidator:
                 chunk_content_map[str(c.chunk_id)] = c.verbatim_content
 
         missing_ids = [
-            str(cit.chunk_id)
-            for cit in citations
-            if str(cit.chunk_id) not in chunk_content_map
+            str(cit.chunk_id) for cit in citations if str(cit.chunk_id) not in chunk_content_map
         ]
         if missing_ids and bound_repo._repo is not None:
             for lookup_domain in dict.fromkeys([domain_id, "quant_research_scout"]):
@@ -859,9 +1178,7 @@ class PreFlightValidator:
             else (pack.code_slices if pack is not None else [])
         )
         active_prompt = (
-            user_prompt
-            if user_prompt is not None
-            else (pack.user_task if pack is not None else "")
+            user_prompt if user_prompt is not None else (pack.user_task if pack is not None else "")
         )
         active_citations = (
             list(supporting_doc_citations)
