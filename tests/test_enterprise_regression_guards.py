@@ -581,3 +581,56 @@ def test_public_repository_hygiene_and_frontend_hook_deps_guard() -> None:
 
     console_tsx = Path("web-ui/src/components/ScoutConsole.tsx").read_text(encoding="utf-8")
     assert "setQuery((prevQuery) =>" in console_tsx
+
+
+def test_readme_schema_and_staff_hygiene_guard() -> None:
+    """Guard 22: README matches actual SQL DDL, module paths, and strips orphan audit codes."""
+    readme_text = Path("README.md").read_text(encoding="utf-8")
+
+    # Actual PostgreSQL 17 tables and runtime role from sql/001_init_schema.sql
+    for actual_identifier in (
+        "domain_packs",
+        "code_files",
+        "ast_symbols",
+        "ast_edges",
+        "doc_chunks",
+        "execution_telemetry",
+        "scout_app_user",
+    ):
+        assert actual_identifier in readme_text, (
+            f"Missing actual SQL identifier: {actual_identifier}"
+        )
+
+    # Hallucinated or stale SQL identifiers, file paths, and pricing strings must never recur
+    banned_stale_tokens = (
+        "git_blobs",
+        "document_chunks",
+        "context_packs",
+        "feedback_events",
+        "context_scout_app",
+        "app_has_scope",
+        "discovery_tokens_saved",
+        "db/connection.py",
+        "ast_engine/parser.py",
+        "ast_engine/expander.py",
+        "ingestion/merkle.py",
+        "$0.75/$3.75",
+        "BLK-01",
+        "SEC-01",
+        "SEC-02",
+        "SEC-03",
+        "SEC-04",
+        "VAL-01",
+        "VAL-02",
+        "FIN-01",
+        "HW-01",
+        "ARC-01",
+        "ARC-02",
+        "ML-01",
+        "OPS-01",
+    )
+    for token in banned_stale_tokens:
+        assert token not in readme_text, (
+            f"Stale or internal audit token '{token}' found in README.md"
+        )
+
