@@ -66,6 +66,142 @@ class BudgetExceededError(RuntimeError):
     """Raised when a principal's session paid token budget would be exceeded."""
 
 
+def apply_search_replace_or_hunk_blocks(
+    raw_patch_text: str,
+    worktree_dir: Path,
+    default_files: list[str] | None = None,
+) -> tuple[bool, str]:
+    """Apply SEARCH/REPLACE blocks or hunk-content matching when git apply fails on line numbers."""
+
+    def _strip_line_num_prefix(line: str) -> str:
+        return re.sub(r"^\s*\d+\s*\|\s?", "", line)
+
+    def _replace_subsequence(
+        file_lines: list[str], before: list[str], after: list[str]
+    ) -> list[str] | None:
+        if not before or before == after:
+            return None
+        n_f = len(file_lines)
+        n_b = len(before)
+        if n_b > n_f:
+            return None
+        # 1. Exact line match
+        for i in range(n_f - n_b + 1):
+            if file_lines[i : i + n_b] == before:
+                return file_lines[:i] + after + file_lines[i + n_b :]
+        # 2. Whitespace-normalized match (requires at least 2 non-empty lines)
+        before_stripped = [b.strip() for b in before]
+        if sum(1 for b in before_stripped if b) < 2:
+            return None
+        file_stripped = [fl.strip() for fl in file_lines]
+        for i in range(n_f - n_b + 1):
+            if file_stripped[i : i + n_b] == before_stripped:
+                return file_lines[:i] + after + file_lines[i + n_b :]
+        return None
+
+    fallback_file = default_files[0] if default_files else None
+    applied_any = False
+
+    # Case 1: Explicit <<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE blocks
+    sr_pattern = re.compile(
+        r"(?:(?:###\s*File:\s*|--- a/|\+\+\+ b/)([^\n`]+)\n)?.*?"
+        r"<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE",
+        re.DOTALL,
+    )
+    for match in sr_pattern.finditer(raw_patch_text):
+        f_rel = (match.group(1) or fallback_file or "").strip()
+        if not f_rel:
+            continue
+        target_path = (worktree_dir / f_rel).resolve()
+        if not target_path.is_relative_to(worktree_dir.resolve()) or not target_path.is_file():
+            continue
+        s_lines = [_strip_line_num_prefix(ln) for ln in match.group(2).splitlines()]
+        r_lines = [_strip_line_num_prefix(ln) for ln in match.group(3).splitlines()]
+        orig_lines = target_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        updated = _replace_subsequence(orig_lines, s_lines, r_lines)
+        if updated is not None:
+            target_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+            applied_any = True
+
+    if applied_any:
+        return (True, "Applied via SEARCH/REPLACE block.")
+
+    # Case 2: Unified diff hunk content matching when @@ line numbers drifted
+    if "<<<<<<<" in raw_patch_text or ">>>>>>>" in raw_patch_text:
+        return (False, "Patch contains unresolved merge conflict markers")
+
+    fenced = re.findall(r"```(?:diff|patch)?\s*\n(.*?)```", raw_patch_text, flags=re.DOTALL)
+    blocks = [*fenced, raw_patch_text]
+    for block in blocks:
+        plus_m = re.search(r"^\+\+\+\s+b/([^\s\n]+)", block, flags=re.MULTILINE)
+        f_rel = plus_m.group(1).strip() if plus_m else (fallback_file or "")
+        if not f_rel:
+            continue
+        target_path = (worktree_dir / f_rel).resolve()
+        if not target_path.is_relative_to(worktree_dir.resolve()) or not target_path.is_file():
+            continue
+
+        before_lines: list[str] = []
+        after_lines: list[str] = []
+        in_hunk = False
+        for ln in block.splitlines():
+            if ln.startswith(("--- ", "+++ ", "diff --git ")):
+                continue
+            m_malformed_ctx = re.match(r"^@@\s*-\d+\s*\|\s?(.*)$", ln)
+            if m_malformed_ctx:
+                in_hunk = True
+                code_ln = m_malformed_ctx.group(1)
+                before_lines.append(code_ln)
+                after_lines.append(code_ln)
+                continue
+            if ln.startswith("@@"):
+                in_hunk = True
+                continue
+            if not in_hunk:
+                continue
+            if ln.startswith("-"):
+                before_lines.append(_strip_line_num_prefix(ln[1:]))
+            elif ln.startswith("+"):
+                after_lines.append(_strip_line_num_prefix(ln[1:]))
+            elif ln.startswith(" ") or ln == "":
+                ctx = _strip_line_num_prefix(ln[1:] if ln.startswith(" ") else "")
+                before_lines.append(ctx)
+                after_lines.append(ctx)
+
+        if before_lines and before_lines != after_lines:
+            orig_lines = target_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            updated = _replace_subsequence(orig_lines, before_lines, after_lines)
+            if updated is None:
+                common_prefix = 0
+                while (
+                    common_prefix < len(before_lines)
+                    and common_prefix < len(after_lines)
+                    and before_lines[common_prefix] == after_lines[common_prefix]
+                ):
+                    common_prefix += 1
+                common_suffix = 0
+                while (
+                    common_suffix < (len(before_lines) - common_prefix)
+                    and common_suffix < (len(after_lines) - common_prefix)
+                    and before_lines[len(before_lines) - 1 - common_suffix]
+                    == after_lines[len(after_lines) - 1 - common_suffix]
+                ):
+                    common_suffix += 1
+                trim_lead = max(0, common_prefix - 3)
+                trim_tail = max(0, common_suffix - 3)
+                b_end = len(before_lines) - trim_tail if trim_tail > 0 else len(before_lines)
+                a_end = len(after_lines) - trim_tail if trim_tail > 0 else len(after_lines)
+                b_local = before_lines[trim_lead:b_end]
+                a_local = after_lines[trim_lead:a_end]
+                if len(b_local) >= 2 and b_local != a_local:
+                    updated = _replace_subsequence(orig_lines, b_local, a_local)
+            if updated is not None:
+                target_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+                return (True, "Applied via AST/hunk SEARCH/REPLACE fallback.")
+
+    return (False, "git apply and SEARCH/REPLACE fallback could not match target lines")
+
+
 class GitWorktreeSandbox:
     """Isolates patch application and verification inside a temporary git worktree."""
 
@@ -137,6 +273,9 @@ class GitWorktreeSandbox:
         )
         if res.returncode == 0:
             return (True, "Patch applied successfully.")
+        sr_ok, sr_msg = apply_search_replace_or_hunk_blocks(patch_diff, self.worktree_dir)
+        if sr_ok:
+            return (True, sr_msg)
         return (False, res.stderr or res.stdout or "git apply failed")
 
     def run_verification(
