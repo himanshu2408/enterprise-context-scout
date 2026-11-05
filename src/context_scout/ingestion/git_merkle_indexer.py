@@ -152,6 +152,25 @@ class GitMerkleIndexer:
                 return lang
         return None
 
+    @staticmethod
+    def _read_blob_or_disk(
+        repo_dir: Path, file_path: str, blob_sha: str, ref: str = "HEAD"
+    ) -> str | None:
+        """Read immutable Git blob content via git cat-file, falling back to working tree."""
+        _ = ref
+        if blob_sha:
+            proc = subprocess.run(
+                ["git", "-C", str(repo_dir), "cat-file", "-p", blob_sha],
+                capture_output=True,
+                check=False,
+            )
+            if proc.returncode == 0:
+                return proc.stdout.decode("utf-8", errors="replace").replace("\x00", "")
+        disk_file = repo_dir / file_path
+        if not disk_file.exists():
+            return None
+        return disk_file.read_text(encoding="utf-8", errors="replace").replace("\x00", "")
+
     def sync_in_memory(
         self,
         repo_dir: Path,
@@ -161,11 +180,13 @@ class GitMerkleIndexer:
         repo_name: str,
         allowed_scopes: list[str] | None = None,
         ref: str = "HEAD",
+        isolate_by_commit: bool = False,
     ) -> MerkleSyncStats:
         """Incrementally indexes git repository into InMemoryRLSRepository."""
         start_time = time.perf_counter()
         commit_sha, current_tree = self.get_git_tree(repo_dir, ref)
-        existing_hashes = repo.get_file_blob_hashes(principal, domain_id, repo_name)
+        effective_repo_name = f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
+        existing_hashes = repo.get_file_blob_hashes(principal, domain_id, effective_repo_name)
         existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
 
         unchanged, new, modified, deleted = self.diff_merkle_tree(current_tree, existing_map)
@@ -217,22 +238,19 @@ class GitMerkleIndexer:
             short_name_map[s.qualified_name.split(".")[-1]].append(s.symbol_id)
 
         for file_path in to_index:
-            disk_file = repo_dir / file_path
-            if not disk_file.exists():
+            blob_sha = current_tree[file_path]
+            raw_content = self._read_blob_or_disk(repo_dir, file_path, blob_sha, ref)
+            if raw_content is None:
                 continue
 
             lang = self._detect_language(file_path)
-            raw_content = disk_file.read_text(encoding="utf-8", errors="replace").replace(
-                "\x00", ""
-            )
             lines = raw_content.splitlines()
             file_id = uuid4()
-            blob_sha = current_tree[file_path]
 
             file_rec = CodeFileRecord(
                 file_id=file_id,
                 domain_id=domain_id,
-                repo_name=repo_name,
+                repo_name=effective_repo_name,
                 file_path=file_path,
                 git_commit_sha=commit_sha,
                 git_blob_sha=blob_sha,
@@ -331,11 +349,13 @@ class GitMerkleIndexer:
         repo_name: str,
         allowed_scopes: list[str] | None = None,
         ref: str = "HEAD",
+        isolate_by_commit: bool = False,
     ) -> MerkleSyncStats:
         """Incrementally indexes git repository into live PostgreSQL 17 under Forced RLS."""
         start_time = time.perf_counter()
         commit_sha, current_tree = self.get_git_tree(repo_dir, ref)
-        existing_hashes = repo.get_file_blob_hashes(conn, domain_id, repo_name)
+        effective_repo_name = f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
+        existing_hashes = repo.get_file_blob_hashes(conn, domain_id, effective_repo_name)
         existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
 
         unchanged, new, modified, deleted = self.diff_merkle_tree(current_tree, existing_map)
@@ -392,22 +412,19 @@ class GitMerkleIndexer:
             short_name_map[s_qual.split(".")[-1]].append(s_id)
 
         for file_path in to_index:
-            disk_file = repo_dir / file_path
-            if not disk_file.exists():
+            blob_sha = current_tree[file_path]
+            raw_content = self._read_blob_or_disk(repo_dir, file_path, blob_sha, ref)
+            if raw_content is None:
                 continue
 
             lang = self._detect_language(file_path)
-            raw_content = disk_file.read_text(encoding="utf-8", errors="replace").replace(
-                "\x00", ""
-            )
             lines = raw_content.splitlines()
             file_id = uuid4()
-            blob_sha = current_tree[file_path]
 
             file_rec = CodeFileRecord(
                 file_id=file_id,
                 domain_id=domain_id,
-                repo_name=repo_name,
+                repo_name=effective_repo_name,
                 file_path=file_path,
                 git_commit_sha=commit_sha,
                 git_blob_sha=blob_sha,

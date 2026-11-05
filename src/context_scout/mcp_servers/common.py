@@ -217,6 +217,143 @@ class PostgresScoutGraphAdapter:
                 )
             return results
 
+    def search_visible_ast_symbols(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        query_text: str,
+        limit: int = 50,
+    ) -> list[ASTSymbolRecord]:
+        """Searches visible AST symbols via SQL pushdown (ILIKE + LIMIT) under Forced RLS."""
+        import re
+
+        words = [
+            w.lower()
+            for w in re.findall(r"[A-Za-z0-9_]{3,}", query_text)
+            if w.lower()
+            not in {
+                "the",
+                "and",
+                "for",
+                "with",
+                "how",
+                "what",
+                "where",
+                "when",
+                "from",
+                "into",
+                "this",
+                "that",
+            }
+        ]
+        if not words:
+            return self.list_visible_ast_symbols(principal, domain_id)[:limit]
+
+        score_parts: list[str] = []
+        where_parts: list[str] = []
+        score_params: list[object] = []
+        where_params: list[object] = []
+        for w in words[:8]:
+            pat = f"%{w}%"
+            score_parts.append(
+                "(CASE WHEN qualified_name ILIKE %s THEN 6 ELSE 0 END + "
+                "CASE WHEN signature_skeleton ILIKE %s THEN 3 ELSE 0 END + "
+                "CASE WHEN contextual_summary ILIKE %s THEN 1 ELSE 0 END)"
+            )
+            score_params.extend([pat, pat, pat])
+            where_parts.append(
+                "(qualified_name ILIKE %s OR signature_skeleton ILIKE %s "
+                "OR contextual_summary ILIKE %s)"
+            )
+            where_params.extend([pat, pat, pat])
+
+        score_expr = " + ".join(score_parts)
+        where_expr = " OR ".join(where_parts)
+        sql = f"""
+            SELECT symbol_id, file_id, domain_id, qualified_name, symbol_kind,
+                   start_line, end_line, signature_skeleton, contextual_summary,
+                   allowed_scopes, embedding
+            FROM ast_symbols
+            WHERE domain_id = %s
+              AND ({where_expr})
+            ORDER BY ({score_expr}) DESC, qualified_name ASC
+            LIMIT %s;
+        """
+        full_params: list[object] = [domain_id, *where_params, *score_params, limit]
+        with scoped_db_session(self.connection_manager, principal) as conn:
+            rows = conn.execute(sql, tuple(full_params)).fetchall()
+            results: list[ASTSymbolRecord] = []
+            for r in rows:
+                scopes_raw = r[9]
+                scopes_list = (
+                    [str(s) for s in scopes_raw] if isinstance(scopes_raw, (list, tuple)) else []
+                )
+                results.append(
+                    ASTSymbolRecord(
+                        symbol_id=UUID(str(r[0])),
+                        file_id=UUID(str(r[1])),
+                        domain_id=str(r[2]),
+                        qualified_name=str(r[3]),
+                        symbol_kind=str(r[4]),  # type: ignore[arg-type]
+                        start_line=int(str(r[5])),
+                        end_line=int(str(r[6])),
+                        signature_skeleton=str(r[7]),
+                        contextual_summary=str(r[8]),
+                        allowed_scopes=scopes_list,
+                        embedding=[],
+                    )
+                )
+            return results
+
+    def get_code_files_by_ids(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        file_ids: list[UUID | str],
+    ) -> list[CodeFileRecord]:
+        """Fetches specific code files by UUID under Forced RLS without scanning whole table."""
+        valid_uuids: list[str] = []
+        for fid in file_ids:
+            try:
+                valid_uuids.append(str(UUID(str(fid))))
+            except ValueError:
+                continue
+        if not valid_uuids:
+            return []
+        with scoped_db_session(self.connection_manager, principal) as conn:
+            rows = conn.execute(
+                """
+                SELECT file_id, domain_id, repo_name, file_path, git_commit_sha,
+                       git_blob_sha, language, allowed_scopes, raw_content, line_count
+                FROM code_files
+                WHERE domain_id = %s
+                  AND file_id = ANY(%s::uuid[])
+                ORDER BY file_path;
+                """,
+                (domain_id, valid_uuids),
+            ).fetchall()
+            results: list[CodeFileRecord] = []
+            for r in rows:
+                scopes_raw = r[7]
+                scopes_list = (
+                    [str(s) for s in scopes_raw] if isinstance(scopes_raw, (list, tuple)) else []
+                )
+                results.append(
+                    CodeFileRecord(
+                        file_id=UUID(str(r[0])),
+                        domain_id=str(r[1]),
+                        repo_name=str(r[2]),
+                        file_path=str(r[3]),
+                        git_commit_sha=str(r[4]),
+                        git_blob_sha=str(r[5]),
+                        language=str(r[6]),
+                        allowed_scopes=scopes_list,
+                        raw_content=str(r[8]),
+                        line_count=int(str(r[9])),
+                    )
+                )
+            return results
+
     def list_visible_ast_edges(
         self, principal: PrincipalContext, domain_id: str
     ) -> list[ASTEdgeRecord]:
@@ -269,9 +406,7 @@ class PostgresScoutGraphAdapter:
             pub_date = None
 
         raw_scopes = r[12]
-        scopes_list = (
-            [str(s) for s in raw_scopes] if isinstance(raw_scopes, (list, tuple)) else []
-        )
+        scopes_list = [str(s) for s in raw_scopes] if isinstance(raw_scopes, (list, tuple)) else []
         return DocChunkRecord(
             chunk_id=UUID(str(r[0])),
             domain_id=str(r[1]),
