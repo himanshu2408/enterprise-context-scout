@@ -18,10 +18,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -218,6 +220,7 @@ class GitWorktreeSandbox:
         self.branch_name: str | None = None
         self._is_active: bool = False
         self._is_standalone_clone: bool = False
+        self._merged_or_kept: bool = False
 
     def __enter__(self) -> GitWorktreeSandbox:
         self.branch_name = f"scout-wt-{uuid.uuid4().hex[:8]}"
@@ -258,22 +261,29 @@ class GitWorktreeSandbox:
         self._is_active = True
         return self
 
-    def apply_patch(self, patch_diff: str) -> tuple[bool, str]:
+    def apply_patch(
+        self, patch_diff: str, default_files: list[str] | None = None
+    ) -> tuple[bool, str]:
         """Applies a unified diff patch to the worktree using git apply --whitespace=fix."""
         if not self._is_active or self.worktree_dir is None:
             raise RuntimeError("Sandbox is not active")
 
         patch_file = self.worktree_dir / "patch.diff"
         patch_file.write_text(patch_diff, encoding="utf-8")
-        res = subprocess.run(
-            ["git", "apply", "--whitespace=fix", str(patch_file)],
-            cwd=self.worktree_dir,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            res = subprocess.run(
+                ["git", "apply", "--whitespace=fix", str(patch_file)],
+                cwd=self.worktree_dir,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            patch_file.unlink(missing_ok=True)
         if res.returncode == 0:
             return (True, "Patch applied successfully.")
-        sr_ok, sr_msg = apply_search_replace_or_hunk_blocks(patch_diff, self.worktree_dir)
+        sr_ok, sr_msg = apply_search_replace_or_hunk_blocks(
+            patch_diff, self.worktree_dir, default_files=default_files
+        )
         if sr_ok:
             return (True, sr_msg)
         return (False, res.stderr or res.stdout or "git apply failed")
@@ -296,10 +306,15 @@ class GitWorktreeSandbox:
             )
         }
         venv_bin = self.repo_root / ".venv" / "bin"
+        if not venv_bin.exists():
+            venv_bin = Path(sys.executable).resolve().parent
         if venv_bin.exists():
             env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
-            env["VIRTUAL_ENV"] = str(self.repo_root / ".venv")
-        env["PYTHONPATH"] = f"{self.worktree_dir / 'src'}:{env.get('PYTHONPATH', '')}"
+            if (self.repo_root / ".venv").exists():
+                env["VIRTUAL_ENV"] = str(self.repo_root / ".venv")
+        env["PYTHONPATH"] = (
+            f"{self.worktree_dir}:{self.worktree_dir / 'src'}:{env.get('PYTHONPATH', '')}"
+        )
 
         # 1. Lint Verification
         lint_args = lint_cmd
@@ -344,6 +359,7 @@ class GitWorktreeSandbox:
         if self.require_confirmation and not confirmed:
             return (False, "Human confirmation required before merge.")
 
+        (self.worktree_dir / "patch.diff").unlink(missing_ok=True)
         subprocess.run(["git", "add", "-A"], cwd=self.worktree_dir, capture_output=True)
         res = subprocess.run(
             [
@@ -361,6 +377,7 @@ class GitWorktreeSandbox:
             text=True,
         )
         if res.returncode == 0 or "nothing to commit" in (res.stdout + res.stderr):
+            self._merged_or_kept = True
             return (True, f"Changes approved and committed on branch {self.branch_name}")
         return (False, f"Commit failed: {res.stderr or res.stdout}")
 
@@ -385,7 +402,7 @@ class GitWorktreeSandbox:
                     cwd=self.repo_root,
                     capture_output=True,
                 )
-                if self.branch_name:
+                if self.branch_name and not self._merged_or_kept:
                     subprocess.run(
                         ["git", "branch", "-D", self.branch_name],
                         cwd=self.repo_root,
@@ -600,7 +617,16 @@ class GeminiImplementationExecutor:
 
         target_path = repo_root / target_slice.file_path
         orig_lines: list[str] = []
-        if target_path.exists():
+        head_proc = subprocess.run(
+            ["git", "show", f"HEAD:{target_slice.file_path}"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if head_proc.returncode == 0 and head_proc.stdout:
+            orig_lines = head_proc.stdout.splitlines(keepends=True)
+        elif target_path.exists():
             orig_text = target_path.read_text(encoding="utf-8")
             orig_lines = orig_text.splitlines(keepends=True)
 
@@ -709,6 +735,46 @@ class GeminiImplementationExecutor:
         if not files and pack.code_slices:
             files = [pack.code_slices[0].file_path]
         return sorted(set(files))
+
+    def execute_patch_with_repair(
+        self,
+        repo_root: Path,
+        patch_generator: Callable[[int, str], str],
+        lint_cmd: list[str] | None = None,
+        test_cmd: list[str] | None = None,
+        max_repair_turns: int = 2,
+        default_files: list[str] | None = None,
+    ) -> tuple[bool, str, str]:
+        """Executes up to max_repair_turns patch-and-verify attempts inside GitWorktreeSandbox."""
+        last_error = ""
+        last_patch = ""
+        last_details = ""
+
+        for attempt in range(1, max(1, max_repair_turns) + 1):
+            candidate_patch = patch_generator(attempt, last_error)
+            last_patch = candidate_patch
+            with GitWorktreeSandbox(
+                repo_root=repo_root,
+                require_confirmation=self.require_confirmation,
+            ) as sandbox:
+                applied_ok, apply_msg = sandbox.apply_patch(
+                    candidate_patch, default_files=default_files
+                )
+                if not applied_ok:
+                    last_error = f"Patch application failed: {apply_msg}"
+                    last_details = last_error
+                    continue
+
+                lint_passed, tests_passed, ver_details = sandbox.run_verification(
+                    lint_cmd=lint_cmd,
+                    test_cmd=test_cmd,
+                )
+                last_details = f"{apply_msg}\n{ver_details}"
+                if lint_passed and tests_passed:
+                    return (True, candidate_patch, last_details)
+                last_error = ver_details
+
+        return (False, last_patch, last_details)
 
     def _calculate_telemetry(
         self,

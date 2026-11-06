@@ -9,11 +9,22 @@ from collections import Counter
 from typing import Final
 
 _TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"\w+", re.UNICODE)
+_CAMEL_BOUNDARY: Final[re.Pattern[str]] = re.compile(
+    r"([a-z0-9])([A-Z])|([A-Z]+)([A-Z][a-z])"
+)
 
 
 def tokenize_bm25(text: str) -> list[str]:
-    """Extracts lowercase word tokens for BM25 indexing and scoring."""
-    return _TOKEN_PATTERN.findall(text.lower())
+    """Extracts lowercase word tokens and snake_case/camelCase sub-tokens for BM25."""
+    tokens: list[str] = []
+    for raw_match in _TOKEN_PATTERN.findall(text):
+        lower_full = raw_match.lower()
+        tokens.append(lower_full)
+        split_camel = _CAMEL_BOUNDARY.sub(r"\1\3_\2\4", raw_match)
+        parts = [p.lower() for p in split_camel.split("_") if p]
+        if len(parts) > 1:
+            tokens.extend(parts)
+    return tokens
 
 
 class BM25Okapi:

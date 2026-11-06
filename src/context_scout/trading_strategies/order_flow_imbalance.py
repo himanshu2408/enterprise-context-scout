@@ -132,7 +132,12 @@ class OrderFlowImbalanceSignal:
 
         return delta_bid - delta_ask
 
-    def process_snapshot(self, snapshot: OrderBookSnapshot) -> OFISignalUpdate:
+    def process_snapshot(
+        self,
+        snapshot: OrderBookSnapshot,
+        recent_return: float | None = None,
+        historical_returns: list[float] | None = None,
+    ) -> OFISignalUpdate:
         """Processes an incoming order book update and generates normalized OFI signal."""
         if snapshot.symbol != self.symbol:
             raise ValueError(
@@ -189,7 +194,17 @@ class OrderFlowImbalanceSignal:
         z_score = (multi_level_val - mean_val) / std_val
 
         # Volatility scaling via GARCH conditional variance
-        cond_vol = math.sqrt(self.garch_model.unconditional_variance)
+        if historical_returns:
+            var_path = self.garch_model.compute_variance_path(historical_returns)
+            cond_var = var_path[-1]
+        elif recent_return is not None:
+            cond_var = self.garch_model.forecast(
+                horizon_steps=1,
+                latest_return=recent_return,
+            ).forecast_variance_steps[0]
+        else:
+            cond_var = self.garch_model.unconditional_variance
+        cond_vol = math.sqrt(max(cond_var, 1e-12))
         vol_adj_signal = z_score / max(cond_vol, 1e-4)
 
         self._prev_snapshot = snapshot

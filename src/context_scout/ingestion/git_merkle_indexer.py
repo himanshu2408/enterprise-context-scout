@@ -6,7 +6,7 @@ import subprocess
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Final, Literal
+from typing import Any, Final, Literal
 from uuid import UUID, uuid4
 
 from psycopg import Connection
@@ -45,6 +45,40 @@ LANG_MAP: Final[dict[str, str]] = {
     ".py": "python",
     ".tsx": "tsx",
     ".ts": "typescript",
+}
+
+SKIP_BINARY_EXTENSIONS: Final[set[str]] = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".ico",
+    ".bmp",
+    ".pdf",
+    ".safetensors",
+    ".bin",
+    ".pt",
+    ".pth",
+    ".onnx",
+    ".gguf",
+    ".npz",
+    ".npy",
+    ".whl",
+    ".tar",
+    ".gz",
+    ".zip",
+    ".7z",
+    ".pyc",
+    ".pyo",
+    ".so",
+    ".dylib",
+    ".dll",
+    ".exe",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".otf",
 }
 
 
@@ -106,8 +140,36 @@ def _resolve_commit_sha(repo_dir: Path, ref: str = "HEAD") -> str:
 class GitMerkleIndexer:
     """Git Blob-SHA Merkle incremental indexer with Tree-Sitter AST extraction."""
 
-    def __init__(self, extractor: ASTExtractor | None = None) -> None:
+    def __init__(
+        self,
+        extractor: ASTExtractor | None = None,
+        embedder: Any | None = None,
+        use_semantic_embeddings: bool = False,
+    ) -> None:
         self.extractor = extractor or ASTExtractor()
+        self.embedder = embedder
+        self.use_semantic_embeddings = use_semantic_embeddings
+
+    @staticmethod
+    def _is_indexable_text_path(file_path: str) -> bool:
+        suffix = Path(file_path).suffix.lower()
+        return suffix not in SKIP_BINARY_EXTENSIONS
+
+    def _compute_symbol_embeddings(self, symbols: list[ParsedSymbol]) -> list[list[float]]:
+        if not symbols:
+            return []
+        if self.use_semantic_embeddings and self.embedder is not None:
+            texts = [
+                f"{s.qualified_name} {s.signature_skeleton} {s.contextual_summary}".strip()
+                for s in symbols
+            ]
+            batch_vecs = self.embedder.embed_batch(texts, is_query=False)
+            if len(batch_vecs) == len(symbols):
+                return [[float(x) for x in v] for v in batch_vecs]
+        return [
+            generate_deterministic_embedding(s.signature_skeleton + " " + s.docstring)
+            for s in symbols
+        ]
 
     def get_git_tree(self, repo_dir: Path, ref: str = "HEAD") -> tuple[str, dict[str, str]]:
         """Extracts current commit SHA and mapping of {file_path: blob_sha} via git ls-tree."""
@@ -129,6 +191,8 @@ class GitMerkleIndexer:
             if len(parts) != 2:
                 continue
             meta, file_path = parts
+            if not self._is_indexable_text_path(file_path):
+                continue
             meta_parts = meta.split()
             if len(meta_parts) >= 3:
                 blob_sha = meta_parts[2]
@@ -266,12 +330,10 @@ class GitMerkleIndexer:
 
             symbols, edges = self.extractor.parse_source(raw_content, lang, file_path=file_path)
             file_symbol_map: dict[str, UUID] = {}
+            symbol_embeddings = self._compute_symbol_embeddings(symbols)
 
-            for parsed_sym in symbols:
+            for parsed_sym, emb in zip(symbols, symbol_embeddings, strict=True):
                 sym_id = uuid4()
-                emb = generate_deterministic_embedding(
-                    parsed_sym.signature_skeleton + " " + parsed_sym.docstring
-                )
                 kind: Literal["function", "class", "method", "interface", "type_alias"] = (
                     parsed_sym.symbol_kind
                 )
@@ -301,8 +363,13 @@ class GitMerkleIndexer:
             for edge in edges:
                 src_id = file_symbol_map.get(edge.source_qualified_name)
                 if not src_id:
-                    # Look up by exact qualified name
+                    # Look up by exact qualified name or short name (for cross-file TESTED_BY)
                     src_id = global_symbol_map.get(edge.source_qualified_name)
+                if not src_id:
+                    src_short = edge.source_qualified_name.split(".")[-1]
+                    src_matches = short_name_map.get(src_short, [])
+                    if src_matches:
+                        src_id = src_matches[0]
                 if not src_id:
                     continue
 
@@ -440,12 +507,10 @@ class GitMerkleIndexer:
 
             symbols, edges = self.extractor.parse_source(raw_content, lang, file_path=file_path)
             file_symbol_map: dict[str, UUID] = {}
+            symbol_embeddings = self._compute_symbol_embeddings(symbols)
 
-            for parsed_sym in symbols:
+            for parsed_sym, emb in zip(symbols, symbol_embeddings, strict=True):
                 sym_id = uuid4()
-                emb = generate_deterministic_embedding(
-                    parsed_sym.signature_skeleton + " " + parsed_sym.docstring
-                )
                 kind: Literal["function", "class", "method", "interface", "type_alias"] = (
                     parsed_sym.symbol_kind
                 )
@@ -476,6 +541,11 @@ class GitMerkleIndexer:
                 src_id = file_symbol_map.get(edge.source_qualified_name)
                 if not src_id:
                     src_id = global_symbol_map.get(edge.source_qualified_name)
+                if not src_id:
+                    src_short = edge.source_qualified_name.split(".")[-1]
+                    src_matches = short_name_map.get(src_short, [])
+                    if src_matches:
+                        src_id = src_matches[0]
                 if not src_id:
                     continue
 

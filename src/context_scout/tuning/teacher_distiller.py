@@ -92,6 +92,61 @@ class DistillationStats:
     rejection_sampling_pass_rate: float
 
 
+def repair_and_constrain_code_pointers_json(raw_output: str) -> list[CodeSlicePointer]:
+    """Repairs truncated/fenced JSON arrays and normalizes enum fields into CodeSlicePointers."""
+    cleaned = re.sub(r"```(?:json)?\s*\n?", "", raw_output).replace("```", "").strip()
+    start_idx = cleaned.find("[")
+    if start_idx != -1:
+        cleaned = cleaned[start_idx:]
+    elif cleaned.startswith("{"):
+        cleaned = "[" + cleaned + "]"
+
+    # Remove trailing commas and close unclosed braces/brackets
+    cleaned = re.sub(r",\s*([\]\}])", r"\1", cleaned)
+    if cleaned.endswith(","):
+        cleaned = cleaned[:-1].rstrip()
+    open_braces = cleaned.count("{") - cleaned.count("}")
+    if open_braces > 0:
+        cleaned += "}" * open_braces
+    cleaned = re.sub(r",\s*$", "", cleaned)
+    open_brackets = cleaned.count("[") - cleaned.count("]")
+    if open_brackets > 0:
+        cleaned += "]" * open_brackets
+    cleaned = re.sub(r",\s*([\]\}])", r"\1", cleaned)
+
+    valid_intents = {m.value for m in ModificationIntent}
+    raw_items: list[dict[str, Any]] = []
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, list):
+            raw_items = [x for x in parsed if isinstance(x, dict)]
+        elif isinstance(parsed, dict):
+            raw_items = [parsed]
+    except Exception:
+        for obj_match in re.finditer(r"\{[^{}]+\}", cleaned, flags=re.DOTALL):
+            try:
+                obj = json.loads(re.sub(r",\s*\}", "}", obj_match.group(0)))
+                if isinstance(obj, dict):
+                    raw_items.append(obj)
+            except Exception:
+                continue
+
+    pointers: list[CodeSlicePointer] = []
+    for idx, item in enumerate(raw_items):
+        intent_raw = str(item.get("modification_intent", "")).strip().lower()
+        if intent_raw not in valid_intents:
+            item["modification_intent"] = (
+                ModificationIntent.MODIFY_TARGET.value
+                if idx == 0
+                else ModificationIntent.REFERENCE_ONLY.value
+            )
+        try:
+            pointers.append(CodeSlicePointer.model_validate(item))
+        except Exception:
+            continue
+    return pointers
+
+
 class TeacherDistiller:
     """Teacher-Student Distillation engine for Gemma 4 QLoRA adapter training.
 

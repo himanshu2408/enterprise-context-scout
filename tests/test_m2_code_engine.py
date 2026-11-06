@@ -109,7 +109,10 @@ def test_tree_sitter_ast_extractor_python(extractor: ASTExtractor) -> None:
     assert any("validate_order" in c or "ExecutionReceipt" in c for c in route_calls)
 
     test_edges = [e for e in edges if e.edge_kind == "TESTED_BY"]
-    assert any(e.target_qualified_name == "route" for e in test_edges)
+    assert any(
+        e.source_qualified_name.endswith("route") and e.target_qualified_name.endswith("test_route")
+        for e in test_edges
+    )
 
 
 def test_tree_sitter_ast_extractor_typescript(extractor: ASTExtractor) -> None:

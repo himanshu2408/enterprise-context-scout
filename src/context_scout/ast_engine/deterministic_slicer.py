@@ -78,6 +78,7 @@ class DeterministicSlicer:
         pointer: CodeSlicePointer,
         file_record: CodeFileRecord,
         auto_expanded_by_ast: bool = False,
+        query_text: str | None = None,
     ) -> VerbatimCodeSlice:
         """Hydrates a CodeSlicePointer with byte-exact code and git commit/blob provenance."""
         verbatim_code = self.slice_lines(
@@ -85,6 +86,17 @@ class DeterministicSlicer:
             start_line=pointer.start_line,
             end_line=pointer.end_line,
         )
+        if (
+            query_text is not None
+            and (pointer.end_line - pointer.start_line) > 150
+            and file_record.language == "python"
+        ):
+            verbatim_code = self._skeletonize_large_python_class(
+                raw_content=file_record.raw_content,
+                start_line=pointer.start_line,
+                end_line=pointer.end_line,
+                query_text=f"{query_text} {pointer.selection_reason}",
+            )
         return VerbatimCodeSlice(
             repo_name=pointer.repo_name,
             file_path=pointer.file_path,
@@ -99,6 +111,90 @@ class DeterministicSlicer:
             auto_expanded_by_ast=auto_expanded_by_ast,
         )
 
+    def _skeletonize_large_python_class(
+        self,
+        raw_content: str,
+        start_line: int,
+        end_line: int,
+        query_text: str,
+        line_number_width: int = 4,
+    ) -> str:
+        """Preserves class header, __init__, and top query-matched methods while eliding others."""
+        all_lines = raw_content.splitlines()
+        selected = all_lines[start_line - 1 : end_line]
+        if not selected or not selected[0].lstrip().startswith("class "):
+            return self.slice_lines(raw_content, start_line, end_line, line_number_width)
+
+        class_indent = len(selected[0]) - len(selected[0].lstrip())
+        method_indent = class_indent + 4
+
+        method_spans: list[tuple[str, int, int]] = []
+        current_name: str | None = None
+        current_start: int = 0
+
+        for idx, line in enumerate(selected):
+            stripped = line.lstrip()
+            indent = len(line) - len(stripped)
+            if indent == method_indent and (
+                stripped.startswith("def ") or stripped.startswith("async def ")
+            ):
+                if current_name is not None:
+                    method_spans.append((current_name, current_start, idx - 1))
+                m_match = re.match(r"(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)", stripped)
+                current_name = m_match.group(1) if m_match else "method"
+                current_start = idx
+
+        if current_name is not None:
+            method_spans.append((current_name, current_start, len(selected) - 1))
+
+        if len(method_spans) <= 3:
+            return self.slice_lines(raw_content, start_line, end_line, line_number_width)
+
+        q_terms = {
+            w.lower()
+            for w in re.findall(r"[A-Za-z0-9_]{3,}", query_text)
+        }
+        scored_methods: list[tuple[int, str]] = []
+        for m_name, m_start, m_end in method_spans:
+            if m_name == "__init__":
+                continue
+            m_body = "\n".join(selected[m_start : m_end + 1]).lower()
+            score = 0
+            if m_name.lower() in q_terms:
+                score += 10
+            for qt in q_terms:
+                if qt in m_name.lower():
+                    score += 5
+                elif qt in m_body:
+                    score += 1
+            scored_methods.append((score, m_name))
+
+        scored_methods.sort(key=lambda item: (-item[0], item[1]))
+        keep_names = {"__init__"} | {name for _, name in scored_methods[:3]}
+
+        output_lines: list[str] = []
+        first_method_idx = method_spans[0][1]
+        for idx in range(first_method_idx):
+            line_no = start_line + idx
+            output_lines.append(f"{line_no:{line_number_width}d} | {selected[idx]}")
+
+        for m_name, m_start, m_end in method_spans:
+            if m_name in keep_names or (m_end - m_start) <= 3:
+                for idx in range(m_start, m_end + 1):
+                    line_no = start_line + idx
+                    output_lines.append(f"{line_no:{line_number_width}d} | {selected[idx]}")
+            else:
+                sig_line_no = start_line + m_start
+                elided_start = start_line + m_start + 1
+                elided_end = start_line + m_end
+                sig_text = selected[m_start].rstrip()
+                output_lines.append(
+                    f"{sig_line_no:{line_number_width}d} | {sig_text} "
+                    f"...  # [lines {elided_start}-{elided_end} elided]"
+                )
+
+        return "\n".join(output_lines)
+
     def normalize_text(self, text: str) -> str:
         """Applies NFKC Unicode normalization and collapses whitespace."""
         nfkc = unicodedata.normalize("NFKC", text)
@@ -109,10 +205,16 @@ class DeterministicSlicer:
         return re.findall(r"\w+|[^\w\s]", text)
 
     def _has_unclosed_delimiters(self, text: str) -> bool:
+        # Strip standard half-open mathematical interval notation (e.g., "[0, T)", "(0, 1]")
+        cleaned = re.sub(
+            r"(?:(?:\bin\b|[∈=:])\s*)?[\[\(]\s*[^\]\)\(\[\n,;]{1,20}\s*,\s*[^\]\)\(\[\n,;]{1,20}\s*[\]\)]",
+            "",
+            text,
+        )
         counts = {
-            "(": text.count("(") - text.count(")"),
-            "[": text.count("[") - text.count("]"),
-            "{": text.count("{") - text.count("}"),
+            "(": cleaned.count("(") - cleaned.count(")"),
+            "[": cleaned.count("[") - cleaned.count("]"),
+            "{": cleaned.count("{") - cleaned.count("}"),
         }
         return any(diff > 0 for diff in counts.values())
 
@@ -198,8 +300,10 @@ class DeterministicSlicer:
 
         if not is_valid:
             unmatched = [t for t in q_tokens if t not in source_window]
-            # Check for truncation: quote is a prefix of window but missing tail
-            if len(q_tokens) < len(source_window) and q_tokens == source_window[: len(q_tokens)]:
+            # Check for truncation: quote is a strict prefix of the aligned source segment
+            matched_slice = s_tokens[match.b : match.b + len(q_tokens)]
+            has_trailing_source = (match.b + len(q_tokens)) < len(s_tokens)
+            if has_trailing_source and q_tokens == matched_slice:
                 error_code = SlicerErrorCode.TRUNCATED_QUOTE
                 error_reason = "Quote is truncated mid-line"
                 if strict:

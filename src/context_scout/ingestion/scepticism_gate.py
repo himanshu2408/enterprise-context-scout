@@ -5,6 +5,7 @@ and validates 100% of doc citation spans using DeterministicSlicer (VAL-02).
 """
 
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Final
 
@@ -67,6 +68,7 @@ class MarketRegimeScepticismGate:
         assumed_bps: float | None,
         floor_bps: float,
         turnover_annual: float = 12.0,
+        assumed_annual_volatility: float | None = None,
     ) -> float | None:
         """Penalizes gross Sharpe if assumed friction omitted market realities."""
         if reported_sharpe is None:
@@ -74,11 +76,16 @@ class MarketRegimeScepticismGate:
 
         actual_cost_bps = assumed_bps if assumed_bps is not None else 0.0
         friction_deficit_bps = max(0.0, floor_bps - actual_cost_bps)
-        # Approximate drag: 10 bps annual cost drag roughly penalizes
-        # Sharpe by 0.15 for 12x turnover
+        # Annualized friction drag as a fraction of capital
         annual_drag = (friction_deficit_bps * turnover_annual) / 10000.0
-        # Scaled Sharpe reduction
-        net_sharpe = reported_sharpe - (annual_drag * 3.5)
+        # Dimensional reduction: Delta SR = annual_drag / sigma_annual
+        # Defaults to 1 / 0.285714 (~3.5x multiplier) when volatility is not explicitly specified
+        inv_vol_multiplier = (
+            (1.0 / max(assumed_annual_volatility, 0.01))
+            if assumed_annual_volatility is not None
+            else 3.5
+        )
+        net_sharpe = reported_sharpe - (annual_drag * inv_vol_multiplier)
         return round(max(-2.0, net_sharpe), 2)
 
     def evaluate(
@@ -129,30 +136,41 @@ class MarketRegimeScepticismGate:
             )
 
         # 2. Verify all doc citations using DeterministicSlicer (VAL-02)
-        chunk_map: dict[str, str] = {}
+        chunk_by_id: dict[str, str] = {}
+        chunks_by_doc_id: dict[str, list[str]] = defaultdict(list)
         for c in corpus_chunks:
-            # Map chunk_id as str
-            chunk_map[str(c.chunk_id)] = c.verbatim_content
-            chunk_map[c.doc_id] = c.verbatim_content
+            chunk_by_id[str(c.chunk_id)] = c.verbatim_content
+            chunks_by_doc_id[c.doc_id].append(c.verbatim_content)
 
         failed_citations: list[tuple[DocCitationSpan, str]] = []
         verified_count = 0
 
         for citation in brief.verified_citations:
-            source_content = chunk_map.get(str(citation.chunk_id)) or chunk_map.get(
-                citation.doc_id
-            )
-            if not source_content:
+            candidate_contents: list[str] = []
+            exact_chunk = chunk_by_id.get(str(citation.chunk_id))
+            if exact_chunk:
+                candidate_contents.append(exact_chunk)
+            for doc_chunk_text in chunks_by_doc_id.get(citation.doc_id, []):
+                if doc_chunk_text not in candidate_contents:
+                    candidate_contents.append(doc_chunk_text)
+
+            if not candidate_contents:
                 failed_citations.append(
                     (citation, f"Chunk {citation.chunk_id} / {citation.doc_id} not in corpus")
                 )
                 continue
 
-            v_res = self.slicer.verify_doc_citation(
-                citation=citation,
-                chunk_content=source_content,
-                min_overlap_ratio=self.min_citation_overlap_ratio,
-            )
+            v_res = None
+            for content_candidate in candidate_contents:
+                v_res = self.slicer.verify_doc_citation(
+                    citation=citation,
+                    chunk_content=content_candidate,
+                    min_overlap_ratio=self.min_citation_overlap_ratio,
+                )
+                if v_res.is_valid:
+                    break
+
+            assert v_res is not None
             if not v_res.is_valid:
                 failed_citations.append(
                     (

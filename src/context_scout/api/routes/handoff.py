@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -32,6 +33,27 @@ from context_scout.schemas.contracts import PrincipalContext
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Handoff"])
+
+
+def _resolve_test_command_for_targets(repo_root: Path, target_files: list[str]) -> list[str]:
+    """Resolves relevant pytest test files for modified target files."""
+    tests_dir = repo_root / "tests"
+    matched_tests: list[str] = []
+    if tests_dir.is_dir():
+        test_files = sorted(tests_dir.glob("test_*.py"))
+        for target in target_files:
+            stem = Path(target).stem.lower()
+            if not stem:
+                continue
+            for tf in test_files:
+                tf_rel = f"tests/{tf.name}"
+                if stem in tf.stem.lower() and tf_rel not in matched_tests:
+                    matched_tests.append(tf_rel)
+        if not matched_tests:
+            fallback_test = tests_dir / "test_deterministic_slicer.py"
+            if fallback_test.is_file():
+                matched_tests.append("tests/test_deterministic_slicer.py")
+    return ["pytest", "-q", *matched_tests] if matched_tests else ["pytest", "-q"]
 
 
 @router.post("/handoff/preview", response_model=HandoffPreviewResponse)
@@ -150,7 +172,7 @@ def apply_handoff(
             if valid_targets
             else ["ruff", "check", "src/context_scout/schemas/contracts.py"]
         )
-        test_target_cmd = ["pytest", "-q", "tests/test_deterministic_slicer.py"]
+        test_target_cmd = _resolve_test_command_for_targets(repo_root, record.target_files)
         result, telemetry = executor.execute_implementation(
             pack=record.pack,
             principal=principal,
