@@ -78,7 +78,6 @@ class ASTDependencyExpander:
                 or (
                     edge.edge_kind == "CALLS"
                     and edge.target_symbol_id is not None
-                    and len(visible_files) > 10
                 )
             ):
                 target_sym: ASTSymbolRecord | None = None
@@ -103,11 +102,12 @@ class ASTDependencyExpander:
                                 break
 
                 if target_sym and target_sym.file_id in visible_files:
+                    if edge.edge_kind == "CALLS" and target_sym.file_id != focus_symbol.file_id:
+                        continue
                     f_rec = visible_files[target_sym.file_id]
                     end_l = target_sym.end_line
                     if (
                         edge.edge_kind == "IMPORTS"
-                        and self.max_expansion_token_budget >= 500
                         and (target_sym.end_line - target_sym.start_line) > 30
                     ):
                         end_l = min(target_sym.end_line, target_sym.start_line + 24)
@@ -126,8 +126,15 @@ class ASTDependencyExpander:
                         )
                     )
 
-        # Deterministic sort for type candidates
-        type_candidates.sort(key=lambda c: (c.file_path, c.start_line, c.symbol.qualified_name))
+        # Deterministic sort for type candidates (USES_TYPE / IMPORTS prioritized before CALLS)
+        type_candidates.sort(
+            key=lambda c: (
+                0 if c.edge_kind in ("USES_TYPE", "IMPORTS") else 1,
+                c.file_path,
+                c.start_line,
+                c.symbol.qualified_name,
+            )
+        )
 
         # 2. Collect Tier 2: Direct Callers (CALLS incoming edges) with call-site diversity
         focus_short_name = focus_symbol.qualified_name.split(".")[-1]
@@ -299,42 +306,49 @@ class ASTDependencyExpander:
         visible_files: dict[UUID, CodeFileRecord],
     ) -> ASTExpansionCandidate | None:
         """Resolves matching unit test fixture via TESTED_BY edge or naming convention."""
-        # 1. Check explicit TESTED_BY edge
+        # 1. Check explicit TESTED_BY edge (supports canonical prod->test and legacy test->prod)
         target_name = focus_symbol.qualified_name.split(".")[-1]
+        expected_test_short = f"test_{target_name}"
         for edge in visible_edges:
             if edge.edge_kind == "TESTED_BY":
-                is_match = (
+                t_sym: ASTSymbolRecord | None = None
+                if (
                     edge.source_symbol_id == focus_symbol.symbol_id
-                    or edge.target_symbol_id == focus_symbol.symbol_id
+                    or edge.target_qualified_name.split(".")[-1] == expected_test_short
+                ):
+                    if edge.target_symbol_id and edge.target_symbol_id in visible_symbols:
+                        t_sym = visible_symbols[edge.target_symbol_id]
+                    else:
+                        t_clean = edge.target_qualified_name.split(".")[-1]
+                        for s in visible_symbols.values():
+                            if (
+                                s.qualified_name == edge.target_qualified_name
+                                or s.qualified_name.split(".")[-1] == t_clean
+                            ):
+                                t_sym = s
+                                break
+                elif (
+                    edge.target_symbol_id == focus_symbol.symbol_id
                     or edge.target_qualified_name == focus_symbol.qualified_name
                     or edge.target_qualified_name == target_name
-                )
-                if is_match:
-                    test_sym_id = (
-                        edge.target_symbol_id
-                        if edge.source_symbol_id == focus_symbol.symbol_id
-                        else edge.source_symbol_id
-                    )
-                    t_sym = visible_symbols.get(test_sym_id) if test_sym_id else None
-                    if not t_sym:
-                        # Try finding by source_symbol_id
-                        t_sym = visible_symbols.get(edge.source_symbol_id)
+                ):
+                    t_sym = visible_symbols.get(edge.source_symbol_id)
 
-                    if t_sym and t_sym.file_id in visible_files:
-                        f_rec = visible_files[t_sym.file_id]
-                        s_lines = f_rec.raw_content.splitlines()[
-                            t_sym.start_line - 1 : t_sym.end_line
-                        ]
-                        return ASTExpansionCandidate(
-                            symbol=t_sym,
-                            edge_kind="TESTED_BY",
-                            intent=ModificationIntent.TEST_FIXTURE,
-                            start_line=t_sym.start_line,
-                            end_line=t_sym.end_line,
-                            estimated_tokens=self.estimate_tokens("\n".join(s_lines)),
-                            file_path=f_rec.file_path,
-                            diversity_key=f_rec.file_path,
-                        )
+                if t_sym and t_sym.file_id in visible_files:
+                    f_rec = visible_files[t_sym.file_id]
+                    s_lines = f_rec.raw_content.splitlines()[
+                        t_sym.start_line - 1 : t_sym.end_line
+                    ]
+                    return ASTExpansionCandidate(
+                        symbol=t_sym,
+                        edge_kind="TESTED_BY",
+                        intent=ModificationIntent.TEST_FIXTURE,
+                        start_line=t_sym.start_line,
+                        end_line=t_sym.end_line,
+                        estimated_tokens=self.estimate_tokens("\n".join(s_lines)),
+                        file_path=f_rec.file_path,
+                        diversity_key=f_rec.file_path,
+                    )
 
         # 2. Naming convention fallback
         if focus_symbol.file_id not in visible_files:

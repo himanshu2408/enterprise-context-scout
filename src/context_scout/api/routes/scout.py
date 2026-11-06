@@ -258,6 +258,7 @@ async def stream_scout(
 
             coordinator = FederatedScoutCoordinator(registry=registry, repo=repo)
             fed_chunks = await asyncio.to_thread(_resolve_federated_doc_chunks, repo, principal)
+            fed_events: list[dict[str, Any]] = []
             result = await asyncio.to_thread(
                 coordinator.run,
                 user_prompt=request.query,
@@ -266,25 +267,33 @@ async def stream_scout(
                 normalized_rrf_score=request.normalized_rrf_score,
                 doc_chunks=fed_chunks,
                 max_bounce_backs=request.max_bounce_backs,
+                on_stage_event=fed_events.append,
             )
 
-            # Check if bounce-back occurred
-            if (
+            # Check if bounce-back occurred during DAG execution
+            fed_bounce_ev = next(
+                (ev for ev in fed_events if ev.get("event_type") == "bounce_back"),
+                None,
+            )
+            if fed_bounce_ev is not None or (
                 isinstance(result, ImplementationContextPack)
                 and result.preflight_report
                 and result.preflight_report.bounce_back_feedback
-            ) or "bounce" in request.query.lower():
+            ):
                 bb = SSEBounceBackEvent(
                     stage=3,
                     status="bounce_back_triggered",
-                    feedback=(
-                        result.preflight_report.bounce_back_feedback
-                        if (
-                            isinstance(result, ImplementationContextPack)
-                            and result.preflight_report
-                            and result.preflight_report.bounce_back_feedback
+                    feedback=str(
+                        (fed_bounce_ev or {}).get("feedback")
+                        or (
+                            result.preflight_report.bounce_back_feedback
+                            if (
+                                isinstance(result, ImplementationContextPack)
+                                and result.preflight_report
+                                and result.preflight_report.bounce_back_feedback
+                            )
+                            else "Pre-flight validation triggered $0 local self-correction pass"
                         )
-                        else "Pre-flight validation failed: unresolved symbol 'calc_spread_floor'"
                     ),
                     paid_tokens_spent=0,
                     cost_usd=0.0,
@@ -386,6 +395,7 @@ async def stream_scout(
             await asyncio.sleep(0.01)
 
             workflow = ScoutWorkflow(registry=registry, repo=repo)
+            wf_events: list[dict[str, Any]] = []
             result = await asyncio.to_thread(
                 workflow.run,
                 user_prompt=request.query,
@@ -394,25 +404,33 @@ async def stream_scout(
                 trace_id=active_trace_id,
                 normalized_rrf_score=request.normalized_rrf_score,
                 max_bounce_backs=request.max_bounce_backs,
+                on_stage_event=wf_events.append,
             )
 
-            # Check if bounce-back event is required
-            if (
+            # Check if bounce-back event occurred during DAG execution
+            wf_bounce_ev = next(
+                (ev for ev in wf_events if ev.get("event_type") == "bounce_back"),
+                None,
+            )
+            if wf_bounce_ev is not None or (
                 isinstance(result, ImplementationContextPack)
                 and result.preflight_report
                 and result.preflight_report.bounce_back_feedback
-            ) or "bounce" in request.query.lower():
+            ):
                 bb = SSEBounceBackEvent(
                     stage=3,
                     status="bounce_back_triggered",
-                    feedback=(
-                        result.preflight_report.bounce_back_feedback
-                        if (
-                            isinstance(result, ImplementationContextPack)
-                            and result.preflight_report
-                            and result.preflight_report.bounce_back_feedback
+                    feedback=str(
+                        (wf_bounce_ev or {}).get("feedback")
+                        or (
+                            result.preflight_report.bounce_back_feedback
+                            if (
+                                isinstance(result, ImplementationContextPack)
+                                and result.preflight_report
+                                and result.preflight_report.bounce_back_feedback
+                            )
+                            else "Pre-flight validation triggered $0 local self-correction pass"
                         )
-                        else "Pre-flight validation failed: unresolved symbol 'calc_spread_floor'"
                     ),
                     paid_tokens_spent=0,
                     cost_usd=0.0,

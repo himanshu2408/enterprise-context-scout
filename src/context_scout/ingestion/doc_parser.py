@@ -31,7 +31,7 @@ MATH_BLOCK_PATTERN: Final[re.Pattern[str]] = re.compile(
     rf"(\\begin\{{(?:{_MATH_ENV_NAMES})\}}.*?\\end\{{(?:{_MATH_ENV_NAMES})\}}|"
     r"\\\[.*?\\\]|"
     r"\$\$.*?\$\$|"
-    r"(?<!\\)\$.+?(?<!\\)\$)",
+    r"(?<!\\)\$(?!\d+\s)[^\$\n]+?(?<!\\)\$)",
     re.DOTALL,
 )
 

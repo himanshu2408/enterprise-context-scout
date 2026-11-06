@@ -1022,6 +1022,8 @@ class LocalQLoRATrainer:
 
                     p_ids, t_ids = tokenized_records[(step - 1) % len(tokenized_records)]
                     tgt_indices = [vocab_map[tid] for tid in t_ids[:max_len]]
+                    if len(tgt_indices) < 2:
+                        tgt_indices = [*tgt_indices, 0]
                     seq_tgt = torch.tensor([tgt_indices], dtype=torch.long, device=device)
 
                     # Forward pass: embed completion tokens through adapter blocks
@@ -1030,7 +1032,9 @@ class LocalQLoRATrainer:
                         h = h + b.adapt_attention(h) + b.adapt_mlp(h)
 
                     logits = lm_head(h)
-                    loss = loss_fn(logits.view(-1, vocab_size), seq_tgt.view(-1))
+                    shift_logits = logits[:, :-1, :].contiguous()
+                    shift_targets = seq_tgt[:, 1:].contiguous()
+                    loss = loss_fn(shift_logits.view(-1, vocab_size), shift_targets.view(-1))
 
                     loss.backward()
                     optimizer.step()
@@ -1065,14 +1069,18 @@ class LocalQLoRATrainer:
                         v_target = v_msgs[-1].get("content", "") + "<end_of_turn>\n"
                         v_ids = _encode_text(tokenizer, v_target)
                         v_indices = [vocab_map.get(tid, 0) for tid in v_ids[:max_len]]
-                        if not v_indices:
+                        if len(v_indices) < 2:
                             continue
                         v_seq = torch.tensor([v_indices], dtype=torch.long, device=device)
                         h_v = emb(v_seq)
                         for b in blocks:
                             h_v = h_v + b.adapt_attention(h_v) + b.adapt_mlp(h_v)
                         v_logits = lm_head(h_v)
-                        v_loss = loss_fn(v_logits.view(-1, vocab_size), v_seq.view(-1))
+                        v_shift_logits = v_logits[:, :-1, :].contiguous()
+                        v_shift_targets = v_seq[:, 1:].contiguous()
+                        v_loss = loss_fn(
+                            v_shift_logits.view(-1, vocab_size), v_shift_targets.view(-1)
+                        )
                         val_losses.append(float(v_loss.item()))
 
                 val_loss = sum(val_losses) / len(val_losses) if val_losses else final_loss

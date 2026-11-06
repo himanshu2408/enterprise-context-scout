@@ -283,7 +283,7 @@ class ASTExtractor:
         class_text = _node_text(outer_node, code_bytes)
         for imp in file_imports:
             imp_short = imp.split(".")[-1]
-            if len(file_imports) <= 3 or re.search(rf"\b{re.escape(imp_short)}\b", class_text):
+            if re.search(rf"\b{re.escape(imp_short)}\b", class_text):
                 edges.append(
                     ParsedEdge(
                         source_qualified_name=qual_name,
@@ -393,10 +393,18 @@ class ASTExtractor:
         if fn_name.startswith("test_"):
             target_candidate = fn_name[5:]
             if target_candidate:
+                prod_qual = next(
+                    (
+                        s.qualified_name
+                        for s in symbols
+                        if s.name == target_candidate and s.qualified_name != qual_name
+                    ),
+                    target_candidate,
+                )
                 edges.append(
                     ParsedEdge(
-                        source_qualified_name=qual_name,
-                        target_qualified_name=target_candidate,
+                        source_qualified_name=prod_qual,
+                        target_qualified_name=qual_name,
                         edge_kind="TESTED_BY",
                     )
                 )
@@ -793,10 +801,18 @@ class ASTExtractor:
         if fn_name.startswith("test") or fn_name.startswith("it_"):
             target_candidate = fn_name.replace("test_", "").replace("test", "")
             if target_candidate:
+                prod_qual = next(
+                    (
+                        s.qualified_name
+                        for s in symbols
+                        if s.name == target_candidate and s.qualified_name != qual_name
+                    ),
+                    target_candidate,
+                )
                 edges.append(
                     ParsedEdge(
-                        source_qualified_name=qual_name,
-                        target_qualified_name=target_candidate,
+                        source_qualified_name=prod_qual,
+                        target_qualified_name=qual_name,
                         edge_kind="TESTED_BY",
                     )
                 )
@@ -885,8 +901,8 @@ class ASTExtractor:
                                 if arg.type == "string":
                                     edges.append(
                                         ParsedEdge(
-                                            source_qualified_name=source_qual,
-                                            target_qualified_name=_node_text(arg).strip("'\"`"),
+                                            source_qualified_name=_node_text(arg).strip("'\"`"),
+                                            target_qualified_name=source_qual,
                                             edge_kind="TESTED_BY",
                                         )
                                     )

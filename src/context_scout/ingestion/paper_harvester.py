@@ -221,23 +221,41 @@ class QuantRelevanceClassifier:
         """Evaluates text against positive concepts and negative blocking keywords."""
         full_text = f"{title}\n{abstract}\n{content}"
 
+        matched_pos: list[str] = []
+        for concept, pattern in self._pos_patterns.items():
+            if pattern.search(full_text):
+                matched_pos.append(concept)
+
+        core_microstructure_concepts = {
+            "limit order book",
+            "order flow",
+            "market microstructure",
+            "high-frequency trading",
+            "market making",
+            "optimal execution",
+            "Almgren-Chriss",
+            "Hawkes process",
+            "bid-ask spread",
+            "GARCH",
+        }
+        core_hits = [c for c in matched_pos if c in core_microstructure_concepts]
+
         matched_neg: list[str] = []
         for kw, pattern in self._neg_patterns.items():
             if pattern.search(full_text):
+                if kw in {"covid", "coronavirus", "pandemic", "brexit"} and len(core_hits) >= 2:
+                    continue
                 matched_neg.append(kw)
 
         if matched_neg:
             neg_desc = ", ".join(matched_neg)
             return RelevanceVerdict(
                 is_relevant=False,
-                matched_positive=[],
+                matched_positive=matched_pos,
                 matched_negative=matched_neg,
                 score=0.0,
                 rejection_reason=f"Rejected: Matched negative blocking keyword(s): {neg_desc}",
             )
-
-        matched_pos: list[str] = []
-        for concept, pattern in self._pos_patterns.items():
             if pattern.search(full_text):
                 matched_pos.append(concept)
 

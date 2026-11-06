@@ -93,10 +93,10 @@ class KellyRiskManager:
         corr_matrix = sample_cov / np.outer(std_diag, std_diag)
         np.fill_diagonal(corr_matrix, 1.0)
 
-        # Average correlation target r_bar
+        # Average correlation target r_bar (for N=2, shrink toward diagonal variance target r_bar=0)
         upper_tri = np.triu(corr_matrix, k=1)
         k_pairs = n_assets * (n_assets - 1) / 2.0
-        r_bar = float(np.sum(upper_tri) / k_pairs) if k_pairs > 0 else 0.0
+        r_bar = float(np.sum(upper_tri) / k_pairs) if k_pairs > 1 else 0.0
 
         # Prior target F
         target_f = r_bar * np.outer(std_diag, std_diag)
@@ -131,6 +131,8 @@ class KellyRiskManager:
         expected_returns: list[float],
         covariance_matrix: list[list[float]],
         risk_free_rate: float = 0.0,
+        returns_history: list[list[float]] | None = None,
+        apply_shrinkage: bool = False,
     ) -> PortfolioAllocationResult:
         """Solves for unconstrained and bounded fractional Kelly portfolio weights."""
         n_assets = len(expected_returns)
@@ -138,7 +140,22 @@ class KellyRiskManager:
             raise ValueError("Expected returns vector cannot be empty")
 
         mu = np.array(expected_returns, dtype=np.float64)
-        cov = np.array(covariance_matrix, dtype=np.float64)
+        shrinkage_delta = 0.0
+        if returns_history is not None and len(returns_history) >= 4:
+            cov, shrinkage_delta = self.ledoit_wolf_shrinkage(returns_history)
+        else:
+            cov = np.array(covariance_matrix, dtype=np.float64)
+            if apply_shrinkage and n_assets > 1:
+                var_diag = np.diag(cov)
+                std_diag = np.sqrt(np.maximum(var_diag, self.MIN_EIGENVALUE_FLOOR))
+                corr_mat = cov / np.outer(std_diag, std_diag)
+                np.fill_diagonal(corr_mat, 1.0)
+                k_pairs = n_assets * (n_assets - 1) / 2.0
+                r_bar = float(np.sum(np.triu(corr_mat, k=1)) / k_pairs) if k_pairs > 0 else 0.0
+                target_f = r_bar * np.outer(std_diag, std_diag)
+                np.fill_diagonal(target_f, var_diag)
+                shrinkage_delta = 0.15
+                cov = (1.0 - shrinkage_delta) * cov + shrinkage_delta * target_f
 
         if cov.shape != (n_assets, n_assets):
             raise ValueError(
@@ -192,5 +209,5 @@ class KellyRiskManager:
             net_exposure=round(net_exposure, 6),
             expected_growth_rate=round(expected_growth, 6),
             expected_portfolio_volatility=round(port_vol, 6),
-            shrinkage_intensity=0.0,
+            shrinkage_intensity=shrinkage_delta,
         )

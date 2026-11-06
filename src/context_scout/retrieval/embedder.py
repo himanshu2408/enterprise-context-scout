@@ -141,6 +141,10 @@ class LocalSemanticEmbedder:
             )
             if torch.backends.mps.is_available():
                 torch.mps.empty_cache()
+            if hasattr(model, "to"):
+                model = model.to("cpu")
+                self._model = model
+            self.device = "cpu"
             cpu_kwargs = dict(kwargs)
             cpu_kwargs["device"] = "cpu"
             cpu_kwargs["batch_size"] = min(batch_size, 8)

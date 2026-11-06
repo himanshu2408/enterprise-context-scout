@@ -194,10 +194,15 @@ class PairsSpreadSignal:
             direction_y = 0.0
             direction_x = 0.0
 
-        # Fractional Kelly sizing projection
+        # Fractional Kelly sizing projection with joint single-position bound preserving hedge ratio
         base_alloc = self.risk_manager.max_single_position * self.risk_manager.fractional_multiplier
         target_w_y = direction_y * base_alloc
         target_w_x = direction_x * base_alloc
+        max_leg = max(abs(target_w_y), abs(target_w_x))
+        if max_leg > self.risk_manager.max_single_position and max_leg > 0.0:
+            scale = self.risk_manager.max_single_position / max_leg
+            target_w_y *= scale
+            target_w_x *= scale
 
         return PairsTradingSignal(
             symbol_y=self.symbol_y,

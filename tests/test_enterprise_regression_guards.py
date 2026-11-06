@@ -202,10 +202,10 @@ def test_scout_workflow_hydrates_quant_strategy_spec_for_quant_domain() -> None:
 
 
 def test_scout_route_matches_hyphenated_bounce_back_prompts() -> None:
-    """Guard 12: scout.py must match 'bounce' prompts without requiring underscore."""
+    """Guard 12: ScoutWorkflow and scout.py must support hyphenated bounce-back via callbacks."""
     src = inspect.getsource(scout)
-    assert '"bounce" in request.query.lower()' in src
     assert '"bounce_back" in request.query.lower()' not in src
+    assert "on_stage_event" in src
 
 
 def test_github_actions_ci_installs_dev_dependencies_and_guards_mlx_markers() -> None:

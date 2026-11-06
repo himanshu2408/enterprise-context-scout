@@ -314,8 +314,40 @@ class PostgresRLSRepository:
     def insert_doc_chunks_batch(
         self, conn: Connection[tuple[object, ...]], records: list[DocChunkRecord]
     ) -> int:
-        for record in records:
-            self.insert_doc_chunk(conn, record)
+        if not records:
+            return 0
+        sql = """
+            INSERT INTO doc_chunks (
+                chunk_id, domain_id, doc_id, doc_title, source_uri,
+                market_scope, published_date, authority_weight,
+                section_heading, contextual_header, verbatim_content,
+                metadata_json, allowed_scopes, embedding
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::vector)
+        """
+        params_seq = [
+            (
+                record.chunk_id,
+                record.domain_id,
+                record.doc_id,
+                record.doc_title.replace("\x00", ""),
+                record.source_uri,
+                record.market_scope.value
+                if hasattr(record.market_scope, "value")
+                else str(record.market_scope),
+                record.published_date,
+                record.authority_weight,
+                record.section_heading.replace("\x00", ""),
+                record.contextual_header.replace("\x00", ""),
+                record.verbatim_content.replace("\x00", ""),
+                json.dumps(record.metadata_json),
+                record.allowed_scopes,
+                "[" + ",".join(f"{v:.6f}" for v in record.embedding) + "]",
+            )
+            for record in records
+        ]
+        with conn.cursor() as cur:
+            cur.executemany(sql, params_seq)
         return len(records)
 
     def list_visible_doc_chunks(
@@ -406,6 +438,8 @@ class PostgresRLSRepository:
             if market_scope is not None
             else None
         )
+        candidate_pool = max(100, top_k * 10)
+        penalty_rank = candidate_pool + 1
         query = """
             WITH fts_ranked AS (
                 SELECT chunk_id,
@@ -413,35 +447,60 @@ class PostgresRLSRepository:
                            ORDER BY ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) DESC,
                                     chunk_id
                        ) AS fts_rank
-                FROM doc_chunks
-                WHERE domain_id = %s
-                  AND (%s::text IS NULL OR market_scope = %s)
+                FROM (
+                    SELECT chunk_id, fts_doc
+                    FROM doc_chunks
+                    WHERE domain_id = %s
+                      AND (%s::text IS NULL OR market_scope = %s)
+                    ORDER BY ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) DESC, chunk_id
+                    LIMIT %s
+                ) fts_sub
             ),
             vec_ranked AS (
                 SELECT chunk_id,
                        ROW_NUMBER() OVER (
-                           ORDER BY (embedding <=> %s::vector) ASC, chunk_id
+                           ORDER BY vec_dist ASC, chunk_id
                        ) AS vec_rank
-                FROM doc_chunks
-                WHERE domain_id = %s
-                  AND (%s::text IS NULL OR market_scope = %s)
+                FROM (
+                    SELECT chunk_id, (embedding <=> %s::vector) AS vec_dist
+                    FROM doc_chunks
+                    WHERE domain_id = %s
+                      AND (%s::text IS NULL OR market_scope = %s)
+                    ORDER BY embedding <=> %s::vector ASC
+                    LIMIT %s
+                ) vec_sub
             ),
             trgm_ranked AS (
                 SELECT chunk_id,
                        ROW_NUMBER() OVER (
-                           ORDER BY (similarity(verbatim_content, %s) * authority_weight) DESC,
-                                    chunk_id
+                           ORDER BY trgm_score DESC, chunk_id
                        ) AS trgm_rank
-                FROM doc_chunks
-                WHERE domain_id = %s
-                  AND (%s::text IS NULL OR market_scope = %s)
+                FROM (
+                    SELECT chunk_id,
+                           (similarity(verbatim_content, %s) * authority_weight) AS trgm_score
+                    FROM doc_chunks
+                    WHERE domain_id = %s
+                      AND (%s::text IS NULL OR market_scope = %s)
+                    ORDER BY (similarity(verbatim_content, %s) * authority_weight) DESC, chunk_id
+                    LIMIT %s
+                ) trgm_sub
+            ),
+            candidate_ids AS (
+                SELECT chunk_id FROM fts_ranked
+                UNION
+                SELECT chunk_id FROM vec_ranked
+                UNION
+                SELECT chunk_id FROM trgm_ranked
             )
             SELECT d.chunk_id, d.doc_title, d.section_heading,
-                   f.fts_rank, v.vec_rank, t.trgm_rank
-            FROM doc_chunks d
-            JOIN fts_ranked f ON d.chunk_id = f.chunk_id
-            JOIN vec_ranked v ON d.chunk_id = v.chunk_id
-            JOIN trgm_ranked t ON d.chunk_id = t.chunk_id
+                   COALESCE(f.fts_rank, %s) AS fts_rank,
+                   COALESCE(v.vec_rank, %s) AS vec_rank,
+                   COALESCE(t.trgm_rank, %s) AS trgm_rank
+            FROM candidate_ids c
+            JOIN doc_chunks d ON d.chunk_id = c.chunk_id
+            LEFT JOIN fts_ranked f ON d.chunk_id = f.chunk_id
+            LEFT JOIN vec_ranked v ON d.chunk_id = v.chunk_id
+            LEFT JOIN trgm_ranked t ON d.chunk_id = t.chunk_id
             WHERE d.domain_id = %s
               AND (%s::text IS NULL OR d.market_scope = %s);
         """
@@ -450,14 +509,23 @@ class PostgresRLSRepository:
             domain_id,
             market_str,
             market_str,
+            query_text,
+            candidate_pool,
             vec_literal,
             domain_id,
             market_str,
             market_str,
+            vec_literal,
+            candidate_pool,
             query_text,
             domain_id,
             market_str,
             market_str,
+            query_text,
+            candidate_pool,
+            penalty_rank,
+            penalty_rank,
+            penalty_rank,
             domain_id,
             market_str,
             market_str,
@@ -478,6 +546,123 @@ class PostgresRLSRepository:
                 RankedSearchHit(
                     item_id=chunk_id,
                     qualified_name_or_title=f"{doc_title} > {section_heading}",
+                    normalized_rrf_score=norm_rrf,
+                    trigram_rank=trgm_rank,
+                    bm25_rank=fts_rank,
+                    vector_rank=vec_rank,
+                )
+            )
+        hits.sort(key=lambda h: h.normalized_rrf_score, reverse=True)
+        return hits[:top_k]
+
+    def search_symbols_hybrid_rrf(
+        self,
+        conn: Connection[tuple[object, ...]],
+        domain_id: str,
+        query_text: str,
+        query_embedding: list[float],
+        top_k: int = 5,
+    ) -> list[RankedSearchHit]:
+        """Executes 3-way Hybrid RRF over PostgreSQL ast_symbols (GIN trigram + FTS + HNSW)."""
+        vec_literal = "[" + ",".join(f"{v:.6f}" for v in query_embedding) + "]"
+        candidate_pool = max(100, top_k * 10)
+        penalty_rank = candidate_pool + 1
+        query = """
+            WITH fts_ranked AS (
+                SELECT symbol_id,
+                       ROW_NUMBER() OVER (
+                           ORDER BY ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) DESC,
+                                    symbol_id
+                       ) AS fts_rank
+                FROM (
+                    SELECT symbol_id, fts_doc
+                    FROM ast_symbols
+                    WHERE domain_id = %s
+                    ORDER BY ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) DESC, symbol_id
+                    LIMIT %s
+                ) fts_sub
+            ),
+            vec_ranked AS (
+                SELECT symbol_id,
+                       ROW_NUMBER() OVER (
+                           ORDER BY vec_dist ASC, symbol_id
+                       ) AS vec_rank
+                FROM (
+                    SELECT symbol_id, (embedding <=> %s::vector) AS vec_dist
+                    FROM ast_symbols
+                    WHERE domain_id = %s
+                    ORDER BY embedding <=> %s::vector ASC
+                    LIMIT %s
+                ) vec_sub
+            ),
+            trgm_ranked AS (
+                SELECT symbol_id,
+                       ROW_NUMBER() OVER (
+                           ORDER BY trgm_score DESC, symbol_id
+                       ) AS trgm_rank
+                FROM (
+                    SELECT symbol_id,
+                           GREATEST(
+                               similarity(qualified_name, %s),
+                               similarity(signature_skeleton, %s)
+                           ) AS trgm_score
+                    FROM ast_symbols
+                    WHERE domain_id = %s
+                    ORDER BY trgm_score DESC, symbol_id
+                    LIMIT %s
+                ) trgm_sub
+            ),
+            candidate_ids AS (
+                SELECT symbol_id FROM fts_ranked
+                UNION
+                SELECT symbol_id FROM vec_ranked
+                UNION
+                SELECT symbol_id FROM trgm_ranked
+            )
+            SELECT s.symbol_id, s.qualified_name,
+                   COALESCE(f.fts_rank, %s) AS fts_rank,
+                   COALESCE(v.vec_rank, %s) AS vec_rank,
+                   COALESCE(t.trgm_rank, %s) AS trgm_rank
+            FROM candidate_ids c
+            JOIN ast_symbols s ON s.symbol_id = c.symbol_id
+            LEFT JOIN fts_ranked f ON s.symbol_id = f.symbol_id
+            LEFT JOIN vec_ranked v ON s.symbol_id = v.symbol_id
+            LEFT JOIN trgm_ranked t ON s.symbol_id = t.symbol_id
+            WHERE s.domain_id = %s;
+        """
+        params = (
+            query_text,
+            domain_id,
+            query_text,
+            candidate_pool,
+            vec_literal,
+            domain_id,
+            vec_literal,
+            candidate_pool,
+            query_text,
+            query_text,
+            domain_id,
+            candidate_pool,
+            penalty_rank,
+            penalty_rank,
+            penalty_rank,
+            domain_id,
+        )
+        rows = conn.execute(query, params).fetchall()
+        hits: list[RankedSearchHit] = []
+        for r in rows:
+            sym_id = UUID(str(r[0]))
+            qual_name = str(r[1])
+            fts_rank = int(str(r[2]))
+            vec_rank = int(str(r[3]))
+            trgm_rank = int(str(r[4]))
+            norm_rrf = compute_normalized_rrf(
+                [trgm_rank, fts_rank, vec_rank], num_modalities=3, k=60
+            )
+            hits.append(
+                RankedSearchHit(
+                    item_id=sym_id,
+                    qualified_name_or_title=qual_name,
                     normalized_rrf_score=norm_rrf,
                     trigram_rank=trgm_rank,
                     bm25_rank=fts_rank,
