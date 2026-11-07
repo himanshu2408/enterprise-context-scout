@@ -315,6 +315,12 @@ PROMPT_STOPWORDS: Final[set[str]] = {
 
 CUSTOM_CORPUS_INDEX_PATHS: dict[str, Path] = {}
 _CUSTOM_CORPUS_MEM_CACHE: dict[str, tuple[int, float, dict[str, Any]]] = {}
+_CUSTOM_CORPUS_PARSED_CACHE: dict[
+    tuple[str, int, tuple[str, ...]],
+    dict[str, list[Any]],
+] = {}
+_FILE_STAT_BLOB_CACHE: dict[Path, tuple[int, int, str]] = {}
+_DEFAULT_DUMMY_EMBEDDING: Final[list[float]] = [0.05] * 768
 
 _SYNC_SKIP_DIRS: Final[set[str]] = {
     ".git",
@@ -323,25 +329,49 @@ _SYNC_SKIP_DIRS: Final[set[str]] = {
     ".venv",
     "venv",
     "dist",
-    "build",
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
 }
 
 
+def _should_skip_sync_parts(rel_parts: tuple[str, ...], is_multi_repo: bool) -> bool:
+    for idx, part in enumerate(rel_parts):
+        if part in _SYNC_SKIP_DIRS:
+            return True
+        if part == "build":
+            if is_multi_repo and idx == 0:
+                continue
+            if idx > 0 and rel_parts[idx - 1] == "src":
+                continue
+            return True
+    return False
+
+
+def _clear_parsed_cache_for_domain(domain_id: str | None = None) -> None:
+    if domain_id is None:
+        _CUSTOM_CORPUS_PARSED_CACHE.clear()
+    else:
+        stale_keys = [k for k in _CUSTOM_CORPUS_PARSED_CACHE if k[0] == domain_id]
+        for k in stale_keys:
+            _CUSTOM_CORPUS_PARSED_CACHE.pop(k, None)
+
+
 def register_custom_corpus_index(domain_id: str, index_path: Path) -> None:
     """Registers a custom domain corpus_index.json path for runtime hydration."""
     CUSTOM_CORPUS_INDEX_PATHS[domain_id] = index_path.resolve()
     _CUSTOM_CORPUS_MEM_CACHE.pop(domain_id, None)
+    _clear_parsed_cache_for_domain(domain_id)
 
 
 def invalidate_custom_corpus_cache(domain_id: str | None = None) -> None:
     """Invalidates in-memory custom domain corpus cache."""
     if domain_id is None:
         _CUSTOM_CORPUS_MEM_CACHE.clear()
+        _clear_parsed_cache_for_domain(None)
     else:
         _CUSTOM_CORPUS_MEM_CACHE.pop(domain_id, None)
+        _clear_parsed_cache_for_domain(domain_id)
 
 
 def _resolve_custom_corpus_index_path(domain_id: str) -> Path | None:
@@ -380,8 +410,9 @@ def sync_custom_domain_corpus_if_needed(
     cached = _CUSTOM_CORPUS_MEM_CACHE.get(domain_id)
     if cached is not None and not force:
         c_mtime, last_check_ts, c_data = cached
-        if c_mtime == stat_mtime and (now - last_check_ts) < 0.08:
-            c_files = c_data.get("code_files", [])
+        c_files = c_data.get("code_files", [])
+        check_interval = 1.5 if len(c_files) > 200 else 0.08
+        if c_mtime == stat_mtime and (now - last_check_ts) < check_interval:
             return {
                 "synced": False,
                 "added": 0,
@@ -468,16 +499,26 @@ def sync_custom_domain_corpus_if_needed(
         if not p.is_file() or p.suffix.lower() not in CODE_EXTENSIONS:
             continue
         rel_parts = p.relative_to(source_dir).parts
-        if any(part in _SYNC_SKIP_DIRS for part in rel_parts):
+        if _should_skip_sync_parts(rel_parts, is_multi_repo):
             continue
         rel_path = str(p.relative_to(source_dir))
         repo_n = rel_parts[0] if (is_multi_repo and len(rel_parts) > 1) else domain_id
         try:
-            raw_b = p.read_bytes()
+            st = p.stat()
+            cached_blob = _FILE_STAT_BLOB_CACHE.get(p)
+            if (
+                cached_blob is not None
+                and cached_blob[0] == st.st_mtime_ns
+                and cached_blob[1] == st.st_size
+            ):
+                blob_sha = cached_blob[2]
+            else:
+                raw_b = p.read_bytes()
+                header = f"blob {len(raw_b)}\x00".encode("ascii")
+                blob_sha = hashlib.sha1(header + raw_b).hexdigest()
+                _FILE_STAT_BLOB_CACHE[p] = (st.st_mtime_ns, st.st_size, blob_sha)
         except Exception:
             continue
-        header = f"blob {len(raw_b)}\x00".encode("ascii")
-        blob_sha = hashlib.sha1(header + raw_b).hexdigest()
         live_files_meta[rel_path] = (p, repo_n, blob_sha)
         old_entry = existing_by_path.get(rel_path)
         if old_entry is None:
@@ -643,6 +684,7 @@ def sync_custom_domain_corpus_if_needed(
         new_mtime = stat_mtime
 
     _CUSTOM_CORPUS_MEM_CACHE[domain_id] = (new_mtime, now, data)
+    _clear_parsed_cache_for_domain(domain_id)
     return {
         "synced": True,
         "added": len(added_paths),
@@ -690,10 +732,18 @@ class BoundGraphRepository:
                         return result
         corpus = _load_custom_domain_corpus(domain_id)
         if corpus and isinstance(corpus.get("code_files"), list):
+            mem_entry = _CUSTOM_CORPUS_MEM_CACHE.get(domain_id)
+            mtime_key = mem_entry[0] if mem_entry is not None else 0
+            scope_key = tuple(sorted(set(principal.allowed_scopes)))
+            cache_key = (domain_id, mtime_key, scope_key)
+            parsed_bucket = _CUSTOM_CORPUS_PARSED_CACHE.setdefault(cache_key, {})
+            if "code_files" in parsed_bucket:
+                return list(parsed_bucket["code_files"])
+            scope_set = set(scope_key)
             out_files: list[CodeFileRecord] = []
             for item in corpus["code_files"]:
                 scopes = list(item.get("allowed_scopes", ["public_eng"]))
-                if not (set(principal.allowed_scopes) & set(scopes)):
+                if not (scope_set & set(scopes)):
                     continue
                 out_files.append(
                     CodeFileRecord(
@@ -709,7 +759,8 @@ class BoundGraphRepository:
                         line_count=int(item.get("line_count", 1)),
                     )
                 )
-            return out_files
+            parsed_bucket["code_files"] = out_files
+            return list(out_files)
         return []
 
     def list_visible_ast_symbols(
@@ -727,10 +778,18 @@ class BoundGraphRepository:
                         return result
         corpus = _load_custom_domain_corpus(domain_id)
         if corpus and isinstance(corpus.get("ast_symbols"), list):
+            mem_entry = _CUSTOM_CORPUS_MEM_CACHE.get(domain_id)
+            mtime_key = mem_entry[0] if mem_entry is not None else 0
+            scope_key = tuple(sorted(set(principal.allowed_scopes)))
+            cache_key = (domain_id, mtime_key, scope_key)
+            parsed_bucket = _CUSTOM_CORPUS_PARSED_CACHE.setdefault(cache_key, {})
+            if "ast_symbols" in parsed_bucket:
+                return list(parsed_bucket["ast_symbols"])
+            scope_set = set(scope_key)
             out_syms: list[ASTSymbolRecord] = []
             for item in corpus["ast_symbols"]:
                 scopes = list(item.get("allowed_scopes", ["public_eng"]))
-                if not (set(principal.allowed_scopes) & set(scopes)):
+                if not (scope_set & set(scopes)):
                     continue
                 raw_kind = str(item.get("symbol_kind", "function"))
                 sym_kind: Literal["function", "class", "method", "interface", "type_alias"]
@@ -756,10 +815,11 @@ class BoundGraphRepository:
                         signature_skeleton=str(item.get("signature_skeleton", "")),
                         contextual_summary=str(item.get("contextual_summary", "")),
                         allowed_scopes=scopes,
-                        embedding=[0.05] * 768,
+                        embedding=_DEFAULT_DUMMY_EMBEDDING,
                     )
                 )
-            return out_syms
+            parsed_bucket["ast_symbols"] = out_syms
+            return list(out_syms)
         return []
 
     def list_visible_ast_edges(
@@ -777,10 +837,18 @@ class BoundGraphRepository:
                         return result
         corpus = _load_custom_domain_corpus(domain_id)
         if corpus and isinstance(corpus.get("ast_edges"), list):
+            mem_entry = _CUSTOM_CORPUS_MEM_CACHE.get(domain_id)
+            mtime_key = mem_entry[0] if mem_entry is not None else 0
+            scope_key = tuple(sorted(set(principal.allowed_scopes)))
+            cache_key = (domain_id, mtime_key, scope_key)
+            parsed_bucket = _CUSTOM_CORPUS_PARSED_CACHE.setdefault(cache_key, {})
+            if "ast_edges" in parsed_bucket:
+                return list(parsed_bucket["ast_edges"])
+            scope_set = set(scope_key)
             out_edges: list[ASTEdgeRecord] = []
             for item in corpus["ast_edges"]:
                 scopes = list(item.get("allowed_scopes", ["public_eng"]))
-                if not (set(principal.allowed_scopes) & set(scopes)):
+                if not (scope_set & set(scopes)):
                     continue
                 raw_edge_kind = str(item.get("edge_kind", "CALLS"))
                 edge_kind: Literal["CALLS", "IMPORTS", "USES_TYPE", "INHERITS", "TESTED_BY"]
@@ -807,7 +875,8 @@ class BoundGraphRepository:
                         allowed_scopes=scopes,
                     )
                 )
-            return out_edges
+            parsed_bucket["ast_edges"] = out_edges
+            return list(out_edges)
         return []
 
     def list_visible_doc_chunks(

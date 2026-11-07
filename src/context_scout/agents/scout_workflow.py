@@ -864,7 +864,9 @@ class LocalGemmaClient:
         )
 
         all_repo_names_l = {f.repo_name.lower() for f in visible_files if f.repo_name}
-        prompt_subwords_l = set(re.findall(r"[A-Za-z0-9_]+", prompt_without_fences.lower()))
+        prompt_subwords_l = set(
+            re.findall(r"[A-Za-z0-9_\-]+", prompt_without_fences.lower())
+        ) | set(re.findall(r"[A-Za-z0-9_]+", prompt_without_fences.lower()))
         mentioned_repo_names_l = (
             all_repo_names_l & prompt_subwords_l if len(all_repo_names_l) > 1 else set()
         )
@@ -955,27 +957,43 @@ class LocalGemmaClient:
                     t2_file_others.append((sym, False))
 
         if len(t1_exact) > 1:
+            sig_query_terms = {
+                w.lower()
+                for w in re.findall(r"[A-Za-z0-9_]{4,}", prompt_without_fences)
+                if w.lower() not in PROMPT_STOPWORDS
+            }
 
             def _t1_priority(
                 item: tuple[ASTSymbolRecord, bool],
-            ) -> tuple[int, int, int, int, int, str]:
+            ) -> tuple[int, int, int, int, int, int, int, str]:
                 s_rec, is_fb = item
                 s_parts = s_rec.qualified_name.split(".")
                 s_short = s_parts[-1]
                 s_two = ".".join(s_parts[-2:]) if len(s_parts) >= 2 else s_rec.qualified_name
                 in_mentioned_file = int(s_rec.file_id in mentioned_file_ids)
+                is_full_qual = int(
+                    "." in s_rec.qualified_name
+                    and (
+                        s_rec.qualified_name in backtick_syms
+                        or s_rec.qualified_name in candidates_to_search
+                    )
+                )
                 in_title = int(s_short in first_line or s_two in first_line)
                 is_two_match = int(s_two in backtick_syms or s_two in missing_from_feedback)
                 is_specific = int("_" in s_short or s_rec.symbol_kind in ("function", "method"))
                 is_god_class = int(
                     s_rec.symbol_kind == "class" and (s_rec.end_line - s_rec.start_line) > 150
                 )
+                meta_l = f"{s_rec.signature_skeleton} {s_rec.contextual_summary}".lower()
+                meta_hits = sum(1 for qt in sig_query_terms if qt in meta_l)
                 return (
                     -int(is_fb),
                     -in_mentioned_file,
+                    -is_full_qual,
                     -is_two_match,
                     is_god_class,
                     -(in_title * 2 + is_specific),
+                    -meta_hits,
                     s_rec.qualified_name,
                 )
 
@@ -1049,11 +1067,29 @@ class LocalGemmaClient:
         }
         body_search_terms = title_terms | backtick_terms_l | code_kwarg_or_snake_terms
         prompt_l_clean = prompt_without_fences.lower()
-        file_lines_by_id: dict[uuid.UUID, list[str]] = {
-            f.file_id: f.raw_content.splitlines() for f in visible_files
-        }
+        file_lines_by_id: dict[uuid.UUID, list[str]] = {}
+        is_large_multi_repo = len(visible_symbols) > 4000
+        has_exact_full_qual = any(
+            "." in s_rec.qualified_name
+            and (
+                s_rec.qualified_name in backtick_syms
+                or s_rec.qualified_name in candidates_to_search
+            )
+            for s_rec, _ in t1_exact
+        )
         scored_nl: list[tuple[float, ASTSymbolRecord]] = []
-        for sym in visible_symbols:
+        skip_nl_scan = is_large_multi_repo and (
+            has_exact_full_qual or (len(t1_exact) >= 3 and not mentioned_repo_names_l)
+        )
+        for sym in [] if skip_nl_scan else visible_symbols:
+            if mentioned_repo_names_l:
+                sym_r_l = (
+                    files_by_id[sym.file_id].repo_name.lower()
+                    if sym.file_id in files_by_id
+                    else ""
+                )
+                if sym_r_l not in mentioned_repo_names_l:
+                    continue
             if (
                 has_non_test_symbols
                 and not prompt_mentions_tests
@@ -1078,10 +1114,14 @@ class LocalGemmaClient:
             sum_l = sym.contextual_summary.lower()
             body_l = ""
             if (
-                file_lines_by_id
-                and sym.file_id in file_lines_by_id
+                not is_large_multi_repo
+                and sym.file_id in files_by_id
                 and not sym.qualified_name.startswith("context_scout.")
             ):
+                if sym.file_id not in file_lines_by_id:
+                    file_lines_by_id[sym.file_id] = files_by_id[
+                        sym.file_id
+                    ].raw_content.splitlines()
                 f_lines = file_lines_by_id[sym.file_id]
                 if (sym.end_line - sym.start_line) <= 160:
                     w_start = max(0, sym.start_line - 1)

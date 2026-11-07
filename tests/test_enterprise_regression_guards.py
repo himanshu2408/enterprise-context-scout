@@ -576,8 +576,11 @@ def test_public_repository_hygiene_and_frontend_hook_deps_guard() -> None:
     assert "30 of 30" in readme_text
     assert "0 of 22" in readme_text
     assert "22 of 22" in readme_text
-    assert "$4.00 / 1M" not in readme_text
-    assert "$20.00 / 1M" not in readme_text
+    assert "Gemini 3.8 Flash" in readme_text
+    assert "Gemini 4 Argon" in readme_text
+    assert "Claude Sonnet 5.5" in readme_text
+    assert "Claude Opus 5.5" in readme_text
+    assert "GPT-6 Astra" in readme_text
 
     console_tsx = Path("web-ui/src/components/ScoutConsole.tsx").read_text(encoding="utf-8")
     assert "setQuery((prevQuery) =>" in console_tsx
