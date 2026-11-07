@@ -170,10 +170,15 @@ CONVERSATIONAL_AND_GENERIC_WORDS: Final[set[str]] = {
     "then",
     "once",
     "bake",
+    "baking",
+    "best",
     "cake",
     "chocolate",
     "recipe",
     "cooking",
+    "flour",
+    "sugar",
+    "oven",
     "vacation",
     "holiday",
     "repair",
@@ -836,11 +841,26 @@ class LocalGemmaClient:
         t3_subword: list[tuple[ASTSymbolRecord, bool]] = []
 
         has_non_test_symbols = any(
-            not s.qualified_name.startswith(("tests.", "examples.")) for s in visible_symbols
+            not s.qualified_name.startswith(
+                (
+                    "tests.",
+                    "examples.",
+                    "docs.",
+                    "README.",
+                    "CHANGES.",
+                    "CHANGELOG.",
+                    "CONTRIBUTING.",
+                )
+            )
+            for s in visible_symbols
         )
         prompt_mentions_tests = any(
             k in prompt_without_fences.lower()
             for k in ("tests/", "tests.", "test_", "pytest", "unit test", "examples/", "examples.")
+        )
+        prompt_mentions_docs = any(
+            k in prompt_without_fences.lower()
+            for k in ("docs/", "readme", "changelog", "markdown", ".md")
         )
 
         all_repo_names_l = {f.repo_name.lower() for f in visible_files if f.repo_name}
@@ -854,6 +874,14 @@ class LocalGemmaClient:
                 has_non_test_symbols
                 and not prompt_mentions_tests
                 and sym.qualified_name.startswith(("tests.", "examples."))
+            ):
+                continue
+            if (
+                has_non_test_symbols
+                and not prompt_mentions_docs
+                and sym.qualified_name.startswith(
+                    ("docs.", "README.", "CHANGES.", "CHANGELOG.", "CONTRIBUTING.")
+                )
             ):
                 continue
             sym_repo_l = (
@@ -967,27 +995,49 @@ class LocalGemmaClient:
             "model",
             "models",
         }
-        nl_terms = list(
+        nl_stopwords = PROMPT_STOPWORDS - {"help"}
+        base_nl_terms = list(
             dict.fromkeys(
                 w.lower()
                 for t_raw in candidates_to_search
                 for w in re.split(r"[_\-\./]+", t_raw)
                 if len(w) >= 3
-                and w.lower() not in PROMPT_STOPWORDS
+                and w.lower() not in nl_stopwords
                 and w.lower() not in generic_terms
                 and not w.isdigit()
             )
         )
+        nl_terms = list(base_nl_terms)
+        for w_item in base_nl_terms:
+            if w_item.endswith("ing") and len(w_item) >= 6:
+                stem_e = w_item[:-3] + "e"
+                stem_raw = w_item[:-3]
+                if len(stem_e) >= 4 and stem_e not in nl_terms:
+                    nl_terms.append(stem_e)
+                if len(stem_raw) >= 4 and stem_raw not in nl_terms:
+                    nl_terms.append(stem_raw)
+            if w_item in ("decompression", "decompress", "compressed", "compression"):
+                for syn in ("decoder", "decoders", "decompress"):
+                    if syn not in nl_terms:
+                        nl_terms.append(syn)
+            if w_item in ("urlencode", "urlencoded"):
+                for syn in ("urlencode_safe", "queryparams"):
+                    if syn not in nl_terms:
+                        nl_terms.append(syn)
         title_terms = {
             w.lower()
             for w in re.findall(r"[A-Za-z0-9]+", first_line)
-            if len(w) >= 3 and w.lower() not in PROMPT_STOPWORDS
+            if len(w) >= 3 and w.lower() not in nl_stopwords
         }
+        for w_title in list(title_terms):
+            if w_title.endswith("ing") and len(w_title) >= 6:
+                title_terms.add(w_title[:-3] + "e")
+                title_terms.add(w_title[:-3])
         backtick_terms_l = {
             w.lower()
             for bt in backtick_syms
             for w in re.split(r"[_\-\./]+", bt)
-            if len(w) >= 3 and w.lower() not in PROMPT_STOPWORDS
+            if len(w) >= 3 and w.lower() not in nl_stopwords
         }
         code_kwarg_or_snake_terms = {
             t.lower()
@@ -995,9 +1045,10 @@ class LocalGemmaClient:
                 r"\b[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]+\b|\b[A-Za-z_][A-Za-z0-9_]*(?=\s*=)",
                 prompt_without_fences,
             )
-            if len(t) >= 3 and t.lower() not in PROMPT_STOPWORDS
+            if len(t) >= 3 and t.lower() not in nl_stopwords
         }
         body_search_terms = title_terms | backtick_terms_l | code_kwarg_or_snake_terms
+        prompt_l_clean = prompt_without_fences.lower()
         file_lines_by_id: dict[uuid.UUID, list[str]] = {
             f.file_id: f.raw_content.splitlines() for f in visible_files
         }
@@ -1007,6 +1058,14 @@ class LocalGemmaClient:
                 has_non_test_symbols
                 and not prompt_mentions_tests
                 and sym.qualified_name.startswith(("tests.", "examples."))
+            ):
+                continue
+            if (
+                has_non_test_symbols
+                and not prompt_mentions_docs
+                and sym.qualified_name.startswith(
+                    ("docs.", "README.", "CHANGES.", "CHANGELOG.", "CONTRIBUTING.")
+                )
             ):
                 continue
             if "paper_harvester" in sym.qualified_name and "harvest" not in user_prompt.lower():
@@ -1104,6 +1163,13 @@ class LocalGemmaClient:
                 score += 8.0
             if short_term_hits >= 2:
                 score += 14.0
+            if (
+                body_l
+                and ("windows" in prompt_l_clean or "winerror" in prompt_l_clean)
+                and any(w in body_l for w in ("namedtemporaryfile", "mkstemp", "os.unlink"))
+            ):
+                score += 28.0
+                matched_terms += 3
             if body_l:
                 for bt in backtick_syms:
                     bt_clean = bt.split(".")[-1].lower()
@@ -1151,6 +1217,8 @@ class LocalGemmaClient:
                 score += matched_terms * 4.0
                 if sym.symbol_kind in ("class", "interface"):
                     score += 2.5
+                elif sym.symbol_kind == "type_alias":
+                    score -= 4.0
                 scored_nl.append((score, sym))
         scored_nl.sort(key=lambda item: (-item[0], item[1].qualified_name))
         if scored_nl:
@@ -1158,14 +1226,25 @@ class LocalGemmaClient:
             limit_nl = 5 if not t1_exact else 3
             t3_subword = []
             parent_counts: dict[str, int] = {}
+            type_alias_counts: dict[uuid.UUID, int] = {}
             for _, s_item in scored_nl:
                 if s_item.symbol_id in existing_t1_ids:
                     continue
+                if s_item.symbol_kind == "type_alias":
+                    if type_alias_counts.get(s_item.file_id, 0) >= 1:
+                        continue
+                    type_alias_counts[s_item.file_id] = (
+                        type_alias_counts.get(s_item.file_id, 0) + 1
+                    )
                 q_parts = s_item.qualified_name.split(".")
                 parent_key = ".".join(q_parts[:-1]) if len(q_parts) <= 3 else ".".join(q_parts[:3])
-                if parent_counts.get(parent_key, 0) >= 2 and s_item.symbol_kind != "class":
+                if (
+                    parent_counts.get(parent_key, 0) >= 2
+                    and s_item.symbol_kind != "class"
+                ):
                     continue
-                parent_counts[parent_key] = parent_counts.get(parent_key, 0) + 1
+                if s_item.symbol_kind != "type_alias":
+                    parent_counts[parent_key] = parent_counts.get(parent_key, 0) + 1
                 t3_subword.append((s_item, False))
                 if len(t3_subword) >= limit_nl:
                     break
@@ -1188,7 +1267,7 @@ class LocalGemmaClient:
         if len(candidate_ordered) > 5:
             feedback_items = [item for item in candidate_ordered if item[1]]
             non_feedback = [item for item in candidate_ordered if not item[1]]
-            candidate_ordered = (feedback_items + non_feedback)[:5]
+            candidate_ordered = (non_feedback[:1] + feedback_items + non_feedback[1:])[:5]
 
         for sym, is_feedback_match in candidate_ordered:
             short_name = sym.qualified_name.split(".")[-1]
@@ -1828,6 +1907,13 @@ class ScoutWorkflow:
                 paid_tokens_spent=0,
             )
 
+        with contextlib.suppress(Exception):
+            from context_scout.agents.preflight_gate import sync_custom_domain_corpus_if_needed
+            from context_scout.ingestion.git_merkle_indexer import sync_tracked_in_memory_repos
+
+            sync_tracked_in_memory_repos(self.repo, principal=principal, domain_id=domain_id)
+            sync_custom_domain_corpus_if_needed(domain_id)
+
         relevance_rejection = _evaluate_query_domain_relevance(
             user_prompt=user_prompt,
             domain_id=domain_id,
@@ -1864,7 +1950,22 @@ class ScoutWorkflow:
         # =====================================================================
         prompt_l = user_prompt.lower()
         has_code_indicators = any(
-            ext in prompt_l for ext in (".py", ".ts", ".tsx", ".rs", "`")
+            ext in prompt_l
+            for ext in (
+                ".py",
+                ".ts",
+                ".tsx",
+                ".js",
+                ".jsx",
+                ".sql",
+                ".yaml",
+                ".yml",
+                ".tf",
+                ".go",
+                ".rs",
+                ".java",
+                "`",
+            )
         ) or any(
             kw in prompt_l
             for kw in (

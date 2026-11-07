@@ -7,6 +7,7 @@ lora_adapter_path: "domains/trading_code_scout/adapters/gemma4_26b_code_scout"
 embedding_model_id: "google/embeddinggemma-2"
 embedding_dimensions: 768
 mcp_read_tools_allowed:
+  - "code_repo_mcp:assemble_verified_context_pack"
   - "code_repo_mcp:search_code_trigram"
   - "code_repo_mcp:lookup_ast_symbol"
   - "code_repo_mcp:expand_ast_1hop_closure"

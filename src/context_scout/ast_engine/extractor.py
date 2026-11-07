@@ -1,7 +1,7 @@
 """Multi-language Tree-Sitter AST extractor for Python and TypeScript/TSX."""
 
 import re
-from typing import Final
+from typing import Final, Literal
 
 import tree_sitter_python as tspython
 import tree_sitter_typescript as tstypescript
@@ -85,16 +85,32 @@ def _derive_module_prefix(file_path: str) -> str:
     path = file_path.replace("\\", "/")
     if path.startswith("src/"):
         path = path[4:]
-    for ext in (".py", ".ts", ".tsx", ".js", ".jsx"):
+    for ext in (
+        ".py",
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".mjs",
+        ".cjs",
+        ".sql",
+        ".yaml",
+        ".yml",
+        ".tf",
+        ".go",
+        ".rs",
+        ".java",
+        ".md",
+    ):
         if path.endswith(ext):
             path = path[: -len(ext)]
             break
-    parts = [p for p in path.split("/") if p and p != "__init__"]
-    return ".".join(parts)
+    parts = [p.lstrip(".") for p in path.split("/") if p and p != "__init__"]
+    return ".".join(p for p in parts if p)
 
 
 class ASTExtractor:
-    """Extracts symbols and relations from Python and TypeScript source code using Tree-Sitter."""
+    """Extracts symbols and relations from polyglot enterprise repositories."""
 
     def __init__(self) -> None:
         self.py_lang = Language(tspython.language())
@@ -124,23 +140,37 @@ class ASTExtractor:
             return self._extract_python(
                 self._active_tree.root_node, code_bytes, module_prefix, file_path
             )
-        elif lang_lower in ("typescript", "ts"):
+        elif lang_lower in ("typescript", "ts", "javascript", "js", "mjs", "cjs"):
             self._active_tree = self.ts_parser.parse(code_bytes)
             return self._extract_typescript(
                 self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=False
             )
-        elif lang_lower in ("tsx",):
+        elif lang_lower in ("tsx", "jsx"):
             self._active_tree = self.tsx_parser.parse(code_bytes)
             return self._extract_typescript(
                 self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=True
             )
+        elif lang_lower == "sql" or file_path.endswith(".sql"):
+            return self._extract_sql(code, code_bytes, module_prefix)
+        elif lang_lower in ("yaml", "yml") or file_path.endswith((".yaml", ".yml")):
+            return self._extract_yaml(code, code_bytes, module_prefix, file_path)
+        elif lang_lower in ("terraform", "hcl", "tf") or file_path.endswith(".tf"):
+            return self._extract_terraform(code, code_bytes, module_prefix)
+        elif lang_lower in ("go", "golang") or file_path.endswith(".go"):
+            return self._extract_compiled_lang(code, code_bytes, module_prefix, "go")
+        elif lang_lower in ("rust", "rs") or file_path.endswith(".rs"):
+            return self._extract_compiled_lang(code, code_bytes, module_prefix, "rust")
+        elif lang_lower == "java" or file_path.endswith(".java"):
+            return self._extract_compiled_lang(code, code_bytes, module_prefix, "java")
+        elif lang_lower in ("markdown", "md") or file_path.endswith(".md"):
+            return self._extract_markdown(code, code_bytes, module_prefix)
         else:
             if file_path.endswith(".py"):
                 self._active_tree = self.py_parser.parse(code_bytes)
                 return self._extract_python(
                     self._active_tree.root_node, code_bytes, module_prefix, file_path
                 )
-            elif file_path.endswith(".tsx"):
+            elif file_path.endswith((".tsx", ".jsx")):
                 self._active_tree = self.tsx_parser.parse(code_bytes)
                 return self._extract_typescript(
                     self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=True
@@ -1024,3 +1054,383 @@ class ASTExtractor:
                             )
                         )
             stack.extend(curr.children)
+
+    def _extract_sql(
+        self,
+        code: str,
+        code_bytes: bytes,
+        module_prefix: str,
+    ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
+        """Extracts DDL tables, functions, views, policies, and FK edges from SQL files."""
+        _ = code_bytes
+        symbols: list[ParsedSymbol] = []
+        edges: list[ParsedEdge] = []
+        lines = code.splitlines()
+        line_offsets: list[int] = [0]
+        for ln in lines:
+            line_offsets.append(line_offsets[-1] + len(ln.encode("utf-8")) + 1)
+
+        stmt_pattern = re.compile(
+            r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+|UNIQUE\s+)?"
+            r"(TABLE|FUNCTION|PROCEDURE|VIEW|POLICY|INDEX)\s+"
+            r"(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_.\"]+)"
+            r"(?:\s+ON\s+([A-Za-z0-9_.\"]+))?",
+            re.IGNORECASE,
+        )
+        i = 0
+        total_lines = len(lines)
+        while i < total_lines:
+            m = stmt_pattern.match(lines[i])
+            if not m:
+                i += 1
+                continue
+            ddl_type = m.group(1).upper()
+            raw_name = m.group(2).strip('"').split(".")[-1]
+            on_table = m.group(3).strip('"').split(".")[-1] if m.group(3) else None
+            start_line = i + 1
+            end_idx = i
+            while end_idx < total_lines and ";" not in lines[end_idx]:
+                end_idx += 1
+            end_line = min(total_lines, end_idx + 1)
+            block_text = "\n".join(lines[i:end_line])
+            sig = lines[i].strip()
+            qual = f"{module_prefix}.{raw_name}" if module_prefix else raw_name
+
+            sym_kind: Literal["function", "class", "method", "interface", "type_alias"]
+            if ddl_type == "TABLE":
+                sym_kind = "class"
+            elif ddl_type in ("FUNCTION", "PROCEDURE"):
+                sym_kind = "function"
+            elif ddl_type == "VIEW":
+                sym_kind = "interface"
+            elif ddl_type == "POLICY":
+                sym_kind = "method"
+            else:
+                sym_kind = "type_alias"
+
+            symbols.append(
+                ParsedSymbol(
+                    name=raw_name,
+                    qualified_name=qual,
+                    symbol_kind=sym_kind,
+                    start_line=start_line,
+                    end_line=end_line,
+                    start_byte=line_offsets[start_line - 1],
+                    end_byte=line_offsets[min(end_line, len(line_offsets) - 1)],
+                    signature=sig,
+                    signature_skeleton=sig,
+                    docstring="",
+                    contextual_summary=f"SQL {ddl_type} {raw_name}: {sig}",
+                )
+            )
+            if on_table:
+                target_q = f"{module_prefix}.{on_table}" if module_prefix else on_table
+                edges.append(
+                    ParsedEdge(
+                        source_qualified_name=qual,
+                        target_qualified_name=target_q,
+                        edge_kind="USES_TYPE",
+                    )
+                )
+            for ref_m in re.finditer(
+                r"REFERENCES\s+([A-Za-z0-9_.\"]+)", block_text, flags=re.IGNORECASE
+            ):
+                ref_tbl = ref_m.group(1).strip('"').split(".")[-1]
+                target_q = f"{module_prefix}.{ref_tbl}" if module_prefix else ref_tbl
+                edges.append(
+                    ParsedEdge(
+                        source_qualified_name=qual,
+                        target_qualified_name=target_q,
+                        edge_kind="USES_TYPE",
+                    )
+                )
+            i = max(i + 1, end_idx + 1)
+        return symbols, edges
+
+    def _extract_yaml(
+        self,
+        code: str,
+        code_bytes: bytes,
+        module_prefix: str,
+        file_path: str,
+    ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
+        """Extracts GitLab CI jobs, K8s manifests, Compose services, and YAML top-level blocks."""
+        _ = (code_bytes, file_path)
+        symbols: list[ParsedSymbol] = []
+        edges: list[ParsedEdge] = []
+        lines = code.splitlines()
+        if not lines:
+            return symbols, edges
+        line_offsets: list[int] = [0]
+        for ln in lines:
+            line_offsets.append(line_offsets[-1] + len(ln.encode("utf-8")) + 1)
+
+        top_keys: list[tuple[str, int]] = []
+        key_re = re.compile(r"^([A-Za-z0-9_.-]+)\s*:")
+        for idx, line in enumerate(lines):
+            if line.startswith((" ", "\t", "#", "---")):
+                continue
+            km = key_re.match(line)
+            if km:
+                top_keys.append((km.group(1), idx + 1))
+
+        for k_idx, (key_name, start_line) in enumerate(top_keys):
+            end_line = (
+                top_keys[k_idx + 1][1] - 1 if k_idx + 1 < len(top_keys) else len(lines)
+            )
+            while end_line > start_line and not lines[end_line - 1].strip():
+                end_line -= 1
+            block_lines = lines[start_line - 1 : end_line]
+            block_text = "\n".join(block_lines)
+            qual = f"{module_prefix}.{key_name}" if module_prefix else key_name
+            sig = f"{key_name}:"
+            summary_parts = [f"YAML block {key_name}"]
+            sub_pat = r"^\s{2,4}(stage|image|kind|extends)\s*:\s*(.+)$"
+            for sub_m in re.finditer(sub_pat, block_text, re.M):
+                summary_parts.append(f"{sub_m.group(1)}={sub_m.group(2).strip()}")
+            symbols.append(
+                ParsedSymbol(
+                    name=key_name,
+                    qualified_name=qual,
+                    symbol_kind="function" if "script:" in block_text else "type_alias",
+                    start_line=start_line,
+                    end_line=max(start_line, end_line),
+                    start_byte=line_offsets[start_line - 1],
+                    end_byte=line_offsets[min(max(start_line, end_line), len(line_offsets) - 1)],
+                    signature=sig,
+                    signature_skeleton=sig,
+                    docstring="",
+                    contextual_summary=" | ".join(summary_parts),
+                )
+            )
+            ext_pat = r"^\s+(extends|stage)\s*:\s*([A-Za-z0-9_.-]+)"
+            for ext_m in re.finditer(ext_pat, block_text, re.M):
+                dep_kind = ext_m.group(1).strip()
+                dep_name = ext_m.group(2).strip()
+                target_q = f"{module_prefix}.{dep_name}" if module_prefix else dep_name
+                edges.append(
+                    ParsedEdge(
+                        source_qualified_name=qual,
+                        target_qualified_name=target_q,
+                        edge_kind="INHERITS" if dep_kind == "extends" else "USES_TYPE",
+                    )
+                )
+        return symbols, edges
+
+    def _extract_terraform(
+        self,
+        code: str,
+        code_bytes: bytes,
+        module_prefix: str,
+    ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
+        """Extracts Terraform/HCL resource, module, variable, output, and data blocks."""
+        _ = code_bytes
+        symbols: list[ParsedSymbol] = []
+        edges: list[ParsedEdge] = []
+        lines = code.splitlines()
+        line_offsets: list[int] = [0]
+        for ln in lines:
+            line_offsets.append(line_offsets[-1] + len(ln.encode("utf-8")) + 1)
+
+        tf_re = re.compile(
+            r'^\s*(resource|data|module|variable|output)\s+"([^"]+)"(?:\s+"([^"]+)")?\s*\{'
+        )
+        i = 0
+        total_lines = len(lines)
+        while i < total_lines:
+            m = tf_re.match(lines[i])
+            if not m:
+                i += 1
+                continue
+            block_kind = m.group(1)
+            first_label = m.group(2)
+            second_label = m.group(3)
+            sym_name = f"{first_label}.{second_label}" if second_label else first_label
+            qual = f"{module_prefix}.{sym_name}" if module_prefix else sym_name
+            start_line = i + 1
+            brace_depth = lines[i].count("{") - lines[i].count("}")
+            end_idx = i
+            while end_idx + 1 < total_lines and brace_depth > 0:
+                end_idx += 1
+                brace_depth += lines[end_idx].count("{") - lines[end_idx].count("}")
+            end_line = end_idx + 1
+            block_text = "\n".join(lines[i:end_line])
+            sig = lines[i].strip()
+            sym_kind: Literal["function", "class", "method", "interface", "type_alias"] = (
+                "class"
+                if block_kind == "resource"
+                else ("interface" if block_kind == "module" else "type_alias")
+            )
+            symbols.append(
+                ParsedSymbol(
+                    name=second_label or first_label,
+                    qualified_name=qual,
+                    symbol_kind=sym_kind,
+                    start_line=start_line,
+                    end_line=end_line,
+                    start_byte=line_offsets[start_line - 1],
+                    end_byte=line_offsets[min(end_line, len(line_offsets) - 1)],
+                    signature=sig,
+                    signature_skeleton=sig,
+                    docstring="",
+                    contextual_summary=f"Terraform {block_kind} {sym_name}: {sig}",
+                )
+            )
+            for var_ref in re.finditer(r"\bvar\.([A-Za-z0-9_-]+)", block_text):
+                v_name = var_ref.group(1)
+                t_qual = f"{module_prefix}.{v_name}" if module_prefix else v_name
+                edges.append(
+                    ParsedEdge(
+                        source_qualified_name=qual,
+                        target_qualified_name=t_qual,
+                        edge_kind="USES_TYPE",
+                    )
+                )
+            i = max(i + 1, end_idx + 1)
+        return symbols, edges
+
+    def _extract_compiled_lang(
+        self,
+        code: str,
+        code_bytes: bytes,
+        module_prefix: str,
+        lang: str,
+    ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
+        """Extracts structs, classes, interfaces, traits, and functions from Go, Rust, and Java."""
+        _ = code_bytes
+        symbols: list[ParsedSymbol] = []
+        edges: list[ParsedEdge] = []
+        lines = code.splitlines()
+        line_offsets: list[int] = [0]
+        for ln in lines:
+            line_offsets.append(line_offsets[-1] + len(ln.encode("utf-8")) + 1)
+
+        if lang == "go":
+            decl_re = re.compile(
+                r"^\s*(?:func\s+(?:\([^)]+\)\s+)?([A-Za-z_][A-Za-z0-9_]*)|type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(struct|interface))"
+            )
+        elif lang == "rust":
+            decl_re = re.compile(
+                r"^\s*(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?(?:fn\s+([A-Za-z_][A-Za-z0-9_]*)|(?:struct|enum|trait)\s+([A-Za-z_][A-Za-z0-9_]*))"
+            )
+        else:
+            decl_re = re.compile(
+                r"^\s*(?:public|private|protected|static|final|abstract|\s)*"
+                r"(?:(?:class|interface|enum)\s+([A-Za-z_][A-Za-z0-9_]*)|"
+                r"[A-Za-z0-9_<>\[\]]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\{)"
+            )
+
+        i = 0
+        total_lines = len(lines)
+        while i < total_lines:
+            m = decl_re.match(lines[i])
+            if not m:
+                i += 1
+                continue
+            fn_name = m.group(1)
+            type_name = m.group(2)
+            sym_name = fn_name or type_name or "symbol"
+            is_type = bool(type_name and not fn_name)
+            if lang == "java" and m.group(1):
+                is_type = True
+                sym_name = m.group(1)
+            elif lang == "java" and m.group(2):
+                is_type = False
+                sym_name = m.group(2)
+            start_line = i + 1
+            brace_depth = lines[i].count("{") - lines[i].count("}")
+            end_idx = i
+            while end_idx + 1 < total_lines and (
+                brace_depth > 0 or (end_idx == i and "{" not in lines[i])
+            ):
+                end_idx += 1
+                brace_depth += lines[end_idx].count("{") - lines[end_idx].count("}")
+                if end_idx - i > 200:
+                    break
+            end_line = end_idx + 1
+            sig = lines[i].strip()
+            qual = f"{module_prefix}.{sym_name}" if module_prefix else sym_name
+            kind_label = "type" if is_type else "function"
+            symbols.append(
+                ParsedSymbol(
+                    name=sym_name,
+                    qualified_name=qual,
+                    symbol_kind="class" if is_type else "function",
+                    start_line=start_line,
+                    end_line=end_line,
+                    start_byte=line_offsets[start_line - 1],
+                    end_byte=line_offsets[min(end_line, len(line_offsets) - 1)],
+                    signature=sig,
+                    signature_skeleton=sig,
+                    docstring="",
+                    contextual_summary=f"{lang} {kind_label} {sym_name}: {sig}",
+                )
+            )
+            i = max(i + 1, end_idx + 1 if not is_type else i + 1)
+        return symbols, edges
+
+    def _extract_markdown(
+        self,
+        code: str,
+        code_bytes: bytes,
+        module_prefix: str,
+    ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
+        """Extracts navigable heading sections and backticked symbol references from Markdown."""
+        _ = code_bytes
+        symbols: list[ParsedSymbol] = []
+        edges: list[ParsedEdge] = []
+        lines = code.splitlines()
+        if not lines:
+            return symbols, edges
+        line_offsets: list[int] = [0]
+        for ln in lines:
+            line_offsets.append(line_offsets[-1] + len(ln.encode("utf-8")) + 1)
+
+        headings: list[tuple[str, str, int]] = []
+        h_re = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
+        in_fence = False
+        for idx, line in enumerate(lines):
+            if line.strip().startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            hm = h_re.match(line)
+            if hm:
+                raw_title = hm.group(2).strip()
+                slug = re.sub(r"[^A-Za-z0-9_]+", "_", raw_title).strip("_") or f"section_{idx + 1}"
+                headings.append((slug[:64], raw_title, idx + 1))
+
+        for h_idx, (slug, raw_title, start_line) in enumerate(headings):
+            end_line = (
+                headings[h_idx + 1][2] - 1 if h_idx + 1 < len(headings) else len(lines)
+            )
+            qual = f"{module_prefix}.{slug}" if module_prefix else slug
+            section_text = "\n".join(lines[start_line - 1 : end_line])
+            symbols.append(
+                ParsedSymbol(
+                    name=slug,
+                    qualified_name=qual,
+                    symbol_kind="interface",
+                    start_line=start_line,
+                    end_line=max(start_line, end_line),
+                    start_byte=line_offsets[start_line - 1],
+                    end_byte=line_offsets[min(max(start_line, end_line), len(line_offsets) - 1)],
+                    signature=f"# {raw_title}",
+                    signature_skeleton=f"# {raw_title}",
+                    docstring=raw_title,
+                    contextual_summary=f"Markdown section '{raw_title}'",
+                )
+            )
+            for bt_m in re.finditer(r"`([A-Za-z_][A-Za-z0-9_.]*)`", section_text):
+                ref_tok = bt_m.group(1)
+                if len(ref_tok) >= 4:
+                    edges.append(
+                        ParsedEdge(
+                            source_qualified_name=qual,
+                            target_qualified_name=ref_tok,
+                            edge_kind="USES_TYPE",
+                        )
+                    )
+        return symbols, edges
+

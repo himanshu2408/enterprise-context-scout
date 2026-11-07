@@ -125,6 +125,7 @@ class DomainAuthorizationGate:
 
     TOOL_ALIASES: Final[dict[str, dict[str, str]]] = {
         "trading_code_scout": {
+            "assemble_verified_context_pack": "code_repo_mcp:grep_repo",
             "search_code_trigram": "code_repo_mcp:grep_repo",
             "lookup_ast_symbol": "code_repo_mcp:search_ast_symbols",
             "expand_ast_1hop_closure": "code_repo_mcp:get_symbol_callers",

@@ -23,7 +23,28 @@ from context_scout.db.repositories import (
 )
 from context_scout.schemas.contracts import PrincipalContext
 
-CODE_EXTENSIONS: Final[set[str]] = {".py", ".ts", ".tsx"}
+CODE_EXTENSIONS: Final[set[str]] = {
+    ".py",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".sql",
+    ".yaml",
+    ".yml",
+    ".tf",
+    ".go",
+    ".rs",
+    ".java",
+}
+
+
+def compute_git_blob_sha(raw_bytes: bytes) -> str:
+    """Computes the exact 40-hex Git blob SHA-1 for arbitrary file bytes."""
+    header = f"blob {len(raw_bytes)}\x00".encode("ascii")
+    return hashlib.sha1(header + raw_bytes).hexdigest()
 
 
 def generate_deterministic_embedding(text: str, dim: int = 768) -> list[float]:
@@ -45,7 +66,23 @@ LANG_MAP: Final[dict[str, str]] = {
     ".py": "python",
     ".tsx": "tsx",
     ".ts": "typescript",
+    ".jsx": "jsx",
+    ".js": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".sql": "sql",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".tf": "terraform",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
 }
+
+_SYMBOL_EMBEDDING_CACHE: dict[tuple[str, str], list[float]] = {}
+_TRACKED_IN_MEMORY_REPOS: dict[
+    tuple[int, str, str], tuple[Path, list[str] | None, str]
+] = {}
 
 SKIP_BINARY_EXTENSIONS: Final[set[str]] = {
     ".png",
@@ -80,6 +117,13 @@ SKIP_BINARY_EXTENSIONS: Final[set[str]] = {
     ".ttf",
     ".otf",
 }
+
+
+# Cache immutable git ls-tree -r output by (resolved_repo_dir, commit_sha).
+_COMMIT_TREE_CACHE: dict[tuple[str, str], dict[str, str]] = {}
+
+# Cache working-tree dirty file blob SHAs by (abs_path, st_mtime_ns, st_size).
+_WT_BLOB_CACHE: dict[tuple[str, int, int], str] = {}
 
 
 class MerkleSyncStats(BaseModel):
@@ -144,59 +188,153 @@ class GitMerkleIndexer:
         self,
         extractor: ASTExtractor | None = None,
         embedder: Any | None = None,
-        use_semantic_embeddings: bool = False,
+        use_semantic_embeddings: bool = True,
+        include_working_tree: bool = True,
     ) -> None:
         self.extractor = extractor or ASTExtractor()
         self.embedder = embedder
         self.use_semantic_embeddings = use_semantic_embeddings
+        self.include_working_tree = include_working_tree
 
     @staticmethod
     def _is_indexable_text_path(file_path: str) -> bool:
         suffix = Path(file_path).suffix.lower()
         return suffix not in SKIP_BINARY_EXTENSIONS
 
-    def _compute_symbol_embeddings(self, symbols: list[ParsedSymbol]) -> list[list[float]]:
+    def _compute_symbol_embeddings(
+        self,
+        symbols: list[ParsedSymbol],
+        blob_sha: str = "",
+        *,
+        git_blob_sha: str = "",
+    ) -> list[list[float]]:
+        blob_sha = blob_sha or git_blob_sha
         if not symbols:
             return []
         if self.use_semantic_embeddings and self.embedder is not None:
-            texts = [
-                f"{s.qualified_name} {s.signature_skeleton} {s.contextual_summary}".strip()
-                for s in symbols
-            ]
-            batch_vecs = self.embedder.embed_batch(texts, is_query=False)
-            if len(batch_vecs) == len(symbols):
-                return [[float(x) for x in v] for v in batch_vecs]
-        return [
-            generate_deterministic_embedding(s.signature_skeleton + " " + s.docstring)
-            for s in symbols
-        ]
+            results: list[list[float] | None] = [None] * len(symbols)
+            missing_indices: list[int] = []
+            missing_texts: list[str] = []
+            for idx, s in enumerate(symbols):
+                cache_key = (blob_sha, s.qualified_name)
+                if blob_sha and cache_key in _SYMBOL_EMBEDDING_CACHE:
+                    results[idx] = _SYMBOL_EMBEDDING_CACHE[cache_key]
+                else:
+                    missing_indices.append(idx)
+                    missing_texts.append(
+                        f"{s.qualified_name} {s.signature_skeleton} {s.contextual_summary}".strip()
+                    )
+            if missing_texts:
+                batch_vecs = self.embedder.embed_batch(missing_texts, is_query=False)
+                if len(batch_vecs) == len(missing_indices):
+                    for m_idx, vec in zip(missing_indices, batch_vecs, strict=True):
+                        flt_vec = [float(x) for x in vec]
+                        results[m_idx] = flt_vec
+                        if blob_sha:
+                            _SYMBOL_EMBEDDING_CACHE[(blob_sha, symbols[m_idx].qualified_name)] = (
+                                flt_vec
+                            )
+            if all(r is not None for r in results):
+                return [r for r in results if r is not None]
+        out_vecs: list[list[float]] = []
+        for s in symbols:
+            cache_key = (blob_sha, s.qualified_name)
+            if blob_sha and cache_key in _SYMBOL_EMBEDDING_CACHE:
+                out_vecs.append(_SYMBOL_EMBEDDING_CACHE[cache_key])
+            else:
+                det_v = generate_deterministic_embedding(s.signature_skeleton + " " + s.docstring)
+                if blob_sha:
+                    _SYMBOL_EMBEDDING_CACHE[cache_key] = det_v
+                out_vecs.append(det_v)
+        return out_vecs
 
-    def get_git_tree(self, repo_dir: Path, ref: str = "HEAD") -> tuple[str, dict[str, str]]:
+    def get_git_tree(
+        self,
+        repo_dir: Path,
+        ref: str = "HEAD",
+        include_working_tree: bool | None = None,
+    ) -> tuple[str, dict[str, str]]:
         """Extracts current commit SHA and mapping of {file_path: blob_sha} via git ls-tree."""
         commit_sha = _resolve_commit_sha(repo_dir, ref)
+        cache_key = (str(repo_dir.resolve()), commit_sha)
+        cached_base = _COMMIT_TREE_CACHE.get(cache_key)
+        if cached_base is not None:
+            tree: dict[str, str] = dict(cached_base)
+        else:
+            ls_cmd = subprocess.run(
+                ["git", "ls-tree", "-r", ref],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
 
-        ls_cmd = subprocess.run(
-            ["git", "ls-tree", "-r", ref],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            check=True,
+            tree = {}
+            for line in ls_cmd.stdout.strip().splitlines():
+                if not line:
+                    continue
+                parts = line.split("\t", 1)
+                if len(parts) != 2:
+                    continue
+                meta, file_path = parts
+                if not self._is_indexable_text_path(file_path):
+                    continue
+                meta_parts = meta.split()
+                if len(meta_parts) >= 3:
+                    blob_sha = meta_parts[2]
+                    tree[file_path] = blob_sha
+            _COMMIT_TREE_CACHE[cache_key] = dict(tree)
+
+        overlay_wt = (
+            self.include_working_tree if include_working_tree is None else include_working_tree
         )
-
-        tree: dict[str, str] = {}
-        for line in ls_cmd.stdout.strip().splitlines():
-            if not line:
-                continue
-            parts = line.split("\t", 1)
-            if len(parts) != 2:
-                continue
-            meta, file_path = parts
-            if not self._is_indexable_text_path(file_path):
-                continue
-            meta_parts = meta.split()
-            if len(meta_parts) >= 3:
-                blob_sha = meta_parts[2]
-                tree[file_path] = blob_sha
+        if overlay_wt and ref == "HEAD":
+            st_cmd = subprocess.run(
+                ["git", "--no-optional-locks", "status", "--porcelain", "-unormal"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if st_cmd.returncode == 0 and st_cmd.stdout.strip():
+                dirty_mutations: list[str] = []
+                for raw_ln in st_cmd.stdout.splitlines():
+                    if len(raw_ln) < 4:
+                        continue
+                    xy = raw_ln[:2]
+                    rel_part = raw_ln[3:].strip().strip('"')
+                    if " -> " in rel_part:
+                        old_rel, new_rel = rel_part.split(" -> ", 1)
+                        old_rel = old_rel.strip().strip('"')
+                        new_rel = new_rel.strip().strip('"')
+                        tree.pop(old_rel, None)
+                        dirty_mutations.append(f"D:{old_rel}")
+                        rel_part = new_rel
+                    if not self._is_indexable_text_path(rel_part):
+                        continue
+                    disk_f = repo_dir / rel_part
+                    if "D" in xy or not disk_f.exists():
+                        if rel_part in tree:
+                            tree.pop(rel_part, None)
+                            dirty_mutations.append(f"D:{rel_part}")
+                    elif disk_f.is_file():
+                        try:
+                            st = disk_f.stat()
+                            wt_key = (str(disk_f), st.st_mtime_ns, st.st_size)
+                            wt_blob = _WT_BLOB_CACHE.get(wt_key)
+                            if wt_blob is None:
+                                wt_blob = compute_git_blob_sha(disk_f.read_bytes())
+                                _WT_BLOB_CACHE[wt_key] = wt_blob
+                            if tree.get(rel_part) != wt_blob:
+                                tree[rel_part] = wt_blob
+                                dirty_mutations.append(f"M:{rel_part}:{wt_blob}")
+                        except Exception:
+                            pass
+                if dirty_mutations:
+                    wt_digest = hashlib.sha1(
+                        "|".join(sorted(dirty_mutations)).encode("utf-8")
+                    ).hexdigest()
+                    commit_sha = f"{commit_sha[:32]}dddd{wt_digest[:4]}"
 
         return commit_sha, tree
 
@@ -218,10 +356,20 @@ class GitMerkleIndexer:
 
     @staticmethod
     def _read_blob_or_disk(
-        repo_dir: Path, file_path: str, blob_sha: str, ref: str = "HEAD"
+        repo_dir: Path,
+        file_path: str,
+        blob_sha: str,
+        ref: str = "HEAD",
+        prefer_working_tree: bool = False,
     ) -> str | None:
-        """Read immutable Git blob content via git cat-file, falling back to working tree."""
+        """Read immutable Git blob content via git cat-file or live working-tree file."""
         _ = ref
+        disk_file = repo_dir / file_path
+        if prefer_working_tree and disk_file.is_file():
+            try:
+                return disk_file.read_text(encoding="utf-8", errors="replace").replace("\x00", "")
+            except Exception:
+                pass
         if blob_sha:
             proc = subprocess.run(
                 ["git", "-C", str(repo_dir), "cat-file", "-p", blob_sha],
@@ -230,7 +378,6 @@ class GitMerkleIndexer:
             )
             if proc.returncode == 0:
                 return proc.stdout.decode("utf-8", errors="replace").replace("\x00", "")
-        disk_file = repo_dir / file_path
         if not disk_file.exists():
             return None
         return disk_file.read_text(encoding="utf-8", errors="replace").replace("\x00", "")
@@ -245,11 +392,25 @@ class GitMerkleIndexer:
         allowed_scopes: list[str] | None = None,
         ref: str = "HEAD",
         isolate_by_commit: bool = False,
+        include_working_tree: bool | None = None,
     ) -> MerkleSyncStats:
         """Incrementally indexes git repository into InMemoryRLSRepository."""
         start_time = time.perf_counter()
-        commit_sha, current_tree = self.get_git_tree(repo_dir, ref)
+        use_wt = (
+            (self.include_working_tree if include_working_tree is None else include_working_tree)
+            and ref == "HEAD"
+            and not isolate_by_commit
+        )
+        commit_sha, current_tree = self.get_git_tree(
+            repo_dir, ref, include_working_tree=use_wt
+        )
         effective_repo_name = f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
+        if ref == "HEAD" and not isolate_by_commit:
+            _TRACKED_IN_MEMORY_REPOS[(id(repo), domain_id, effective_repo_name)] = (
+                repo_dir.resolve(),
+                allowed_scopes,
+                commit_sha,
+            )
         existing_hashes = repo.get_file_blob_hashes(principal, domain_id, effective_repo_name)
         existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
 
@@ -303,7 +464,9 @@ class GitMerkleIndexer:
 
         for file_path in to_index:
             blob_sha = current_tree[file_path]
-            raw_content = self._read_blob_or_disk(repo_dir, file_path, blob_sha, ref)
+            raw_content = self._read_blob_or_disk(
+                repo_dir, file_path, blob_sha, ref, prefer_working_tree=use_wt
+            )
             if raw_content is None:
                 continue
 
@@ -330,7 +493,7 @@ class GitMerkleIndexer:
 
             symbols, edges = self.extractor.parse_source(raw_content, lang, file_path=file_path)
             file_symbol_map: dict[str, UUID] = {}
-            symbol_embeddings = self._compute_symbol_embeddings(symbols)
+            symbol_embeddings = self._compute_symbol_embeddings(symbols, blob_sha=blob_sha)
 
             for parsed_sym, emb in zip(symbols, symbol_embeddings, strict=True):
                 sym_id = uuid4()
@@ -417,10 +580,18 @@ class GitMerkleIndexer:
         allowed_scopes: list[str] | None = None,
         ref: str = "HEAD",
         isolate_by_commit: bool = False,
+        include_working_tree: bool | None = None,
     ) -> MerkleSyncStats:
         """Incrementally indexes git repository into live PostgreSQL 17 under Forced RLS."""
         start_time = time.perf_counter()
-        commit_sha, current_tree = self.get_git_tree(repo_dir, ref)
+        use_wt = (
+            (self.include_working_tree if include_working_tree is None else include_working_tree)
+            and ref == "HEAD"
+            and not isolate_by_commit
+        )
+        commit_sha, current_tree = self.get_git_tree(
+            repo_dir, ref, include_working_tree=use_wt
+        )
         effective_repo_name = f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
         existing_hashes = repo.get_file_blob_hashes(conn, domain_id, effective_repo_name)
         existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
@@ -480,7 +651,9 @@ class GitMerkleIndexer:
 
         for file_path in to_index:
             blob_sha = current_tree[file_path]
-            raw_content = self._read_blob_or_disk(repo_dir, file_path, blob_sha, ref)
+            raw_content = self._read_blob_or_disk(
+                repo_dir, file_path, blob_sha, ref, prefer_working_tree=use_wt
+            )
             if raw_content is None:
                 continue
 
@@ -507,7 +680,7 @@ class GitMerkleIndexer:
 
             symbols, edges = self.extractor.parse_source(raw_content, lang, file_path=file_path)
             file_symbol_map: dict[str, UUID] = {}
-            symbol_embeddings = self._compute_symbol_embeddings(symbols)
+            symbol_embeddings = self._compute_symbol_embeddings(symbols, blob_sha=blob_sha)
 
             for parsed_sym, emb in zip(symbols, symbol_embeddings, strict=True):
                 sym_id = uuid4()
@@ -583,9 +756,46 @@ class GitMerkleIndexer:
         )
 
 
+def sync_tracked_in_memory_repos(
+    repo: Any, principal: PrincipalContext, domain_id: str
+) -> list[MerkleSyncStats]:
+    """Automatically re-syncs tracked InMemoryRLSRepository Git repos on HEAD/WT change."""
+    if not isinstance(repo, InMemoryRLSRepository):
+        return []
+    matching_keys = [
+        k for k in list(_TRACKED_IN_MEMORY_REPOS.keys()) if k[0] == id(repo) and k[1] == domain_id
+    ]
+    if not matching_keys:
+        return []
+    indexer = GitMerkleIndexer()
+    results: list[MerkleSyncStats] = []
+    for key in matching_keys:
+        _repo_id, _dom_id, repo_name = key
+        repo_dir, allowed_scopes, _last_sha = _TRACKED_IN_MEMORY_REPOS[key]
+        if not repo_dir.exists() or not (repo_dir / ".git").exists():
+            continue
+        try:
+            st = indexer.sync_in_memory(
+                repo_dir=repo_dir,
+                repo=repo,
+                principal=principal,
+                domain_id=domain_id,
+                repo_name=repo_name,
+                allowed_scopes=allowed_scopes,
+                ref="HEAD",
+                isolate_by_commit=False,
+            )
+            results.append(st)
+        except Exception:
+            pass
+    return results
+
+
 __all__ = [
     "CODE_EXTENSIONS",
     "GitMerkleIndexer",
     "MerkleSyncStats",
+    "compute_git_blob_sha",
     "generate_deterministic_embedding",
+    "sync_tracked_in_memory_repos",
 ]
