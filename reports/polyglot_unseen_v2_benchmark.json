@@ -69,7 +69,7 @@
   "estimated_full_repo_tokens": 7486164,
   "incremental_sync_check": {
     "domain_id": "polyglot_unseen_v2",
-    "sync_latency_ms": 1478.62,
+    "sync_latency_ms": 1541.0,
     "synced": false,
     "added": 0,
     "modified": 0,
@@ -80,22 +80,22 @@
     "edges_indexed": 290759
   },
   "queries_evaluated": 60,
-  "file_recall_at_5_count": 58,
-  "file_recall_at_5_pct": 96.67,
-  "symbol_recall_at_5_count": 57,
-  "symbol_recall_at_5_pct": 95.0,
+  "file_recall_at_5_count": 59,
+  "file_recall_at_5_pct": 98.33,
+  "symbol_recall_at_5_count": 59,
+  "symbol_recall_at_5_pct": 98.33,
   "preflight_pass_count": 60,
   "preflight_pass_pct": 100.0,
-  "verbatim_slices_checked": 366,
-  "verbatim_slices_exact": 366,
+  "verbatim_slices_checked": 371,
+  "verbatim_slices_exact": 371,
   "verbatim_faithfulness_pct": 100.0,
   "median_without_scout_input_tokens": 32486,
-  "median_with_scout_input_tokens": 2000,
-  "total_without_scout_input_tokens": 1921818,
-  "total_with_scout_input_tokens": 141016,
-  "median_agent_token_savings_pct": 92.64,
+  "median_with_scout_input_tokens": 1923,
+  "total_without_scout_input_tokens": 1926044,
+  "total_with_scout_input_tokens": 137162,
+  "median_agent_token_savings_pct": 92.66,
   "mean_token_savings_pct": 99.98,
-  "median_latency_ms": 199.5,
+  "median_latency_ms": 199.7,
   "out_of_scope_zero_cost_abstention": true,
   "prompt_injection_blocked": true,
   "task_results": [
@@ -115,7 +115,7 @@
       "agent_token_savings_pct": 98.18,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 3513.12
+      "latency_ms": 3588.39
     },
     {
       "task_index": 2,
@@ -133,7 +133,7 @@
       "agent_token_savings_pct": 93.99,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 147.2
+      "latency_ms": 157.36
     },
     {
       "task_index": 3,
@@ -151,7 +151,7 @@
       "agent_token_savings_pct": 96.18,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 175.81
+      "latency_ms": 182.29
     },
     {
       "task_index": 4,
@@ -169,7 +169,7 @@
       "agent_token_savings_pct": 88.04,
       "token_savings_pct": 99.92,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 228.0
+      "latency_ms": 231.62
     },
     {
       "task_index": 5,
@@ -187,7 +187,7 @@
       "agent_token_savings_pct": 98.05,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 164.69
+      "latency_ms": 171.0
     },
     {
       "task_index": 6,
@@ -205,7 +205,7 @@
       "agent_token_savings_pct": 96.41,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 739.9
+      "latency_ms": 764.47
     },
     {
       "task_index": 7,
@@ -223,7 +223,7 @@
       "agent_token_savings_pct": 86.31,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 7,
-      "latency_ms": 240.74
+      "latency_ms": 251.15
     },
     {
       "task_index": 8,
@@ -241,7 +241,7 @@
       "agent_token_savings_pct": 93.51,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 458.86
+      "latency_ms": 472.96
     },
     {
       "task_index": 9,
@@ -259,7 +259,7 @@
       "agent_token_savings_pct": 93.86,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 158.65
+      "latency_ms": 163.49
     },
     {
       "task_index": 10,
@@ -277,7 +277,7 @@
       "agent_token_savings_pct": 94.59,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 174.09
+      "latency_ms": 609.22
     },
     {
       "task_index": 11,
@@ -295,7 +295,7 @@
       "agent_token_savings_pct": 94.13,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 730.74
+      "latency_ms": 311.66
     },
     {
       "task_index": 12,
@@ -313,25 +313,25 @@
       "agent_token_savings_pct": 94.27,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 222.71
+      "latency_ms": 236.48
     },
     {
       "task_index": 13,
       "category": "repo_scoped_symbol_localization",
       "repo_name": "h11",
       "language": "python",
-      "target_file": "h11/fuzz/afl-server.py",
-      "target_symbol": "fuzz.afl-server.process_all",
+      "target_file": "h11/h11/_connection.py",
+      "target_symbol": "h11._connection.Connection._clean_up_response_headers_for_sending",
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
-      "pack_tokens": 501,
-      "with_scout_input_tokens": 1151,
-      "without_scout_input_tokens": 25361,
-      "agent_token_savings_pct": 95.46,
-      "token_savings_pct": 99.99,
-      "auto_expanded_1hop_slices": 1,
-      "latency_ms": 168.1
+      "pack_tokens": 3411,
+      "with_scout_input_tokens": 4061,
+      "without_scout_input_tokens": 47060,
+      "agent_token_savings_pct": 91.37,
+      "token_savings_pct": 99.95,
+      "auto_expanded_1hop_slices": 3,
+      "latency_ms": 188.22
     },
     {
       "task_index": 14,
@@ -349,7 +349,7 @@
       "agent_token_savings_pct": 82.1,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 168.84
+      "latency_ms": 177.83
     },
     {
       "task_index": 15,
@@ -367,7 +367,7 @@
       "agent_token_savings_pct": 85.37,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 156.17
+      "latency_ms": 589.31
     },
     {
       "task_index": 16,
@@ -385,7 +385,7 @@
       "agent_token_savings_pct": 87.62,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 684.77
+      "latency_ms": 263.47
     },
     {
       "task_index": 17,
@@ -403,7 +403,7 @@
       "agent_token_savings_pct": 94.35,
       "token_savings_pct": 99.96,
       "auto_expanded_1hop_slices": 14,
-      "latency_ms": 600.46
+      "latency_ms": 532.76
     },
     {
       "task_index": 18,
@@ -421,7 +421,7 @@
       "agent_token_savings_pct": 81.63,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 249.75
+      "latency_ms": 644.82
     },
     {
       "task_index": 19,
@@ -439,7 +439,7 @@
       "agent_token_savings_pct": 94.09,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 816.43
+      "latency_ms": 317.02
     },
     {
       "task_index": 20,
@@ -457,7 +457,7 @@
       "agent_token_savings_pct": 86.15,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 5,
-      "latency_ms": 175.81
+      "latency_ms": 165.62
     },
     {
       "task_index": 21,
@@ -475,7 +475,7 @@
       "agent_token_savings_pct": 94.45,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 189.64
+      "latency_ms": 184.95
     },
     {
       "task_index": 22,
@@ -493,7 +493,7 @@
       "agent_token_savings_pct": 97.03,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 142.93
+      "latency_ms": 144.98
     },
     {
       "task_index": 23,
@@ -511,25 +511,25 @@
       "agent_token_savings_pct": 92.66,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 156.46
+      "latency_ms": 162.73
     },
     {
       "task_index": 24,
       "category": "symptom_and_signature_discovery",
       "repo_name": "markdown-it-py",
       "language": "python",
-      "target_file": "markdown-it-py/benchmarking/conftest.py",
-      "target_symbol": "benchmarking.conftest.pytest_benchmark_update_machine_info",
+      "target_file": "markdown-it-py/markdown_it/_punycode.py",
+      "target_symbol": "markdown_it._punycode.map_domain",
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
-      "pack_tokens": 1358,
-      "with_scout_input_tokens": 2008,
-      "without_scout_input_tokens": 31116,
-      "agent_token_savings_pct": 93.55,
+      "pack_tokens": 1483,
+      "with_scout_input_tokens": 2133,
+      "without_scout_input_tokens": 30006,
+      "agent_token_savings_pct": 92.89,
       "token_savings_pct": 99.98,
-      "auto_expanded_1hop_slices": 1,
-      "latency_ms": 181.21
+      "auto_expanded_1hop_slices": 2,
+      "latency_ms": 607.11
     },
     {
       "task_index": 25,
@@ -547,7 +547,7 @@
       "agent_token_savings_pct": 89.22,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 556.24
+      "latency_ms": 168.12
     },
     {
       "task_index": 26,
@@ -565,7 +565,7 @@
       "agent_token_savings_pct": 95.8,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 153.76
+      "latency_ms": 162.19
     },
     {
       "task_index": 27,
@@ -583,7 +583,7 @@
       "agent_token_savings_pct": 96.29,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 190.75
+      "latency_ms": 199.7
     },
     {
       "task_index": 28,
@@ -601,25 +601,25 @@
       "agent_token_savings_pct": 85.21,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 204.29
+      "latency_ms": 215.92
     },
     {
       "task_index": 29,
       "category": "repo_scoped_symbol_localization",
       "repo_name": "packaging",
       "language": "python",
-      "target_file": "packaging/noxfile.py",
-      "target_symbol": "noxfile.Project",
+      "target_file": "packaging/src/packaging/_elffile.py",
+      "target_symbol": "packaging._elffile.ELFFile",
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
-      "pack_tokens": 1936,
-      "with_scout_input_tokens": 2586,
-      "without_scout_input_tokens": 10962,
-      "agent_token_savings_pct": 76.41,
-      "token_savings_pct": 99.97,
-      "auto_expanded_1hop_slices": 0,
-      "latency_ms": 285.17
+      "pack_tokens": 2982,
+      "with_scout_input_tokens": 3632,
+      "without_scout_input_tokens": 44774,
+      "agent_token_savings_pct": 91.89,
+      "token_savings_pct": 99.96,
+      "auto_expanded_1hop_slices": 3,
+      "latency_ms": 228.68
     },
     {
       "task_index": 30,
@@ -637,7 +637,7 @@
       "agent_token_savings_pct": 72.27,
       "token_savings_pct": 99.96,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 616.56
+      "latency_ms": 631.51
     },
     {
       "task_index": 31,
@@ -655,7 +655,7 @@
       "agent_token_savings_pct": 96.86,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 273.03
+      "latency_ms": 275.22
     },
     {
       "task_index": 32,
@@ -673,7 +673,7 @@
       "agent_token_savings_pct": 87.65,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 199.91
+      "latency_ms": 205.43
     },
     {
       "task_index": 33,
@@ -691,7 +691,7 @@
       "agent_token_savings_pct": 91.28,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 167.14
+      "latency_ms": 167.6
     },
     {
       "task_index": 34,
@@ -709,7 +709,7 @@
       "agent_token_savings_pct": 76.88,
       "token_savings_pct": 99.93,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 268.74
+      "latency_ms": 703.72
     },
     {
       "task_index": 35,
@@ -727,7 +727,7 @@
       "agent_token_savings_pct": 92.64,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 178.3
+      "latency_ms": 186.88
     },
     {
       "task_index": 36,
@@ -745,7 +745,7 @@
       "agent_token_savings_pct": 88.99,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 595.52
+      "latency_ms": 192.6
     },
     {
       "task_index": 37,
@@ -763,25 +763,25 @@
       "agent_token_savings_pct": 85.91,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 158.88
+      "latency_ms": 167.18
     },
     {
       "task_index": 38,
       "category": "cross_symbol_dependency_closure",
       "repo_name": "stamina",
       "language": "python",
-      "target_file": "stamina/noxfile.py",
-      "target_symbol": "noxfile._get_pkg",
+      "target_file": "stamina/src/stamina/_config.py",
+      "target_symbol": "stamina._config._Config",
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
-      "pack_tokens": 444,
-      "with_scout_input_tokens": 1094,
-      "without_scout_input_tokens": 14900,
-      "agent_token_savings_pct": 92.66,
-      "token_savings_pct": 99.99,
-      "auto_expanded_1hop_slices": 1,
-      "latency_ms": 169.47
+      "pack_tokens": 2140,
+      "with_scout_input_tokens": 2790,
+      "without_scout_input_tokens": 41714,
+      "agent_token_savings_pct": 93.31,
+      "token_savings_pct": 99.97,
+      "auto_expanded_1hop_slices": 8,
+      "latency_ms": 185.74
     },
     {
       "task_index": 39,
@@ -799,25 +799,25 @@
       "agent_token_savings_pct": 77.34,
       "token_savings_pct": 99.9,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 199.58
+      "latency_ms": 205.42
     },
     {
       "task_index": 40,
       "category": "symptom_and_signature_discovery",
       "repo_name": "structlog",
       "language": "python",
-      "target_file": "structlog/show_off.py",
-      "target_symbol": "show_off.make_call_stack_more_impressive",
+      "target_file": "structlog/src/structlog/_base.py",
+      "target_symbol": "structlog._base.BoundLoggerBase._process_event",
       "file_recall_at_5": true,
-      "symbol_recall_at_5": false,
+      "symbol_recall_at_5": true,
       "preflight_passed": true,
-      "pack_tokens": 1048,
-      "with_scout_input_tokens": 1698,
-      "without_scout_input_tokens": 37185,
-      "agent_token_savings_pct": 95.43,
-      "token_savings_pct": 99.99,
+      "pack_tokens": 2076,
+      "with_scout_input_tokens": 2726,
+      "without_scout_input_tokens": 48258,
+      "agent_token_savings_pct": 94.35,
+      "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 183.46
+      "latency_ms": 675.21
     },
     {
       "task_index": 41,
@@ -835,7 +835,7 @@
       "agent_token_savings_pct": 94.24,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 631.0
+      "latency_ms": 207.34
     },
     {
       "task_index": 42,
@@ -853,79 +853,79 @@
       "agent_token_savings_pct": 96.36,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 172.13
+      "latency_ms": 171.13
     },
     {
       "task_index": 43,
       "category": "polyglot_python_query",
       "repo_name": "tomli",
       "language": "python",
-      "target_file": "tomli/benchmark/run.py",
-      "target_symbol": "benchmark.run.benchmark",
+      "target_file": "tomli/fuzzer/fuzz.py",
+      "target_symbol": "fuzzer.fuzz.normalize_toml_obj",
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
-      "pack_tokens": 1660,
-      "with_scout_input_tokens": 2310,
-      "without_scout_input_tokens": 36788,
-      "agent_token_savings_pct": 93.72,
-      "token_savings_pct": 99.98,
-      "auto_expanded_1hop_slices": 4,
-      "latency_ms": 236.3
+      "pack_tokens": 1080,
+      "with_scout_input_tokens": 1730,
+      "without_scout_input_tokens": 13057,
+      "agent_token_savings_pct": 86.75,
+      "token_savings_pct": 99.99,
+      "auto_expanded_1hop_slices": 1,
+      "latency_ms": 187.18
     },
     {
       "task_index": 44,
       "category": "symptom_and_signature_discovery",
       "repo_name": "tomli-w",
       "language": "python",
-      "target_file": "tomli-w/benchmark/run.py",
-      "target_symbol": "benchmark.run.benchmark",
+      "target_file": "tomli-w/src/tomli_w/_writer.py",
+      "target_symbol": "tomli_w._writer.format_decimal",
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
-      "pack_tokens": 2199,
-      "with_scout_input_tokens": 2849,
-      "without_scout_input_tokens": 34815,
-      "agent_token_savings_pct": 91.82,
+      "pack_tokens": 2416,
+      "with_scout_input_tokens": 3066,
+      "without_scout_input_tokens": 33893,
+      "agent_token_savings_pct": 90.95,
       "token_savings_pct": 99.97,
-      "auto_expanded_1hop_slices": 5,
-      "latency_ms": 235.3
+      "auto_expanded_1hop_slices": 1,
+      "latency_ms": 192.43
     },
     {
       "task_index": 45,
       "category": "repo_scoped_symbol_localization",
       "repo_name": "typer",
       "language": "python",
-      "target_file": "typer/scripts/agent_banner.py",
-      "target_symbol": "scripts.agent_banner.AgentBannerPreprocessor",
+      "target_file": "typer/typer/_click/_compat.py",
+      "target_symbol": "typer._click._compat._AtomicFile",
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
-      "pack_tokens": 1277,
-      "with_scout_input_tokens": 1927,
-      "without_scout_input_tokens": 78516,
-      "agent_token_savings_pct": 97.55,
-      "token_savings_pct": 99.98,
+      "pack_tokens": 1103,
+      "with_scout_input_tokens": 1753,
+      "without_scout_input_tokens": 103605,
+      "agent_token_savings_pct": 98.31,
+      "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 256.96
+      "latency_ms": 858.15
     },
     {
       "task_index": 46,
       "category": "cross_symbol_dependency_closure",
       "repo_name": "urllib3",
       "language": "python",
-      "target_file": "urllib3/noxfile.py",
-      "target_symbol": "noxfile.downstream_botocore",
+      "target_file": "urllib3/src/urllib3/_base_connection.py",
+      "target_symbol": "urllib3._base_connection._ResponseOptions",
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
-      "pack_tokens": 2112,
-      "with_scout_input_tokens": 2762,
-      "without_scout_input_tokens": 31856,
-      "agent_token_savings_pct": 91.33,
-      "token_savings_pct": 99.97,
+      "pack_tokens": 306,
+      "with_scout_input_tokens": 956,
+      "without_scout_input_tokens": 22509,
+      "agent_token_savings_pct": 95.75,
+      "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 594.24
+      "latency_ms": 156.3
     },
     {
       "task_index": 47,
@@ -943,7 +943,7 @@
       "agent_token_savings_pct": 94.29,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 5,
-      "latency_ms": 227.78
+      "latency_ms": 236.15
     },
     {
       "task_index": 48,
@@ -961,7 +961,7 @@
       "agent_token_savings_pct": 85.67,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 203.21
+      "latency_ms": 204.9
     },
     {
       "task_index": 49,
@@ -979,7 +979,7 @@
       "agent_token_savings_pct": 81.61,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 162.19
+      "latency_ms": 164.4
     },
     {
       "task_index": 50,
@@ -997,7 +997,7 @@
       "agent_token_savings_pct": 96.19,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 154.55
+      "latency_ms": 567.68
     },
     {
       "task_index": 51,
@@ -1015,7 +1015,7 @@
       "agent_token_savings_pct": 86.37,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 162.84
+      "latency_ms": 155.98
     },
     {
       "task_index": 52,
@@ -1033,7 +1033,7 @@
       "agent_token_savings_pct": 84.81,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 159.86
+      "latency_ms": 157.26
     },
     {
       "task_index": 53,
@@ -1051,7 +1051,7 @@
       "agent_token_savings_pct": 87.55,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 706.72
+      "latency_ms": 275.91
     },
     {
       "task_index": 54,
@@ -1069,7 +1069,7 @@
       "agent_token_savings_pct": 88.68,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 171.39
+      "latency_ms": 176.78
     },
     {
       "task_index": 55,
@@ -1087,47 +1087,29 @@
       "agent_token_savings_pct": 88.43,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 161.1
+      "latency_ms": 167.73
     },
     {
       "task_index": 56,
       "category": "symptom_and_signature_discovery",
-      "repo_name": "typer",
-      "language": "yaml",
-      "target_file": "typer/mkdocs.yml",
-      "target_symbol": "mkdocs.extra_javascript",
-      "file_recall_at_5": false,
-      "symbol_recall_at_5": false,
-      "preflight_passed": true,
-      "pack_tokens": 4755,
-      "with_scout_input_tokens": 5405,
-      "without_scout_input_tokens": 71515,
-      "agent_token_savings_pct": 92.44,
-      "token_savings_pct": 99.94,
-      "auto_expanded_1hop_slices": 0,
-      "latency_ms": 180.82
-    },
-    {
-      "task_index": 57,
-      "category": "repo_scoped_symbol_localization",
       "repo_name": "urllib3",
       "language": "javascript",
       "target_file": "urllib3/src/urllib3/contrib/emscripten/emscripten_fetch_worker.js",
       "target_symbol": "emscripten_fetch_worker",
-      "file_recall_at_5": true,
-      "symbol_recall_at_5": true,
+      "file_recall_at_5": false,
+      "symbol_recall_at_5": false,
       "preflight_passed": true,
-      "pack_tokens": 3145,
-      "with_scout_input_tokens": 3795,
-      "without_scout_input_tokens": 26841,
-      "agent_token_savings_pct": 85.86,
-      "token_savings_pct": 99.96,
+      "pack_tokens": 1267,
+      "with_scout_input_tokens": 1917,
+      "without_scout_input_tokens": 51824,
+      "agent_token_savings_pct": 96.3,
+      "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 162.99
+      "latency_ms": 712.54
     },
     {
-      "task_index": 58,
-      "category": "symptom_and_signature_discovery",
+      "task_index": 57,
+      "category": "repo_scoped_symbol_localization",
       "repo_name": "watchfiles",
       "language": "rust",
       "target_file": "watchfiles/src/lib.rs",
@@ -1135,17 +1117,17 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
-      "pack_tokens": 3750,
-      "with_scout_input_tokens": 4400,
-      "without_scout_input_tokens": 46010,
-      "agent_token_savings_pct": 90.44,
-      "token_savings_pct": 99.95,
+      "pack_tokens": 392,
+      "with_scout_input_tokens": 1042,
+      "without_scout_input_tokens": 27506,
+      "agent_token_savings_pct": 96.21,
+      "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 590.21
+      "latency_ms": 156.97
     },
     {
-      "task_index": 59,
-      "category": "polyglot_javascript_query",
+      "task_index": 58,
+      "category": "cross_symbol_dependency_closure",
       "repo_name": "werkzeug",
       "language": "javascript",
       "target_file": "werkzeug/src/werkzeug/debug/shared/debugger.js",
@@ -1153,31 +1135,49 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
-      "pack_tokens": 2074,
-      "with_scout_input_tokens": 2724,
-      "without_scout_input_tokens": 36483,
-      "agent_token_savings_pct": 92.53,
-      "token_savings_pct": 99.97,
+      "pack_tokens": 758,
+      "with_scout_input_tokens": 1408,
+      "without_scout_input_tokens": 8407,
+      "agent_token_savings_pct": 83.25,
+      "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 184.75
+      "latency_ms": 174.55
+    },
+    {
+      "task_index": 59,
+      "category": "polyglot_javascript_query",
+      "repo_name": "zod",
+      "language": "javascript",
+      "target_file": "zod/.configs/rollup.config.js",
+      "target_symbol": "rollup.config",
+      "file_recall_at_5": true,
+      "symbol_recall_at_5": true,
+      "preflight_passed": true,
+      "pack_tokens": 1553,
+      "with_scout_input_tokens": 2203,
+      "without_scout_input_tokens": 39957,
+      "agent_token_savings_pct": 94.49,
+      "token_savings_pct": 99.98,
+      "auto_expanded_1hop_slices": 4,
+      "latency_ms": 172.02
     },
     {
       "task_index": 60,
       "category": "symptom_and_signature_discovery",
-      "repo_name": "zod",
-      "language": "javascript",
-      "target_file": "zod/scripts/chrome-devtools-mcp.mjs",
-      "target_symbol": "scripts.chrome-devtools-mcp.headlessShellPath",
-      "file_recall_at_5": false,
-      "symbol_recall_at_5": false,
+      "repo_name": "chi",
+      "language": "go",
+      "target_file": "chi/chi.go",
+      "target_symbol": "chi.Router",
+      "file_recall_at_5": true,
+      "symbol_recall_at_5": true,
       "preflight_passed": true,
-      "pack_tokens": 269,
-      "with_scout_input_tokens": 919,
-      "without_scout_input_tokens": 50113,
-      "agent_token_savings_pct": 98.17,
-      "token_savings_pct": 100.0,
-      "auto_expanded_1hop_slices": 2,
-      "latency_ms": 199.5
+      "pack_tokens": 1707,
+      "with_scout_input_tokens": 2357,
+      "without_scout_input_tokens": 24117,
+      "agent_token_savings_pct": 90.23,
+      "token_savings_pct": 99.98,
+      "auto_expanded_1hop_slices": 0,
+      "latency_ms": 158.2
     }
   ]
 }
