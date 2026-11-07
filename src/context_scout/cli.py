@@ -892,10 +892,19 @@ def cmd_benchmark_domain(
                 "docs",
                 "docs_src",
                 "benchmarks",
+                "benchmark",
+                "benchmarking",
+                "fuzz",
+                "scripts",
                 "dummyserver",
                 ".github",
                 ".claude",
                 "pnpm-lock.yaml",
+                "noxfile.py",
+                "conftest.py",
+                "setup.py",
+                "show_off.py",
+                "mkdocs.yml",
             )
             for seg in str(file_by_id[str(s["file_id"])]["file_path"]).split("/")
         )
@@ -1277,21 +1286,31 @@ def cmd_benchmark_domain(
             f"- **Byte-Exact Slice Faithfulness (VAL-02):** "
             f"`{verbatim_exact_slices}/{total_slices_checked}` "
             f"(`{summary['verbatim_faithfulness_pct']}%`)",
+            f"- **Median Input Tokens (Without Scout vs. With Scout):** "
+            f"`{median_without_toks:,}` vs `{median_with_toks:,}` "
+            f"(`{median_agent_sav_pct}%` median agent token savings)",
+            f"- **Total Input Tokens Across Benchmark ($N={len(task_results)}$):** "
+            f"`{total_without_toks:,}` Without Scout vs `{total_with_toks:,}` With Scout",
             f"- **Mean Token Savings vs Full Repo:** `{mean_savings}%`",
             f"- **Median Query Latency:** `{median_lat_ms} ms`",
             f"- **Incremental Sync Latency:** `{sync_report['sync_latency_ms']} ms`",
             f"- **Out-of-Scope $0 Abstention:** `{oos_abstained}`",
             f"- **Prompt Injection Blocked:** `{injection_blocked}`",
             "",
-            "| # | Category | Repo | Lang | Target Symbol | File@5 | Sym@5 | Tokens | Latency |",
-            "|---|---|---|---|---|---|---|---|---|",
+            (
+                "| # | Category | Repo | Lang | Target Symbol | File@5 | Sym@5 "
+                "| Without Scout | With Scout | Saved % | Latency |"
+            ),
+            "|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for tr in task_results:
             md_lines.append(
                 f"| {tr['task_index']} | `{tr['category']}` | `{tr['repo_name']}` | "
                 f"`{tr['language']}` | `{tr['target_symbol']}` | "
                 f"`{tr['file_recall_at_5']}` | `{tr['symbol_recall_at_5']}` | "
-                f"`{tr['pack_tokens']}` | `{tr['latency_ms']} ms` |"
+                f"`{tr.get('without_scout_input_tokens', 0):,}` | "
+                f"`{tr.get('with_scout_input_tokens', tr['pack_tokens']):,}` | "
+                f"`{tr.get('agent_token_savings_pct', 0.0)}%` | `{tr['latency_ms']} ms` |"
             )
         output_md.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 

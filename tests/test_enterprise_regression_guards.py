@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from pathlib import Path
 
 from context_scout.agents.scout_workflow import LocalGemmaClient
@@ -636,4 +637,37 @@ def test_readme_schema_and_contract_alignment_guard() -> None:
         assert token not in readme_text, (
             f"Stale or internal audit token '{token}' found in README.md"
         )
+
+    # Every relative Markdown link in README.md must exist on disk, and all report
+    # links in README.md must point to human-readable .md files (never .json or .jsonl)
+    for _label, target in re.findall(r"\[([^\]]+)\]\(([^)]+)\)", readme_text):
+        if target.startswith(("http://", "https://", "#")):
+            continue
+        clean_target = target.split("#", 1)[0]
+        assert Path(clean_target).exists(), (
+            f"Broken relative link in README.md: {clean_target}"
+        )
+        if clean_target.startswith("reports/"):
+            assert clean_target.endswith(".md"), (
+                f"README.md report link must use human-readable .md format, got: {clean_target}"
+            )
+
+    # Verify README.md numbers stay synchronized with reports/polyglot_unseen_v2_benchmark.md
+    # and reports/unseen_repo_ab_report.md
+    for expected_metric in (
+        "59 of 60",
+        "98.33%",
+        "371 of 371",
+        "32,486",
+        "1,923",
+        "1,926,044",
+        "137,162",
+        "`27 of 30` (`90.00%`)",
+        "`6 of 30` (`20.00%`)",
+        "`29 of 30` (`96.67%`)",
+    ):
+        assert expected_metric in readme_text, (
+            f"README.md out of sync with benchmark reports; missing: {expected_metric}"
+        )
+
 
