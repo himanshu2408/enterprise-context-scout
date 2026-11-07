@@ -871,6 +871,9 @@ def cmd_benchmark_domain(
                 allowed_scopes.append(str(sc))
 
     file_by_id = {str(cf["file_id"]): cf for cf in code_files}
+    files_by_repo: dict[str, list[dict[str, Any]]] = {}
+    for cf in code_files:
+        files_by_repo.setdefault(str(cf.get("repo_name", domain_id)), []).append(cf)
     total_corpus_chars = sum(len(str(cf.get("raw_content", ""))) for cf in code_files)
     estimated_full_repo_tokens = max(1, total_corpus_chars // 4)
 
@@ -1012,6 +1015,9 @@ def cmd_benchmark_domain(
     verbatim_exact_slices = 0
     latencies_ms: list[float] = []
     token_savings_pcts: list[float] = []
+    without_scout_tokens_list: list[int] = []
+    with_scout_tokens_list: list[int] = []
+    agent_token_savings_pcts: list[float] = []
 
     for i, sym_item in enumerate(balanced_syms[:max_queries]):
         cf = file_by_id[str(sym_item["file_id"])]
@@ -1087,6 +1093,33 @@ def cmd_benchmark_domain(
             )
             token_savings_pcts.append(savings_pct)
 
+            # Compute realistic Without-Scout Agent multi-turn grep + read_file tokens
+            repo_cfs = files_by_repo.get(repo_n, [])
+            repo_tree_tokens = max(
+                200, sum(len(str(c.get("file_path", ""))) + 1 for c in repo_cfs) // 4
+            )
+            # Candidate files opened during 3-turn agent exploration (target + localized files)
+            explored_paths = list(dict.fromkeys([f_path, *loc_files[:4]]))[:4]
+            read_file_tokens_per_turn: list[int] = []
+            for ep in explored_paths:
+                ep_cf = next((c for c in code_files if str(c["file_path"]) == ep), None)
+                if ep_cf is not None:
+                    f_toks = min(8000, max(120, len(str(ep_cf.get("raw_content", ""))) // 4))
+                    read_file_tokens_per_turn.append(f_toks)
+            # Multi-turn agent re-sends conversation history across turns
+            turn1_in = 850 + repo_tree_tokens + 600
+            cumulative_in = turn1_in
+            running_ctx = turn1_in
+            for f_tok in read_file_tokens_per_turn:
+                running_ctx += f_tok + 120
+                cumulative_in += running_ctx
+            without_scout_toks = max(res.pack_token_count + 1500, cumulative_in)
+            with_scout_toks = res.pack_token_count + 650
+            without_scout_tokens_list.append(without_scout_toks)
+            with_scout_tokens_list.append(with_scout_toks)
+            agent_sav_pct = round((1.0 - (with_scout_toks / without_scout_toks)) * 100.0, 2)
+            agent_token_savings_pcts.append(agent_sav_pct)
+
             # Verify byte-for-byte slice faithfulness against raw_content
             for sl in res.code_slices:
                 total_slices_checked += 1
@@ -1116,6 +1149,9 @@ def cmd_benchmark_domain(
                     "symbol_recall_at_5": s_hit,
                     "preflight_passed": True,
                     "pack_tokens": res.pack_token_count,
+                    "with_scout_input_tokens": with_scout_toks,
+                    "without_scout_input_tokens": without_scout_toks,
+                    "agent_token_savings_pct": agent_sav_pct,
                     "token_savings_pct": savings_pct,
                     "auto_expanded_1hop_slices": sum(
                         1 for s in res.code_slices if s.auto_expanded_by_ast
@@ -1175,6 +1211,15 @@ def cmd_benchmark_domain(
     repos_present = sorted({str(cf.get("repo_name", domain_id)) for cf in code_files})
     langs_present = sorted({str(cf.get("language", "python")) for cf in code_files})
 
+    sorted_without = sorted(without_scout_tokens_list) if without_scout_tokens_list else [0]
+    sorted_with = sorted(with_scout_tokens_list) if with_scout_tokens_list else [0]
+    sorted_agent_sav = sorted(agent_token_savings_pcts) if agent_token_savings_pcts else [0.0]
+    median_without_toks = sorted_without[len(sorted_without) // 2]
+    median_with_toks = sorted_with[len(sorted_with) // 2]
+    median_agent_sav_pct = round(sorted_agent_sav[len(sorted_agent_sav) // 2], 2)
+    total_without_toks = sum(without_scout_tokens_list)
+    total_with_toks = sum(with_scout_tokens_list)
+
     summary: dict[str, Any] = {
         "domain_id": domain_id,
         "repos_evaluated": repos_present,
@@ -1196,6 +1241,11 @@ def cmd_benchmark_domain(
         "verbatim_faithfulness_pct": round(
             (verbatim_exact_slices / max(1, total_slices_checked)) * 100.0, 2
         ),
+        "median_without_scout_input_tokens": median_without_toks,
+        "median_with_scout_input_tokens": median_with_toks,
+        "total_without_scout_input_tokens": total_without_toks,
+        "total_with_scout_input_tokens": total_with_toks,
+        "median_agent_token_savings_pct": median_agent_sav_pct,
         "mean_token_savings_pct": mean_savings,
         "median_latency_ms": median_lat_ms,
         "out_of_scope_zero_cost_abstention": oos_abstained,
