@@ -136,10 +136,12 @@ class PromptInjectionSanitizer:
     @classmethod
     def sanitize(cls, text: str) -> tuple[str, bool, list[str]]:
         """Sanitizes text and reports whether prompt injection signatures were present."""
-        cleaned = cls.strip_invisible_unicode(text)
-        cleaned = cls.strip_comment_payloads(cleaned)
-        is_injection, signatures = cls.scan_injection_signatures(cleaned)
-        return cleaned, is_injection, signatures
+        no_invis = cls.strip_invisible_unicode(text)
+        _, pre_comment_sigs = cls.scan_injection_signatures(no_invis)
+        cleaned = cls.strip_comment_payloads(no_invis)
+        _, post_comment_sigs = cls.scan_injection_signatures(cleaned)
+        signatures = list(dict.fromkeys([*pre_comment_sigs, *post_comment_sigs]))
+        return cleaned, len(signatures) > 0, signatures
 
 
 class SecretRedactor:

@@ -22,15 +22,23 @@ from typing import Any
 import yaml
 
 from context_scout.agents.domain_registry import DomainRegistry
-from context_scout.agents.preflight_gate import register_custom_corpus_index
+from context_scout.agents.gemini_executor import GeminiImplementationExecutor
+from context_scout.agents.preflight_gate import BoundGraphRepository, register_custom_corpus_index
+from context_scout.agents.scout_workflow import ScoutWorkflow
+from context_scout.ast_engine.extractor import ASTExtractor
+from context_scout.ast_engine.models import ParsedEdge, ParsedSymbol
 from context_scout.config import ScoutSettings, detect_hardware_profile
+from context_scout.db.repositories import InMemoryRLSRepository
 from context_scout.schemas.contracts import (
     CodeSlicePointer,
     DocCitationSpan,
     FrictionVerdict,
+    ImplementationContextPack,
     MarketRegime,
     ModificationIntent,
+    PrincipalContext,
     QuantStrategyBrief,
+    RoleType,
 )
 from context_scout.tuning.train_mlx_lora import LocalQLoRATrainer
 
@@ -44,9 +52,10 @@ def cmd_hardware() -> int:
 
 def cmd_init_domain(
     domain_id: str,
-    kind: str,
+    kind: str = "code",
     display_name: str | None = None,
     domains_dir: Path = Path("domains"),
+    source_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Scaffolds a new DomainPack directory with domain.yaml, prompts, tuning, and adapters."""
     if not re.match(r"^[a-z0-9_]+$", domain_id):
@@ -100,6 +109,8 @@ def cmd_init_domain(
         },
         "output_contract": "ImplementationContextPack" if is_code else "QuantStrategyBrief",
     }
+    if source_dir is not None:
+        manifest_data["source_dir"] = str(source_dir)
 
     manifest_path = domain_root / "domain.yaml"
     with open(manifest_path, "w", encoding="utf-8") as f:
@@ -114,25 +125,38 @@ def cmd_init_domain(
             encoding="utf-8",
         )
 
-    return {
+    out_payload: dict[str, Any] = {
         "domain_id": domain_id,
         "kind": kind,
         "manifest_path": str(manifest_path),
         "adapter_dir": str(adapter_dir),
     }
+    if source_dir is not None:
+        out_payload["source_dir"] = str(source_dir)
+    return out_payload
+
+
+def _resolve_repo_name_for_path(cf: Path, source_dir: Path, domain_id: str) -> str:
+    """Determines sub-repository name when source_dir is a multi-repo directory."""
+    try:
+        rel_parts = cf.relative_to(source_dir).parts
+        if len(rel_parts) >= 2:
+            top_dir = source_dir / rel_parts[0]
+            if (top_dir / ".git").exists() or (top_dir / "pyproject.toml").exists():
+                return rel_parts[0]
+    except Exception:
+        pass
+    return domain_id
 
 
 def cmd_distill_custom_domain(
     domain_id: str,
-    source_dir: Path,
+    source_dir: Path | None = None,
     num_samples: int = 40,
     domains_dir: Path = Path("domains"),
     data_dir: Path = Path("data/tuning"),
 ) -> dict[str, Any]:
     """Distills RAG-conditioned train.jsonl and valid.jsonl from a local source directory."""
-    if not source_dir.exists():
-        raise FileNotFoundError(f"source_dir does not exist: {source_dir}")
-
     manifest_path = domains_dir / domain_id / "domain.yaml"
     if not manifest_path.exists():
         raise FileNotFoundError(
@@ -141,7 +165,20 @@ def cmd_distill_custom_domain(
         )
 
     with open(manifest_path, encoding="utf-8") as f:
-        manifest = yaml.safe_load(f)
+        manifest = yaml.safe_load(f) or {}
+
+    if source_dir is None:
+        recorded_src = manifest.get("source_dir")
+        if recorded_src:
+            source_dir = Path(str(recorded_src))
+        else:
+            raise ValueError(
+                f"No --source-dir provided and no 'source_dir' found in {manifest_path}."
+            )
+
+    if not source_dir.exists():
+        raise FileNotFoundError(f"source_dir does not exist: {source_dir}")
+
     is_code = manifest.get("output_contract") == "ImplementationContextPack"
 
     corpus_index_data: dict[str, Any] = {
@@ -149,99 +186,260 @@ def cmd_distill_custom_domain(
         "kind": "code" if is_code else "research",
         "code_files": [],
         "ast_symbols": [],
+        "ast_edges": [],
         "doc_chunks": [],
     }
 
     examples: list[dict[str, Any]] = []
     if is_code:
+        ignored_dirs = ("node_modules", "__pycache__", ".venv", "venv", "build", "dist")
         code_files = sorted(
             p
             for p in source_dir.rglob("*")
-            if p.is_file() and p.suffix in (".py", ".ts", ".tsx", ".go", ".rs")
+            if p.is_file()
+            and p.suffix in (".py", ".ts", ".tsx", ".go", ".rs")
+            and not any(
+                part.startswith(".") or part in ignored_dirs
+                for part in p.parts
+            )
         )
         if not code_files:
             raise ValueError(f"No code files found in {source_dir}")
 
-        candidates: list[tuple[str, str, int, int]] = []
+        ast_extractor = ASTExtractor()
+        candidates: list[tuple[str, str, str, int, int, str]] = []
+        sym_name_to_id: dict[str, str] = {}
+        repo_sym_to_id: dict[tuple[str, str], str] = {}
+        pending_edges: list[tuple[str, str, str, str, list[str]]] = []
+        repos_seen: set[str] = set()
+
         for cf in code_files:
             try:
-                text = cf.read_text(encoding="utf-8")
+                raw_bytes = cf.read_bytes()
+                if b"\x00" in raw_bytes[:8192]:
+                    continue
+                text = raw_bytes.decode("utf-8")
             except Exception:
                 continue
+
             rel = str(cf.relative_to(source_dir)) if cf.is_relative_to(source_dir) else cf.name
+            repo_name = _resolve_repo_name_for_path(cf, source_dir, domain_id)
+            repos_seen.add(repo_name)
+            scopes = ["public_eng", "public_quant", f"repo:{repo_name}"]
             lines = text.splitlines()
             file_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:file:{rel}"))
+            lang_map = {".py": "python", ".ts": "typescript", ".tsx": "tsx"}
+            lang = lang_map.get(cf.suffix, cf.suffix.lstrip("."))
+
             corpus_index_data["code_files"].append(
                 {
                     "file_id": file_uuid,
                     "domain_id": domain_id,
-                    "repo_name": domain_id,
+                    "repo_name": repo_name,
                     "file_path": rel,
                     "git_commit_sha": "custom_commit_sha",
-                    "git_blob_sha": "custom_blob_sha",
-                    "language": cf.suffix.lstrip("."),
-                    "allowed_scopes": ["public_eng", "public_quant"],
+                    "git_blob_sha": str(uuid.uuid5(uuid.NAMESPACE_DNS, text))[:40],
+                    "language": lang,
+                    "allowed_scopes": scopes,
                     "raw_content": text,
                     "line_count": max(1, len(lines)),
                 }
             )
-            file_has_sym = False
-            for idx, ln in enumerate(lines, start=1):
-                sym_pat = r"^\s*(?:class|def|async\s+def|function|interface)\s+([A-Za-z0-9_]+)"
-                m = re.match(sym_pat, ln)
-                if m:
-                    sym = m.group(1)
-                    s_ln = idx
-                    e_ln = min(len(lines), idx + 35)
-                    candidates.append((rel, sym, s_ln, e_ln))
-                    file_has_sym = True
+
+            parsed_syms: list[ParsedSymbol] = []
+            parsed_edges: list[ParsedEdge] = []
+            repo_rel_path = rel
+            if (
+                repo_name != domain_id
+                and rel.startswith(f"{repo_name}/")
+                and (source_dir / repo_name).is_dir()
+            ):
+                repo_rel_path = rel[len(repo_name) + 1 :]
+            if lang in ("python", "typescript", "tsx"):
+                try:
+                    parsed_syms, parsed_edges = ast_extractor.parse_source(
+                        code=text,
+                        language="typescript" if lang == "tsx" else lang,
+                        file_path=repo_rel_path,
+                    )
+                except Exception:
+                    parsed_syms, parsed_edges = [], []
+
+            if parsed_syms:
+                for ps in parsed_syms:
                     sym_uuid = str(
-                        uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:sym:{rel}:{sym}:{s_ln}")
+                        uuid.uuid5(
+                            uuid.NAMESPACE_DNS,
+                            f"{domain_id}:sym:{rel}:{ps.qualified_name}:{ps.start_line}",
+                        )
+                    )
+                    sym_name_to_id[ps.qualified_name] = sym_uuid
+                    repo_sym_to_id[(repo_name, ps.qualified_name)] = sym_uuid
+                    repo_sym_to_id[(repo_name, ps.name)] = sym_uuid
+                    candidates.append(
+                        (
+                            repo_name,
+                            rel,
+                            ps.qualified_name,
+                            ps.start_line,
+                            ps.end_line,
+                            ps.contextual_summary or ps.signature_skeleton,
+                        )
                     )
                     corpus_index_data["ast_symbols"].append(
                         {
                             "symbol_id": sym_uuid,
                             "file_id": file_uuid,
                             "domain_id": domain_id,
-                            "qualified_name": f"{cf.stem}.{sym}",
-                            "symbol_kind": "class" if "class" in ln else "function",
-                            "start_line": s_ln,
-                            "end_line": e_ln,
-                            "signature_skeleton": ln.strip(),
-                            "contextual_summary": "\n".join(
-                                lines[s_ln - 1 : min(len(lines), s_ln + 8)]
-                            ),
-                            "allowed_scopes": ["public_eng", "public_quant"],
+                            "qualified_name": ps.qualified_name,
+                            "symbol_kind": ps.symbol_kind,
+                            "start_line": ps.start_line,
+                            "end_line": ps.end_line,
+                            "signature_skeleton": ps.signature_skeleton,
+                            "contextual_summary": ps.contextual_summary or ps.signature_skeleton,
+                            "allowed_scopes": scopes,
                         }
                     )
-            if not file_has_sym and lines:
-                s_ln, e_ln = 1, min(len(lines), 40)
-                candidates.append((rel, cf.stem, s_ln, e_ln))
-                sym_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:sym:{rel}:{cf.stem}:1"))
-                corpus_index_data["ast_symbols"].append(
-                    {
-                        "symbol_id": sym_uuid,
-                        "file_id": file_uuid,
-                        "domain_id": domain_id,
-                        "qualified_name": cf.stem,
-                        "symbol_kind": "module",
-                        "start_line": s_ln,
-                        "end_line": e_ln,
-                        "signature_skeleton": lines[0].strip(),
-                        "contextual_summary": "\n".join(lines[: min(len(lines), 10)]),
-                        "allowed_scopes": ["public_eng", "public_quant"],
-                    }
+                for pe in parsed_edges:
+                    pending_edges.append(
+                        (
+                            repo_name,
+                            pe.source_qualified_name,
+                            pe.target_qualified_name,
+                            pe.edge_kind,
+                            scopes,
+                        )
+                    )
+            else:
+                file_has_sym = False
+                sym_pat = (
+                    r"^\s*(?:class|def|async\s+def|function|interface|fn|struct)"
+                    r"\s+([A-Za-z0-9_]+)"
                 )
+                for idx, ln in enumerate(lines, start=1):
+                    m = re.match(sym_pat, ln)
+                    if m:
+                        sym = m.group(1)
+                        s_ln = idx
+                        e_ln = min(len(lines), idx + 35)
+                        q_sym = f"{cf.stem}.{sym}"
+                        candidates.append((repo_name, rel, q_sym, s_ln, e_ln, ln.strip()))
+                        file_has_sym = True
+                        sym_uuid = str(
+                            uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:sym:{rel}:{q_sym}:{s_ln}")
+                        )
+                        sym_name_to_id[q_sym] = sym_uuid
+                        fallback_kind = (
+                            "class" if "class" in ln or "struct" in ln else "function"
+                        )
+                        corpus_index_data["ast_symbols"].append(
+                            {
+                                "symbol_id": sym_uuid,
+                                "file_id": file_uuid,
+                                "domain_id": domain_id,
+                                "qualified_name": q_sym,
+                                "symbol_kind": fallback_kind,
+                                "start_line": s_ln,
+                                "end_line": e_ln,
+                                "signature_skeleton": ln.strip(),
+                                "contextual_summary": "\n".join(
+                                    lines[s_ln - 1 : min(len(lines), s_ln + 8)]
+                                ),
+                                "allowed_scopes": scopes,
+                            }
+                        )
+                if not file_has_sym and lines:
+                    s_ln, e_ln = 1, min(len(lines), 40)
+                    candidates.append((repo_name, rel, cf.stem, s_ln, e_ln, lines[0].strip()))
+                    sym_uuid = str(
+                        uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:sym:{rel}:{cf.stem}:1")
+                    )
+                    sym_name_to_id[cf.stem] = sym_uuid
+                    corpus_index_data["ast_symbols"].append(
+                        {
+                            "symbol_id": sym_uuid,
+                            "file_id": file_uuid,
+                            "domain_id": domain_id,
+                            "qualified_name": cf.stem,
+                            "symbol_kind": "function",
+                            "start_line": s_ln,
+                            "end_line": e_ln,
+                            "signature_skeleton": lines[0].strip(),
+                            "contextual_summary": "\n".join(lines[: min(len(lines), 10)]),
+                            "allowed_scopes": scopes,
+                        }
+                    )
+
+        for e_idx, (e_repo, src_q, tgt_q, e_kind, e_scopes) in enumerate(pending_edges):
+            src_id = (
+                repo_sym_to_id.get((e_repo, src_q))
+                or sym_name_to_id.get(src_q)
+                or repo_sym_to_id.get((e_repo, src_q.split(".")[-1]))
+            )
+            if not src_id:
+                continue
+            tgt_id = (
+                repo_sym_to_id.get((e_repo, tgt_q))
+                or sym_name_to_id.get(tgt_q)
+                or repo_sym_to_id.get((e_repo, tgt_q.split(".")[-1]))
+            )
+            edge_uuid = str(
+                uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:edge:{e_idx}:{src_q}:{tgt_q}:{e_kind}")
+            )
+            corpus_index_data["ast_edges"].append(
+                {
+                    "edge_id": edge_uuid,
+                    "domain_id": domain_id,
+                    "source_symbol_id": src_id,
+                    "target_qualified_name": tgt_q,
+                    "target_symbol_id": tgt_id,
+                    "edge_kind": e_kind,
+                    "allowed_scopes": e_scopes,
+                }
+            )
+
+        # Prioritize non-test candidates for primary distillation targets
+        prod_candidates = [
+            c
+            for c in candidates
+            if not c[1].startswith(("tests/", "test_")) and ".test_" not in c[2]
+        ] or candidates
 
         for i in range(num_samples):
-            rel, sym, s_ln, e_ln = candidates[i % len(candidates)]
-            user_prompt = (
-                f"Locate exact slice pointers for `{sym}` in `{rel}` to inspect implementation.\n"
-                f"Retrieved AST Candidate: [repo={domain_id} | file={rel} | "
-                f"symbol={sym} | lines={s_ln}-{e_ln} | intent=modify_target]"
-            )
+            repo_n, rel, sym, s_ln, e_ln, _summary_txt = prod_candidates[i % len(prod_candidates)]
+            short_sym = sym.split(".")[-1]
+            # Build 5-candidate distractor prompt on 80% of samples, 1-candidate on 20%
+            if len(prod_candidates) >= 5 and (i % 5 != 0):
+                distractors = [
+                    prod_candidates[(i + offset * 7 + 3) % len(prod_candidates)]
+                    for offset in range(1, 5)
+                    if prod_candidates[(i + offset * 7 + 3) % len(prod_candidates)][2] != sym
+                ][:4]
+                cand_pool = [(repo_n, rel, sym, s_ln, e_ln, "modify_target")] + [
+                    (d[0], d[1], d[2], d[3], d[4], "reference_only") for d in distractors
+                ]
+                # Rotate target position deterministically across slots 0..min(2, len-1)
+                rot = i % min(3, len(cand_pool))
+                if rot > 0:
+                    cand_pool[0], cand_pool[rot] = cand_pool[rot], cand_pool[0]
+                cand_lines = [
+                    f"Retrieved AST Candidate: [repo={c_repo} | file={c_rel} | "
+                    f"symbol={c_sym} | lines={c_s}-{c_e} | intent={c_int}]"
+                    for c_repo, c_rel, c_sym, c_s, c_e, c_int in cand_pool
+                ]
+                user_prompt = (
+                    f"Localize the AST code slice for `{short_sym}` in `{rel}` "
+                    f"to review implementation logic and performance.\n" + "\n".join(cand_lines)
+                )
+            else:
+                user_prompt = (
+                    f"Locate exact slice pointers for `{sym}` in `{rel}` "
+                    f"to inspect implementation.\n"
+                    f"Retrieved AST Candidate: [repo={repo_n} | file={rel} | "
+                    f"symbol={sym} | lines={s_ln}-{e_ln} | intent=modify_target]"
+                )
             ptr = CodeSlicePointer(
-                repo_name=domain_id,
+                repo_name=repo_n,
                 file_path=rel,
                 start_line=s_ln,
                 end_line=e_ln,
@@ -388,6 +586,10 @@ def cmd_distill_custom_domain(
 
     return {
         "domain_id": domain_id,
+        "files_indexed": len(corpus_index_data["code_files"])
+        + len(corpus_index_data["doc_chunks"]),
+        "symbols_indexed": len(corpus_index_data["ast_symbols"]),
+        "edges_indexed": len(corpus_index_data["ast_edges"]),
         "train_samples": len(train_set),
         "valid_samples": len(valid_set),
         "train_path": str(data_dir / domain_id / "train.jsonl"),
@@ -400,6 +602,7 @@ def cmd_train_domain(
     steps: int = 20,
     domains_dir: Path = Path("domains"),
     data_dir: Path = Path("data/tuning"),
+    use_mlx_native: bool = False,
 ) -> dict[str, Any]:
     """Trains QLoRA adapter for domain_id and registers it in DomainRegistry."""
     train_jsonl = data_dir / domain_id / "train.jsonl"
@@ -432,6 +635,7 @@ def cmd_train_domain(
         output_adapter_dir=output_dir,
         domain_id=domain_id,
         num_steps=steps,
+        use_mlx_native=use_mlx_native,
     )
 
     registry = DomainRegistry(domains_dir=domains_dir)
@@ -446,6 +650,118 @@ def cmd_train_domain(
         "safetensors_path": str(res.safetensors_path),
         "adapter_verified": verification.get("is_valid", False),
     }
+
+
+def cmd_query_domain(
+    domain_id: str,
+    prompt: str,
+    domains_dir: Path = Path("domains"),
+    handoff_apply: bool = False,
+    repo_root: Path | None = None,
+) -> dict[str, Any]:
+    """Runs local Scout discovery ($0) on a domain and optionally triggers execution handoff."""
+    corpus_index_path = domains_dir / domain_id / "corpus_index.json"
+    allowed_scopes = ["public_eng", "public_quant", f"domain:{domain_id}", f"repo:{domain_id}"]
+    if corpus_index_path.exists():
+        register_custom_corpus_index(domain_id, corpus_index_path)
+        try:
+            with open(corpus_index_path, encoding="utf-8") as f:
+                idx_data = json.load(f)
+            for cf in idx_data.get("code_files", []):
+                for sc in cf.get("allowed_scopes", []):
+                    if sc not in allowed_scopes:
+                        allowed_scopes.append(str(sc))
+        except Exception:
+            pass
+
+    registry = DomainRegistry(domains_dir=domains_dir)
+    registry.load_all()
+    in_mem_repo = InMemoryRLSRepository()
+    bound_repo = BoundGraphRepository(in_mem_repo)
+    workflow = ScoutWorkflow(registry=registry, repo=bound_repo)
+
+    principal = PrincipalContext(
+        user_id="cli_operator",
+        role=RoleType.ENGINEER,
+        allowed_scopes=allowed_scopes,
+    )
+    result = workflow.run(user_prompt=prompt, principal=principal, domain_id=domain_id)
+
+    payload: dict[str, Any] = {
+        "domain_id": domain_id,
+        "result_type": type(result).__name__,
+    }
+    if isinstance(result, ImplementationContextPack):
+        payload["trace_id"] = result.trace_id
+        payload["pack_token_count"] = result.pack_token_count
+        payload["code_slices_count"] = len(result.code_slices)
+        payload["code_slices"] = [
+            {
+                "repo_name": s.repo_name,
+                "file_path": s.file_path,
+                "qualified_symbol": s.qualified_symbol,
+                "start_line": s.start_line,
+                "end_line": s.end_line,
+                "modification_intent": s.modification_intent.value,
+            }
+            for s in result.code_slices
+        ]
+        payload["preflight_report"] = result.preflight_report.model_dump(mode="json")
+        if handoff_apply:
+            target_root = repo_root
+            if target_root is None:
+                manifest_path = domains_dir / domain_id / "domain.yaml"
+                if manifest_path.exists():
+                    with open(manifest_path, encoding="utf-8") as f:
+                        manifest_data = yaml.safe_load(f) or {}
+                    src_hint = manifest_data.get("source_dir")
+                    if src_hint and Path(str(src_hint)).exists():
+                        target_root = Path(str(src_hint))
+            if target_root is None:
+                target_root = Path.cwd()
+            # Normalize slice paths when target_root is a sub-repo inside a multi-repo corpus
+            pack_for_exec = result
+            if result.code_slices:
+                adjusted_slices = []
+                for sl in result.code_slices:
+                    adj_path = sl.file_path
+                    if (
+                        adj_path.startswith(f"{sl.repo_name}/")
+                        and not (target_root / adj_path).exists()
+                        and (target_root / adj_path[len(sl.repo_name) + 1 :]).exists()
+                    ):
+                        adj_path = adj_path[len(sl.repo_name) + 1 :]
+                    adjusted_slices.append(sl.model_copy(update={"file_path": adj_path}))
+                pack_for_exec = result.model_copy(update={"code_slices": adjusted_slices})
+            primary_file = (
+                pack_for_exec.code_slices[0].file_path
+                if pack_for_exec.code_slices
+                else ""
+            )
+            lint_cmd = (
+                ["python3", "-m", "py_compile", primary_file]
+                if primary_file.endswith(".py")
+                else ["python3", "-c", "pass"]
+            )
+            test_cmd = ["python3", "-c", "pass"]
+            executor = GeminiImplementationExecutor(require_confirmation=False)
+            patch_res, telemetry_rec = executor.execute_implementation(
+                pack=pack_for_exec,
+                principal=principal,
+                repo_root=target_root,
+                repo=in_mem_repo,
+                auto_confirm=True,
+                lint_cmd=lint_cmd,
+                test_cmd=test_cmd,
+            )
+            payload["execution_handoff"] = {
+                "patch_result": patch_res.model_dump(mode="json"),
+                "telemetry": telemetry_rec.model_dump(mode="json"),
+            }
+    else:
+        payload["result"] = result.model_dump(mode="json")
+
+    return payload
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -466,15 +782,26 @@ def main(argv: list[str] | None = None) -> int:
         "--domain-id", required=True, help="Snake-case domain ID (e.g. rust_core_scout)"
     )
     p_init.add_argument(
-        "--kind", choices=["code", "research"], default="code", help="Domain archetype"
+        "--kind",
+        "--domain-type",
+        dest="kind",
+        choices=["code", "research"],
+        default="code",
+        help="Domain archetype",
     )
     p_init.add_argument("--display-name", default=None, help="Human-readable display name")
+    p_init.add_argument(
+        "--source-dir",
+        type=Path,
+        default=None,
+        help="Optional default source directory to record in domain.yaml",
+    )
     p_init.add_argument("--domains-dir", type=Path, default=Path("domains"))
 
     p_distill = sub.add_parser("distill", help="Distill RAG-conditioned JSONL from a source folder")
     p_distill.add_argument("--domain-id", required=True, help="Target domain ID")
     p_distill.add_argument(
-        "--source-dir", type=Path, required=True, help="Path to code or docs folder"
+        "--source-dir", type=Path, default=None, help="Path to code or docs folder"
     )
     p_distill.add_argument(
         "--num-samples", type=int, default=40, help="Number of samples to generate"
@@ -484,9 +811,39 @@ def main(argv: list[str] | None = None) -> int:
 
     p_train = sub.add_parser("train", help="Train QLoRA adapter for a domain")
     p_train.add_argument("--domain-id", required=True, help="Target domain ID")
-    p_train.add_argument("--steps", type=int, default=20, help="Training steps")
+    p_train.add_argument(
+        "--steps",
+        "--iters",
+        dest="steps",
+        type=int,
+        default=20,
+        help="Training steps / iterations",
+    )
     p_train.add_argument("--domains-dir", type=Path, default=Path("domains"))
     p_train.add_argument("--data-dir", type=Path, default=Path("data/tuning"))
+    p_train.add_argument(
+        "--mlx-native",
+        action="store_true",
+        help="Run native mlx_lm 4-bit QLoRA training on Apple Silicon GPU",
+    )
+
+    p_query = sub.add_parser(
+        "query", help="Run local Scout discovery ($0) and optional handoff on a domain"
+    )
+    p_query.add_argument("--domain-id", required=True, help="Target domain ID")
+    p_query.add_argument("--prompt", required=True, help="Engineering or research query")
+    p_query.add_argument(
+        "--handoff-apply",
+        action="store_true",
+        help="Run Execution Model handoff after Pre-Flight Gate passes",
+    )
+    p_query.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help="Optional target Git repository root for worktree patch verification",
+    )
+    p_query.add_argument("--domains-dir", type=Path, default=Path("domains"))
 
     args = parser.parse_args(argv)
 
@@ -498,6 +855,7 @@ def main(argv: list[str] | None = None) -> int:
             kind=args.kind,
             display_name=args.display_name,
             domains_dir=args.domains_dir,
+            source_dir=args.source_dir,
         )
         print(json.dumps(out, indent=2))
         return 0
@@ -517,6 +875,17 @@ def main(argv: list[str] | None = None) -> int:
             steps=args.steps,
             domains_dir=args.domains_dir,
             data_dir=args.data_dir,
+            use_mlx_native=args.mlx_native,
+        )
+        print(json.dumps(out, indent=2))
+        return 0
+    if args.command == "query":
+        out = cmd_query_domain(
+            domain_id=args.domain_id,
+            prompt=args.prompt,
+            domains_dir=args.domains_dir,
+            handoff_apply=args.handoff_apply,
+            repo_root=args.repo_root,
         )
         print(json.dumps(out, indent=2))
         return 0
