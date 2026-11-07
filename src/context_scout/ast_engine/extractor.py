@@ -212,8 +212,106 @@ class ASTExtractor:
                     file_imports,
                     is_method=False,
                 )
+            elif node.type == "expression_statement" and node.children:
+                first_expr = node.children[0]
+                if first_expr.type == "assignment":
+                    self._extract_python_module_assignment(
+                        first_expr, child, code_bytes, module_prefix, symbols, edges
+                    )
+            elif node.type == "assignment":
+                self._extract_python_module_assignment(
+                    node, child, code_bytes, module_prefix, symbols, edges
+                )
 
         return symbols, edges
+
+    def _extract_python_module_assignment(
+        self,
+        node: Node,
+        outer_node: Node,
+        code_bytes: bytes,
+        module_prefix: str,
+        symbols: list[ParsedSymbol],
+        edges: list[ParsedEdge],
+    ) -> None:
+        left_node = node.child_by_field_name("left")
+        right_node = node.child_by_field_name("right")
+        if not left_node or not right_node or left_node.type != "identifier":
+            return
+        var_name = _node_text(left_node, code_bytes).strip()
+        if (
+            len(var_name) < 3
+            or var_name.startswith("__")
+            or var_name.lower() in {"logger", "log"}
+        ):
+            return
+
+        right_text = _node_text(right_node, code_bytes).strip()
+        is_dict_or_collection = right_node.type in ("dictionary", "tuple", "list", "set")
+        is_upper_constant = var_name.isupper()
+        if not (is_dict_or_collection or is_upper_constant):
+            return
+
+        # Link any module-local classes/functions referenced in this dispatch table/registry
+        referenced_module_symbols = [
+            s for s in symbols if re.search(rf"\b{re.escape(s.name)}\b", right_text)
+        ]
+        if not referenced_module_symbols and not is_upper_constant:
+            return
+
+        qual_name = f"{module_prefix}.{var_name}" if module_prefix else var_name
+        start_line = _point_row(outer_node.start_point) + 1
+        end_line = _point_row(outer_node.end_point) + 1
+        compact_rhs = re.sub(r"\s+", " ", right_text)[:240]
+        sig_skeleton = f"{var_name} = {compact_rhs}"
+
+        # Enrich referenced classes/functions (and their methods) with dispatch keys
+        for pair_match in re.finditer(
+            r"""['"]([A-Za-z0-9_\-\.]+)['"]\s*:\s*([A-Za-z_][A-Za-z0-9_]*)""",
+            right_text,
+        ):
+            dispatch_key, target_ident = pair_match.group(1), pair_match.group(2)
+            for sym in symbols:
+                if sym.name == target_ident or sym.qualified_name.endswith(
+                    f".{target_ident}.__init__"
+                ) or sym.qualified_name.startswith(f"{module_prefix}.{target_ident}."):
+                    tag = f"[dispatch {var_name}: {dispatch_key}]"
+                    if tag not in sym.contextual_summary:
+                        sym.contextual_summary = f"{sym.contextual_summary} {tag}".strip()
+
+        for ref_sym in referenced_module_symbols:
+            edges.append(
+                ParsedEdge(
+                    source_qualified_name=qual_name,
+                    target_qualified_name=ref_sym.qualified_name,
+                    edge_kind="USES_TYPE",
+                )
+            )
+            edges.append(
+                ParsedEdge(
+                    source_qualified_name=ref_sym.qualified_name,
+                    target_qualified_name=qual_name,
+                    edge_kind="USES_TYPE",
+                )
+            )
+
+        # Emit named UPPER_CASE module constants and dispatch tables as AST symbols
+        if is_upper_constant:
+            symbols.append(
+                ParsedSymbol(
+                    name=var_name,
+                    qualified_name=qual_name,
+                    symbol_kind="type_alias",
+                    start_line=start_line,
+                    end_line=end_line,
+                    start_byte=outer_node.start_byte,
+                    end_byte=outer_node.end_byte,
+                    signature=sig_skeleton,
+                    signature_skeleton=sig_skeleton,
+                    docstring="",
+                    contextual_summary=sig_skeleton,
+                )
+            )
 
     def _extract_python_class(
         self,
@@ -352,6 +450,14 @@ class ASTExtractor:
 
         summary = docstring.split("\n")[0] if docstring else sig
 
+        called_targets: list[str] = []
+        if body:
+            called_targets = self._collect_python_calls(body, qual_name, edges)
+        if called_targets:
+            unique_calls = list(dict.fromkeys(c.split(".")[-1] for c in called_targets if c))[:6]
+            if unique_calls:
+                summary = f"{summary} [calls: {', '.join(unique_calls)}]"
+
         symbols.append(
             ParsedSymbol(
                 name=fn_name,
@@ -387,9 +493,6 @@ class ASTExtractor:
                         )
                     )
 
-        if body:
-            self._collect_python_calls(body, qual_name, edges)
-
         if fn_name.startswith("test_"):
             target_candidate = fn_name[5:]
             if target_candidate:
@@ -411,21 +514,26 @@ class ASTExtractor:
 
     def _collect_python_calls(
         self, root_node: Node, source_qual: str, edges: list[ParsedEdge]
-    ) -> None:
+    ) -> list[str]:
+        called: list[str] = []
         stack = [root_node]
         while stack:
             curr = stack.pop()
             if curr.type == "call":
                 fn = curr.child_by_field_name("function")
                 if fn:
-                    edges.append(
-                        ParsedEdge(
-                            source_qualified_name=source_qual,
-                            target_qualified_name=_node_text(fn),
-                            edge_kind="CALLS",
+                    fn_txt = _node_text(fn).strip()
+                    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$", fn_txt):
+                        called.append(fn_txt)
+                        edges.append(
+                            ParsedEdge(
+                                source_qualified_name=source_qual,
+                                target_qualified_name=fn_txt,
+                                edge_kind="CALLS",
+                            )
                         )
-                    )
             stack.extend(curr.children)
+        return called
 
     def _extract_typescript(
         self,

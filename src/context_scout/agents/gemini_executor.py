@@ -91,14 +91,26 @@ def apply_search_replace_or_hunk_blocks(
         for i in range(n_f - n_b + 1):
             if file_lines[i : i + n_b] == before:
                 return file_lines[:i] + after + file_lines[i + n_b :]
-        # 2. Whitespace-normalized match (requires at least 2 non-empty lines)
+        # 2. Whitespace-normalized match with indentation preservation
         before_stripped = [b.strip() for b in before]
-        if sum(1 for b in before_stripped if b) < 2:
+        non_empty_cnt = sum(1 for b in before_stripped if b)
+        if non_empty_cnt == 0 or (
+            non_empty_cnt == 1 and len(next(b for b in before_stripped if b)) < 12
+        ):
             return None
         file_stripped = [fl.strip() for fl in file_lines]
         for i in range(n_f - n_b + 1):
             if file_stripped[i : i + n_b] == before_stripped:
-                return file_lines[:i] + after + file_lines[i + n_b :]
+                first_f_ln = next((fl for fl in file_lines[i : i + n_b] if fl.strip()), "")
+                first_b_ln = next((bl for bl in before if bl.strip()), "")
+                f_indent = len(first_f_ln) - len(first_f_ln.lstrip(" "))
+                b_indent = len(first_b_ln) - len(first_b_ln.lstrip(" "))
+                indent_delta = max(0, f_indent - b_indent)
+                adj_after = [
+                    (" " * indent_delta + al) if (al.strip() and indent_delta > 0) else al
+                    for al in after
+                ]
+                return file_lines[:i] + adj_after + file_lines[i + n_b :]
         return None
 
     fallback_file = default_files[0] if default_files else None
@@ -143,6 +155,7 @@ def apply_search_replace_or_hunk_blocks(
         if not target_path.is_relative_to(worktree_dir.resolve()) or not target_path.is_file():
             continue
 
+        hunks: list[tuple[list[str], list[str]]] = []
         before_lines: list[str] = []
         after_lines: list[str] = []
         in_hunk = False
@@ -151,12 +164,20 @@ def apply_search_replace_or_hunk_blocks(
                 continue
             m_malformed_ctx = re.match(r"^@@\s*-\d+\s*\|\s?(.*)$", ln)
             if m_malformed_ctx:
+                if before_lines and before_lines != after_lines:
+                    hunks.append((before_lines, after_lines))
+                before_lines = []
+                after_lines = []
                 in_hunk = True
                 code_ln = m_malformed_ctx.group(1)
                 before_lines.append(code_ln)
                 after_lines.append(code_ln)
                 continue
             if ln.startswith("@@"):
+                if before_lines and before_lines != after_lines:
+                    hunks.append((before_lines, after_lines))
+                before_lines = []
+                after_lines = []
                 in_hunk = True
                 continue
             if not in_hunk:
@@ -171,34 +192,42 @@ def apply_search_replace_or_hunk_blocks(
                 after_lines.append(ctx)
 
         if before_lines and before_lines != after_lines:
+            hunks.append((before_lines, after_lines))
+
+        if hunks:
             orig_lines = target_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            updated = _replace_subsequence(orig_lines, before_lines, after_lines)
-            if updated is None:
-                common_prefix = 0
-                while (
-                    common_prefix < len(before_lines)
-                    and common_prefix < len(after_lines)
-                    and before_lines[common_prefix] == after_lines[common_prefix]
-                ):
-                    common_prefix += 1
-                common_suffix = 0
-                while (
-                    common_suffix < (len(before_lines) - common_prefix)
-                    and common_suffix < (len(after_lines) - common_prefix)
-                    and before_lines[len(before_lines) - 1 - common_suffix]
-                    == after_lines[len(after_lines) - 1 - common_suffix]
-                ):
-                    common_suffix += 1
-                trim_lead = max(0, common_prefix - 3)
-                trim_tail = max(0, common_suffix - 3)
-                b_end = len(before_lines) - trim_tail if trim_tail > 0 else len(before_lines)
-                a_end = len(after_lines) - trim_tail if trim_tail > 0 else len(after_lines)
-                b_local = before_lines[trim_lead:b_end]
-                a_local = after_lines[trim_lead:a_end]
-                if len(b_local) >= 2 and b_local != a_local:
-                    updated = _replace_subsequence(orig_lines, b_local, a_local)
-            if updated is not None:
-                target_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+            any_hunk_applied = False
+            for h_before, h_after in hunks:
+                updated = _replace_subsequence(orig_lines, h_before, h_after)
+                if updated is None:
+                    common_prefix = 0
+                    while (
+                        common_prefix < len(h_before)
+                        and common_prefix < len(h_after)
+                        and h_before[common_prefix] == h_after[common_prefix]
+                    ):
+                        common_prefix += 1
+                    common_suffix = 0
+                    while (
+                        common_suffix < (len(h_before) - common_prefix)
+                        and common_suffix < (len(h_after) - common_prefix)
+                        and h_before[len(h_before) - 1 - common_suffix]
+                        == h_after[len(h_after) - 1 - common_suffix]
+                    ):
+                        common_suffix += 1
+                    trim_lead = max(0, common_prefix - 3)
+                    trim_tail = max(0, common_suffix - 3)
+                    b_end = len(h_before) - trim_tail if trim_tail > 0 else len(h_before)
+                    a_end = len(h_after) - trim_tail if trim_tail > 0 else len(h_after)
+                    b_local = h_before[trim_lead:b_end]
+                    a_local = h_after[trim_lead:a_end]
+                    if len(b_local) >= 1 and b_local != a_local:
+                        updated = _replace_subsequence(orig_lines, b_local, a_local)
+                if updated is not None:
+                    orig_lines = updated
+                    any_hunk_applied = True
+            if any_hunk_applied:
+                target_path.write_text("\n".join(orig_lines) + "\n", encoding="utf-8")
                 return (True, "Applied via AST/hunk SEARCH/REPLACE fallback.")
 
     return (False, "git apply and SEARCH/REPLACE fallback could not match target lines")

@@ -299,13 +299,14 @@ def register_custom_corpus_index(domain_id: str, index_path: Path) -> None:
 
 
 def _load_custom_domain_corpus(domain_id: str) -> dict[str, Any] | None:
-    """Loads domains/<domain_id>/corpus_index.json if present."""
+    """Loads domains/<domain_id>/corpus_index.json if present for custom domains."""
     candidates: list[Path] = []
     if domain_id in CUSTOM_CORPUS_INDEX_PATHS:
         candidates.append(CUSTOM_CORPUS_INDEX_PATHS[domain_id])
-    candidates.append(Path("domains") / domain_id / "corpus_index.json")
-    repo_domains = Path(__file__).resolve().parents[3] / "domains"
-    candidates.append(repo_domains / domain_id / "corpus_index.json")
+    elif domain_id not in ("trading_code_scout", "quant_research_scout", "federated_coordinator"):
+        candidates.append(Path("domains") / domain_id / "corpus_index.json")
+        repo_domains = Path(__file__).resolve().parents[3] / "domains"
+        candidates.append(repo_domains / domain_id / "corpus_index.json")
     for cand in candidates:
         if cand.exists():
             try:
@@ -387,9 +388,17 @@ class BoundGraphRepository:
                 if not (set(principal.allowed_scopes) & set(scopes)):
                     continue
                 raw_kind = str(item.get("symbol_kind", "function"))
-                sym_kind: Literal["function", "class", "method", "interface", "type_alias"] = (
-                    "class" if raw_kind == "class" else "function"
-                )
+                sym_kind: Literal["function", "class", "method", "interface", "type_alias"]
+                if raw_kind == "class":
+                    sym_kind = "class"
+                elif raw_kind == "method":
+                    sym_kind = "method"
+                elif raw_kind == "interface":
+                    sym_kind = "interface"
+                elif raw_kind == "type_alias":
+                    sym_kind = "type_alias"
+                else:
+                    sym_kind = "function"
                 out_syms.append(
                     ASTSymbolRecord(
                         symbol_id=UUID(str(item["symbol_id"])),
@@ -419,8 +428,41 @@ class BoundGraphRepository:
             except TypeError:
                 if self._conn is not None:
                     result = self._repo.list_visible_ast_edges(self._conn, domain_id)
-                    if isinstance(result, list):
+                    if isinstance(result, list) and result:
                         return result
+        corpus = _load_custom_domain_corpus(domain_id)
+        if corpus and isinstance(corpus.get("ast_edges"), list):
+            out_edges: list[ASTEdgeRecord] = []
+            for item in corpus["ast_edges"]:
+                scopes = list(item.get("allowed_scopes", ["public_eng"]))
+                if not (set(principal.allowed_scopes) & set(scopes)):
+                    continue
+                raw_edge_kind = str(item.get("edge_kind", "CALLS"))
+                edge_kind: Literal["CALLS", "IMPORTS", "USES_TYPE", "INHERITS", "TESTED_BY"]
+                if raw_edge_kind == "IMPORTS":
+                    edge_kind = "IMPORTS"
+                elif raw_edge_kind == "USES_TYPE":
+                    edge_kind = "USES_TYPE"
+                elif raw_edge_kind == "INHERITS":
+                    edge_kind = "INHERITS"
+                elif raw_edge_kind == "TESTED_BY":
+                    edge_kind = "TESTED_BY"
+                else:
+                    edge_kind = "CALLS"
+                raw_target_id = item.get("target_symbol_id")
+                target_sym_uuid = UUID(str(raw_target_id)) if raw_target_id else None
+                out_edges.append(
+                    ASTEdgeRecord(
+                        edge_id=UUID(str(item["edge_id"])),
+                        domain_id=domain_id,
+                        source_symbol_id=UUID(str(item["source_symbol_id"])),
+                        target_qualified_name=str(item["target_qualified_name"]),
+                        target_symbol_id=target_sym_uuid,
+                        edge_kind=edge_kind,
+                        allowed_scopes=scopes,
+                    )
+                )
+            return out_edges
         return []
 
     def list_visible_doc_chunks(
@@ -1021,6 +1063,11 @@ class PreFlightValidator:
 
                 # If this is an internal repository symbol, verify it is present in code_slices
                 if target_sym is not None:
+                    if (
+                        edge.edge_kind == "CALLS"
+                        and target_sym.file_id != focus_sym.file_id
+                    ):
+                        continue
                     sym_clean = target_sym.qualified_name.split(".")[-1]
                     edge_clean = edge.target_qualified_name.split(".")[-1]
                     is_covered = (

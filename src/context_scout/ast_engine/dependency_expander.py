@@ -108,8 +108,11 @@ class ASTDependencyExpander:
                     end_l = target_sym.end_line
                     if (
                         edge.edge_kind == "IMPORTS"
-                        and (target_sym.end_line - target_sym.start_line) > 30
-                    ):
+                        or (
+                            edge.edge_kind == "USES_TYPE"
+                            and focus_symbol.symbol_kind == "type_alias"
+                        )
+                    ) and (target_sym.end_line - target_sym.start_line) > 30:
                         end_l = min(target_sym.end_line, target_sym.start_line + 24)
                     s_lines = f_rec.raw_content.splitlines()[target_sym.start_line - 1 : end_l]
                     est = self.estimate_tokens("\n".join(s_lines))

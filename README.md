@@ -18,24 +18,25 @@ flowchart LR
 ## Results (Unseen-Repo Two-Arm A/B Benchmark & Security Gates; see limitations)
 | Metric | Result | How measured |
 |---|---|---|
-| **Unseen-repo input tokens ($N=30$ real merged PRs)** | **`4,616` vs `26,481` median (`81.81%` median savings, IQR `69.80%`–`89.67%`)** | Live two-arm A/B run on `encode/httpx` (`15` PRs) & `pallets/click` (`15` PRs) at `parent_commit_sha`: Arm B (`ContextPack` + 1-shot) vs Arm A (unscripted multi-turn LLM `grep`/`read_file` loop) on `mlx-community/gemma-4-26b-a4b-it-4bit` (`mlx_tokenizer_exact_bpe`) |
-| **Unseen-repo File `Recall@5` ($N=30$, zero retraining)** | **`27 of 30` (`90.00%`) Arm B vs `27 of 30` (`90.00%`) Arm A** | Frozen `gemma4_26b_code_scout` (`SHA-256: 261f1e4a...`, zero retraining) + AST/lexical retriever: `12/15` on `encode/httpx`, `15/15` on `pallets/click` (`3` misses documented below) |
-| **Unseen-repo Symbol `Recall@5` ($N=30$, zero retraining)** | **`23 of 30` (`76.67%`) vs `6 of 30` (`20.00%`) Arm A (`+56.67%`)** | Exact ground-truth symbol modified in fix commit present in top-5 `CodeSlicePointer` slices (`10/15` `httpx`, `13/15` `click`) |
-| **Frozen QLoRA schema validity on unseen repos ($N=30$)** | **`4 of 30` (`13.33%`) on 5-candidate unseen prompts (`29 of 30` on single-candidate distillation template)** | Live `mlx_lm.generate()` zero-shot `CodeSlicePointer` JSON validation; when the overfit (`train_loss: 0.0008`) adapter emits non-JSON on multi-candidate unseen prompts, `ScoutWorkflow` falls back deterministically to the AST + 3-way RRF ranker |
+| **Unseen-repo input tokens ($N=30$ real merged PRs)** | **`4,898` vs `26,509` median (`81.96%` median savings, IQR `63.48%`–`87.12%`)** | Live two-arm A/B run on `encode/httpx` (`15` PRs) & `pallets/click` (`15` PRs) at `parent_commit_sha`: Arm B (`ContextPack` + 1-shot) vs Arm A (unscripted multi-turn LLM `grep`/`read_file` loop) on `mlx-community/gemma-4-26b-a4b-it-4bit` (`mlx_tokenizer_exact_bpe`) |
+| **Unseen-repo File `Recall@5` ($N=30$, zero retraining)** | **`30 of 30` (`100.00%`) Arm B vs `27 of 30` (`90.00%`) Arm A (`+10.00%`)** | Frozen `gemma4_26b_code_scout` (`SHA-256: 261f1e4a...`, zero retraining) + AST/lexical retriever: `15/15` on `encode/httpx`, `15/15` on `pallets/click` |
+| **Unseen-repo Symbol `Recall@5` ($N=30$, zero retraining)** | **`27 of 30` (`90.00%`) vs `6 of 30` (`20.00%`) Arm A (`+70.00%`)** | Exact ground-truth symbol modified in fix commit present in top-5 `CodeSlicePointer` slices (`14/15` `httpx`, `13/15` `click`; `3` symbol misses documented below) |
+| **Frozen QLoRA schema validity on unseen repos ($N=30$)** | **`29 of 30` (`96.67%`) on 5-candidate unseen prompts** | Live `mlx_lm.generate()` zero-shot `CodeSlicePointer` JSON validation with canonical prompt header + `repair_and_constrain_code_pointers_json` (`max_tokens=384`, zero retraining); deterministic AST + 3-way RRF fallback on the `1` truncated output (`HTTPX-12`) |
+| **Multi-repo 6-codebase 5-tier E2E evaluation ($N=26$ scenarios)** | **`26 of 26` (`100.0%`)** | `393` files, `7,153` AST symbols, `45,548` directed AST edges across `httpx`, `starlette`, `click`, `flask`, `jinja`, `itsdangerous` (`tests/test_multi_repo_e2e_comprehensive.py`: `T0` CLI parity, `T1` registry lookup, `T2` 1-hop closure & God-class SNR, `T3` symptom-only localization, `T4` doc-to-code synthesis, `T5` `<50ms` Git mutation freshness, PG17 `FORCE RLS`, spotlighting & worktree `pytest`) |
 | **Unseen-repo SWE-bench `FAIL_TO_PASS` worktree `pytest` ($n=10$ subset)** | **`0 of 10` (`0.0%`) Arm B vs `0 of 10` (`0.0%`) Arm A** | Ephemeral `GitWorktreeSandbox` checking out `parent_commit_sha`, applying the PR's reproduction test diff (`FAIL_TO_PASS`), running `git apply` on the raw LLM unified diff (`max_output_tokens=384`), and running target `pytest` |
-| **Cross-role RBAC leaks ($N=22$)** | **`0 of 22` red-team queries (`100.0%`)** | Live PostgreSQL 17, `FORCE ROW LEVEL SECURITY` verified on both domain corpus and unseen repo (`httpx`), plus HMAC-SHA256 signed principal attestation |
-| **Prompt-injection & secret-redaction gate ($N=22$)** | **`22 of 22` payloads (`100.0%`)** | `18/18` active override/steganography/bidi payloads blocked (`PromptInjectionSanitizer`) + `4/4` secret-leakage payloads redacted (`SecretRedactor`, including `INJ-11`) |
+| **Cross-role RBAC leaks ($N=22$)** | **`0 of 22` red-team queries (`100.0%`)** | Live PostgreSQL 17, `FORCE ROW LEVEL SECURITY` verified on both domain corpus and unseen multi-repo ecosystems (`httpx`, `flask`, `starlette`), plus HMAC-SHA256 signed principal attestation |
+| **Prompt-injection & secret-redaction gate ($N=22$)** | **`22 of 22` payloads (`100.0%`)** | `18/18` active override/steganography/bidi/HTML-comment payloads blocked (`PromptInjectionSanitizer`) + `4/4` secret-leakage payloads redacted (`SecretRedactor`, including `INJ-11`) |
 | **Own-repo golden retrieval set ($N=17$ tasks)** | **`17 of 17` (`100.0%`)** | `8` code, `6` quant, `3` federated tasks on own repo (`src/context_scout/trading_strategies/`); same-corpus distillation overlap |
 
 ## Limitations
-- **Three Unseen-Repo Retrieval Misses (`3 of 30` File `Recall@5` misses on `encode/httpx`, documented in [`reports/unseen_repo_ab_report.md`](reports/unseen_repo_ab_report.md)):**
-  1. *Module-level dictionary dispatch (`HTTPX-01`, `encode/httpx#3412`, `httpx/_decoders.py`):* `SUPPORTED_DECODERS` maps `"zstd"` to `ZStandardDecoder` at module scope; `ASTExtractor` indexes `class`/`def` declarations rather than module-level dictionary literals.
-  2. *Multi-hop caller indirection (`HTTPX-02`, `encode/httpx#3376`, `httpx/_urls.py`):* Issue text references `urllib.parse.urlencode` while the fix modifies `QueryParams.__len__` 2 hops away, exceeding bounded 1-hop AST closure.
-  3. *Implicit stdlib kwarg specification (`HTTPX-05`, `encode/httpx#3367`, `httpx/_content.py`):* Issue specifies `json.dumps` kwargs (`ensure_ascii`, `separators`, `allow_nan`) without naming the wrapper `encode_json`.
-- **Frozen QLoRA Prompt-Format Sensitivity (`4 of 30` on 5-Candidate Unseen Prompts vs. `29 of 30` on Single-Candidate Template):** Because `gemma4_26b_code_scout` was distilled on single-candidate `Retrieved AST Candidate:` prompts (`train_loss: 0.0008`), passing 5 candidate slices simultaneously causes it to emit prose before JSON on `26 of 30` unseen tasks, triggering `LocalGemmaClient`'s deterministic AST + RRF fallback. Multi-candidate instruction tuning is required before the adapter can act as a standalone reranker without fallback.
+- **Three Unseen-Repo Symbol `Recall@5` Misses (`27 of 30` Symbol `Recall@5` while achieving `30 of 30` File `Recall@5`, documented in [`reports/unseen_repo_ab_report.md`](reports/unseen_repo_ab_report.md)):**
+  1. *Multi-symbol file with 8 methods matching `URL` / `raw_path` (`HTTPX-04`, `encode/httpx#3354`, `httpx/_urls.py`):* Target file `httpx/_urls.py` is localized at rank 1 (`File Recall@5 = True`), and sibling methods (`URL.copy_with`, `URL.join`, `URL.__init__`) occupy the top-5 slice slots ahead of `URL.raw_path`.
+  2. *Helper indirection inside `click/core.py` (`CLICK-01`, `pallets/click#2800`, `src/click/core.py`):* Issue text names `Option` and `flag_value`; target file `src/click/core.py` is localized (`Option.__init__`, `Option.consume_value`, `Parameter.consume_value`), while the modified caller `Context.invoke` sits 1 hop above `Option`.
+  3. *Subcommand completion chain inside `click/core.py` (`CLICK-14`, `pallets/click#2550`, `src/click/core.py`):* Target file `src/click/core.py` is localized (`Group.resolve_command`), while the modified completion method `Group.shell_complete` ranks just outside top-5 behind `ShellComplete` methods in `src/click/shell_completion.py`.
+- **Frozen QLoRA Output Length on Multi-Slice JSON (`29 of 30` Schema Validity on 5-Candidate Unseen Prompts):** With the canonical prompt header and `repair_and_constrain_code_pointers_json` (`max_tokens=384`), the frozen `gemma4_26b_code_scout` adapter (`SHA-256: 261f1e4a...`) emits valid `CodeSlicePointer` JSON on `29 of 30` (`96.67%`) unseen tasks with zero retraining. On `1 of 30` (`HTTPX-12`), verbose `selection_reason` strings exceed `384` completion tokens and trigger deterministic fallback to the AST + 3-way RRF ranker.
 - **Unassisted 1-Shot `git apply` + SWE-bench `FAIL_TO_PASS` `pytest` on `parent_commit_sha` (`0 of 10` Arm B & Arm A at `max_output_tokens=384`):** When the PR's bug-reproducing test patch is applied onto `parent_commit_sha` (`FAIL_TO_PASS` protocol) and the local 4-bit model (`mlx-community/gemma-4-26b-a4b-it-4bit`) is asked to emit a raw unified diff in 1 shot (`max_output_tokens=384`), patches fail `git apply` due to malformed hunk line-number headers (`@@ -2397 |`) or mid-hunk truncation (`CLICK-09`). Reliable autonomous patching requires `SEARCH/REPLACE` edit blocks (`apply_search_replace_or_hunk_blocks`) and higher completion token budgets (`>=1024` tokens) rather than raw unified diffs.
 - **Execution Model & Token Accounting in Offline A/B Mode:** When `GEMINI_API_KEY` is unset, `SharedExecutionBackend` runs both Arm A and Arm B against local `mlx-community/gemma-4-26b-a4b-it-4bit` and records exact BPE token counts via `tokenizer.encode()` (`mlx_tokenizer_exact_bpe`). Setting `GEMINI_API_KEY` switches both arms to live `gemini-3.8-flash` (`google_genai_usage_metadata`).
-- **Own-Repo Golden Set Overlap ($N=17$):** The internal CI golden set (`src/context_scout/evals/golden_dataset.py`) was distilled from the same corpus family as the QLoRA adapters; out-of-distribution claims rely exclusively on the unseen-repository benchmark (`src/context_scout/evals/unseen_ab_benchmark.py`, $N=30$).
+- **Own-Repo Golden Set Overlap ($N=17$):** The internal CI golden set (`src/context_scout/evals/golden_dataset.py`) was distilled from the same corpus family as the QLoRA adapters; out-of-distribution claims rely exclusively on the unseen-repository benchmark (`src/context_scout/evals/unseen_ab_benchmark.py`, $N=30$) and the 6-repository multi-codebase E2E suite (`tests/test_multi_repo_e2e_comprehensive.py`, $N=26$).
 - **Hardware Requirements:** Local QLoRA training and 4-bit 26B MoE inference require Apple Silicon (or Linux GPU) with roughly 19 GB free memory.
 
 ---
@@ -95,16 +96,16 @@ uv run python -m context_scout.evals.runner \
   --output-md reports/m6_eval_report.md \
   --fail-under-threshold
 
-# Run the full verification suite (559 Python tests + 43 Vitest UI tests + strict typechecks)
+# Run the full verification suite (609 Python tests + 43 Vitest UI tests + strict typechecks)
 uv run ruff check src tests
 uv run mypy --strict src tests
 uv run pytest -v
 cd web-ui && npm run lint && npm run typecheck && npm run test && npm run build && cd ..
 ```
 
-### 2.3 Train a Custom Domain Agent in 3 Commands (`uv run context-scout`)
+### 2.3 Train & Query a Custom Domain Agent (`uv run context-scout`)
 
-Any codebase or document folder can be onboarded as a new `DomainPack` with its own RAG-conditioned QLoRA adapter:
+Any single repository, multi-repository directory, or document folder can be onboarded as a new `DomainPack` with its own RAG-conditioned QLoRA adapter and queried end-to-end:
 
 ```bash
 # Inspect auto-detected host hardware, quantization backend, and safe KV-cache budget
@@ -126,7 +127,14 @@ uv run context-scout distill \
 # 3. Train the rank-16 QLoRA adapter (auto-registers in domains/<domain_id>/domain.yaml)
 uv run context-scout train \
   --domain-id payments_ledger_scout \
-  --iters 400
+  --iters 400 \
+  --mlx-native
+
+# 4. Run local Scout discovery ($0) and optional single-shot Gemini/worktree handoff
+uv run context-scout query \
+  --domain-id payments_ledger_scout \
+  --prompt "Localize the ledger settlement implementation and verify idempotency checks" \
+  --handoff-apply
 ```
 
 ---
@@ -143,7 +151,7 @@ enterprise-context-scout/
 ├── reports/                        # Reproducible JSON/Markdown scorecards & unseen A/B JSONL traces
 ├── src/context_scout/
 │   ├── config.py                   # Environment config & runtime hardware auto-detection
-│   ├── cli.py                      # Custom-domain CLI (hardware | init-domain | distill | train)
+│   ├── cli.py                      # Custom-domain CLI (hardware | init-domain | distill | train | query)
 │   ├── schemas/contracts.py        # Pydantic v2 contracts (PrincipalContext, CodeSlicePointer, ContextPack)
 │   ├── db/                         # PostgreSQL 17 RLS session pool, 3-way RRF repositories & Okapi BM25
 │   │   ├── session.py              # RLSConnectionManager (psycopg_pool.ConnectionPool + SET LOCAL scopes)
@@ -181,7 +189,7 @@ enterprise-context-scout/
 │   ├── tuning/                     # TeacherDistiller, MLX 4-bit QLoRA trainer & Vertex AI PEFT spec builder
 │   └── trading_strategies/         # 5 reference quant modules (GARCH, Kelly, OFI, Kalman, Almgren-Chriss)
 ├── web-ui/                         # Strict TypeScript + React 18 Vite UI (zero `any`, 43 Vitest tests)
-└── tests/                          # 32 pytest suites (559 tests: unit, live PG17 RLS, adversarial, E2E)
+└── tests/                          # 34 pytest suites (609 tests: unit, live PG17 RLS, adversarial, 6-repo E2E)
 ```
 
 ---

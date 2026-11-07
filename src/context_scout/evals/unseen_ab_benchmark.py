@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import datetime
 import gc
-import json
 import logging
 import os
 import re
@@ -55,7 +54,6 @@ from context_scout.evals.unseen_repo_dataset import (
 from context_scout.ingestion.git_merkle_indexer import GitMerkleIndexer
 from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
 from context_scout.schemas.contracts import (
-    CodeSlicePointer,
     ImplementationContextPack,
     InsufficientContextDiagnostic,
     PrincipalContext,
@@ -714,12 +712,14 @@ class UnseenRepoABBenchmarkRunner:
 
         # Final Turn: Synthesize localization + unified diff patch (Live LLM generation)
         final_turn_idx = len(traces) + 1
-        final_max_tokens = 384 if task.verify_with_pytest else 96
+        final_max_tokens = 640 if task.verify_with_pytest else 96
         final_prompt = (
             "\n".join(history_transcript)
-            + "\nProduce a git-apply compatible unified diff patch enclosed in ```diff ... ``` "
-            "(using `--- a/<file_path>` and `+++ b/<file_path>` without `NNNN | ` line prefixes) "
-            "and state the modified file path and qualified symbol name."
+            + "\nProduce a minimal code fix as either a git-apply unified diff enclosed in "
+            "```diff ... ``` (using `--- a/<file_path>` and `+++ b/<file_path>` without "
+            "`NNNN | ` line prefixes) OR a `<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE` "
+            "block (without `NNNN | ` line prefixes), and state the modified file path "
+            "and qualified symbol name."
         )
         final_resp, in_f, out_f, lat_f = self.backend.generate(
             final_prompt, max_output_tokens=final_max_tokens
@@ -852,22 +852,24 @@ class UnseenRepoABBenchmarkRunner:
                 primary_slice = scout_res.code_slices[0]
                 short_sym = primary_slice.qualified_symbol.split(".")[-1]
                 qlora_prompt = (
-                    f"Localize the primary AST code slice for `{short_sym}` in "
-                    f"`{primary_slice.file_path}` for task: {task.title}.\n" + "\n".join(cand_lines)
+                    f"Localize the AST code slice for `{short_sym}` in "
+                    f"`{primary_slice.file_path}` to review implementation logic and performance.\n"
+                    + "\n".join(cand_lines)
                 )
                 t_q0 = time.perf_counter()
                 try:
+                    from context_scout.tuning.teacher_distiller import (
+                        repair_and_constrain_code_pointers_json,
+                    )
+
                     raw_q = qlora_client._call_in_process_mlx(
                         qlora_prompt,
                         domain_id="trading_code_scout",
-                        max_tokens=256,
+                        max_tokens=384,
                     )
                     qlora_ms = round((time.perf_counter() - t_q0) * 1000.0, 2)
-                    parsed_q = json.loads(raw_q)
-                    if isinstance(parsed_q, list) and len(parsed_q) > 0:
-                        validated_ptrs = [
-                            CodeSlicePointer.model_validate(item) for item in parsed_q
-                        ]
+                    validated_ptrs = repair_and_constrain_code_pointers_json(raw_q)
+                    if len(validated_ptrs) > 0:
                         qlora_valid = True
                         # Promote the frozen QLoRA adapter's chosen primary slice to index 0
                         chosen_sym = validated_ptrs[0].qualified_symbol
@@ -954,9 +956,11 @@ class UnseenRepoABBenchmarkRunner:
         one_shot_prompt = (
             self.gemini_prompt_builder._build_gemini_prompt(scout_res)
             + "\nDo not include 'NNNN | ' line-number prefixes inside the diff body; "
-            "use standard '--- a/<file_path>' and '+++ b/<file_path>' headers."
+            "use standard '--- a/<file_path>' and '+++ b/<file_path>' headers, OR emit "
+            "a minimal '<<<<<<< SEARCH\\n<exact existing lines>\\n=======\\n<replacement lines>"
+            "\\n>>>>>>> REPLACE' block without line-number prefixes."
         )
-        arm_b_max_tokens = 384 if task.verify_with_pytest else 96
+        arm_b_max_tokens = 640 if task.verify_with_pytest else 96
         patch_resp, in_tok, out_tok, gen_lat_ms = self.backend.generate(
             one_shot_prompt, max_output_tokens=arm_b_max_tokens
         )
@@ -1028,7 +1032,14 @@ class UnseenRepoABBenchmarkRunner:
             )
 
         clean_diff = _extract_unified_diff(arm_result.generated_patch_diff)
-        if not clean_diff:
+        has_search_replace = (
+            "<<<<<<< SEARCH" in arm_result.generated_patch_diff
+            and ">>>>>>> REPLACE" in arm_result.generated_patch_diff
+        )
+        has_hunk_or_diff = bool(
+            re.search(r"(?m)^(?:@@\s|[-+][^\-+]|```diff)", arm_result.generated_patch_diff)
+        )
+        if not clean_diff and not has_search_replace and not has_hunk_or_diff:
             return (
                 False,
                 "No valid unified diff (--- a/... +++ b/... @@ ...) emitted by model",
@@ -1095,36 +1106,42 @@ class UnseenRepoABBenchmarkRunner:
                         check=False,
                     )
 
-            patch_path = worktree_dir / ".scout_candidate.patch"
-            patch_path.write_text(clean_diff, encoding="utf-8")
+            apply_proc_ok = False
+            apply_err_text = ""
+            if clean_diff:
+                patch_path = worktree_dir / ".scout_candidate.patch"
+                patch_path.write_text(clean_diff, encoding="utf-8")
 
-            apply_proc = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(worktree_dir),
-                    "apply",
-                    "--recount",
-                    "--ignore-space-change",
-                    "--ignore-whitespace",
-                    str(patch_path),
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if apply_proc.returncode != 0:
+                apply_proc = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_dir),
+                        "apply",
+                        "--recount",
+                        "--ignore-space-change",
+                        "--ignore-whitespace",
+                        str(patch_path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                apply_proc_ok = apply_proc.returncode == 0
+                apply_err_text = apply_proc.stderr.strip() or apply_proc.stdout.strip()
+
+            if not apply_proc_ok:
                 from context_scout.agents.gemini_executor import (
                     apply_search_replace_or_hunk_blocks,
                 )
 
-                sr_ok, _sr_msg = apply_search_replace_or_hunk_blocks(
+                sr_ok, sr_msg = apply_search_replace_or_hunk_blocks(
                     arm_result.generated_patch_diff,
                     worktree_dir,
                     default_files=arm_result.localized_files,
                 )
                 if not sr_ok:
-                    err_msg = (apply_proc.stderr.strip() or apply_proc.stdout.strip())[:160]
+                    err_msg = (apply_err_text or sr_msg)[:160]
                     short_sha = task.parent_commit_sha[:8]
                     return (
                         False,
@@ -1172,7 +1189,11 @@ class UnseenRepoABBenchmarkRunner:
                 timeout=30,
                 check=False,
             )
-            if proc.returncode == 4 and "conftest" in (proc.stdout + proc.stderr):
+            if proc.returncode in (2, 4) and (
+                "conftest" in (proc.stdout + proc.stderr)
+                or "ImportError" in (proc.stdout + proc.stderr)
+                or "ModuleNotFoundError" in (proc.stdout + proc.stderr)
+            ):
                 proc = subprocess.run(
                     [*cmd, "--noconftest"],
                     cwd=worktree_dir,
@@ -1316,6 +1337,18 @@ class UnseenRepoABBenchmarkRunner:
             if traces_jsonl_path is not None:
                 with traces_jsonl_path.open("a", encoding="utf-8") as f_log:
                     f_log.write(comp.model_dump_json() + "\n")
+
+        # Restore httpx and click repos to default branches after benchmark checkout loop
+        subprocess.run(
+            ["git", "-C", str(httpx_dir), "checkout", "-f", "master"],
+            check=False,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(click_dir), "checkout", "-f", "main"],
+            check=False,
+            capture_output=True,
+        )
 
         n_tasks = len(comparisons)
         a_f_cnt = sum(1 for c in comparisons if c.arm_a.file_recall_at_5)
