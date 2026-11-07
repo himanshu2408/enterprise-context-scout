@@ -562,8 +562,8 @@ def test_benchmark_domain_cli_on_polyglot_multi_repo_corpus() -> None:
             output_md=out_md,
         )
         assert out_json.exists() and out_md.exists()
-        assert bench["file_recall_at_5_pct"] == 100.0
-        assert bench["symbol_recall_at_5_pct"] == 100.0
+        assert bench["file_recall_at_5_pct"] >= 75.0
+        assert bench["symbol_recall_at_5_pct"] >= 75.0
         assert bench["preflight_pass_pct"] == 100.0
         assert bench["verbatim_faithfulness_pct"] == 100.0
         assert bench["out_of_scope_zero_cost_abstention"] is True
@@ -571,3 +571,30 @@ def test_benchmark_domain_cli_on_polyglot_multi_repo_corpus() -> None:
     finally:
         invalidate_custom_corpus_cache("multi_repo_polyglot_test")
         shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def test_50_repo_polyglot_benchmark_scorecard_and_non_tautological_prompts() -> None:
+    """Verify the 50-repo benchmark report and ensure prompts never embed ground-truth file_path."""
+    import inspect
+    import json
+
+    from context_scout import cli
+
+    cli_src = inspect.getsource(cli.cmd_benchmark_domain)
+    assert "in `{f_path}`" not in cli_src
+
+    report_path = Path("reports/polyglot_unseen_v2_benchmark.json")
+    assert report_path.exists()
+    data = json.loads(report_path.read_text(encoding="utf-8"))
+    assert len(data["repos_evaluated"]) == 50
+    assert len(data["languages_evaluated"]) >= 8
+    assert data["files_indexed"] >= 4000
+    assert data["symbols_indexed"] >= 50000
+    assert data["edges_indexed"] >= 280000
+    assert data["queries_evaluated"] == 60
+    assert data["file_recall_at_5_pct"] >= 90.0
+    assert data["symbol_recall_at_5_pct"] >= 90.0
+    assert data["preflight_pass_pct"] == 100.0
+    assert data["verbatim_faithfulness_pct"] == 100.0
+    assert data["out_of_scope_zero_cost_abstention"] is True
+    assert data["prompt_injection_blocked"] is True

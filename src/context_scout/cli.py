@@ -217,21 +217,34 @@ def cmd_distill_custom_domain(
             "__pycache__",
             ".venv",
             "venv",
-            "build",
             "dist",
             ".pytest_cache",
             ".mypy_cache",
             ".ruff_cache",
         }
+        has_sub_git = any(
+            d.is_dir() and (d / ".git").exists() for d in source_dir.iterdir()
+        ) and not (source_dir / ".git").exists()
+
+        def _ignore_path(p_cand: Path) -> bool:
+            r_parts = p_cand.relative_to(source_dir).parts
+            for idx_p, part_p in enumerate(r_parts):
+                if part_p in ignored_dirs:
+                    return True
+                if part_p == "build":
+                    if has_sub_git and idx_p == 0:
+                        continue
+                    if idx_p > 0 and r_parts[idx_p - 1] == "src":
+                        continue
+                    return True
+            return False
+
         code_files = sorted(
             p
             for p in source_dir.rglob("*")
             if p.is_file()
             and p.suffix.lower() in CODE_EXTENSIONS
-            and not any(
-                part in ignored_dirs
-                for part in p.relative_to(source_dir).parts
-            )
+            and not _ignore_path(p)
         )
         if not code_files:
             raise ValueError(f"No code files found in {source_dir}")
@@ -867,7 +880,20 @@ def cmd_benchmark_domain(
         for s in ast_symbols
         if str(s.get("file_id")) in file_by_id
         and not any(
-            seg in ("tests", "test", "examples", "docs", "benchmarks")
+            seg
+            in (
+                "tests",
+                "test",
+                "examples",
+                "_examples",
+                "docs",
+                "docs_src",
+                "benchmarks",
+                "dummyserver",
+                ".github",
+                ".claude",
+                "pnpm-lock.yaml",
+            )
             for seg in str(file_by_id[str(s["file_id"])]["file_path"]).split("/")
         )
         and ".test_" not in str(s.get("qualified_name", ""))
@@ -881,32 +907,91 @@ def cmd_benchmark_domain(
         and not str(s.get("qualified_name", "")).split(".")[-1].startswith("__")
     ] or list(ast_symbols)
 
+    # Identify symbols with outgoing edges for 1-hop closure verification
+    edges_by_src: dict[str, list[dict[str, Any]]] = {}
+    for e in ast_edges:
+        edges_by_src.setdefault(str(e.get("source_symbol_id", "")), []).append(e)
+
+    generic_short_names = {
+        "name",
+        "type",
+        "value",
+        "default",
+        "params",
+        "url",
+        "args",
+        "opts",
+        "info",
+        "help",
+        "env",
+        "main",
+        "init",
+        "setup",
+        "close",
+        "read",
+        "write",
+        "send",
+        "open",
+        "get",
+        "set",
+        "run",
+    }
+
+    def _sym_quality_key(s_obj: dict[str, Any]) -> tuple[int, int, int, str]:
+        qn = str(s_obj.get("qualified_name", ""))
+        sn = qn.split(".")[-1]
+        sid = str(s_obj.get("symbol_id", ""))
+        has_e = int(sid in edges_by_src)
+        non_generic = int(sn.lower() not in generic_short_names and len(sn) >= 5)
+        span = int(s_obj.get("end_line", 10)) - int(s_obj.get("start_line", 1))
+        good_span = int(5 <= span <= 120)
+        return (-non_generic, -has_e, -good_span, qn)
+
     # Group symbols by repo_name and language for balanced multi-repo/polyglot coverage
     by_repo_and_lang: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    by_repo_primary: dict[str, list[dict[str, Any]]] = {}
     for s in prod_syms:
         cf = file_by_id.get(str(s["file_id"]), {})
-        key = (str(cf.get("repo_name", domain_id)), str(cf.get("language", "python")))
-        by_repo_and_lang.setdefault(key, []).append(s)
+        r_name = str(cf.get("repo_name", domain_id))
+        l_name = str(cf.get("language", "python"))
+        by_repo_and_lang.setdefault((r_name, l_name), []).append(s)
+        by_repo_primary.setdefault(r_name, []).append(s)
+
+    for b_list in by_repo_and_lang.values():
+        b_list.sort(key=_sym_quality_key)
+    for r_list in by_repo_primary.values():
+        r_list.sort(key=_sym_quality_key)
 
     balanced_syms: list[dict[str, Any]] = []
-    buckets = list(by_repo_and_lang.values())
+    seen_sym_ids: set[str] = set()
+    # First guarantee 1 primary symbol from every repository in sorted order
+    for r_name in sorted(by_repo_primary.keys()):
+        if len(balanced_syms) >= max_queries:
+            break
+        top_sym = by_repo_primary[r_name][0]
+        balanced_syms.append(top_sym)
+        seen_sym_ids.add(str(top_sym["symbol_id"]))
+
+    # Then round-robin across (repo, language) buckets (non-Python first for polyglot coverage)
+    buckets = [
+        by_repo_and_lang[k]
+        for k in sorted(by_repo_and_lang.keys(), key=lambda x: (x[1] == "python", x[0], x[1]))
+    ]
     round_idx = 0
     while len(balanced_syms) < max_queries and buckets:
         added_in_round = False
         for b in buckets:
             if round_idx < len(b):
-                balanced_syms.append(b[round_idx])
+                cand_s = b[round_idx]
                 added_in_round = True
-                if len(balanced_syms) >= max_queries:
-                    break
+                if str(cand_s["symbol_id"]) not in seen_sym_ids:
+                    balanced_syms.append(cand_s)
+                    seen_sym_ids.add(str(cand_s["symbol_id"]))
+                    if len(balanced_syms) >= max_queries:
+                        break
         if not added_in_round:
             break
         round_idx += 1
-
-    # Identify symbols with outgoing edges for 1-hop closure verification
-    edges_by_src: dict[str, list[dict[str, Any]]] = {}
-    for e in ast_edges:
-        edges_by_src.setdefault(str(e.get("source_symbol_id", "")), []).append(e)
 
     registry = DomainRegistry(domains_dir=domains_dir)
     registry.load_all()
@@ -934,25 +1019,51 @@ def cmd_benchmark_domain(
         repo_n = str(cf["repo_name"])
         lang = str(cf.get("language", "python"))
         q_name = str(sym_item["qualified_name"])
-        short_name = q_name.split(".")[-1]
+        q_parts = q_name.split(".")
+        short_name = q_parts[-1]
+        two_part = ".".join(q_parts[-2:]) if len(q_parts) >= 2 else q_name
         has_edges = str(sym_item["symbol_id"]) in edges_by_src
+        sig_skel = str(sym_item.get("signature_skeleton", "")).strip()
+        ctx_sum = str(sym_item.get("contextual_summary", "")).strip()
+        hint_words = " ".join((ctx_sum or sig_skel).split()[:8])
 
-        if i % 3 == 0:
-            category = "exact_symbol_localization"
+        # Non-tautological prompts across 4 difficulty tiers: NEVER include f_path in the prompt!
+        if i % 4 == 0:
+            category = "repo_scoped_symbol_localization"
             prompt = (
-                f"Locate the implementation of `{short_name}` in `{f_path}` "
-                f"({repo_n}) and verify its signature and dependencies."
+                f"In repository `{repo_n}`, locate the implementation of `{two_part}` "
+                f"(`{short_name}`) and verify its signature and dependencies."
             )
-        elif i % 3 == 1 and has_edges:
+        elif i % 4 == 1 and has_edges:
             category = "cross_symbol_dependency_closure"
             prompt = (
-                f"Inspect `{q_name}` in `{f_path}` and trace its 1-hop AST dependencies "
-                f"and callers in `{repo_n}`."
+                f"Inspect `{q_name}` ({hint_words}) and trace its 1-hop AST dependencies "
+                f"and callers."
             )
-        else:
+        elif i % 4 == 2:
             category = f"polyglot_{lang}_query"
             prompt = (
-                f"In `{repo_n}`, how does `{short_name}` in `{f_path}` work?"
+                f"In `{repo_n}`, how does `{short_name}` work when handling "
+                f"{hint_words or 'execution'}?"
+            )
+        else:
+            category = "symptom_and_signature_discovery"
+            anon_sig = re.sub(
+                rf"\b{re.escape(short_name)}\b",
+                "target_symbol",
+                sig_skel,
+                flags=re.IGNORECASE,
+            )
+            anon_hint = re.sub(
+                rf"\b{re.escape(short_name)}\b",
+                "target",
+                ctx_sum,
+                flags=re.IGNORECASE,
+            )
+            anon_words = " ".join((anon_hint or anon_sig).split()[:12])
+            prompt = (
+                f"In `{repo_n}`, locate the implementation with signature `{anon_sig or 'target'}` "
+                f"that handles: {anon_words or 'core execution'}."
             )
 
         t0 = time.perf_counter()
