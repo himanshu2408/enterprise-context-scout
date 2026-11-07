@@ -69,7 +69,7 @@
   "estimated_full_repo_tokens": 7486164,
   "incremental_sync_check": {
     "domain_id": "polyglot_unseen_v2",
-    "sync_latency_ms": 1653.42,
+    "sync_latency_ms": 1478.62,
     "synced": false,
     "added": 0,
     "modified": 0,
@@ -89,8 +89,13 @@
   "verbatim_slices_checked": 366,
   "verbatim_slices_exact": 366,
   "verbatim_faithfulness_pct": 100.0,
+  "median_without_scout_input_tokens": 32486,
+  "median_with_scout_input_tokens": 2000,
+  "total_without_scout_input_tokens": 1921818,
+  "total_with_scout_input_tokens": 141016,
+  "median_agent_token_savings_pct": 92.64,
   "mean_token_savings_pct": 99.98,
-  "median_latency_ms": 200.65,
+  "median_latency_ms": 199.5,
   "out_of_scope_zero_cost_abstention": true,
   "prompt_injection_blocked": true,
   "task_results": [
@@ -105,9 +110,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 921,
+      "with_scout_input_tokens": 1571,
+      "without_scout_input_tokens": 86482,
+      "agent_token_savings_pct": 98.18,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 3504.86
+      "latency_ms": 3513.12
     },
     {
       "task_index": 2,
@@ -120,9 +128,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 825,
+      "with_scout_input_tokens": 1475,
+      "without_scout_input_tokens": 24552,
+      "agent_token_savings_pct": 93.99,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 167.69
+      "latency_ms": 147.2
     },
     {
       "task_index": 3,
@@ -135,9 +146,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 871,
+      "with_scout_input_tokens": 1521,
+      "without_scout_input_tokens": 39848,
+      "agent_token_savings_pct": 96.18,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 175.96
+      "latency_ms": 175.81
     },
     {
       "task_index": 4,
@@ -150,9 +164,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 5846,
+      "with_scout_input_tokens": 6496,
+      "without_scout_input_tokens": 54337,
+      "agent_token_savings_pct": 88.04,
       "token_savings_pct": 99.92,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 222.28
+      "latency_ms": 228.0
     },
     {
       "task_index": 5,
@@ -165,9 +182,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 550,
+      "with_scout_input_tokens": 1200,
+      "without_scout_input_tokens": 61476,
+      "agent_token_savings_pct": 98.05,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 167.35
+      "latency_ms": 164.69
     },
     {
       "task_index": 6,
@@ -180,9 +200,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 483,
+      "with_scout_input_tokens": 1133,
+      "without_scout_input_tokens": 31577,
+      "agent_token_savings_pct": 96.41,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 735.95
+      "latency_ms": 739.9
     },
     {
       "task_index": 7,
@@ -195,9 +218,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 3646,
+      "with_scout_input_tokens": 4296,
+      "without_scout_input_tokens": 31387,
+      "agent_token_savings_pct": 86.31,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 7,
-      "latency_ms": 241.01
+      "latency_ms": 240.74
     },
     {
       "task_index": 8,
@@ -210,9 +236,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 2132,
+      "with_scout_input_tokens": 2782,
+      "without_scout_input_tokens": 42885,
+      "agent_token_savings_pct": 93.51,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 465.67
+      "latency_ms": 458.86
     },
     {
       "task_index": 9,
@@ -225,9 +254,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 182,
+      "with_scout_input_tokens": 832,
+      "without_scout_input_tokens": 13550,
+      "agent_token_savings_pct": 93.86,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 170.63
+      "latency_ms": 158.65
     },
     {
       "task_index": 10,
@@ -240,9 +272,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 2042,
+      "with_scout_input_tokens": 2692,
+      "without_scout_input_tokens": 49750,
+      "agent_token_savings_pct": 94.59,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 178.67
+      "latency_ms": 174.09
     },
     {
       "task_index": 11,
@@ -255,9 +290,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1464,
+      "with_scout_input_tokens": 2114,
+      "without_scout_input_tokens": 36034,
+      "agent_token_savings_pct": 94.13,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 722.75
+      "latency_ms": 730.74
     },
     {
       "task_index": 12,
@@ -270,9 +308,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1495,
+      "with_scout_input_tokens": 2145,
+      "without_scout_input_tokens": 37438,
+      "agent_token_savings_pct": 94.27,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 230.56
+      "latency_ms": 222.71
     },
     {
       "task_index": 13,
@@ -285,9 +326,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 501,
+      "with_scout_input_tokens": 1151,
+      "without_scout_input_tokens": 25361,
+      "agent_token_savings_pct": 95.46,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 168.29
+      "latency_ms": 168.1
     },
     {
       "task_index": 14,
@@ -300,9 +344,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 81,
+      "with_scout_input_tokens": 731,
+      "without_scout_input_tokens": 4084,
+      "agent_token_savings_pct": 82.1,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 169.98
+      "latency_ms": 168.84
     },
     {
       "task_index": 15,
@@ -315,9 +362,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1053,
+      "with_scout_input_tokens": 1703,
+      "without_scout_input_tokens": 11642,
+      "agent_token_savings_pct": 85.37,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 168.41
+      "latency_ms": 156.17
     },
     {
       "task_index": 16,
@@ -330,9 +380,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 3944,
+      "with_scout_input_tokens": 4594,
+      "without_scout_input_tokens": 37123,
+      "agent_token_savings_pct": 87.62,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 713.13
+      "latency_ms": 684.77
     },
     {
       "task_index": 17,
@@ -345,9 +398,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 3264,
+      "with_scout_input_tokens": 3914,
+      "without_scout_input_tokens": 69234,
+      "agent_token_savings_pct": 94.35,
       "token_savings_pct": 99.96,
       "auto_expanded_1hop_slices": 14,
-      "latency_ms": 505.13
+      "latency_ms": 600.46
     },
     {
       "task_index": 18,
@@ -360,9 +416,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 48,
+      "with_scout_input_tokens": 698,
+      "without_scout_input_tokens": 3799,
+      "agent_token_savings_pct": 81.63,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 221.0
+      "latency_ms": 249.75
     },
     {
       "task_index": 19,
@@ -375,9 +434,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1389,
+      "with_scout_input_tokens": 2039,
+      "without_scout_input_tokens": 34500,
+      "agent_token_savings_pct": 94.09,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 743.05
+      "latency_ms": 816.43
     },
     {
       "task_index": 20,
@@ -390,9 +452,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1527,
+      "with_scout_input_tokens": 2177,
+      "without_scout_input_tokens": 15714,
+      "agent_token_savings_pct": 86.15,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 5,
-      "latency_ms": 163.67
+      "latency_ms": 175.81
     },
     {
       "task_index": 21,
@@ -405,9 +470,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1273,
+      "with_scout_input_tokens": 1923,
+      "without_scout_input_tokens": 34672,
+      "agent_token_savings_pct": 94.45,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 179.11
+      "latency_ms": 189.64
     },
     {
       "task_index": 22,
@@ -420,9 +488,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 809,
+      "with_scout_input_tokens": 1459,
+      "without_scout_input_tokens": 49142,
+      "agent_token_savings_pct": 97.03,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 146.78
+      "latency_ms": 142.93
     },
     {
       "task_index": 23,
@@ -435,9 +506,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1053,
+      "with_scout_input_tokens": 1703,
+      "without_scout_input_tokens": 23207,
+      "agent_token_savings_pct": 92.66,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 161.77
+      "latency_ms": 156.46
     },
     {
       "task_index": 24,
@@ -450,9 +524,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1358,
+      "with_scout_input_tokens": 2008,
+      "without_scout_input_tokens": 31116,
+      "agent_token_savings_pct": 93.55,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 182.61
+      "latency_ms": 181.21
     },
     {
       "task_index": 25,
@@ -465,9 +542,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 634,
+      "with_scout_input_tokens": 1284,
+      "without_scout_input_tokens": 11916,
+      "agent_token_savings_pct": 89.22,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 155.14
+      "latency_ms": 556.24
     },
     {
       "task_index": 26,
@@ -480,9 +560,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 738,
+      "with_scout_input_tokens": 1388,
+      "without_scout_input_tokens": 33064,
+      "agent_token_savings_pct": 95.8,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 577.84
+      "latency_ms": 153.76
     },
     {
       "task_index": 27,
@@ -495,9 +578,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 822,
+      "with_scout_input_tokens": 1472,
+      "without_scout_input_tokens": 39702,
+      "agent_token_savings_pct": 96.29,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 201.03
+      "latency_ms": 190.75
     },
     {
       "task_index": 28,
@@ -510,9 +596,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 725,
+      "with_scout_input_tokens": 1375,
+      "without_scout_input_tokens": 9296,
+      "agent_token_savings_pct": 85.21,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 214.73
+      "latency_ms": 204.29
     },
     {
       "task_index": 29,
@@ -525,9 +614,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1936,
+      "with_scout_input_tokens": 2586,
+      "without_scout_input_tokens": 10962,
+      "agent_token_savings_pct": 76.41,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 297.35
+      "latency_ms": 285.17
     },
     {
       "task_index": 30,
@@ -540,9 +632,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 2622,
+      "with_scout_input_tokens": 3272,
+      "without_scout_input_tokens": 11800,
+      "agent_token_savings_pct": 72.27,
       "token_savings_pct": 99.96,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 209.97
+      "latency_ms": 616.56
     },
     {
       "task_index": 31,
@@ -555,9 +650,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1488,
+      "with_scout_input_tokens": 2138,
+      "without_scout_input_tokens": 68066,
+      "agent_token_savings_pct": 96.86,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 699.66
+      "latency_ms": 273.03
     },
     {
       "task_index": 32,
@@ -570,9 +668,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1447,
+      "with_scout_input_tokens": 2097,
+      "without_scout_input_tokens": 16975,
+      "agent_token_savings_pct": 87.65,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 206.65
+      "latency_ms": 199.91
     },
     {
       "task_index": 33,
@@ -585,9 +686,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 610,
+      "with_scout_input_tokens": 1260,
+      "without_scout_input_tokens": 14456,
+      "agent_token_savings_pct": 91.28,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 165.85
+      "latency_ms": 167.14
     },
     {
       "task_index": 34,
@@ -600,9 +704,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 4934,
+      "with_scout_input_tokens": 5584,
+      "without_scout_input_tokens": 24153,
+      "agent_token_savings_pct": 76.88,
       "token_savings_pct": 99.93,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 271.36
+      "latency_ms": 268.74
     },
     {
       "task_index": 35,
@@ -615,9 +722,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 790,
+      "with_scout_input_tokens": 1440,
+      "without_scout_input_tokens": 19568,
+      "agent_token_savings_pct": 92.64,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 182.12
+      "latency_ms": 178.3
     },
     {
       "task_index": 36,
@@ -630,9 +740,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 3572,
+      "with_scout_input_tokens": 4222,
+      "without_scout_input_tokens": 38338,
+      "agent_token_savings_pct": 88.99,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 613.46
+      "latency_ms": 595.52
     },
     {
       "task_index": 37,
@@ -645,9 +758,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1350,
+      "with_scout_input_tokens": 2000,
+      "without_scout_input_tokens": 14192,
+      "agent_token_savings_pct": 85.91,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 161.42
+      "latency_ms": 158.88
     },
     {
       "task_index": 38,
@@ -660,9 +776,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 444,
+      "with_scout_input_tokens": 1094,
+      "without_scout_input_tokens": 14900,
+      "agent_token_savings_pct": 92.66,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 174.32
+      "latency_ms": 169.47
     },
     {
       "task_index": 39,
@@ -675,9 +794,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 7367,
+      "with_scout_input_tokens": 8017,
+      "without_scout_input_tokens": 35387,
+      "agent_token_savings_pct": 77.34,
       "token_savings_pct": 99.9,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 208.42
+      "latency_ms": 199.58
     },
     {
       "task_index": 40,
@@ -690,9 +812,12 @@
       "symbol_recall_at_5": false,
       "preflight_passed": true,
       "pack_tokens": 1048,
+      "with_scout_input_tokens": 1698,
+      "without_scout_input_tokens": 37185,
+      "agent_token_savings_pct": 95.43,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 181.76
+      "latency_ms": 183.46
     },
     {
       "task_index": 41,
@@ -705,9 +830,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 2023,
+      "with_scout_input_tokens": 2673,
+      "without_scout_input_tokens": 46418,
+      "agent_token_savings_pct": 94.24,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 212.11
+      "latency_ms": 631.0
     },
     {
       "task_index": 42,
@@ -720,9 +848,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 249,
+      "with_scout_input_tokens": 899,
+      "without_scout_input_tokens": 24708,
+      "agent_token_savings_pct": 96.36,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 587.63
+      "latency_ms": 172.13
     },
     {
       "task_index": 43,
@@ -735,9 +866,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1660,
+      "with_scout_input_tokens": 2310,
+      "without_scout_input_tokens": 36788,
+      "agent_token_savings_pct": 93.72,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 233.88
+      "latency_ms": 236.3
     },
     {
       "task_index": 44,
@@ -750,9 +884,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 2199,
+      "with_scout_input_tokens": 2849,
+      "without_scout_input_tokens": 34815,
+      "agent_token_savings_pct": 91.82,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 5,
-      "latency_ms": 231.22
+      "latency_ms": 235.3
     },
     {
       "task_index": 45,
@@ -765,9 +902,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1277,
+      "with_scout_input_tokens": 1927,
+      "without_scout_input_tokens": 78516,
+      "agent_token_savings_pct": 97.55,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 253.48
+      "latency_ms": 256.96
     },
     {
       "task_index": 46,
@@ -780,9 +920,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 2112,
+      "with_scout_input_tokens": 2762,
+      "without_scout_input_tokens": 31856,
+      "agent_token_savings_pct": 91.33,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 180.2
+      "latency_ms": 594.24
     },
     {
       "task_index": 47,
@@ -795,9 +938,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 2069,
+      "with_scout_input_tokens": 2719,
+      "without_scout_input_tokens": 47634,
+      "agent_token_savings_pct": 94.29,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 5,
-      "latency_ms": 643.59
+      "latency_ms": 227.78
     },
     {
       "task_index": 48,
@@ -810,9 +956,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 4004,
+      "with_scout_input_tokens": 4654,
+      "without_scout_input_tokens": 32486,
+      "agent_token_savings_pct": 85.67,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 200.65
+      "latency_ms": 203.21
     },
     {
       "task_index": 49,
@@ -825,9 +974,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 843,
+      "with_scout_input_tokens": 1493,
+      "without_scout_input_tokens": 8117,
+      "agent_token_savings_pct": 81.61,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 160.96
+      "latency_ms": 162.19
     },
     {
       "task_index": 50,
@@ -840,9 +992,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1231,
+      "with_scout_input_tokens": 1881,
+      "without_scout_input_tokens": 49394,
+      "agent_token_savings_pct": 96.19,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 153.58
+      "latency_ms": 154.55
     },
     {
       "task_index": 51,
@@ -855,9 +1010,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 123,
+      "with_scout_input_tokens": 773,
+      "without_scout_input_tokens": 5670,
+      "agent_token_savings_pct": 86.37,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 154.06
+      "latency_ms": 162.84
     },
     {
       "task_index": 52,
@@ -870,9 +1028,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 223,
+      "with_scout_input_tokens": 873,
+      "without_scout_input_tokens": 5746,
+      "agent_token_savings_pct": 84.81,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 156.0
+      "latency_ms": 159.86
     },
     {
       "task_index": 53,
@@ -885,9 +1046,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 686,
+      "with_scout_input_tokens": 1336,
+      "without_scout_input_tokens": 10730,
+      "agent_token_savings_pct": 87.55,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 678.16
+      "latency_ms": 706.72
     },
     {
       "task_index": 54,
@@ -900,9 +1064,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 570,
+      "with_scout_input_tokens": 1220,
+      "without_scout_input_tokens": 10782,
+      "agent_token_savings_pct": 88.68,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 170.29
+      "latency_ms": 171.39
     },
     {
       "task_index": 55,
@@ -915,9 +1082,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 1470,
+      "with_scout_input_tokens": 2120,
+      "without_scout_input_tokens": 18326,
+      "agent_token_savings_pct": 88.43,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 157.83
+      "latency_ms": 161.1
     },
     {
       "task_index": 56,
@@ -930,9 +1100,12 @@
       "symbol_recall_at_5": false,
       "preflight_passed": true,
       "pack_tokens": 4755,
+      "with_scout_input_tokens": 5405,
+      "without_scout_input_tokens": 71515,
+      "agent_token_savings_pct": 92.44,
       "token_savings_pct": 99.94,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 175.89
+      "latency_ms": 180.82
     },
     {
       "task_index": 57,
@@ -945,9 +1118,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 3145,
+      "with_scout_input_tokens": 3795,
+      "without_scout_input_tokens": 26841,
+      "agent_token_savings_pct": 85.86,
       "token_savings_pct": 99.96,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 159.49
+      "latency_ms": 162.99
     },
     {
       "task_index": 58,
@@ -960,9 +1136,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 3750,
+      "with_scout_input_tokens": 4400,
+      "without_scout_input_tokens": 46010,
+      "agent_token_savings_pct": 90.44,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 160.53
+      "latency_ms": 590.21
     },
     {
       "task_index": 59,
@@ -975,9 +1154,12 @@
       "symbol_recall_at_5": true,
       "preflight_passed": true,
       "pack_tokens": 2074,
+      "with_scout_input_tokens": 2724,
+      "without_scout_input_tokens": 36483,
+      "agent_token_savings_pct": 92.53,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 593.76
+      "latency_ms": 184.75
     },
     {
       "task_index": 60,
@@ -990,9 +1172,12 @@
       "symbol_recall_at_5": false,
       "preflight_passed": true,
       "pack_tokens": 269,
+      "with_scout_input_tokens": 919,
+      "without_scout_input_tokens": 50113,
+      "agent_token_savings_pct": 98.17,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 187.15
+      "latency_ms": 199.5
     }
   ]
 }

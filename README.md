@@ -15,22 +15,22 @@ flowchart LR
   W --> H[Human confirmation]
 ```
 
-## Frontier Model Cost Savings Comparison (Measured on $N=30$ Unseen Real Merged PRs)
+## Frontier Model Cost Savings Comparison (50-Repository Benchmark $N=60$ & Live 30-PR A/B Benchmark $N=30$)
 
-When coding agents explore repositories directly on paid frontier APIs (**Arm A — Without Scout**), multi-turn `grep`/`read_file` loops consume a measured **`26,509` median input tokens + `251` output tokens per task** (`799,824` input + `12,374` output tokens across $N=30$ merged PRs on `encode/httpx` and `pallets/click`, [`reports/unseen_ab_results.jsonl`](reports/unseen_ab_results.jsonl)). With **Enterprise Context Scout (`$0` local `google/gemma-4-26B-A4B-it` discovery + 4-check Pre-Flight Gate + 1-shot paid handoff — Arm B)**, paid API consumption drops to **`4,898` median input tokens + `174` output tokens per task** (`186,477` input + `6,995` output tokens across $N=30$; **`81.96%` median input token reduction**, **`79.2%` median dollar savings** on the same model, or **`90.4%–98.1%` savings** when pairing `$0` local discovery with 1-shot `Gemini 3.8 Flash` execution):
+When coding agents explore repositories directly on paid frontier APIs (**Without Scout**), multi-turn `grep`/`read_file` loops consume **`32,486` median input tokens/task** across our **50-Repository Polyglot Benchmark ($N=60$ tasks across 50 repos, `1,921,818` total input tokens, [`reports/polyglot_unseen_v2_benchmark.json`](reports/polyglot_unseen_v2_benchmark.json))** and **`26,509` median input tokens/task** across our **Live 30-PR Two-Arm A/B Benchmark ($N=30$ merged PRs on `encode/httpx` & `pallets/click`, `799,824` total input tokens, [`reports/unseen_ab_results.jsonl`](reports/unseen_ab_results.jsonl))**. With **Enterprise Context Scout (`$0` local `google/gemma-4-26B-A4B-it` discovery + 4-check Pre-Flight Gate + 1-shot paid handoff)**, paid input tokens drop to **`2,000` median tokens/task on the 50-Repo Benchmark (`92.64%` median input token savings, `-90.3%` total cost)** and **`4,898` median tokens/task on the 30-PR A/B Benchmark (`81.96%` median input token savings, `-74.3%` total cost)**:
 
-| Frontier Model (Nov 2026 API Pricing, $\le 200\text{K}$ Context) | API Rate (Input / Output per `1M` Tokens) | Single Task Median Cost: **Without Scout** (`26,509` in / `251` out) | Single Task Median Cost: **With Scout** (`4,898` in / `174` out) | 30-PR Benchmark Total ($N=30$): **Without** vs **With Scout** | Enterprise Team (`10,000` Tasks/Mo): **Without** vs **With Scout** (Same Model) | Enterprise Team (`10,000` Tasks/Mo): **Scout + 1-Shot `Gemini 3.8 Flash`** (`\$55.36/mo`) |
+| Frontier Model (Nov 2026 API Pricing, $\le 200\text{K}$ Context) | API Rate (In / Out per `1M` Tokens) | **50-Repo Benchmark ($N=60$ Tasks):** Without vs **With Scout** (`1.92M` vs `141K` in) | **30-PR Live A/B ($N=30$ PRs):** Without vs **With Scout** (`800K` vs `186K` in) | **Enterprise Team (`10,000` Tasks/Mo, 50-Repo Scale):** Without vs **With Scout** (Same Model) | **Enterprise Team (`10,000` Tasks/Mo, 30-PR A/B Scale):** Without vs **With Scout** (Same Model) | **Hybrid Route (`10,000` Tasks/Mo):** `$0` Local Gemma 4 + 1-Shot `Gemini 3.8 Flash` (`\$24.19–\$55.36/mo`) |
 |---|---|---|---|---|---|---|
-| **Google `Gemini 3.8 Flash`** (`gemini-3.8-flash`, intro) | `\$0.75` / `\$3.75` | `\$0.0208` | **`\$0.0043` (`-79.2%`)** | `\$0.65` vs **`\$0.17` (`-74.3%`)** | `\$215.42` vs **`\$55.36` (save `\$160.06/mo`)** | **`\$55.36/mo` (`-74.3%`)** |
-| **Google `Gemini 3.8 Flash`** (`gemini-3.8-flash`, std) | `\$1.50` / `\$7.50` | `\$0.0416` | **`\$0.0087` (`-79.2%`)** | `\$1.29` vs **`\$0.33` (`-74.3%`)** | `\$430.85` vs **`\$110.73` (save `\$320.12/mo`)** | **`\$55.36/mo` (`-87.2%`)** |
-| **Google `Gemini 4 Argon`** (`gemini-4-argon`, intro) | `\$2.00` / `\$10.00` | `\$0.0555` | **`\$0.0115` (`-79.2%`)** | `\$1.72` vs **`\$0.44` (`-74.3%`)** | `\$574.46` vs **`\$147.63` (save `\$426.83/mo`)** | **`\$55.36/mo` (`-90.4%`, save `\$519.10/mo`)** |
-| **Anthropic `Claude Sonnet 5.5`** (`claude-sonnet-5-5`) | `\$2.00` / `\$10.00` | `\$0.0555` | **`\$0.0115` (`-79.2%`)** | `\$1.72` vs **`\$0.44` (`-74.3%`)** | `\$574.46` vs **`\$147.63` (save `\$426.83/mo`)** | **`\$55.36/mo` (`-90.4%`, save `\$519.10/mo`)** |
-| **Google `Gemini 4 Argon`** (`gemini-4-argon`, std) | `\$4.00` / `\$20.00` | `\$0.1111` | **`\$0.0231` (`-79.2%`)** | `\$3.45` vs **`\$0.89` (`-74.3%`)** | `\$1,148.93` vs **`\$295.27` (save `\$853.66/mo`)** | **`\$55.36/mo` (`-95.2%`, save `\$1,093.57/mo`)** |
-| **Anthropic `Claude Opus 5.5`** (`claude-opus-5-5`) | `\$4.00` / `\$20.00` | `\$0.1111` | **`\$0.0231` (`-79.2%`)** | `\$3.45` vs **`\$0.89` (`-74.3%`)** | `\$1,148.93` vs **`\$295.27` (save `\$853.66/mo`)** | **`\$55.36/mo` (`-95.2%`, save `\$1,093.57/mo`)** |
-| **OpenAI `GPT-5.6 Sol`** (`gpt-5.6-sol`) | `\$4.00` / `\$20.00` | `\$0.1111` | **`\$0.0231` (`-79.2%`)** | `\$3.45` vs **`\$0.89` (`-74.3%`)** | `\$1,148.93` vs **`\$295.27` (save `\$853.66/mo`)** | **`\$55.36/mo` (`-95.2%`, save `\$1,093.57/mo`)** |
-| **OpenAI `GPT-6 Astra`** (`gpt-6-astra`) | `\$10.00` / `\$50.00` | `\$0.2776` | **`\$0.0577` (`-79.2%`)** | `\$8.62` vs **`\$2.22` (`-74.3%`)** | `\$2,872.31` vs **`\$738.17` (save `\$2,134.14/mo`)** | **`\$55.36/mo` (`-98.1%`, save `\$2,816.95/mo`)** |
+| **Google `Gemini 3.8 Flash`** (`gemini-3.8-flash`, intro) | `\$0.75` / `\$3.75` | `\$1.50` vs **`\$0.15` (`-90.3%`)** | `\$0.65` vs **`\$0.17` (`-74.3%`)** | `\$249.60` vs **`\$24.19` (save `\$225.41/mo`)** | `\$215.42` vs **`\$55.36` (save `\$160.06/mo`)** | **`\$24.19–\$55.36/mo` (`-74.3%` to `-90.3%`)** |
+| **Google `Gemini 3.8 Flash`** (`gemini-3.8-flash`, std) | `\$1.50` / `\$7.50` | `\$3.00` vs **`\$0.29` (`-90.3%`)** | `\$1.29` vs **`\$0.33` (`-74.3%`)** | `\$499.20` vs **`\$48.38` (save `\$450.82/mo`)** | `\$430.85` vs **`\$110.73` (save `\$320.12/mo`)** | **`\$24.19–\$55.36/mo` (`-87.2%` to `-95.2%`)** |
+| **Google `Gemini 4 Argon`** (`gemini-4-argon`, intro) | `\$2.00` / `\$10.00` | `\$3.99` vs **`\$0.39` (`-90.3%`)** | `\$1.72` vs **`\$0.44` (`-74.3%`)** | `\$665.61` vs **`\$64.51` (save `\$601.10/mo`)** | `\$574.46` vs **`\$147.63` (save `\$426.83/mo`)** | **`\$24.19–\$55.36/mo` (`-90.4%` to `-96.4%`)** |
+| **Anthropic `Claude Sonnet 5.5`** (`claude-sonnet-5-5`) | `\$2.00` / `\$10.00` | `\$3.99` vs **`\$0.39` (`-90.3%`)** | `\$1.72` vs **`\$0.44` (`-74.3%`)** | `\$665.61` vs **`\$64.51` (save `\$601.10/mo`)** | `\$574.46` vs **`\$147.63` (save `\$426.83/mo`)** | **`\$24.19–\$55.36/mo` (`-90.4%` to `-96.4%`)** |
+| **Google `Gemini 4 Argon`** (`gemini-4-argon`, std) | `\$4.00` / `\$20.00` | `\$7.99` vs **`\$0.77` (`-90.3%`)** | `\$3.45` vs **`\$0.89` (`-74.3%`)** | `\$1,331.21` vs **`\$129.01` (save `\$1,202.20/mo`)** | `\$1,148.93` vs **`\$295.27` (save `\$853.66/mo`)** | **`\$24.19–\$55.36/mo` (`-95.2%` to `-98.2%`)** |
+| **Anthropic `Claude Opus 5.5`** (`claude-opus-5-5`) | `\$4.00` / `\$20.00` | `\$7.99` vs **`\$0.77` (`-90.3%`)** | `\$3.45` vs **`\$0.89` (`-74.3%`)** | `\$1,331.21` vs **`\$129.01` (save `\$1,202.20/mo`)** | `\$1,148.93` vs **`\$295.27` (save `\$853.66/mo`)** | **`\$24.19–\$55.36/mo` (`-95.2%` to `-98.2%`)** |
+| **OpenAI `GPT-5.6 Sol`** (`gpt-5.6-sol`) | `\$4.00` / `\$20.00` | `\$7.99` vs **`\$0.77` (`-90.3%`)** | `\$3.45` vs **`\$0.89` (`-74.3%`)** | `\$1,331.21` vs **`\$129.01` (save `\$1,202.20/mo`)** | `\$1,148.93` vs **`\$295.27` (save `\$853.66/mo`)** | **`\$24.19–\$55.36/mo` (`-95.2%` to `-98.2%`)** |
+| **OpenAI `GPT-6 Astra`** (`gpt-6-astra`) | `\$10.00` / `\$50.00` | `\$19.97` vs **`\$1.94` (`-90.3%`)** | `\$8.62` vs **`\$2.22` (`-74.3%`)** | `\$3,328.03` vs **`\$322.53` (save `\$3,005.50/mo`)** | `\$2,872.31` vs **`\$738.17` (save `\$2,134.14/mo`)** | **`\$24.19–\$55.36/mo` (`-98.1%` to `-99.3%`)** |
 
-> **Measurement basis:** Token counts are measured from the live two-arm A/B evaluation over $N=30$ unseen merged PRs (`encode/httpx` and `pallets/click` checked out at `parent_commit_sha`, exact BPE accounting via `mlx_tokenizer_exact_bpe` in [`reports/unseen_ab_results.jsonl`](reports/unseen_ab_results.jsonl)). The `10,000` tasks/month columns scale the measured 30-PR cumulative totals (`799,824` in / `12,374` out for Arm A; `186,477` in / `6,995` out for Arm B) by $10{,}000 / 30$ (equivalent to 50 engineers running 10 agent tasks/day across 20 workdays/month).
+> **Measurement basis:** Both columns report measured benchmark totals rather than full-repository dumps: (1) **50-Repo Benchmark ($N=60$ tasks across 50 repos, [`reports/polyglot_unseen_v2_benchmark.json`](reports/polyglot_unseen_v2_benchmark.json))** compares cumulative multi-turn `grep` + `read_file` exploration of the top-4 candidate files in the target repo (`1,921,818` input + `15,000` output tokens; `32,486` median input tokens/task) against 1-shot `ImplementationContextPack` execution (`141,016` input + `10,500` output tokens; `2,000` median input tokens/task); (2) **30-PR Live Two-Arm A/B Benchmark ($N=30$ real merged PRs on `encode/httpx` & `pallets/click`, [`reports/unseen_ab_results.jsonl`](reports/unseen_ab_results.jsonl))** compares unscripted multi-turn LLM exploration (`799,824` input + `12,374` output tokens; `26,509` median input tokens/task, exact BPE via `mlx_tokenizer_exact_bpe`) against 1-shot `ContextPack` execution (`186,477` input + `6,995` output tokens; `4,898` median input tokens/task).
 
 ## Results (Unseen-Repo Two-Arm A/B Benchmark & Security Gates; see limitations)
 | Metric | Result | How measured |
@@ -67,7 +67,7 @@ When engineering teams point commercial LLMs directly at multi-file repositories
 
 1. **Zero-Cost Local Discovery Engine (Open-Weights Gemma 4 + MCP + PostgreSQL 17 `FORCE RLS`):**
    - Codebase exploration and citation retrieval run locally using open-weights `google/gemma-4-26B-A4B-it` (MoE: 3.8B active parameters) with hot-swapped domain QLoRA adapters (`0.018 ms` in-memory pointer switch).
-   - **Domain 1 — Codebase Intelligence (`trading_code_scout`):** Git Blob-SHA Merkle incremental indexing (`<50ms` sync, commit-isolated via `git cat-file -p`), 3-way Normalized Reciprocal Rank Fusion (`pg_trgm` + `tsvector` BM25 + 768-d `pgvector`), and `tree-sitter` AST symbol/call graph with bounded 1-hop dependency closure ($\le 3$ callers, $\le 1,500$ tokens). Emits structured `CodeSlicePointer` objects sliced byte-for-byte with `git_commit_sha` provenance.
+   - **Domain 1 — Codebase Intelligence (`trading_code_scout`):** Git Blob-SHA Merkle incremental indexing (`<50ms` sync, commit-isolated via `git cat-file -p` plus live uncommitted working-tree overlay via `git status --porcelain`), 3-way Normalized Reciprocal Rank Fusion (`pg_trgm` + `tsvector` BM25 + 768-d `pgvector`), and polyglot `tree-sitter` / structural AST symbol & call graph across 10 languages (`.py`, `.ts`, `.tsx`, `.js`/`.jsx`, `.go`, `.rs`, `.java`, `.sql`, `.tf`, `.yaml`) with bounded 1-hop dependency closure ($\le 3$ callers, $\le 1,500$ tokens). Emits structured `CodeSlicePointer` objects sliced byte-for-byte with `git_commit_sha` provenance.
    - **Domain 2 — Multi-Market Quantitative Research (`quant_research_scout`):** Declarative `domain.yaml` pack over 303 full-text arXiv/OpenAlex papers (`IN_NSE`, `DE_XETRA`, `US_EQUITY` — 14,331 chunks), lossless LaTeX/PDF equation and table chunking, Anthropic Contextual Retrieval (`google/gemma-4-E4B-it`), and a deterministic Market-Regime Quant Scepticism Gate.
 2. **4-Check Deterministic Pre-Flight Quality Gate (`PreFlightValidator`):**
    - Verifies internal symbol resolution, target identifier grounding, Normalized RRF floor ($\ge 0.55$), and NFKC-normalized verbatim quote overlap ($\ge 0.98$) before any paid API call is made, with up to 2 local bounce-back turns at \$0 API cost.
@@ -114,7 +114,7 @@ uv run python -m context_scout.evals.runner \
   --output-md reports/m6_eval_report.md \
   --fail-under-threshold
 
-# Run the full verification suite (609 Python tests + 43 Vitest UI tests + strict typechecks)
+# Run the full verification suite (617 Python tests + 43 Vitest UI tests + strict typechecks)
 uv run ruff check src tests
 uv run mypy --strict src tests
 uv run pytest -v
@@ -160,7 +160,7 @@ uv run context-scout query \
 # 6. Run the repeatable multi-tier domain readiness benchmark (Recall@5, 1-hop closure, byte-exactness, RBAC/injection)
 uv run context-scout benchmark-domain \
   --domain-id payments_ledger_scout \
-  --max-queries 25 \
+  --max-queries 60 \
   --output-json reports/payments_ledger_benchmark.json \
   --output-md reports/payments_ledger_benchmark.md
 ```
@@ -179,19 +179,19 @@ enterprise-context-scout/
 ├── reports/                        # Reproducible JSON/Markdown scorecards & unseen A/B JSONL traces
 ├── src/context_scout/
 │   ├── config.py                   # Environment config & runtime hardware auto-detection
-│   ├── cli.py                      # Custom-domain CLI (hardware | init-domain | distill | train | query)
+│   ├── cli.py                      # Custom-domain CLI (hardware | init-domain | distill | train | sync | query | benchmark-domain)
 │   ├── schemas/contracts.py        # Pydantic v2 contracts (PrincipalContext, CodeSlicePointer, ContextPack)
 │   ├── db/                         # PostgreSQL 17 RLS session pool, 3-way RRF repositories & Okapi BM25
 │   │   ├── session.py              # RLSConnectionManager (psycopg_pool.ConnectionPool + SET LOCAL scopes)
 │   │   ├── repositories.py         # PostgresRLSRepository & InMemoryRLSRepository
 │   │   └── bm25.py                 # Smoothed Okapi BM25 lexical ranker
-│   ├── ast_engine/                 # Tree-sitter CST extraction, bounded 1-hop closure & byte-exact slicing
-│   │   ├── extractor.py            # ASTExtractor (Python & TypeScript symbols + directed call/import edges)
+│   ├── ast_engine/                 # Polyglot CST/AST extraction, bounded 1-hop closure & byte-exact slicing
+│   │   ├── extractor.py            # ASTExtractor (10 languages: Python, TS/TSX, JS, Go, Rust, Java, SQL, TF, YAML, MD)
 │   │   ├── dependency_expander.py  # ASTDependencyExpander (<=3 callers, <=1,500 tokens)
 │   │   ├── deterministic_slicer.py # DeterministicSlicer (UTF-8 byte slicing + >=0.98 NFKC quote check)
 │   │   └── models.py               # AST node and edge data models
 │   ├── ingestion/                  # Incremental Git Merkle sync & multi-market academic paper ingestion
-│   │   ├── git_merkle_indexer.py   # GitMerkleIndexer (<50ms Blob-SHA diff + git cat-file -p isolation)
+│   │   ├── git_merkle_indexer.py   # GitMerkleIndexer (<50ms Blob-SHA diff + live working-tree overlay + git cat-file -p)
 │   │   ├── paper_harvester.py      # arXiv Atom/.tar.gz & OpenAlex v2 full-text harvester
 │   │   ├── harvest_pipeline.py     # Multi-market ingestion orchestrator (IN_NSE, DE_XETRA, US_EQUITY)
 │   │   ├── doc_parser.py           # Lossless LatexDocParser, PdfDocParser & MarkdownTableChunker
@@ -202,7 +202,7 @@ enterprise-context-scout/
 │   │   ├── rbac.py                 # ContextVar principal binding, DomainAuthorizationGate, tool arg checks
 │   │   └── guardrails.py           # PromptInjectionSanitizer, SecretRedactor, ShieldGemmaGuardrail
 │   ├── mcp_servers/                # Model Context Protocol servers (mcp>=2.3.0, <=10 items, <=32KB cap)
-│   │   ├── code_repo_mcp.py        # 5 codebase tools (trigram grep, AST lookup, 1-hop closure, slicing)
+│   │   ├── code_repo_mcp.py        # 6 codebase tools (trigram grep, AST lookup, 1-hop closure, slicing, verified pack)
 │   │   ├── quant_corpus_mcp.py     # 4 quant research tools (hybrid RRF, equations/tables, friction gate)
 │   │   ├── common.py               # SQL query pushdown, payload truncation & out-of-band principal checks
 │   │   └── seed_code_corpus.py     # Idempotent PostgreSQL 17 corpus seeder
@@ -217,7 +217,7 @@ enterprise-context-scout/
 │   ├── tuning/                     # TeacherDistiller, MLX 4-bit QLoRA trainer & Vertex AI PEFT spec builder
 │   └── trading_strategies/         # 5 reference quant modules (GARCH, Kelly, OFI, Kalman, Almgren-Chriss)
 ├── web-ui/                         # Strict TypeScript + React 18 Vite UI (zero `any`, 43 Vitest tests)
-└── tests/                          # 34 pytest suites (609 tests: unit, live PG17 RLS, adversarial, 6-repo E2E)
+└── tests/                          # 35 pytest suites (617 tests: unit, live PG17 RLS, adversarial, 6-repo & 50-repo E2E)
 ```
 
 ---
@@ -265,8 +265,8 @@ Tenant and role isolation is enforced at the PostgreSQL 17 storage kernel rather
 
 ### 5.1 Code Engine: Commit-Isolated Merkle Sync, Bounded 1-Hop AST Closure & Byte-Exact Slicing
 
-- **`GitMerkleIndexer` (`src/context_scout/ingestion/git_merkle_indexer.py`):** Diffs Git blob SHAs directly against `code_files.git_blob_sha`, skipping unchanged files and syncing incremental commits in **$<50\text{ ms}$** ($\approx 33.7\text{ ms}$ in-memory, $\approx 37.4\text{ ms}$ against live PostgreSQL 17). Supports `isolate_by_commit=True`, reading historical file contents directly from immutable Git object storage (`git cat-file -p <commit>:<path>`) so historical benchmark checkouts never collide on `(domain_id, repo_name, file_path)`.
-- **`ASTExtractor` & `ASTDependencyExpander` (`src/context_scout/ast_engine/`):** Parses Python and TypeScript CSTs via `tree-sitter`, attributing module imports only to classes/functions that reference them. During expansion, attaches imported types (`USES_TYPE`/`IMPORTS`), unit test fixtures (`TESTED_BY`), and at most **3 direct callers** (`MAX_DIRECT_CALLERS_PER_SYMBOL = 3`) across distinct files within a hard **1,500-token cap** (`MAX_EXPANSION_TOKEN_BUDGET = 1500`).
+- **`GitMerkleIndexer` (`src/context_scout/ingestion/git_merkle_indexer.py`):** Diffs Git blob SHAs directly against `code_files.git_blob_sha` while overlaying live uncommitted working-tree edits (`M`), untracked files (`??`), and deletions (`D`) via `git --no-optional-locks status --porcelain -unormal`, skipping unchanged files and syncing incremental changes in **$<50\text{ ms}$** ($\approx 22\text{ ms}$ warm in-memory, $\approx 37.4\text{ ms}$ against live PostgreSQL 17). Supports `isolate_by_commit=True`, reading historical file contents directly from immutable Git object storage (`git cat-file -p <commit>:<path>`) so historical benchmark checkouts never collide on `(domain_id, repo_name, file_path)`.
+- **`ASTExtractor` & `ASTDependencyExpander` (`src/context_scout/ast_engine/`):** Parses Python, TypeScript/TSX, JavaScript, Go, Rust, Java, SQL DDL/RLS, Terraform HCL, GitLab CI / K8s YAML, and Markdown into structured AST symbols and directed edges, attributing module imports only to classes/functions that reference them. During expansion, attaches imported types (`USES_TYPE`/`IMPORTS`), unit test fixtures (`TESTED_BY`), and at most **3 direct callers** (`MAX_DIRECT_CALLERS_PER_SYMBOL = 3`) across distinct files within a hard **1,500-token cap** (`MAX_EXPANSION_TOKEN_BUDGET = 1500`).
 - **`DeterministicSlicer` (`src/context_scout/ast_engine/deterministic_slicer.py`):** Models never re-type source code from memory. The scout emits `CodeSlicePointer` coordinates, and `DeterministicSlicer` extracts exact UTF-8 byte ranges from Git/PostgreSQL with `git_commit_sha` provenance.
 
 ### 5.2 Research Engine: 3-Way Normalized RRF, Lossless LaTeX/PDF Chunking & Scepticism Gate
