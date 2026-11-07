@@ -165,6 +165,29 @@ PROMPT_STOPWORDS: Final[set[str]] = {
     "verify",
     "verifying",
     "verified",
+    "inspect",
+    "inspecting",
+    "inspected",
+    "locate",
+    "locating",
+    "located",
+    "trace",
+    "tracing",
+    "traced",
+    "explain",
+    "explaining",
+    "explained",
+    "dependency",
+    "dependencies",
+    "caller",
+    "callers",
+    "signature",
+    "signatures",
+    "work",
+    "works",
+    "working",
+    "ast",
+    "hop",
     "test",
     "tests",
     "testing",
@@ -291,15 +314,37 @@ PROMPT_STOPWORDS: Final[set[str]] = {
 }
 
 CUSTOM_CORPUS_INDEX_PATHS: dict[str, Path] = {}
+_CUSTOM_CORPUS_MEM_CACHE: dict[str, tuple[int, float, dict[str, Any]]] = {}
+
+_SYNC_SKIP_DIRS: Final[set[str]] = {
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+}
 
 
 def register_custom_corpus_index(domain_id: str, index_path: Path) -> None:
     """Registers a custom domain corpus_index.json path for runtime hydration."""
     CUSTOM_CORPUS_INDEX_PATHS[domain_id] = index_path.resolve()
+    _CUSTOM_CORPUS_MEM_CACHE.pop(domain_id, None)
 
 
-def _load_custom_domain_corpus(domain_id: str) -> dict[str, Any] | None:
-    """Loads domains/<domain_id>/corpus_index.json if present for custom domains."""
+def invalidate_custom_corpus_cache(domain_id: str | None = None) -> None:
+    """Invalidates in-memory custom domain corpus cache."""
+    if domain_id is None:
+        _CUSTOM_CORPUS_MEM_CACHE.clear()
+    else:
+        _CUSTOM_CORPUS_MEM_CACHE.pop(domain_id, None)
+
+
+def _resolve_custom_corpus_index_path(domain_id: str) -> Path | None:
     candidates: list[Path] = []
     if domain_id in CUSTOM_CORPUS_INDEX_PATHS:
         candidates.append(CUSTOM_CORPUS_INDEX_PATHS[domain_id])
@@ -309,14 +354,314 @@ def _load_custom_domain_corpus(domain_id: str) -> dict[str, Any] | None:
         candidates.append(repo_domains / domain_id / "corpus_index.json")
     for cand in candidates:
         if cand.exists():
-            try:
-                with open(cand, encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-            except Exception as e:
-                logger.debug("Failed to load custom corpus index %s: %s", cand, e)
+            return cand
     return None
+
+
+def sync_custom_domain_corpus_if_needed(
+    domain_id: str,
+    index_path: Path | None = None,
+    force: bool = False,
+) -> dict[str, Any] | None:
+    """Incrementally syncs custom domain corpus_index.json with live Git/working-tree files."""
+    import hashlib
+    import time
+    from uuid import NAMESPACE_URL, uuid5
+
+    from context_scout.ast_engine.extractor import ASTExtractor
+    from context_scout.ingestion.git_merkle_indexer import CODE_EXTENSIONS, LANG_MAP
+
+    cand = index_path or _resolve_custom_corpus_index_path(domain_id)
+    if cand is None or not cand.exists():
+        return None
+
+    now = time.monotonic()
+    stat_mtime = cand.stat().st_mtime_ns
+    cached = _CUSTOM_CORPUS_MEM_CACHE.get(domain_id)
+    if cached is not None and not force:
+        c_mtime, last_check_ts, c_data = cached
+        if c_mtime == stat_mtime and (now - last_check_ts) < 0.08:
+            c_files = c_data.get("code_files", [])
+            return {
+                "synced": False,
+                "added": 0,
+                "modified": 0,
+                "deleted": 0,
+                "unchanged": len(c_files),
+                "files_indexed": len(c_files),
+                "symbols_indexed": len(c_data.get("ast_symbols", [])),
+                "edges_indexed": len(c_data.get("ast_edges", [])),
+            }
+
+    if cached is not None and cached[0] == stat_mtime:
+        data = cached[2]
+    else:
+        try:
+            with open(cand, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if not isinstance(loaded, dict):
+                return None
+            data = loaded
+        except Exception as e:
+            logger.debug("Failed to load custom corpus index %s: %s", cand, e)
+            return None
+
+    source_dir_str = str(data.get("source_dir", "")).strip()
+    if not source_dir_str:
+        manifest_yaml = cand.parent / "domain.yaml"
+        if manifest_yaml.exists():
+            try:
+                import yaml
+
+                with open(manifest_yaml, encoding="utf-8") as mf:
+                    m_data = yaml.safe_load(mf) or {}
+                source_dir_str = str(m_data.get("source_dir", "")).strip()
+            except Exception:
+                pass
+
+    if not source_dir_str or data.get("kind") != "code":
+        _CUSTOM_CORPUS_MEM_CACHE[domain_id] = (stat_mtime, now, data)
+        c_files = data.get("code_files", [])
+        return {
+            "synced": False,
+            "added": 0,
+            "modified": 0,
+            "deleted": 0,
+            "unchanged": len(c_files) or len(data.get("doc_chunks", [])),
+            "files_indexed": len(c_files),
+            "symbols_indexed": len(data.get("ast_symbols", [])),
+            "edges_indexed": len(data.get("ast_edges", [])),
+        }
+
+    source_dir = Path(source_dir_str)
+    if not source_dir.exists() or not source_dir.is_dir():
+        _CUSTOM_CORPUS_MEM_CACHE[domain_id] = (stat_mtime, now, data)
+        c_files = data.get("code_files", [])
+        return {
+            "synced": False,
+            "added": 0,
+            "modified": 0,
+            "deleted": 0,
+            "unchanged": len(c_files),
+            "files_indexed": len(c_files),
+            "symbols_indexed": len(data.get("ast_symbols", [])),
+            "edges_indexed": len(data.get("ast_edges", [])),
+        }
+
+    # Scan live working-tree files under source_dir and compare git_blob_sha
+    existing_files: list[dict[str, Any]] = list(data.get("code_files", []))
+    existing_by_path: dict[str, dict[str, Any]] = {
+        str(item["file_path"]): item for item in existing_files if "file_path" in item
+    }
+
+    sub_git_repos = [
+        d for d in sorted(source_dir.iterdir()) if d.is_dir() and (d / ".git").exists()
+    ]
+    is_multi_repo = len(sub_git_repos) > 0 and not (source_dir / ".git").exists()
+
+    live_files_meta: dict[str, tuple[Path, str, str]] = {}
+    added_paths: list[str] = []
+    modified_paths: list[str] = []
+    unchanged_count = 0
+
+    for p in source_dir.rglob("*"):
+        if not p.is_file() or p.suffix.lower() not in CODE_EXTENSIONS:
+            continue
+        rel_parts = p.relative_to(source_dir).parts
+        if any(part in _SYNC_SKIP_DIRS for part in rel_parts):
+            continue
+        rel_path = str(p.relative_to(source_dir))
+        repo_n = rel_parts[0] if (is_multi_repo and len(rel_parts) > 1) else domain_id
+        try:
+            raw_b = p.read_bytes()
+        except Exception:
+            continue
+        header = f"blob {len(raw_b)}\x00".encode("ascii")
+        blob_sha = hashlib.sha1(header + raw_b).hexdigest()
+        live_files_meta[rel_path] = (p, repo_n, blob_sha)
+        old_entry = existing_by_path.get(rel_path)
+        if old_entry is None:
+            added_paths.append(rel_path)
+        elif str(old_entry.get("git_blob_sha", "")) != blob_sha:
+            modified_paths.append(rel_path)
+        else:
+            unchanged_count += 1
+
+    changed_or_new = added_paths + modified_paths
+    deleted_paths = set(existing_by_path.keys()) - set(live_files_meta.keys())
+
+    if not changed_or_new and not deleted_paths:
+        _CUSTOM_CORPUS_MEM_CACHE[domain_id] = (stat_mtime, now, data)
+        return {
+            "synced": False,
+            "added": 0,
+            "modified": 0,
+            "deleted": 0,
+            "unchanged": unchanged_count,
+            "files_indexed": len(existing_files),
+            "symbols_indexed": len(data.get("ast_symbols", [])),
+            "edges_indexed": len(data.get("ast_edges", [])),
+        }
+
+    # Incremental re-index of only changed/new/deleted files
+    extractor = ASTExtractor()
+    mutated_paths = set(changed_or_new) | deleted_paths
+    mutated_file_ids = {
+        str(existing_by_path[p]["file_id"])
+        for p in mutated_paths
+        if p in existing_by_path and "file_id" in existing_by_path[p]
+    }
+
+    kept_files = [f for f in existing_files if str(f.get("file_path")) not in mutated_paths]
+    all_symbols: list[dict[str, Any]] = list(data.get("ast_symbols", []))
+    mutated_symbol_ids = {
+        str(s["symbol_id"])
+        for s in all_symbols
+        if str(s.get("file_id")) in mutated_file_ids
+    }
+    kept_symbols = [
+        s for s in all_symbols if str(s.get("file_id")) not in mutated_file_ids
+    ]
+    all_edges: list[dict[str, Any]] = list(data.get("ast_edges", []))
+    kept_edges = [
+        e for e in all_edges if str(e.get("source_symbol_id")) not in mutated_symbol_ids
+    ]
+
+    qual_to_sym_id: dict[str, str] = {
+        str(s["qualified_name"]): str(s["symbol_id"]) for s in kept_symbols
+    }
+    short_to_sym_ids: dict[str, list[str]] = {}
+    for s in kept_symbols:
+        sn = str(s["qualified_name"]).split(".")[-1]
+        short_to_sym_ids.setdefault(sn, []).append(str(s["symbol_id"]))
+
+    pending_new_edges: list[tuple[str, str, str, list[str]]] = []
+    for rel_path in sorted(changed_or_new):
+        disk_p, repo_n, blob_sha = live_files_meta[rel_path]
+        try:
+            raw_text = disk_p.read_text(encoding="utf-8", errors="replace").replace("\x00", "")
+        except Exception:
+            continue
+        file_uuid = str(uuid5(NAMESPACE_URL, f"{domain_id}:file:{rel_path}"))
+        commit_sha = hashlib.sha1(f"{domain_id}:{rel_path}:{blob_sha}".encode()).hexdigest()
+        lang = LANG_MAP.get(disk_p.suffix.lower(), "python")
+        file_scopes = ["public_eng", f"repo:{repo_n}"]
+
+        kept_files.append(
+            {
+                "file_id": file_uuid,
+                "domain_id": domain_id,
+                "repo_name": repo_n,
+                "file_path": rel_path,
+                "git_commit_sha": commit_sha,
+                "git_blob_sha": blob_sha,
+                "language": lang,
+                "allowed_scopes": file_scopes,
+                "raw_content": raw_text,
+                "line_count": max(1, len(raw_text.splitlines())),
+            }
+        )
+        sub_rel = (
+            str(disk_p.relative_to(source_dir / repo_n))
+            if (is_multi_repo and (source_dir / repo_n).exists())
+            else rel_path
+        )
+        try:
+            parsed_syms, parsed_edges = extractor.parse_source(
+                raw_text, lang, file_path=sub_rel
+            )
+        except Exception:
+            parsed_syms, parsed_edges = [], []
+
+        for sym_idx, ps in enumerate(parsed_syms):
+            sym_uuid = str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"{domain_id}:sym:{rel_path}:{ps.qualified_name}:{ps.start_line}:{sym_idx}",
+                )
+            )
+            qual_to_sym_id[ps.qualified_name] = sym_uuid
+            short_to_sym_ids.setdefault(ps.name, []).append(sym_uuid)
+            kept_symbols.append(
+                {
+                    "symbol_id": sym_uuid,
+                    "file_id": file_uuid,
+                    "domain_id": domain_id,
+                    "qualified_name": ps.qualified_name,
+                    "symbol_kind": ps.symbol_kind,
+                    "start_line": ps.start_line,
+                    "end_line": ps.end_line,
+                    "signature_skeleton": ps.signature_skeleton,
+                    "contextual_summary": ps.contextual_summary or ps.docstring or ps.signature,
+                    "allowed_scopes": file_scopes,
+                }
+            )
+        for pe in parsed_edges:
+            pending_new_edges.append(
+                (pe.source_qualified_name, pe.target_qualified_name, pe.edge_kind, file_scopes)
+            )
+
+    for edge_idx, (src_q, tgt_q, e_kind, e_scopes) in enumerate(pending_new_edges):
+        src_uuid = qual_to_sym_id.get(src_q)
+        if not src_uuid:
+            s_cands = short_to_sym_ids.get(src_q.split(".")[-1], [])
+            if s_cands:
+                src_uuid = s_cands[0]
+        if not src_uuid:
+            continue
+        tgt_uuid = qual_to_sym_id.get(tgt_q)
+        if not tgt_uuid:
+            t_cands = short_to_sym_ids.get(tgt_q.split(".")[-1], [])
+            if len(t_cands) == 1:
+                tgt_uuid = t_cands[0]
+        edge_uuid = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"{domain_id}:edge:sync:{src_uuid}:{tgt_q}:{e_kind}:{edge_idx}",
+            )
+        )
+        kept_edges.append(
+            {
+                "edge_id": edge_uuid,
+                "domain_id": domain_id,
+                "source_symbol_id": src_uuid,
+                "target_qualified_name": tgt_q,
+                "target_symbol_id": tgt_uuid,
+                "edge_kind": e_kind,
+                "allowed_scopes": e_scopes,
+            }
+        )
+
+    data["code_files"] = kept_files
+    data["ast_symbols"] = kept_symbols
+    data["ast_edges"] = kept_edges
+    try:
+        with open(cand, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        new_mtime = cand.stat().st_mtime_ns
+    except Exception:
+        new_mtime = stat_mtime
+
+    _CUSTOM_CORPUS_MEM_CACHE[domain_id] = (new_mtime, now, data)
+    return {
+        "synced": True,
+        "added": len(added_paths),
+        "modified": len(modified_paths),
+        "deleted": len(deleted_paths),
+        "unchanged": unchanged_count,
+        "files_indexed": len(kept_files),
+        "symbols_indexed": len(kept_symbols),
+        "edges_indexed": len(kept_edges),
+    }
+
+
+def _load_custom_domain_corpus(domain_id: str) -> dict[str, Any] | None:
+    """Loads and auto-syncs domains/<domain_id>/corpus_index.json for custom domains."""
+    res = sync_custom_domain_corpus_if_needed(domain_id)
+    if res is None:
+        return None
+    cached = _CUSTOM_CORPUS_MEM_CACHE.get(domain_id)
+    return cached[2] if cached is not None else None
 
 
 class BoundGraphRepository:

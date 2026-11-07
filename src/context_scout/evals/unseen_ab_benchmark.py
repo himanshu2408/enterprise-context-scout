@@ -32,6 +32,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -712,14 +713,15 @@ class UnseenRepoABBenchmarkRunner:
 
         # Final Turn: Synthesize localization + unified diff patch (Live LLM generation)
         final_turn_idx = len(traces) + 1
-        final_max_tokens = 640 if task.verify_with_pytest else 96
+        final_max_tokens = 1024 if task.verify_with_pytest else 96
         final_prompt = (
             "\n".join(history_transcript)
-            + "\nProduce a minimal code fix as either a git-apply unified diff enclosed in "
-            "```diff ... ``` (using `--- a/<file_path>` and `+++ b/<file_path>` without "
-            "`NNNN | ` line prefixes) OR a `<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE` "
-            "block (without `NNNN | ` line prefixes), and state the modified file path "
-            "and qualified symbol name."
+            + "\nOutput ONLY the code patch FIRST at the very top of your reply (no prose before "
+            "the patch) as either a git-apply unified diff enclosed in ```diff ... ``` "
+            "(using `--- a/<file_path>` and `+++ b/<file_path>` without `NNNN | ` line prefixes) "
+            "OR a `### File: <file_path>\\n<<<<<<< SEARCH\\n<exact existing lines>\\n=======\\n"
+            "<replacement lines>\\n>>>>>>> REPLACE` block (without `NNNN | ` line prefixes), "
+            "followed by the modified file path and qualified symbol name."
         )
         final_resp, in_f, out_f, lat_f = self.backend.generate(
             final_prompt, max_output_tokens=final_max_tokens
@@ -955,12 +957,13 @@ class UnseenRepoABBenchmarkRunner:
 
         one_shot_prompt = (
             self.gemini_prompt_builder._build_gemini_prompt(scout_res)
-            + "\nDo not include 'NNNN | ' line-number prefixes inside the diff body; "
-            "use standard '--- a/<file_path>' and '+++ b/<file_path>' headers, OR emit "
-            "a minimal '<<<<<<< SEARCH\\n<exact existing lines>\\n=======\\n<replacement lines>"
-            "\\n>>>>>>> REPLACE' block without line-number prefixes."
+            + "\nIMPORTANT: Output the code patch FIRST at the very top of your reply (before any "
+            "prose explanation). Do not include 'NNNN | ' line-number prefixes inside the diff "
+            "body; use standard '--- a/<file_path>' and '+++ b/<file_path>' headers, OR emit "
+            "a minimal '### File: <file_path>\\n<<<<<<< SEARCH\\n<exact existing lines>\\n"
+            "=======\\n<replacement lines>\\n>>>>>>> REPLACE' block without line-number prefixes."
         )
-        arm_b_max_tokens = 640 if task.verify_with_pytest else 96
+        arm_b_max_tokens = 1024 if task.verify_with_pytest else 96
         patch_resp, in_tok, out_tok, gen_lat_ms = self.backend.generate(
             one_shot_prompt, max_output_tokens=arm_b_max_tokens
         )
@@ -1140,13 +1143,9 @@ class UnseenRepoABBenchmarkRunner:
                     worktree_dir,
                     default_files=arm_result.localized_files,
                 )
+                apply_proc_ok = sr_ok
                 if not sr_ok:
-                    err_msg = (apply_err_text or sr_msg)[:160]
-                    short_sha = task.parent_commit_sha[:8]
-                    return (
-                        False,
-                        f"git apply failed on parent_commit_sha ({short_sha}): {err_msg}",
-                    )
+                    apply_err_text = (apply_err_text or sr_msg)[:160]
 
             env = {
                 k: v
@@ -1169,8 +1168,8 @@ class UnseenRepoABBenchmarkRunner:
             env["PYTHONPATH"] = f"{src_path}:{env.get('PYTHONPATH', '')}"
 
             cmd = [
-                "uv",
-                "run",
+                sys.executable,
+                "-m",
                 "pytest",
                 "-o",
                 "filterwarnings=",
@@ -1180,28 +1179,144 @@ class UnseenRepoABBenchmarkRunner:
             ]
             if added_test_names:
                 cmd.extend(["-k", " or ".join(added_test_names)])
-            proc = subprocess.run(
-                cmd,
-                cwd=worktree_dir,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-            if proc.returncode in (2, 4) and (
-                "conftest" in (proc.stdout + proc.stderr)
-                or "ImportError" in (proc.stdout + proc.stderr)
-                or "ModuleNotFoundError" in (proc.stdout + proc.stderr)
-            ):
-                proc = subprocess.run(
-                    [*cmd, "--noconftest"],
+
+            def _run_worktree_pytest() -> subprocess.CompletedProcess[str]:
+                p = subprocess.run(
+                    cmd,
                     cwd=worktree_dir,
                     env=env,
                     capture_output=True,
                     text=True,
                     timeout=30,
                     check=False,
+                )
+                if p.returncode in (2, 4) and (
+                    "conftest" in (p.stdout + p.stderr)
+                    or "ImportError" in (p.stdout + p.stderr)
+                    or "ModuleNotFoundError" in (p.stdout + p.stderr)
+                ):
+                    p = subprocess.run(
+                        [*cmd, "--noconftest"],
+                        cwd=worktree_dir,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        check=False,
+                    )
+                return p
+
+            proc = _run_worktree_pytest() if apply_proc_ok else None
+
+            # Bounded 1-turn worktree pytest-stderr repair loop if initial patch failed
+            if (proc is None or proc.returncode != 0) and arm_result.localized_files:
+                from context_scout.agents.gemini_executor import (
+                    apply_search_replace_or_hunk_blocks,
+                )
+
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_dir),
+                        "checkout",
+                        "-f",
+                        "--",
+                        *list(task.ground_truth_files),
+                    ],
+                    capture_output=True,
+                    check=False,
+                )
+                target_f_rel = arm_result.localized_files[0]
+                target_f_path = worktree_dir / target_f_rel
+                file_excerpt = ""
+                if target_f_path.is_file():
+                    f_lines = target_f_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    ).splitlines()
+                    sym_short = (
+                        arm_result.localized_symbols[0].split(".")[-1]
+                        if arm_result.localized_symbols
+                        else ""
+                    )
+                    center_idx = next(
+                        (
+                            i
+                            for i, ln in enumerate(f_lines)
+                            if (sym_short and f"def {sym_short}" in ln)
+                            or f"class {sym_short}" in ln
+                        ),
+                        0,
+                    )
+                    s_idx = max(0, center_idx - 15)
+                    e_idx = min(len(f_lines), center_idx + 95)
+                    file_excerpt = "\n".join(f_lines[s_idx:e_idx])
+                pytest_diag = (
+                    (proc.stdout + "\n" + proc.stderr)[-1200:]
+                    if proc is not None
+                    else f"Patch failed to apply: {apply_err_text}"
+                )
+                repair_prompt = (
+                    f"Bug Report:\n{task.problem_statement}\n\n"
+                    f"Target File ({target_f_rel}):\n```python\n{file_excerpt}\n```\n\n"
+                    f"Previous Patch / Test Failure Output:\n```\n{pytest_diag}\n```\n\n"
+                    "Output ONLY a corrected `<<<<<<< SEARCH\\n<exact existing lines>"
+                    "\\n=======\\n<replacement lines>\\n>>>>>>> REPLACE` block "
+                    "at the very top of your response that makes the failing pytest test pass."
+                )
+                try:
+                    rep_text, rep_in, rep_out, rep_lat = self.backend.generate(
+                        repair_prompt, max_output_tokens=768
+                    )
+                    arm_result.input_tokens += rep_in
+                    arm_result.output_tokens += rep_out
+                    arm_result.total_tokens = arm_result.input_tokens + arm_result.output_tokens
+                    arm_result.estimated_frontier_cost_usd = compute_frontier_cost_usd(
+                        arm_result.input_tokens, arm_result.output_tokens
+                    )
+                    arm_result.wall_clock_latency_ms = round(
+                        arm_result.wall_clock_latency_ms + rep_lat, 2
+                    )
+                    rep_diff = _extract_unified_diff(rep_text)
+                    rep_applied = False
+                    if rep_diff:
+                        rep_patch_path = worktree_dir / ".scout_repair.patch"
+                        rep_patch_path.write_text(rep_diff, encoding="utf-8")
+                        rep_ap = subprocess.run(
+                            [
+                                "git",
+                                "-C",
+                                str(worktree_dir),
+                                "apply",
+                                "--recount",
+                                "--ignore-space-change",
+                                "--ignore-whitespace",
+                                str(rep_patch_path),
+                            ],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        rep_applied = rep_ap.returncode == 0
+                    if not rep_applied:
+                        rep_applied, _ = apply_search_replace_or_hunk_blocks(
+                            rep_text,
+                            worktree_dir,
+                            default_files=arm_result.localized_files,
+                        )
+                    if rep_applied:
+                        arm_result.generated_patch_diff = rep_text[:2000]
+                        proc = _run_worktree_pytest()
+                except Exception as rep_exc:
+                    logger.warning(
+                        "Worktree 1-turn repair skipped on %s: %s", task.task_id, rep_exc
+                    )
+
+            if proc is None:
+                short_sha = task.parent_commit_sha[:8]
+                return (
+                    False,
+                    f"git apply failed on parent_commit_sha ({short_sha}): {apply_err_text}",
                 )
             summary = (proc.stdout.strip() or proc.stderr.strip()).splitlines()[-1:]
             summary_str = summary[0] if summary else f"exit_code={proc.returncode}"

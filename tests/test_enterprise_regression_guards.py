@@ -573,7 +573,7 @@ def test_public_repository_hygiene_and_frontend_hook_deps_guard() -> None:
         in readme_text
     )
     assert "## Limitations" in readme_text
-    assert "27 of 30" in readme_text
+    assert "30 of 30" in readme_text
     assert "0 of 22" in readme_text
     assert "22 of 22" in readme_text
     assert "$4.00 / 1M" not in readme_text

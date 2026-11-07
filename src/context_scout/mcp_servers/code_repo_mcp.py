@@ -511,6 +511,57 @@ def create_code_repo_mcp_server(
         return bound_payload_dict(payload)
 
     # -------------------------------------------------------------------------
+    # Canonical Tool 6: assemble_verified_context_pack (High-Level IDE Tool)
+    # -------------------------------------------------------------------------
+    @server.tool(
+        name="assemble_verified_context_pack",
+        description=(
+            "Run the complete 4-stage Enterprise Context Scout DAG (live Git/working-tree "
+            "incremental sync, 3-way hybrid retrieval, 1-hop AST dependency closure, and "
+            "4-check PreFlightValidator with $0 local bounce-back) and return a verified "
+            "ImplementationContextPack in a single call for IDE agents."
+        ),
+    )
+    async def assemble_verified_context_pack(
+        query: str,
+        domain_id: str = DOMAIN_ID,
+        max_bounce_backs: int = 1,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Assembles a verified ImplementationContextPack under out-of-band PrincipalContext."""
+        validate_tool_call_arguments(
+            {
+                "query": query,
+                "domain_id": domain_id,
+                "max_bounce_backs": max_bounce_backs,
+            }
+        )
+        principal = get_current_principal()
+        registry.load_all()
+        auth_gate.authorize_tool_call(
+            domain_id, "code_repo_mcp:assemble_verified_context_pack", principal
+        )
+
+        from context_scout.agents.scout_workflow import ScoutWorkflow
+
+        clamped_bounces = min(max(0, max_bounce_backs), 3)
+        workflow = ScoutWorkflow(
+            registry=registry,
+            repo=graph_adapter,
+            slicer=slicer,
+            expander=expander,
+            auth_gate=auth_gate,
+        )
+        pack_or_diag = workflow.run(
+            user_prompt=query,
+            principal=principal,
+            domain_id=domain_id,
+            max_bounce_backs=clamped_bounces,
+        )
+        dumped: dict[str, Any] = pack_or_diag.model_dump(mode="json")
+        return dumped
+
+    # -------------------------------------------------------------------------
     # Legacy Tool Aliases (for backward compatibility)
     # -------------------------------------------------------------------------
     @server.tool(name="search_ast_symbols", description="Legacy alias for lookup_ast_symbol.")
