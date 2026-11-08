@@ -1079,4 +1079,320 @@ def test_cross_repo_isolation_2hop_schema_closure_and_contiguous_slice_coalescin
     assert "app" not in missing_refs
 
 
+def test_enterprise_production_class_state_cross_file_dto_and_caller_anti_starvation() -> None:
+    """Guard 23: Verifies class __init__ context, cross-file DTO inheritance, and caller budget."""
+    from uuid import uuid4
+
+    from context_scout.agents.domain_registry import DomainRegistry
+    from context_scout.agents.preflight_gate import BoundGraphRepository
+    from context_scout.agents.scout_workflow import ScoutWorkflow
+    from context_scout.ast_engine.dependency_expander import ASTDependencyExpander
+    from context_scout.db.repositories import ASTEdgeRecord, ASTSymbolRecord, CodeFileRecord
+    from context_scout.schemas.contracts import ModificationIntent, VerbatimCodeSlice
+
+    f_svc_id = uuid4()
+    f_dto_id = uuid4()
+    f_base_dto_id = uuid4()
+    f_caller_id = uuid4()
+    f_other_test_id = uuid4()
+
+    svc_code = "\n".join(
+        [
+            "from __future__ import annotations",
+            "import asyncio",
+            "DEFAULT_MAX_RETRIES = 5",
+            *[f"# module padding {i}" for i in range(4, 16)],
+            "class OrderExecutionService:",
+            "    def __init__(self, db_pool: object, redis_lock: object) -> None:",
+            "        self._db_pool = db_pool",
+            "        self._redis_lock = redis_lock",
+            "        self._OrderCache: dict[str, object] = {}",
+            *[f"    # class padding {i}" for i in range(22, 42)],
+            "    def submit_order(self, req: CreateOrderDTO) -> str:",
+            "        retries = DEFAULT_MAX_RETRIES",
+            "        return _normalize_order_id(str(retries))",
+            "def _normalize_order_id(raw_id: str) -> str:",
+            "    return raw_id.strip().upper()",
+        ]
+    )
+    dto_code = (
+        "class CreateOrderDTO(BaseAuthenticatedDTO):\n"
+        "    symbol: str\n"
+        "    qty: int\n"
+    )
+    base_dto_code = (
+        "class BaseAuthenticatedDTO:\n"
+        "    tenant_id: str\n"
+        "    idempotency_key: str\n"
+    )
+    caller_code = (
+        "def handle_http_post(svc: OrderExecutionService, payload: CreateOrderDTO) -> str:\n"
+        "    return svc.submit_order(payload)\n"
+    )
+    other_repo_test_code = (
+        "def test_submit_order() -> None:\n"
+        "    assert True\n"
+    )
+
+    files = [
+        CodeFileRecord(
+            file_id=f_svc_id,
+            domain_id="prod_test",
+            repo_name="orders_service",
+            file_path="orders_service/src/order_service.py",
+            git_commit_sha="a" * 40,
+            git_blob_sha="b" * 40,
+            language="python",
+            allowed_scopes=["public_eng", "repo:orders_service"],
+            raw_content=svc_code,
+            line_count=len(svc_code.splitlines()),
+        ),
+        CodeFileRecord(
+            file_id=f_dto_id,
+            domain_id="prod_test",
+            repo_name="orders_service",
+            file_path="orders_service/src/dtos/order_dto.py",
+            git_commit_sha="c" * 40,
+            git_blob_sha="d" * 40,
+            language="python",
+            allowed_scopes=["public_eng", "repo:orders_service"],
+            raw_content=dto_code,
+            line_count=len(dto_code.splitlines()),
+        ),
+        CodeFileRecord(
+            file_id=f_base_dto_id,
+            domain_id="prod_test",
+            repo_name="orders_service",
+            file_path="orders_service/src/dtos/base_dto.py",
+            git_commit_sha="e" * 40,
+            git_blob_sha="f" * 40,
+            language="python",
+            allowed_scopes=["public_eng", "repo:orders_service"],
+            raw_content=base_dto_code,
+            line_count=len(base_dto_code.splitlines()),
+        ),
+        CodeFileRecord(
+            file_id=f_caller_id,
+            domain_id="prod_test",
+            repo_name="orders_service",
+            file_path="orders_service/src/api/routes.py",
+            git_commit_sha="1" * 40,
+            git_blob_sha="2" * 40,
+            language="python",
+            allowed_scopes=["public_eng", "repo:orders_service"],
+            raw_content=caller_code,
+            line_count=len(caller_code.splitlines()),
+        ),
+        CodeFileRecord(
+            file_id=f_other_test_id,
+            domain_id="prod_test",
+            repo_name="unrelated_repo",
+            file_path="unrelated_repo/tests/test_order_service.py",
+            git_commit_sha="3" * 40,
+            git_blob_sha="4" * 40,
+            language="python",
+            allowed_scopes=["public_eng", "repo:unrelated_repo"],
+            raw_content=other_repo_test_code,
+            line_count=len(other_repo_test_code.splitlines()),
+        ),
+    ]
+
+    sym_submit = ASTSymbolRecord(
+        symbol_id=uuid4(),
+        file_id=f_svc_id,
+        domain_id="prod_test",
+        qualified_name="order_service.OrderExecutionService.submit_order",
+        symbol_kind="method",
+        start_line=42,
+        end_line=44,
+        signature_skeleton="def submit_order(self, req: CreateOrderDTO) -> str:",
+        contextual_summary="submit_order",
+        allowed_scopes=["public_eng", "repo:orders_service"],
+        embedding=[],
+    )
+    sym_helper = ASTSymbolRecord(
+        symbol_id=uuid4(),
+        file_id=f_svc_id,
+        domain_id="prod_test",
+        qualified_name="order_service._normalize_order_id",
+        symbol_kind="function",
+        start_line=45,
+        end_line=46,
+        signature_skeleton="def _normalize_order_id(raw_id: str) -> str:",
+        contextual_summary="_normalize_order_id",
+        allowed_scopes=["public_eng", "repo:orders_service"],
+        embedding=[],
+    )
+    sym_dto = ASTSymbolRecord(
+        symbol_id=uuid4(),
+        file_id=f_dto_id,
+        domain_id="prod_test",
+        qualified_name="dtos.order_dto.CreateOrderDTO",
+        symbol_kind="class",
+        start_line=1,
+        end_line=3,
+        signature_skeleton="class CreateOrderDTO(BaseAuthenticatedDTO):",
+        contextual_summary="CreateOrderDTO",
+        allowed_scopes=["public_eng", "repo:orders_service"],
+        embedding=[],
+    )
+    sym_base_dto = ASTSymbolRecord(
+        symbol_id=uuid4(),
+        file_id=f_base_dto_id,
+        domain_id="prod_test",
+        qualified_name="dtos.base_dto.BaseAuthenticatedDTO",
+        symbol_kind="class",
+        start_line=1,
+        end_line=3,
+        signature_skeleton="class BaseAuthenticatedDTO:",
+        contextual_summary="BaseAuthenticatedDTO",
+        allowed_scopes=["public_eng", "repo:orders_service"],
+        embedding=[],
+    )
+    sym_caller = ASTSymbolRecord(
+        symbol_id=uuid4(),
+        file_id=f_caller_id,
+        domain_id="prod_test",
+        qualified_name="api.routes.handle_http_post",
+        symbol_kind="function",
+        start_line=1,
+        end_line=2,
+        signature_skeleton="def handle_http_post(svc, payload) -> str:",
+        contextual_summary="handle_http_post",
+        allowed_scopes=["public_eng", "repo:orders_service"],
+        embedding=[],
+    )
+    sym_other_test = ASTSymbolRecord(
+        symbol_id=uuid4(),
+        file_id=f_other_test_id,
+        domain_id="prod_test",
+        qualified_name="tests.test_order_service.test_submit_order",
+        symbol_kind="function",
+        start_line=1,
+        end_line=2,
+        signature_skeleton="def test_submit_order() -> None:",
+        contextual_summary="test_submit_order",
+        allowed_scopes=["public_eng", "repo:unrelated_repo"],
+        embedding=[],
+    )
+
+    symbols = [sym_submit, sym_helper, sym_dto, sym_base_dto, sym_caller, sym_other_test]
+    edges = [
+        ASTEdgeRecord(
+            edge_id=uuid4(),
+            source_symbol_id=sym_submit.symbol_id,
+            target_symbol_id=sym_dto.symbol_id,
+            target_qualified_name="CreateOrderDTO",
+            edge_kind="USES_TYPE",
+            domain_id="prod_test",
+            allowed_scopes=["public_eng", "repo:orders_service"],
+        ),
+        ASTEdgeRecord(
+            edge_id=uuid4(),
+            source_symbol_id=sym_dto.symbol_id,
+            target_symbol_id=sym_base_dto.symbol_id,
+            target_qualified_name="BaseAuthenticatedDTO",
+            edge_kind="INHERITS",
+            domain_id="prod_test",
+            allowed_scopes=["public_eng", "repo:orders_service"],
+        ),
+        ASTEdgeRecord(
+            edge_id=uuid4(),
+            source_symbol_id=sym_caller.symbol_id,
+            target_symbol_id=sym_submit.symbol_id,
+            target_qualified_name="submit_order",
+            edge_kind="CALLS",
+            domain_id="prod_test",
+            allowed_scopes=["public_eng", "repo:orders_service"],
+        ),
+    ]
+
+    class _MockRepo:
+        def list_visible_code_files(self, *args: object, **kwargs: object) -> list[CodeFileRecord]:
+            return files
+
+        def list_visible_ast_symbols(
+            self, *args: object, **kwargs: object
+        ) -> list[ASTSymbolRecord]:
+            return symbols
+
+        def list_visible_ast_edges(self, *args: object, **kwargs: object) -> list[ASTEdgeRecord]:
+            return edges
+
+        def list_visible_doc_chunks(self, *args: object, **kwargs: object) -> list[object]:
+            return []
+
+    bound = BoundGraphRepository(_MockRepo())
+    # Tight budget (80 tokens) to verify primary caller is NOT starved by secondary types
+    expander = ASTDependencyExpander(max_direct_callers=3, max_expansion_token_budget=80)
+    principal = PrincipalContext(
+        user_id="prod_eng",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng", "repo:orders_service", "repo:unrelated_repo"],
+    )
+    exp = expander.expand_1hop(
+        focus_symbol=sym_submit,
+        repo=bound,
+        principal=principal,
+        domain_id="prod_test",
+    )
+    expanded_type_names = {p.qualified_symbol for p in exp.imported_type_slices}
+    # 1. Cross-file 2-hop BaseAuthenticatedDTO & same-file helper _normalize_order_id expanded
+    expander_full = ASTDependencyExpander(max_direct_callers=3, max_expansion_token_budget=1500)
+    exp_full = expander_full.expand_1hop(
+        focus_symbol=sym_submit,
+        repo=bound,
+        principal=principal,
+        domain_id="prod_test",
+    )
+    full_types = {p.qualified_symbol for p in exp_full.imported_type_slices}
+    assert "dtos.order_dto.CreateOrderDTO" in full_types
+    assert "dtos.base_dto.BaseAuthenticatedDTO" in full_types
+    assert "order_service._normalize_order_id" in full_types
+    # 2. Anti-starvation: even under tight 80-token budget, caller_slices is non-empty
+    assert len(exp.caller_slices) == 1
+    assert exp.caller_slices[0].qualified_symbol == "api.routes.handle_http_post"
+    assert len(expanded_type_names) >= 1
+    # 3. Cross-repo test fixture isolation: unrelated_repo test_order_service is NOT attached
+    assert len(exp_full.test_fixture_slices) == 0
+
+    # 4. Enclosing class header & __init__ state + top-of-file constant DEFAULT_MAX_RETRIES attached
+    wf = ScoutWorkflow(registry=DomainRegistry(Path("domains")), repo=_MockRepo())
+    method_slice = [
+        VerbatimCodeSlice(
+            repo_name="orders_service",
+            file_path="orders_service/src/order_service.py",
+            git_commit_sha="a" * 40,
+            git_blob_sha="b" * 40,
+            start_line=42,
+            end_line=44,
+            qualified_symbol="order_service.OrderExecutionService.submit_order",
+            modification_intent=ModificationIntent.MODIFY_TARGET,
+            auto_expanded_by_ast=False,
+            selection_reason="target",
+            verbatim_code_with_lines=(
+                "  42 |     def submit_order(self, req: CreateOrderDTO) -> str:\n"
+                "  43 |         retries = DEFAULT_MAX_RETRIES\n"
+                "  44 |         return _normalize_order_id(str(retries))"
+            ),
+        )
+    ]
+    enriched = wf._coalesce_and_enrich_target_file_slices(
+        hydrated_slices=method_slice,
+        files_by_path={f.file_path: f for f in files},
+        user_prompt="In repository `orders_service`, update `submit_order`",
+    )
+    assert any(
+        "Top-of-file import header" in s.selection_reason
+        and "DEFAULT_MAX_RETRIES = 5" in s.verbatim_code_with_lines
+        for s in enriched
+    )
+    assert any(
+        "Enclosing class & constructor state" in s.selection_reason
+        and "self._redis_lock = redis_lock" in s.verbatim_code_with_lines
+        for s in enriched
+    )
+
+
+
 

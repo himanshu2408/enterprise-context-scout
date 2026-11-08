@@ -175,8 +175,9 @@ class ASTDependencyExpander:
                     if edge.edge_kind in ("USES_TYPE", "INHERITS"):
                         hop1_type_syms.append(target_sym)
 
-        # 1b. Transitive 2-hop same-file schema/type/DDL closure
-        # (e.g. SQL POLICY -> TABLE -> FK TABLE, or Function -> Interface -> Parent Interface)
+        # 1b. Transitive 2-hop schema/type/inheritance closure within the same repository
+        # (e.g. SQL POLICY -> TABLE -> FK TABLE, Function -> DTO -> BaseDTO across files,
+        # or Class -> ParentClass -> GrandparentInterface)
         for h1_sym in hop1_type_syms:
             for edge in visible_edges:
                 if edge.source_symbol_id == h1_sym.symbol_id and edge.edge_kind in (
@@ -186,14 +187,24 @@ class ASTDependencyExpander:
                     h2_sym = _resolve_symbol_scoped(
                         edge.target_symbol_id, edge.target_qualified_name
                     )
-                    if (
-                        h2_sym is not None
-                        and h2_sym.file_id == focus_symbol.file_id
-                    ):
-                        _append_type_candidate(h2_sym, "USES_TYPE")
+                    if h2_sym is not None and h2_sym.file_id in visible_files:
+                        h2_file = visible_files[h2_sym.file_id]
+                        same_repo = (
+                            focus_repo_name is None or h2_file.repo_name == focus_repo_name
+                        )
+                        is_valid_2hop = (
+                            h2_sym.file_id == focus_symbol.file_id
+                            or edge.edge_kind == "INHERITS"
+                            or (
+                                h1_sym.symbol_kind in ("class", "interface", "type_alias")
+                                and h2_sym.symbol_kind in ("class", "interface", "type_alias")
+                            )
+                        )
+                        if same_repo and is_valid_2hop:
+                            _append_type_candidate(h2_sym, edge.edge_kind)
 
-        # 1c. Same-file body-referenced types/classes/tables (catches snake_case state vars like
-        # cancel_scope -> CancelScope, _task_states -> TaskState, or same-file interfaces/tables)
+        # 1c. Same-file body-referenced types, classes, tables, constants, and helper functions
+        # (catches snake_case state vars: cancel_scope -> CancelScope, _task_states -> TaskState)
         if focus_file_rec is not None:
             focus_lines = focus_file_rec.raw_content.splitlines()[
                 max(0, focus_symbol.start_line - 1) : focus_symbol.end_line
@@ -205,7 +216,7 @@ class ASTDependencyExpander:
                 for s in visible_symbols.values()
                 if s.file_id == focus_symbol.file_id
                 and s.symbol_id != focus_symbol.symbol_id
-                and s.symbol_kind in ("class", "interface", "type_alias")
+                and s.symbol_kind in ("class", "interface", "type_alias", "function")
             ]
             for sf_sym in sorted(same_file_syms, key=lambda x: x.start_line):
                 short_n = sf_sym.qualified_name.split(".")[-1]
@@ -213,12 +224,16 @@ class ASTDependencyExpander:
                     continue
                 snake_n = re.sub(r"(?<!^)(?=[A-Z])", "_", short_n).lower()
                 sym_span = sf_sym.end_line - sf_sym.start_line + 1
-                is_referenced_in_body = (
-                    bool(re.search(rf"\b{re.escape(short_n)}\b", focus_body_text))
-                    or (len(snake_n) >= 4 and snake_n in focus_body_lower)
+                exact_body_match = bool(re.search(rf"\b{re.escape(short_n)}\b", focus_body_text))
+                is_referenced_in_body = exact_body_match or (
+                    sf_sym.symbol_kind in ("class", "interface", "type_alias")
+                    and len(snake_n) >= 4
+                    and snake_n in focus_body_lower
                 )
                 is_compact_same_file_schema = (
-                    focus_file_rec.line_count <= 80 and sym_span <= 30
+                    sf_sym.symbol_kind in ("class", "interface", "type_alias")
+                    and focus_file_rec.line_count <= 80
+                    and sym_span <= 30
                 )
                 if is_referenced_in_body or is_compact_same_file_schema:
                     _append_type_candidate(sf_sym, "USES_TYPE")
@@ -304,6 +319,8 @@ class ASTDependencyExpander:
         )
 
         # 4. Budget Accumulation & Cutoff Logic (enforcing MAX_EXPANSION_TOKEN_BUDGET)
+        # Interleaves primary types with at least 1 direct caller so a long type list
+        # never starves call-site contract visibility to zero when modifying signatures.
         accumulated_tokens = 0
         budget_exhausted = False
         dropped_count = 0
@@ -312,9 +329,15 @@ class ASTDependencyExpander:
         caller_slices: list[CodeSlicePointer] = []
         test_slices: list[CodeSlicePointer] = []
 
-        all_candidates_ordered: list[tuple[ASTExpansionCandidate, list[CodeSlicePointer]]] = [
-            (c, type_slices) for c in type_candidates
-        ] + [(c, caller_slices) for c in selected_callers]
+        all_candidates_ordered: list[tuple[ASTExpansionCandidate, list[CodeSlicePointer]]] = []
+        primary_types = [(c, type_slices) for c in type_candidates[:2]]
+        secondary_types = [(c, type_slices) for c in type_candidates[2:]]
+        primary_caller = [(c, caller_slices) for c in selected_callers[:1]]
+        secondary_callers = [(c, caller_slices) for c in selected_callers[1:]]
+        all_candidates_ordered.extend(primary_types)
+        all_candidates_ordered.extend(primary_caller)
+        all_candidates_ordered.extend(secondary_types)
+        all_candidates_ordered.extend(secondary_callers)
         if test_candidate:
             all_candidates_ordered.append((test_candidate, test_slices))
 
@@ -416,6 +439,8 @@ class ASTDependencyExpander:
         visible_files: dict[UUID, CodeFileRecord],
     ) -> ASTExpansionCandidate | None:
         """Resolves matching unit test fixture via TESTED_BY edge or naming convention."""
+        focus_f = visible_files.get(focus_symbol.file_id)
+        focus_repo = focus_f.repo_name if focus_f is not None else None
         # 1. Check explicit TESTED_BY edge (supports canonical prod->test and legacy test->prod)
         target_name = focus_symbol.qualified_name.split(".")[-1]
         expected_test_short = f"test_{target_name}"
@@ -427,10 +452,16 @@ class ASTDependencyExpander:
                     or edge.target_qualified_name.split(".")[-1] == expected_test_short
                 ):
                     if edge.target_symbol_id and edge.target_symbol_id in visible_symbols:
-                        t_sym = visible_symbols[edge.target_symbol_id]
+                        cand_t = visible_symbols[edge.target_symbol_id]
+                        cand_tf = visible_files.get(cand_t.file_id)
+                        if focus_repo is None or (cand_tf and cand_tf.repo_name == focus_repo):
+                            t_sym = cand_t
                     else:
                         t_clean = edge.target_qualified_name.split(".")[-1]
                         for s in visible_symbols.values():
+                            sf = visible_files.get(s.file_id)
+                            if focus_repo is not None and sf and sf.repo_name != focus_repo:
+                                continue
                             if (
                                 s.qualified_name == edge.target_qualified_name
                                 or s.qualified_name.split(".")[-1] == t_clean
@@ -442,7 +473,11 @@ class ASTDependencyExpander:
                     or edge.target_qualified_name == focus_symbol.qualified_name
                     or edge.target_qualified_name == target_name
                 ):
-                    t_sym = visible_symbols.get(edge.source_symbol_id)
+                    cand_s = visible_symbols.get(edge.source_symbol_id)
+                    if cand_s is not None:
+                        cand_sf = visible_files.get(cand_s.file_id)
+                        if focus_repo is None or (cand_sf and cand_sf.repo_name == focus_repo):
+                            t_sym = cand_s
 
                 if t_sym and t_sym.file_id in visible_files:
                     f_rec = visible_files[t_sym.file_id]
@@ -460,7 +495,7 @@ class ASTDependencyExpander:
                         diversity_key=f_rec.file_path,
                     )
 
-        # 2. Naming convention fallback
+        # 2. Naming convention fallback (scoped to focus_repo)
         if focus_symbol.file_id not in visible_files:
             return None
         f_rec = visible_files[focus_symbol.file_id]
@@ -472,6 +507,8 @@ class ASTDependencyExpander:
         test_path_fragment = f"test_{mod_name}"
 
         for t_file in visible_files.values():
+            if focus_repo is not None and t_file.repo_name != focus_repo:
+                continue
             if test_path_fragment in t_file.file_path:
                 func_name = focus_symbol.qualified_name.split(".")[-1]
                 target_test_name = f"test_{func_name}"

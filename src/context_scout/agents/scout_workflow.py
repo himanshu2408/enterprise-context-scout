@@ -2449,24 +2449,32 @@ class ScoutWorkflow:
                         auto_expanded_by_ast=primary.auto_expanded_by_ast,
                     )
 
-        # 3. Attach compact top-of-file import header if MODIFY_TARGET starts after line 15
+        # 3. Attach compact top-of-file import & referenced module-constant header
+        raw_lines = file_rec.raw_content.splitlines()
+        target_text = filtered[0].verbatim_code_with_lines
         if filtered[0].start_line > 15 and not any(
             s.file_path == primary.file_path and s.start_line <= 5 for s in filtered
         ):
-            raw_lines = file_rec.raw_content.splitlines()
-            limit_line = min(25, filtered[0].start_line - 1, len(raw_lines))
-            last_import_line = 0
+            limit_line = min(35, filtered[0].start_line - 1, len(raw_lines))
+            last_header_line = 0
             for idx in range(limit_line):
                 stripped = raw_lines[idx].strip()
                 if stripped.startswith(("import ", "from ", "package ", "use ")):
-                    last_import_line = idx + 1
-            if last_import_line > 0:
+                    last_header_line = idx + 1
+                else:
+                    const_m = re.match(
+                        r"^(?:export\s+)?(?:const\s+)?([A-Z_][A-Z0-9_]{2,})\s*(?::[^=]+)?=",
+                        stripped,
+                    )
+                    if const_m and re.search(rf"\b{re.escape(const_m.group(1))}\b", target_text):
+                        last_header_line = idx + 1
+            if last_header_line > 0:
                 with contextlib.suppress(Exception):
                     hdr_ptr = CodeSlicePointer(
                         repo_name=primary.repo_name,
                         file_path=primary.file_path,
                         start_line=1,
-                        end_line=last_import_line,
+                        end_line=last_header_line,
                         qualified_symbol=primary.qualified_symbol,
                         selection_reason=(
                             f"Top-of-file import header for {primary.file_path}"
@@ -2479,6 +2487,54 @@ class ScoutWorkflow:
                         auto_expanded_by_ast=True,
                     )
                     filtered.append(hdr_slice)
+
+        # 4. If MODIFY_TARGET is a class method, attach enclosing class header & __init__/fields
+        if filtered[0].start_line > 10 and len(raw_lines) >= filtered[0].start_line:
+            target_first_raw = raw_lines[filtered[0].start_line - 1]
+            target_indent = len(target_first_raw) - len(target_first_raw.lstrip())
+            if target_indent > 0 or "." in primary.qualified_symbol:
+                enclosing_cls_line: int | None = None
+                for idx in range(filtered[0].start_line - 2, -1, -1):
+                    ln = raw_lines[idx]
+                    ln_stripped = ln.lstrip()
+                    ln_indent = len(ln) - len(ln_stripped)
+                    if ln_indent < target_indent and ln_stripped.startswith(
+                        ("class ", "export class ", "abstract class ", "export abstract class ")
+                    ):
+                        enclosing_cls_line = idx + 1
+                        break
+                if enclosing_cls_line is not None:
+                    cls_end_cap = min(
+                        filtered[0].start_line - 1,
+                        enclosing_cls_line + 24,
+                        len(raw_lines),
+                    )
+                    already_covers_cls = any(
+                        s.file_path == primary.file_path
+                        and s.start_line <= enclosing_cls_line
+                        and s.end_line >= min(enclosing_cls_line + 3, cls_end_cap)
+                        for s in filtered
+                    )
+                    if not already_covers_cls and cls_end_cap >= enclosing_cls_line:
+                        with contextlib.suppress(Exception):
+                            cls_ptr = CodeSlicePointer(
+                                repo_name=primary.repo_name,
+                                file_path=primary.file_path,
+                                start_line=enclosing_cls_line,
+                                end_line=cls_end_cap,
+                                qualified_symbol=primary.qualified_symbol,
+                                selection_reason=(
+                                    "Enclosing class & constructor state for "
+                                    f"{primary.qualified_symbol}"
+                                ),
+                                modification_intent=ModificationIntent.REFERENCE_ONLY,
+                            )
+                            cls_slice = self.slicer.slice_pointer(
+                                pointer=cls_ptr,
+                                file_record=file_rec,
+                                auto_expanded_by_ast=True,
+                            )
+                            filtered.append(cls_slice)
 
         return filtered
 
