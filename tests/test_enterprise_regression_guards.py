@@ -652,8 +652,8 @@ def test_readme_schema_and_contract_alignment_guard() -> None:
                 f"README.md report link must use human-readable .md format, got: {clean_target}"
             )
 
-    # Verify README.md numbers stay synchronized with reports/polyglot_unseen_v2_benchmark.md
-    # and reports/unseen_repo_ab_report.md
+    # Verify README.md numbers stay synchronized with reports/polyglot_unseen_v2_benchmark.md,
+    # reports/senior_eng_30_e2e_ab_report.md, and reports/unseen_repo_ab_report.md
     for expected_metric in (
         "59 of 60",
         "98.33%",
@@ -662,6 +662,13 @@ def test_readme_schema_and_contract_alignment_guard() -> None:
         "1,923",
         "1,926,044",
         "137,162",
+        "1,949",
+        "17,473",
+        "91.35%",
+        "60,471",
+        "887,092",
+        "93.18%",
+        "reports/senior_eng_30_e2e_ab_report.md",
         "`27 of 30` (`90.00%`)",
         "`6 of 30` (`20.00%`)",
         "`29 of 30` (`96.67%`)",
