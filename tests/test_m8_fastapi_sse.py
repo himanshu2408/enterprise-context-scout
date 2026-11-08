@@ -148,7 +148,11 @@ def test_domains_endpoint_manifest_and_adapter_pool(client: TestClient) -> None:
     for domain in data["domains"]:
         assert "manifest" in domain
         manifest = domain["manifest"]
-        assert manifest["domain_id"] in ("trading_code_scout", "quant_research_scout")
+        assert manifest["domain_id"] in (
+            "trading_code_scout",
+            "quant_research_scout",
+            "polyglot_unseen_v2",
+        )
         assert len(manifest["display_name"]) > 0
         assert manifest["authority_rules"]["primary_truth_source"] in ("code", "document")
 

@@ -131,7 +131,7 @@ def test_domain_registry_and_adapter_pool_isolation() -> None:
 
     registry = DomainRegistry(REPO_ROOT / "domains")
     manifests = registry.load_all()
-    assert set(manifests.keys()) == {"trading_code_scout", "quant_research_scout"}
+    assert {"trading_code_scout", "quant_research_scout"}.issubset(set(manifests.keys()))
 
     code_slot = registry.adapter_pool.get_slot("trading_code_scout")
     quant_slot = registry.adapter_pool.get_slot("quant_research_scout")
