@@ -678,3 +678,405 @@ def test_readme_schema_and_contract_alignment_guard() -> None:
         )
 
 
+def test_cross_repo_isolation_2hop_schema_closure_and_contiguous_slice_coalescing() -> None:
+    """Guard 22: Verifies cross-repo isolation, 2-hop schema closure, and slice coalescing."""
+    from uuid import uuid4
+
+    from context_scout.agents.preflight_gate import BoundGraphRepository, PreFlightValidator
+    from context_scout.agents.scout_workflow import ScoutWorkflow
+    from context_scout.ast_engine.dependency_expander import ASTDependencyExpander
+    from context_scout.db.repositories import ASTEdgeRecord, ASTSymbolRecord, CodeFileRecord
+    from context_scout.schemas.contracts import ModificationIntent, VerbatimCodeSlice
+
+    class _MockMultiRepo:
+        def __init__(
+            self,
+            files: list[CodeFileRecord],
+            symbols: list[ASTSymbolRecord],
+            edges: list[ASTEdgeRecord],
+        ) -> None:
+            self._files = files
+            self._symbols = symbols
+            self._edges = edges
+
+        def list_visible_code_files(self, *args: object, **kwargs: object) -> list[CodeFileRecord]:
+            return list(self._files)
+
+        def list_visible_ast_symbols(
+            self, *args: object, **kwargs: object
+        ) -> list[ASTSymbolRecord]:
+            return list(self._symbols)
+
+        def list_visible_ast_edges(self, *args: object, **kwargs: object) -> list[ASTEdgeRecord]:
+            return list(self._edges)
+
+        def list_visible_doc_chunks(self, *args: object, **kwargs: object) -> list[object]:
+            return []
+
+    # 1. File records across 3 repositories (`anyio`, `rich`, `enterprise_gitlab_ops`)
+    f_anyio_id = uuid4()
+    f_rich_id = uuid4()
+    f_sql_id = uuid4()
+    f_tsx_id = uuid4()
+
+    anyio_code = "\n".join(
+        [
+            "from __future__ import annotations",
+            "import asyncio",
+            "from collections.abc import Callable",
+            *[f"# header padding line {i}" for i in range(4, 25)],
+            "def find_root_task() -> asyncio.Task:",
+            "    root: asyncio.Task | None = None",
+            "    for task in asyncio.all_tasks():",
+            "        state = _task_states.get(task)",
+            "        if state is not None and state.cancel_scope is not None:",
+            "            return task",
+            "    raise RuntimeError('Failed to look up root task')",
+            *[f"# middle padding line {i}" for i in range(32, 50)],
+            "class CancelScope:",
+            "    def __init__(self, deadline: float = 0.0) -> None:",
+            "        self._deadline = deadline",
+            "class TaskState:",
+            "    def __init__(self, parent_id: int | None, cancel_scope: Any = None) -> None:",
+            "        self.parent_id = parent_id",
+            "        self.cancel_scope = cancel_scope",
+        ]
+    )
+    rich_code = (
+        "class Task:\n"
+        "    def __init__(self, description: str) -> None:\n"
+        "        self.description = description\n"
+    )
+    sql_code = (
+        "CREATE TABLE IF NOT EXISTS tenant_accounts (\n"
+        "    tenant_id UUID PRIMARY KEY,\n"
+        "    org_slug TEXT NOT NULL UNIQUE,\n"
+        "    tier TEXT NOT NULL DEFAULT 'enterprise'\n"
+        ");\n\n"
+        "CREATE TABLE IF NOT EXISTS execution_orders (\n"
+        "    order_id UUID PRIMARY KEY,\n"
+        "    tenant_id UUID NOT NULL REFERENCES tenant_accounts(tenant_id),\n"
+        "    symbol TEXT NOT NULL,\n"
+        "    notional_usd NUMERIC(18, 2) NOT NULL\n"
+        ");\n\n"
+        "ALTER TABLE execution_orders ENABLE ROW LEVEL SECURITY;\n\n"
+        "CREATE POLICY tenant_isolation_policy ON execution_orders\n"
+        "    USING (tenant_id::text = current_setting('app.current_tenant_id', true));\n"
+    )
+    tsx_code = (
+        "export interface AuditRowProps {\n"
+        "  readonly traceId: string;\n"
+        "  readonly status: 'PASS' | 'BLOCKED' | 'RETRY';\n"
+        "  readonly latencyMs: number;\n"
+        "}\n\n"
+        "export function renderAuditBadge(row: AuditRowProps): string {\n"
+        "  const prefix = row.status === 'PASS' ? '[OK]' : '[WARN]';\n"
+        "  return `${prefix} ${row.traceId} (${row.latencyMs}ms)`;\n"
+        "}\n\n"
+        "export function formatAuditSummary(rows: readonly AuditRowProps[]): string {\n"
+        "  return rows.map((r) => renderAuditBadge(r)).join('\\n');\n"
+        "}\n"
+    )
+
+    files = [
+        CodeFileRecord(
+            file_id=f_anyio_id,
+            domain_id="polyglot_test",
+            repo_name="anyio",
+            file_path="anyio/src/anyio/_backends/_asyncio.py",
+            git_commit_sha="a" * 40,
+            git_blob_sha="b" * 40,
+            language="python",
+            allowed_scopes=["public_eng", "repo:anyio"],
+            raw_content=anyio_code,
+            line_count=len(anyio_code.splitlines()),
+        ),
+        CodeFileRecord(
+            file_id=f_rich_id,
+            domain_id="polyglot_test",
+            repo_name="rich",
+            file_path="rich/rich/progress.py",
+            git_commit_sha="c" * 40,
+            git_blob_sha="d" * 40,
+            language="python",
+            allowed_scopes=["public_eng", "repo:rich"],
+            raw_content=rich_code,
+            line_count=len(rich_code.splitlines()),
+        ),
+        CodeFileRecord(
+            file_id=f_sql_id,
+            domain_id="polyglot_test",
+            repo_name="enterprise_gitlab_ops",
+            file_path="enterprise_gitlab_ops/migrations/ledger_rls.sql",
+            git_commit_sha="e" * 40,
+            git_blob_sha="f" * 40,
+            language="sql",
+            allowed_scopes=["public_eng", "repo:enterprise_gitlab_ops"],
+            raw_content=sql_code,
+            line_count=len(sql_code.splitlines()),
+        ),
+        CodeFileRecord(
+            file_id=f_tsx_id,
+            domain_id="polyglot_test",
+            repo_name="enterprise_gitlab_ops",
+            file_path="enterprise_gitlab_ops/web/AuditPanel.tsx",
+            git_commit_sha="1" * 40,
+            git_blob_sha="2" * 40,
+            language="tsx",
+            allowed_scopes=["public_eng", "repo:enterprise_gitlab_ops"],
+            raw_content=tsx_code,
+            line_count=len(tsx_code.splitlines()),
+        ),
+    ]
+
+    sym_find_root = ASTSymbolRecord(
+        symbol_id=uuid4(),
+        file_id=f_anyio_id,
+        domain_id="polyglot_test",
+        qualified_name="anyio._backends._asyncio.find_root_task",
+        symbol_kind="function",
+        start_line=25,
+        end_line=31,
+        signature_skeleton="def find_root_task() -> asyncio.Task:",
+        contextual_summary="find_root_task",
+        allowed_scopes=["public_eng", "repo:anyio"],
+        embedding=[],
+    )
+    sym_cancel_scope = ASTSymbolRecord(
+        symbol_id=uuid4(),
+        file_id=f_anyio_id,
+        domain_id="polyglot_test",
+        qualified_name="anyio._backends._asyncio.CancelScope",
+        symbol_kind="class",
+        start_line=50,
+        end_line=52,
+        signature_skeleton="class CancelScope:",
+        contextual_summary="CancelScope",
+        allowed_scopes=["public_eng", "repo:anyio"],
+        embedding=[],
+    )
+    sym_task_state = ASTSymbolRecord(
+        symbol_id=uuid4(),
+        file_id=f_anyio_id,
+        domain_id="polyglot_test",
+        qualified_name="anyio._backends._asyncio.TaskState",
+        symbol_kind="class",
+        start_line=53,
+        end_line=56,
+        signature_skeleton="class TaskState:",
+        contextual_summary="TaskState",
+        allowed_scopes=["public_eng", "repo:anyio"],
+        embedding=[],
+    )
+    sym_rich_task = ASTSymbolRecord(
+        symbol_id=uuid4(),
+        file_id=f_rich_id,
+        domain_id="polyglot_test",
+        qualified_name="rich.progress.Task",
+        symbol_kind="class",
+        start_line=1,
+        end_line=3,
+        signature_skeleton="class Task:",
+        contextual_summary="Task",
+        allowed_scopes=["public_eng", "repo:rich"],
+        embedding=[],
+    )
+    sym_tenant_tbl = ASTSymbolRecord(
+        symbol_id=uuid4(),
+        file_id=f_sql_id,
+        domain_id="polyglot_test",
+        qualified_name="ledger_rls.tenant_accounts",
+        symbol_kind="class",
+        start_line=1,
+        end_line=5,
+        signature_skeleton="CREATE TABLE IF NOT EXISTS tenant_accounts",
+        contextual_summary="tenant_accounts",
+        allowed_scopes=["public_eng", "repo:enterprise_gitlab_ops"],
+        embedding=[],
+    )
+    sym_orders_tbl = ASTSymbolRecord(
+        symbol_id=uuid4(),
+        file_id=f_sql_id,
+        domain_id="polyglot_test",
+        qualified_name="ledger_rls.execution_orders",
+        symbol_kind="class",
+        start_line=7,
+        end_line=12,
+        signature_skeleton="CREATE TABLE IF NOT EXISTS execution_orders",
+        contextual_summary="execution_orders",
+        allowed_scopes=["public_eng", "repo:enterprise_gitlab_ops"],
+        embedding=[],
+    )
+    sym_rls_policy = ASTSymbolRecord(
+        symbol_id=uuid4(),
+        file_id=f_sql_id,
+        domain_id="polyglot_test",
+        qualified_name="ledger_rls.tenant_isolation_policy",
+        symbol_kind="function",
+        start_line=16,
+        end_line=17,
+        signature_skeleton="CREATE POLICY tenant_isolation_policy ON execution_orders",
+        contextual_summary="tenant_isolation_policy",
+        allowed_scopes=["public_eng", "repo:enterprise_gitlab_ops"],
+        embedding=[],
+    )
+
+    symbols = [
+        sym_find_root,
+        sym_cancel_scope,
+        sym_task_state,
+        sym_rich_task,
+        sym_tenant_tbl,
+        sym_orders_tbl,
+        sym_rls_policy,
+    ]
+    edges = [
+        # Cross-repo short-name collision edge (`asyncio.Task` -> `Task`)
+        ASTEdgeRecord(
+            edge_id=uuid4(),
+            source_symbol_id=sym_find_root.symbol_id,
+            target_symbol_id=None,
+            target_qualified_name="asyncio.Task",
+            edge_kind="USES_TYPE",
+            domain_id="polyglot_test",
+            allowed_scopes=["public_eng", "repo:anyio"],
+        ),
+        # 2-hop SQL chain: policy -> execution_orders -> tenant_accounts
+        ASTEdgeRecord(
+            edge_id=uuid4(),
+            source_symbol_id=sym_rls_policy.symbol_id,
+            target_symbol_id=sym_orders_tbl.symbol_id,
+            target_qualified_name="execution_orders",
+            edge_kind="USES_TYPE",
+            domain_id="polyglot_test",
+            allowed_scopes=["public_eng", "repo:enterprise_gitlab_ops"],
+        ),
+        ASTEdgeRecord(
+            edge_id=uuid4(),
+            source_symbol_id=sym_orders_tbl.symbol_id,
+            target_symbol_id=sym_tenant_tbl.symbol_id,
+            target_qualified_name="tenant_accounts",
+            edge_kind="USES_TYPE",
+            domain_id="polyglot_test",
+            allowed_scopes=["public_eng", "repo:enterprise_gitlab_ops"],
+        ),
+    ]
+
+    mock_repo = _MockMultiRepo(files=files, symbols=symbols, edges=edges)
+    bound_repo = BoundGraphRepository(mock_repo)
+    expander = ASTDependencyExpander(max_direct_callers=3, max_expansion_token_budget=1500)
+    principal = PrincipalContext(
+        user_id="test_eng",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng", "repo:anyio", "repo:rich", "repo:enterprise_gitlab_ops"],
+    )
+
+    # Check A: `find_root_task` expands same-file `CancelScope` and `TaskState` via body-referenced
+    # snake_case state inference, and NEVER attaches `rich.progress.Task` from `rich`.
+    exp_anyio = expander.expand_1hop(
+        focus_symbol=sym_find_root,
+        repo=bound_repo,
+        principal=principal,
+        domain_id="polyglot_test",
+    )
+    anyio_types = {p.qualified_symbol for p in exp_anyio.imported_type_slices}
+    assert "anyio._backends._asyncio.CancelScope" in anyio_types
+    assert "anyio._backends._asyncio.TaskState" in anyio_types
+    assert "rich.progress.Task" not in anyio_types
+
+    # Check B: `tenant_isolation_policy` expands both 1-hop and 2-hop tables
+    exp_sql = expander.expand_1hop(
+        focus_symbol=sym_rls_policy,
+        repo=bound_repo,
+        principal=principal,
+        domain_id="polyglot_test",
+    )
+    sql_types = {p.qualified_symbol for p in exp_sql.imported_type_slices}
+    assert "ledger_rls.execution_orders" in sql_types
+    assert "ledger_rls.tenant_accounts" in sql_types
+
+    # Check C: `_coalesce_and_enrich_target_file_slices` merges fragmented slices in compact files
+    # and attaches top-of-file imports for deep target functions
+    from context_scout.agents.domain_registry import DomainRegistry
+
+    wf = ScoutWorkflow(registry=DomainRegistry(Path("domains")), repo=mock_repo)
+    fragmented_tsx = [
+        VerbatimCodeSlice(
+            repo_name="enterprise_gitlab_ops",
+            file_path="enterprise_gitlab_ops/web/AuditPanel.tsx",
+            git_commit_sha="1" * 40,
+            git_blob_sha="2" * 40,
+            start_line=7,
+            end_line=10,
+            qualified_symbol="AuditPanel.renderAuditBadge",
+            modification_intent=ModificationIntent.MODIFY_TARGET,
+            auto_expanded_by_ast=False,
+            selection_reason="target",
+            verbatim_code_with_lines=(
+                "   7 | export function renderAuditBadge(row: AuditRowProps): string {"
+            ),
+        ),
+        VerbatimCodeSlice(
+            repo_name="enterprise_gitlab_ops",
+            file_path="enterprise_gitlab_ops/web/AuditPanel.tsx",
+            git_commit_sha="1" * 40,
+            git_blob_sha="2" * 40,
+            start_line=1,
+            end_line=5,
+            qualified_symbol="AuditPanel.AuditRowProps",
+            modification_intent=ModificationIntent.IMPORTED_TYPE,
+            auto_expanded_by_ast=True,
+            selection_reason="type",
+            verbatim_code_with_lines="   1 | export interface AuditRowProps {",
+        ),
+    ]
+    files_by_path = {f.file_path: f for f in files}
+    coalesced_tsx = wf._coalesce_and_enrich_target_file_slices(
+        hydrated_slices=fragmented_tsx,
+        files_by_path=files_by_path,
+        user_prompt=(
+            "In repository `enterprise_gitlab_ops`, update `renderAuditBadge` in `AuditPanel.tsx`"
+        ),
+    )
+    assert coalesced_tsx[0].start_line == 1
+    assert coalesced_tsx[0].end_line == 14
+    assert "export function formatAuditSummary" in coalesced_tsx[0].verbatim_code_with_lines
+
+    deep_anyio = [
+        VerbatimCodeSlice(
+            repo_name="anyio",
+            file_path="anyio/src/anyio/_backends/_asyncio.py",
+            git_commit_sha="a" * 40,
+            git_blob_sha="b" * 40,
+            start_line=25,
+            end_line=31,
+            qualified_symbol="anyio._backends._asyncio.find_root_task",
+            modification_intent=ModificationIntent.MODIFY_TARGET,
+            auto_expanded_by_ast=False,
+            selection_reason="target",
+            verbatim_code_with_lines="  25 | def find_root_task() -> asyncio.Task:",
+        )
+    ]
+    enriched_anyio = wf._coalesce_and_enrich_target_file_slices(
+        hydrated_slices=deep_anyio,
+        files_by_path=files_by_path,
+        user_prompt="In repository `anyio`, update `find_root_task`",
+    )
+    assert any(
+        "Top-of-file import header" in s.selection_reason and s.start_line == 1
+        for s in enriched_anyio
+    )
+    validator = PreFlightValidator(repo=mock_repo)
+    missing_refs, _ = validator.partition_prompt_identifiers(
+        user_prompt=(
+            "In repository `enterprise_gitlab_ops`, check `tenant_isolation_policy` "
+            "with `app.current_tenant_id`"
+        ),
+        visible_symbols=symbols,
+        visible_files=files,
+        code_slices=coalesced_tsx,
+    )
+    assert "app" not in missing_refs
+
+
+

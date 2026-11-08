@@ -2,7 +2,7 @@
 
 import re
 from collections import defaultdict
-from typing import Final, Protocol
+from typing import Final, Literal, Protocol
 from uuid import UUID
 
 from context_scout.ast_engine.models import ASTExpansionCandidate, ASTExpansionResult
@@ -69,70 +69,170 @@ class ASTDependencyExpander:
         }
         visible_files = {f.file_id: f for f in repo.list_visible_code_files(principal, domain_id)}
         visible_edges = repo.list_visible_ast_edges(principal, domain_id)
+        focus_file_rec = visible_files.get(focus_symbol.file_id)
+        focus_repo_name = focus_file_rec.repo_name if focus_file_rec is not None else None
+
+        def _resolve_symbol_scoped(
+            edge_target_id: UUID | None,
+            edge_target_qual: str,
+        ) -> ASTSymbolRecord | None:
+            if edge_target_id and edge_target_id in visible_symbols:
+                cand_direct = visible_symbols[edge_target_id]
+                cand_f = visible_files.get(cand_direct.file_id)
+                if (
+                    focus_repo_name is None
+                    or cand_f is None
+                    or cand_f.repo_name == focus_repo_name
+                ):
+                    return cand_direct
+            rel_suffix = edge_target_qual.lstrip(".")
+            target_clean = edge_target_qual.split(".")[-1]
+            # Pass 1: Same file
+            for s in visible_symbols.values():
+                if s.file_id == focus_symbol.file_id and (
+                    s.qualified_name == rel_suffix
+                    or s.qualified_name.endswith("." + rel_suffix)
+                    or s.qualified_name.split(".")[-1] == target_clean
+                ):
+                    return s
+            # Pass 2: Same repository (qualified suffix match first, then short name)
+            if focus_repo_name is not None:
+                for s in visible_symbols.values():
+                    sf = visible_files.get(s.file_id)
+                    if sf is not None and sf.repo_name == focus_repo_name and (
+                        s.qualified_name == rel_suffix
+                        or s.qualified_name.endswith("." + rel_suffix)
+                    ):
+                        return s
+                for s in visible_symbols.values():
+                    sf = visible_files.get(s.file_id)
+                    if sf is not None and sf.repo_name == focus_repo_name and (
+                        s.qualified_name == edge_target_qual
+                        or s.qualified_name.split(".")[-1] == target_clean
+                    ):
+                        return s
+                return None
+            # Fallback when focus_repo_name is unknown
+            for s in visible_symbols.values():
+                if s.qualified_name == rel_suffix or s.qualified_name.endswith("." + rel_suffix):
+                    return s
+            for s in visible_symbols.values():
+                if (
+                    s.qualified_name == edge_target_qual
+                    or s.qualified_name.split(".")[-1] == target_clean
+                ):
+                    return s
+            return None
 
         # 1. Collect Tier 1: Imported Types & Internal Calls (USES_TYPE, IMPORTS, CALLS)
         type_candidates: list[ASTExpansionCandidate] = []
+        seen_type_sym_ids: set[UUID] = {focus_symbol.symbol_id}
+
+        def _append_type_candidate(
+            target_sym: ASTSymbolRecord,
+            edge_kind: Literal["CALLS", "IMPORTS", "USES_TYPE", "INHERITS", "TESTED_BY"],
+        ) -> None:
+            if target_sym.symbol_id in seen_type_sym_ids:
+                return
+            if target_sym.file_id not in visible_files:
+                return
+            seen_type_sym_ids.add(target_sym.symbol_id)
+            f_rec = visible_files[target_sym.file_id]
+            end_l = target_sym.end_line
+            if (target_sym.end_line - target_sym.start_line) > 30:
+                end_l = min(target_sym.end_line, target_sym.start_line + 28)
+            s_lines = f_rec.raw_content.splitlines()[target_sym.start_line - 1 : end_l]
+            est = self.estimate_tokens("\n".join(s_lines))
+            type_candidates.append(
+                ASTExpansionCandidate(
+                    symbol=target_sym,
+                    edge_kind=edge_kind,
+                    intent=ModificationIntent.IMPORTED_TYPE,
+                    start_line=target_sym.start_line,
+                    end_line=end_l,
+                    estimated_tokens=est,
+                    file_path=f_rec.file_path,
+                    diversity_key=f_rec.file_path,
+                )
+            )
+
+        hop1_type_syms: list[ASTSymbolRecord] = []
         for edge in visible_edges:
             if edge.source_symbol_id == focus_symbol.symbol_id and (
-                edge.edge_kind in ("USES_TYPE", "IMPORTS")
+                edge.edge_kind in ("USES_TYPE", "IMPORTS", "INHERITS")
                 or (
                     edge.edge_kind == "CALLS"
                     and edge.target_symbol_id is not None
                 )
             ):
-                target_sym: ASTSymbolRecord | None = None
-                if edge.target_symbol_id and edge.target_symbol_id in visible_symbols:
-                    target_sym = visible_symbols[edge.target_symbol_id]
-                else:
-                    rel_suffix = edge.target_qualified_name.lstrip(".")
-                    target_clean = edge.target_qualified_name.split(".")[-1]
-                    for s in visible_symbols.values():
-                        if s.qualified_name == rel_suffix or s.qualified_name.endswith(
-                            "." + rel_suffix
-                        ):
-                            target_sym = s
-                            break
-                    if target_sym is None:
-                        for s in visible_symbols.values():
-                            if (
-                                s.qualified_name == edge.target_qualified_name
-                                or s.qualified_name.split(".")[-1] == target_clean
-                            ):
-                                target_sym = s
-                                break
-
+                target_sym = _resolve_symbol_scoped(
+                    edge.target_symbol_id, edge.target_qualified_name
+                )
                 if target_sym and target_sym.file_id in visible_files:
                     if edge.edge_kind == "CALLS" and target_sym.file_id != focus_symbol.file_id:
                         continue
-                    f_rec = visible_files[target_sym.file_id]
-                    end_l = target_sym.end_line
-                    if (
-                        edge.edge_kind == "IMPORTS"
-                        or (
-                            edge.edge_kind == "USES_TYPE"
-                            and focus_symbol.symbol_kind == "type_alias"
-                        )
-                    ) and (target_sym.end_line - target_sym.start_line) > 30:
-                        end_l = min(target_sym.end_line, target_sym.start_line + 24)
-                    s_lines = f_rec.raw_content.splitlines()[target_sym.start_line - 1 : end_l]
-                    est = self.estimate_tokens("\n".join(s_lines))
-                    type_candidates.append(
-                        ASTExpansionCandidate(
-                            symbol=target_sym,
-                            edge_kind=edge.edge_kind,
-                            intent=ModificationIntent.IMPORTED_TYPE,
-                            start_line=target_sym.start_line,
-                            end_line=end_l,
-                            estimated_tokens=est,
-                            file_path=f_rec.file_path,
-                            diversity_key=f_rec.file_path,
-                        )
-                    )
+                    _append_type_candidate(target_sym, edge.edge_kind)
+                    if edge.edge_kind in ("USES_TYPE", "INHERITS"):
+                        hop1_type_syms.append(target_sym)
 
-        # Deterministic sort for type candidates (USES_TYPE / IMPORTS prioritized before CALLS)
+        # 1b. Transitive 2-hop same-file schema/type/DDL closure
+        # (e.g. SQL POLICY -> TABLE -> FK TABLE, or Function -> Interface -> Parent Interface)
+        for h1_sym in hop1_type_syms:
+            for edge in visible_edges:
+                if edge.source_symbol_id == h1_sym.symbol_id and edge.edge_kind in (
+                    "USES_TYPE",
+                    "INHERITS",
+                ):
+                    h2_sym = _resolve_symbol_scoped(
+                        edge.target_symbol_id, edge.target_qualified_name
+                    )
+                    if (
+                        h2_sym is not None
+                        and h2_sym.file_id == focus_symbol.file_id
+                    ):
+                        _append_type_candidate(h2_sym, "USES_TYPE")
+
+        # 1c. Same-file body-referenced types/classes/tables (catches snake_case state vars like
+        # cancel_scope -> CancelScope, _task_states -> TaskState, or same-file interfaces/tables)
+        if focus_file_rec is not None:
+            focus_lines = focus_file_rec.raw_content.splitlines()[
+                max(0, focus_symbol.start_line - 1) : focus_symbol.end_line
+            ]
+            focus_body_text = "\n".join(focus_lines)
+            focus_body_lower = focus_body_text.lower()
+            same_file_syms = [
+                s
+                for s in visible_symbols.values()
+                if s.file_id == focus_symbol.file_id
+                and s.symbol_id != focus_symbol.symbol_id
+                and s.symbol_kind in ("class", "interface", "type_alias")
+            ]
+            for sf_sym in sorted(same_file_syms, key=lambda x: x.start_line):
+                short_n = sf_sym.qualified_name.split(".")[-1]
+                if len(short_n) < 3:
+                    continue
+                snake_n = re.sub(r"(?<!^)(?=[A-Z])", "_", short_n).lower()
+                sym_span = sf_sym.end_line - sf_sym.start_line + 1
+                is_referenced_in_body = (
+                    bool(re.search(rf"\b{re.escape(short_n)}\b", focus_body_text))
+                    or (len(snake_n) >= 4 and snake_n in focus_body_lower)
+                )
+                is_compact_same_file_schema = (
+                    focus_file_rec.line_count <= 80 and sym_span <= 30
+                )
+                if is_referenced_in_body or is_compact_same_file_schema:
+                    _append_type_candidate(sf_sym, "USES_TYPE")
+
+        # Deterministic sort for type candidates (same-file USES_TYPE first)
         type_candidates.sort(
             key=lambda c: (
-                0 if c.edge_kind in ("USES_TYPE", "IMPORTS") else 1,
+                0
+                if (
+                    c.symbol.file_id == focus_symbol.file_id
+                    and c.edge_kind in ("USES_TYPE", "INHERITS")
+                )
+                else 1,
+                0 if c.edge_kind in ("USES_TYPE", "IMPORTS", "INHERITS") else 1,
                 c.file_path,
                 c.start_line,
                 c.symbol.qualified_name,
@@ -157,6 +257,13 @@ class ASTDependencyExpander:
             caller_sym = visible_symbols.get(edge.source_symbol_id)
             if caller_sym and caller_sym.file_id in visible_files:
                 f_rec = visible_files[caller_sym.file_id]
+                if (
+                    focus_repo_name is not None
+                    and f_rec.repo_name != focus_repo_name
+                    and edge.target_symbol_id != focus_symbol.symbol_id
+                    and edge.target_qualified_name != focus_symbol.qualified_name
+                ):
+                    continue
                 call_line = self._find_call_site_line(
                     f_rec.raw_content, caller_sym, focus_symbol.qualified_name
                 )
