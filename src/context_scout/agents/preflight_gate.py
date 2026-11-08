@@ -1237,11 +1237,28 @@ class PreFlightValidator:
         if not all_candidates:
             return [], []
 
-        # Build repository symbol and file lookup indices
+        # Build repository symbol and file lookup indices (scoped to target repo when multi-repo)
+        target_repos: set[str] = {
+            s.repo_name
+            for s in code_slices
+            if s.modification_intent == ModificationIntent.MODIFY_TARGET
+            or str(s.modification_intent) == "modify_target"
+        }
+        distinct_all_repos = {f.repo_name for f in visible_files}
+        scope_to_target_repo = bool(target_repos and len(distinct_all_repos) > 1)
+        scoped_files = [
+            f
+            for f in visible_files
+            if not scope_to_target_repo or f.repo_name in target_repos
+        ]
+        scoped_file_ids = {f.file_id for f in scoped_files}
+
         known_symbols_by_name: dict[str, ASTSymbolRecord] = {}
         known_symbols_by_short: dict[str, ASTSymbolRecord] = {}
         for sym in visible_symbols:
-            if len(visible_files) > 15 and sym.qualified_name.startswith(("tests.", "examples.")):
+            if scope_to_target_repo and sym.file_id not in scoped_file_ids:
+                continue
+            if len(scoped_files) > 15 and sym.qualified_name.startswith(("tests.", "examples.")):
                 continue
             known_symbols_by_name[sym.qualified_name] = sym
             parts = sym.qualified_name.split(".")
@@ -1252,7 +1269,7 @@ class PreFlightValidator:
 
         known_files_by_path: dict[str, CodeFileRecord] = {}
         known_files_by_name: dict[str, CodeFileRecord] = {}
-        for f in visible_files:
+        for f in scoped_files:
             known_files_by_path[f.file_path] = f
             file_name = f.file_path.split("/")[-1]
             known_files_by_name[file_name] = f
@@ -1445,16 +1462,34 @@ class PreFlightValidator:
                 and e.edge_kind in ("USES_TYPE", "IMPORTS", "CALLS")
             ]
 
+            focus_file_rec = visible_files_by_id.get(focus_sym.file_id)
+            focus_repo_name = focus_file_rec.repo_name if focus_file_rec is not None else None
+
             for edge in target_edges:
                 target_sym: ASTSymbolRecord | None = None
                 if edge.target_symbol_id and edge.target_symbol_id in visible_symbols_by_id:
-                    target_sym = visible_symbols_by_id[edge.target_symbol_id]
+                    cand_s = visible_symbols_by_id[edge.target_symbol_id]
+                    cand_f = visible_files_by_id.get(cand_s.file_id)
+                    if (
+                        focus_repo_name is not None
+                        and cand_f is not None
+                        and cand_f.repo_name != focus_repo_name
+                    ):
+                        continue
+                    target_sym = cand_s
                 elif edge.target_symbol_id is None:
                     if edge.edge_kind == "CALLS":
                         continue
                     rel_suffix = edge.target_qualified_name.lstrip(".")
                     target_clean = edge.target_qualified_name.split(".")[-1]
                     for sym_rec in visible_symbols:
+                        sf = visible_files_by_id.get(sym_rec.file_id)
+                        if (
+                            focus_repo_name is not None
+                            and sf is not None
+                            and sf.repo_name != focus_repo_name
+                        ):
+                            continue
                         if sym_rec.qualified_name == rel_suffix or sym_rec.qualified_name.endswith(
                             "." + rel_suffix
                         ):
@@ -1467,6 +1502,13 @@ class PreFlightValidator:
                         ):
                             continue
                         for sym_rec in visible_symbols:
+                            sf = visible_files_by_id.get(sym_rec.file_id)
+                            if (
+                                focus_repo_name is not None
+                                and sf is not None
+                                and sf.repo_name != focus_repo_name
+                            ):
+                                continue
                             if sym_rec.qualified_name == edge.target_qualified_name or (
                                 sym_rec.qualified_name.split(".")[-1] == target_clean
                                 and sym_rec.symbol_kind

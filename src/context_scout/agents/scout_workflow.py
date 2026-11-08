@@ -2186,6 +2186,12 @@ class ScoutWorkflow:
                                     )
                                     hydrated_slices.append(hydrated_auto)
 
+        hydrated_slices = self._coalesce_and_enrich_target_file_slices(
+            hydrated_slices=hydrated_slices,
+            files_by_path=files_by_path,
+            user_prompt=user_prompt,
+        )
+
         if on_stage_event is not None:
             on_stage_event(
                 {
@@ -2362,6 +2368,119 @@ class ScoutWorkflow:
         )
 
         return pack
+
+    def _coalesce_and_enrich_target_file_slices(
+        self,
+        hydrated_slices: list[VerbatimCodeSlice],
+        files_by_path: dict[str, CodeFileRecord],
+        user_prompt: str,
+    ) -> list[VerbatimCodeSlice]:
+        """Prunes cross-repo noise, coalesces same-file slices, and attaches import headers."""
+        if not hydrated_slices:
+            return hydrated_slices
+
+        primary = hydrated_slices[0]
+        primary_repo_prefix = primary.file_path.split("/", 1)[0].lower()
+        prompt_lower = user_prompt.lower()
+        explicitly_scoped_to_primary_repo = (
+            len(primary_repo_prefix) >= 3 and primary_repo_prefix in prompt_lower
+        )
+
+        filtered: list[VerbatimCodeSlice] = [primary]
+        for s in hydrated_slices[1:]:
+            s_repo_prefix = s.file_path.split("/", 1)[0].lower()
+            if (
+                explicitly_scoped_to_primary_repo
+                and s.modification_intent == ModificationIntent.REFERENCE_ONLY
+                and s_repo_prefix != primary_repo_prefix
+                and s_repo_prefix not in prompt_lower
+            ):
+                continue
+            filtered.append(s)
+
+        file_rec = files_by_path.get(primary.file_path)
+        if file_rec is None:
+            return filtered
+
+        same_file_slices = [s for s in filtered if s.file_path == primary.file_path]
+        # 1. If the target file is compact (<= 60 lines) and has multiple slices in the pack,
+        # widen the primary MODIFY_TARGET slice to span the contiguous file so the executor
+        # never receives disjoint out-of-order fragments with missing gap lines.
+        if file_rec.line_count <= 60 and len(same_file_slices) >= 2:
+            with contextlib.suppress(Exception):
+                coalesced_ptr = CodeSlicePointer(
+                    repo_name=primary.repo_name,
+                    file_path=primary.file_path,
+                    start_line=1,
+                    end_line=file_rec.line_count,
+                    qualified_symbol=primary.qualified_symbol,
+                    selection_reason=primary.selection_reason,
+                    modification_intent=primary.modification_intent,
+                )
+                filtered[0] = self.slicer.slice_pointer(
+                    pointer=coalesced_ptr,
+                    file_record=file_rec,
+                    auto_expanded_by_ast=primary.auto_expanded_by_ast,
+                )
+        elif len(same_file_slices) >= 2:
+            # 2. For larger files, merge same-file slices separated by <= 15 lines
+            min_l = primary.start_line
+            max_l = primary.end_line
+            for sf in sorted(same_file_slices[1:], key=lambda x: x.start_line):
+                if sf.end_line >= min_l - 15 and sf.start_line <= max_l + 15:
+                    new_min = min(min_l, sf.start_line)
+                    new_max = max(max_l, sf.end_line)
+                    if (new_max - new_min + 1) <= 85:
+                        min_l, max_l = new_min, new_max
+            if min_l != primary.start_line or max_l != primary.end_line:
+                with contextlib.suppress(Exception):
+                    coalesced_ptr = CodeSlicePointer(
+                        repo_name=primary.repo_name,
+                        file_path=primary.file_path,
+                        start_line=min_l,
+                        end_line=max_l,
+                        qualified_symbol=primary.qualified_symbol,
+                        selection_reason=primary.selection_reason,
+                        modification_intent=primary.modification_intent,
+                    )
+                    filtered[0] = self.slicer.slice_pointer(
+                        pointer=coalesced_ptr,
+                        file_record=file_rec,
+                        auto_expanded_by_ast=primary.auto_expanded_by_ast,
+                    )
+
+        # 3. Attach compact top-of-file import header if MODIFY_TARGET starts after line 15
+        if filtered[0].start_line > 15 and not any(
+            s.file_path == primary.file_path and s.start_line <= 5 for s in filtered
+        ):
+            raw_lines = file_rec.raw_content.splitlines()
+            limit_line = min(25, filtered[0].start_line - 1, len(raw_lines))
+            last_import_line = 0
+            for idx in range(limit_line):
+                stripped = raw_lines[idx].strip()
+                if stripped.startswith(("import ", "from ", "package ", "use ")):
+                    last_import_line = idx + 1
+            if last_import_line > 0:
+                with contextlib.suppress(Exception):
+                    hdr_ptr = CodeSlicePointer(
+                        repo_name=primary.repo_name,
+                        file_path=primary.file_path,
+                        start_line=1,
+                        end_line=last_import_line,
+                        qualified_symbol=primary.qualified_symbol,
+                        selection_reason=(
+                            f"Top-of-file import header for {primary.file_path}"
+                        ),
+                        modification_intent=ModificationIntent.REFERENCE_ONLY,
+                    )
+                    hdr_slice = self.slicer.slice_pointer(
+                        pointer=hdr_ptr,
+                        file_record=file_rec,
+                        auto_expanded_by_ast=True,
+                    )
+                    filtered.append(hdr_slice)
+
+        return filtered
 
 
 class FederatedScoutCoordinator:
