@@ -69,7 +69,7 @@
   "estimated_full_repo_tokens": 7486164,
   "incremental_sync_check": {
     "domain_id": "polyglot_unseen_v2",
-    "sync_latency_ms": 1541.0,
+    "sync_latency_ms": 2288.63,
     "synced": false,
     "added": 0,
     "modified": 0,
@@ -86,6 +86,10 @@
   "symbol_recall_at_5_pct": 98.33,
   "preflight_pass_count": 60,
   "preflight_pass_pct": 100.0,
+  "live_mlx_qlora_enabled": true,
+  "qlora_schema_valid_count": 59,
+  "qlora_schema_validity_pct": 98.33,
+  "median_qlora_latency_ms": 1688.26,
   "verbatim_slices_checked": 371,
   "verbatim_slices_exact": 371,
   "verbatim_faithfulness_pct": 100.0,
@@ -95,7 +99,7 @@
   "total_with_scout_input_tokens": 137162,
   "median_agent_token_savings_pct": 92.66,
   "mean_token_savings_pct": 99.98,
-  "median_latency_ms": 199.7,
+  "median_latency_ms": 629.81,
   "out_of_scope_zero_cost_abstention": true,
   "prompt_injection_blocked": true,
   "task_results": [
@@ -109,13 +113,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 9555.8,
       "pack_tokens": 921,
       "with_scout_input_tokens": 1571,
       "without_scout_input_tokens": 86482,
       "agent_token_savings_pct": 98.18,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 3588.39
+      "latency_ms": 3830.77
     },
     {
       "task_index": 2,
@@ -127,13 +133,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1632.93,
       "pack_tokens": 825,
       "with_scout_input_tokens": 1475,
       "without_scout_input_tokens": 24552,
       "agent_token_savings_pct": 93.99,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 157.36
+      "latency_ms": 580.05
     },
     {
       "task_index": 3,
@@ -145,13 +153,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1635.31,
       "pack_tokens": 871,
       "with_scout_input_tokens": 1521,
       "without_scout_input_tokens": 39848,
       "agent_token_savings_pct": 96.18,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 182.29
+      "latency_ms": 590.13
     },
     {
       "task_index": 4,
@@ -163,13 +173,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1718.13,
       "pack_tokens": 5846,
       "with_scout_input_tokens": 6496,
       "without_scout_input_tokens": 54337,
       "agent_token_savings_pct": 88.04,
       "token_savings_pct": 99.92,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 231.62
+      "latency_ms": 641.79
     },
     {
       "task_index": 5,
@@ -181,13 +193,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1510.47,
       "pack_tokens": 550,
       "with_scout_input_tokens": 1200,
       "without_scout_input_tokens": 61476,
       "agent_token_savings_pct": 98.05,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 171.0
+      "latency_ms": 586.56
     },
     {
       "task_index": 6,
@@ -199,13 +213,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1607.91,
       "pack_tokens": 483,
       "with_scout_input_tokens": 1133,
       "without_scout_input_tokens": 31577,
       "agent_token_savings_pct": 96.41,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 764.47
+      "latency_ms": 751.59
     },
     {
       "task_index": 7,
@@ -217,13 +233,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1806.25,
       "pack_tokens": 3646,
       "with_scout_input_tokens": 4296,
       "without_scout_input_tokens": 31387,
       "agent_token_savings_pct": 86.31,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 7,
-      "latency_ms": 251.15
+      "latency_ms": 765.6
     },
     {
       "task_index": 8,
@@ -235,13 +253,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1693.61,
       "pack_tokens": 2132,
       "with_scout_input_tokens": 2782,
       "without_scout_input_tokens": 42885,
       "agent_token_savings_pct": 93.51,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 472.96
+      "latency_ms": 979.64
     },
     {
       "task_index": 9,
@@ -253,13 +273,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1736.87,
       "pack_tokens": 182,
       "with_scout_input_tokens": 832,
       "without_scout_input_tokens": 13550,
       "agent_token_savings_pct": 93.86,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 163.49
+      "latency_ms": 620.1
     },
     {
       "task_index": 10,
@@ -271,13 +293,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1664.81,
       "pack_tokens": 2042,
       "with_scout_input_tokens": 2692,
       "without_scout_input_tokens": 49750,
       "agent_token_savings_pct": 94.59,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 609.22
+      "latency_ms": 628.74
     },
     {
       "task_index": 11,
@@ -289,13 +313,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1732.19,
       "pack_tokens": 1464,
       "with_scout_input_tokens": 2114,
       "without_scout_input_tokens": 36034,
       "agent_token_savings_pct": 94.13,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 311.66
+      "latency_ms": 729.74
     },
     {
       "task_index": 12,
@@ -307,13 +333,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1691.85,
       "pack_tokens": 1495,
       "with_scout_input_tokens": 2145,
       "without_scout_input_tokens": 37438,
       "agent_token_savings_pct": 94.27,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 236.48
+      "latency_ms": 657.0
     },
     {
       "task_index": 13,
@@ -325,13 +353,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 2120.13,
       "pack_tokens": 3411,
       "with_scout_input_tokens": 4061,
       "without_scout_input_tokens": 47060,
       "agent_token_savings_pct": 91.37,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 188.22
+      "latency_ms": 657.76
     },
     {
       "task_index": 14,
@@ -343,13 +373,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": false,
+      "qlora_latency_ms": 3017.28,
       "pack_tokens": 81,
       "with_scout_input_tokens": 731,
       "without_scout_input_tokens": 4084,
       "agent_token_savings_pct": 82.1,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 177.83
+      "latency_ms": 605.92
     },
     {
       "task_index": 15,
@@ -361,13 +393,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1481.75,
       "pack_tokens": 1053,
       "with_scout_input_tokens": 1703,
       "without_scout_input_tokens": 11642,
       "agent_token_savings_pct": 85.37,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 589.31
+      "latency_ms": 586.12
     },
     {
       "task_index": 16,
@@ -379,13 +413,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1582.23,
       "pack_tokens": 3944,
       "with_scout_input_tokens": 4594,
       "without_scout_input_tokens": 37123,
       "agent_token_savings_pct": 87.62,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 263.47
+      "latency_ms": 687.53
     },
     {
       "task_index": 17,
@@ -397,13 +433,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1577.0,
       "pack_tokens": 3264,
       "with_scout_input_tokens": 3914,
       "without_scout_input_tokens": 69234,
       "agent_token_savings_pct": 94.35,
       "token_savings_pct": 99.96,
       "auto_expanded_1hop_slices": 14,
-      "latency_ms": 532.76
+      "latency_ms": 948.92
     },
     {
       "task_index": 18,
@@ -415,13 +453,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1534.52,
       "pack_tokens": 48,
       "with_scout_input_tokens": 698,
       "without_scout_input_tokens": 3799,
       "agent_token_savings_pct": 81.63,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 644.82
+      "latency_ms": 641.34
     },
     {
       "task_index": 19,
@@ -433,13 +473,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1641.89,
       "pack_tokens": 1389,
       "with_scout_input_tokens": 2039,
       "without_scout_input_tokens": 34500,
       "agent_token_savings_pct": 94.09,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 317.02
+      "latency_ms": 755.23
     },
     {
       "task_index": 20,
@@ -451,13 +493,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1729.1,
       "pack_tokens": 1527,
       "with_scout_input_tokens": 2177,
       "without_scout_input_tokens": 15714,
       "agent_token_savings_pct": 86.15,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 5,
-      "latency_ms": 165.62
+      "latency_ms": 610.4
     },
     {
       "task_index": 21,
@@ -469,13 +513,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1754.89,
       "pack_tokens": 1273,
       "with_scout_input_tokens": 1923,
       "without_scout_input_tokens": 34672,
       "agent_token_savings_pct": 94.45,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 184.95
+      "latency_ms": 636.97
     },
     {
       "task_index": 22,
@@ -487,13 +533,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1463.87,
       "pack_tokens": 809,
       "with_scout_input_tokens": 1459,
       "without_scout_input_tokens": 49142,
       "agent_token_savings_pct": 97.03,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 144.98
+      "latency_ms": 572.42
     },
     {
       "task_index": 23,
@@ -505,13 +553,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1745.78,
       "pack_tokens": 1053,
       "with_scout_input_tokens": 1703,
       "without_scout_input_tokens": 23207,
       "agent_token_savings_pct": 92.66,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 162.73
+      "latency_ms": 590.41
     },
     {
       "task_index": 24,
@@ -523,13 +573,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1802.69,
       "pack_tokens": 1483,
       "with_scout_input_tokens": 2133,
       "without_scout_input_tokens": 30006,
       "agent_token_savings_pct": 92.89,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 607.11
+      "latency_ms": 609.21
     },
     {
       "task_index": 25,
@@ -541,13 +593,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1610.41,
       "pack_tokens": 634,
       "with_scout_input_tokens": 1284,
       "without_scout_input_tokens": 11916,
       "agent_token_savings_pct": 89.22,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 168.12
+      "latency_ms": 586.85
     },
     {
       "task_index": 26,
@@ -559,13 +613,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1748.74,
       "pack_tokens": 738,
       "with_scout_input_tokens": 1388,
       "without_scout_input_tokens": 33064,
       "agent_token_savings_pct": 95.8,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 162.19
+      "latency_ms": 588.69
     },
     {
       "task_index": 27,
@@ -577,13 +633,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1804.16,
       "pack_tokens": 822,
       "with_scout_input_tokens": 1472,
       "without_scout_input_tokens": 39702,
       "agent_token_savings_pct": 96.29,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 199.7
+      "latency_ms": 639.0
     },
     {
       "task_index": 28,
@@ -595,13 +653,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1503.56,
       "pack_tokens": 725,
       "with_scout_input_tokens": 1375,
       "without_scout_input_tokens": 9296,
       "agent_token_savings_pct": 85.21,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 215.92
+      "latency_ms": 643.51
     },
     {
       "task_index": 29,
@@ -613,13 +673,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1637.85,
       "pack_tokens": 2982,
       "with_scout_input_tokens": 3632,
       "without_scout_input_tokens": 44774,
       "agent_token_savings_pct": 91.89,
       "token_savings_pct": 99.96,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 228.68
+      "latency_ms": 662.97
     },
     {
       "task_index": 30,
@@ -631,13 +693,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1803.64,
       "pack_tokens": 2622,
       "with_scout_input_tokens": 3272,
       "without_scout_input_tokens": 11800,
       "agent_token_savings_pct": 72.27,
       "token_savings_pct": 99.96,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 631.51
+      "latency_ms": 644.11
     },
     {
       "task_index": 31,
@@ -649,13 +713,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1530.18,
       "pack_tokens": 1488,
       "with_scout_input_tokens": 2138,
       "without_scout_input_tokens": 68066,
       "agent_token_savings_pct": 96.86,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 275.22
+      "latency_ms": 714.19
     },
     {
       "task_index": 32,
@@ -667,13 +733,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1762.82,
       "pack_tokens": 1447,
       "with_scout_input_tokens": 2097,
       "without_scout_input_tokens": 16975,
       "agent_token_savings_pct": 87.65,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 205.43
+      "latency_ms": 636.05
     },
     {
       "task_index": 33,
@@ -685,13 +753,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1703.89,
       "pack_tokens": 610,
       "with_scout_input_tokens": 1260,
       "without_scout_input_tokens": 14456,
       "agent_token_savings_pct": 91.28,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 167.6
+      "latency_ms": 629.81
     },
     {
       "task_index": 34,
@@ -703,13 +773,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1559.35,
       "pack_tokens": 4934,
       "with_scout_input_tokens": 5584,
       "without_scout_input_tokens": 24153,
       "agent_token_savings_pct": 76.88,
       "token_savings_pct": 99.93,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 703.72
+      "latency_ms": 720.1
     },
     {
       "task_index": 35,
@@ -721,13 +793,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1527.48,
       "pack_tokens": 790,
       "with_scout_input_tokens": 1440,
       "without_scout_input_tokens": 19568,
       "agent_token_savings_pct": 92.64,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 186.88
+      "latency_ms": 612.88
     },
     {
       "task_index": 36,
@@ -739,13 +813,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1514.44,
       "pack_tokens": 3572,
       "with_scout_input_tokens": 4222,
       "without_scout_input_tokens": 38338,
       "agent_token_savings_pct": 88.99,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 192.6
+      "latency_ms": 617.97
     },
     {
       "task_index": 37,
@@ -757,13 +833,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1719.9,
       "pack_tokens": 1350,
       "with_scout_input_tokens": 2000,
       "without_scout_input_tokens": 14192,
       "agent_token_savings_pct": 85.91,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 167.18
+      "latency_ms": 592.04
     },
     {
       "task_index": 38,
@@ -775,13 +853,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1579.23,
       "pack_tokens": 2140,
       "with_scout_input_tokens": 2790,
       "without_scout_input_tokens": 41714,
       "agent_token_savings_pct": 93.31,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 8,
-      "latency_ms": 185.74
+      "latency_ms": 607.49
     },
     {
       "task_index": 39,
@@ -793,13 +873,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1784.8,
       "pack_tokens": 7367,
       "with_scout_input_tokens": 8017,
       "without_scout_input_tokens": 35387,
       "agent_token_savings_pct": 77.34,
       "token_savings_pct": 99.9,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 205.42
+      "latency_ms": 637.67
     },
     {
       "task_index": 40,
@@ -811,13 +893,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1791.12,
       "pack_tokens": 2076,
       "with_scout_input_tokens": 2726,
       "without_scout_input_tokens": 48258,
       "agent_token_savings_pct": 94.35,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 675.21
+      "latency_ms": 686.33
     },
     {
       "task_index": 41,
@@ -829,13 +913,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1790.03,
       "pack_tokens": 2023,
       "with_scout_input_tokens": 2673,
       "without_scout_input_tokens": 46418,
       "agent_token_savings_pct": 94.24,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 207.34
+      "latency_ms": 657.79
     },
     {
       "task_index": 42,
@@ -847,13 +933,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1495.32,
       "pack_tokens": 249,
       "with_scout_input_tokens": 899,
       "without_scout_input_tokens": 24708,
       "agent_token_savings_pct": 96.36,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 171.13
+      "latency_ms": 602.75
     },
     {
       "task_index": 43,
@@ -865,13 +953,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1734.15,
       "pack_tokens": 1080,
       "with_scout_input_tokens": 1730,
       "without_scout_input_tokens": 13057,
       "agent_token_savings_pct": 86.75,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 187.18
+      "latency_ms": 620.8
     },
     {
       "task_index": 44,
@@ -883,13 +973,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1805.04,
       "pack_tokens": 2416,
       "with_scout_input_tokens": 3066,
       "without_scout_input_tokens": 33893,
       "agent_token_savings_pct": 90.95,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 192.43
+      "latency_ms": 619.92
     },
     {
       "task_index": 45,
@@ -901,13 +993,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1677.81,
       "pack_tokens": 1103,
       "with_scout_input_tokens": 1753,
       "without_scout_input_tokens": 103605,
       "agent_token_savings_pct": 98.31,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 858.15
+      "latency_ms": 858.7
     },
     {
       "task_index": 46,
@@ -919,13 +1013,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1688.26,
       "pack_tokens": 306,
       "with_scout_input_tokens": 956,
       "without_scout_input_tokens": 22509,
       "agent_token_savings_pct": 95.75,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 156.3
+      "latency_ms": 583.68
     },
     {
       "task_index": 47,
@@ -937,13 +1033,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1578.93,
       "pack_tokens": 2069,
       "with_scout_input_tokens": 2719,
       "without_scout_input_tokens": 47634,
       "agent_token_savings_pct": 94.29,
       "token_savings_pct": 99.97,
       "auto_expanded_1hop_slices": 5,
-      "latency_ms": 236.15
+      "latency_ms": 662.45
     },
     {
       "task_index": 48,
@@ -955,13 +1053,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1586.33,
       "pack_tokens": 4004,
       "with_scout_input_tokens": 4654,
       "without_scout_input_tokens": 32486,
       "agent_token_savings_pct": 85.67,
       "token_savings_pct": 99.95,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 204.9
+      "latency_ms": 637.46
     },
     {
       "task_index": 49,
@@ -973,13 +1073,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1723.71,
       "pack_tokens": 843,
       "with_scout_input_tokens": 1493,
       "without_scout_input_tokens": 8117,
       "agent_token_savings_pct": 81.61,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 164.4
+      "latency_ms": 595.15
     },
     {
       "task_index": 50,
@@ -991,13 +1093,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1533.74,
       "pack_tokens": 1231,
       "with_scout_input_tokens": 1881,
       "without_scout_input_tokens": 49394,
       "agent_token_savings_pct": 96.19,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 567.68
+      "latency_ms": 589.21
     },
     {
       "task_index": 51,
@@ -1009,13 +1113,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1566.08,
       "pack_tokens": 123,
       "with_scout_input_tokens": 773,
       "without_scout_input_tokens": 5670,
       "agent_token_savings_pct": 86.37,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 155.98
+      "latency_ms": 601.35
     },
     {
       "task_index": 52,
@@ -1027,13 +1133,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1755.29,
       "pack_tokens": 223,
       "with_scout_input_tokens": 873,
       "without_scout_input_tokens": 5746,
       "agent_token_savings_pct": 84.81,
       "token_savings_pct": 100.0,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 157.26
+      "latency_ms": 593.8
     },
     {
       "task_index": 53,
@@ -1045,13 +1153,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1683.06,
       "pack_tokens": 686,
       "with_scout_input_tokens": 1336,
       "without_scout_input_tokens": 10730,
       "agent_token_savings_pct": 87.55,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 275.91
+      "latency_ms": 702.1
     },
     {
       "task_index": 54,
@@ -1063,13 +1173,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1649.13,
       "pack_tokens": 570,
       "with_scout_input_tokens": 1220,
       "without_scout_input_tokens": 10782,
       "agent_token_savings_pct": 88.68,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 1,
-      "latency_ms": 176.78
+      "latency_ms": 598.33
     },
     {
       "task_index": 55,
@@ -1081,13 +1193,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1815.73,
       "pack_tokens": 1470,
       "with_scout_input_tokens": 2120,
       "without_scout_input_tokens": 18326,
       "agent_token_savings_pct": 88.43,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 167.73
+      "latency_ms": 593.39
     },
     {
       "task_index": 56,
@@ -1099,13 +1213,15 @@
       "file_recall_at_5": false,
       "symbol_recall_at_5": false,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1962.43,
       "pack_tokens": 1267,
       "with_scout_input_tokens": 1917,
       "without_scout_input_tokens": 51824,
       "agent_token_savings_pct": 96.3,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 712.54
+      "latency_ms": 719.33
     },
     {
       "task_index": 57,
@@ -1117,13 +1233,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1477.78,
       "pack_tokens": 392,
       "with_scout_input_tokens": 1042,
       "without_scout_input_tokens": 27506,
       "agent_token_savings_pct": 96.21,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 3,
-      "latency_ms": 156.97
+      "latency_ms": 588.63
     },
     {
       "task_index": 58,
@@ -1135,13 +1253,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 2096.14,
       "pack_tokens": 758,
       "with_scout_input_tokens": 1408,
       "without_scout_input_tokens": 8407,
       "agent_token_savings_pct": 83.25,
       "token_savings_pct": 99.99,
       "auto_expanded_1hop_slices": 2,
-      "latency_ms": 174.55
+      "latency_ms": 637.5
     },
     {
       "task_index": 59,
@@ -1153,13 +1273,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1507.68,
       "pack_tokens": 1553,
       "with_scout_input_tokens": 2203,
       "without_scout_input_tokens": 39957,
       "agent_token_savings_pct": 94.49,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 4,
-      "latency_ms": 172.02
+      "latency_ms": 605.43
     },
     {
       "task_index": 60,
@@ -1171,13 +1293,15 @@
       "file_recall_at_5": true,
       "symbol_recall_at_5": true,
       "preflight_passed": true,
+      "qlora_schema_valid": true,
+      "qlora_latency_ms": 1507.85,
       "pack_tokens": 1707,
       "with_scout_input_tokens": 2357,
       "without_scout_input_tokens": 24117,
       "agent_token_savings_pct": 90.23,
       "token_savings_pct": 99.98,
       "auto_expanded_1hop_slices": 0,
-      "latency_ms": 158.2
+      "latency_ms": 599.17
     }
   ]
 }

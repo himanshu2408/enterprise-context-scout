@@ -1,0 +1,21 @@
+domain_id: polyglot_unseen_v2
+display_name: Polyglot Unseen V2 (Code Scout)
+base_model_id: google/gemma-4-26B-A4B-it
+contextualizer_model_id: google/gemma-4-E4B-it
+lora_adapter_id: gemma4_26b_polyglot_unseen_v2
+lora_adapter_path: domains/polyglot_unseen_v2/adapters/gemma4_26b_polyglot_unseen_v2
+embedding_model_id: google/embeddinggemma-2
+embedding_dimensions: 768
+mcp_read_tools_allowed:
+- code_repo_mcp:assemble_verified_context_pack
+- code_repo_mcp:search_code_trigram
+- code_repo_mcp:lookup_ast_symbol
+- code_repo_mcp:expand_ast_1hop_closure
+- code_repo_mcp:slice_file_lines
+authority_rules:
+  primary_truth_source: code
+  require_out_of_sample_check: false
+  require_transaction_cost_check: false
+  freshness_half_life_days: 90
+output_contract: ImplementationContextPack
+source_dir: data/unseen_repos_v2

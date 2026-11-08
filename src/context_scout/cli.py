@@ -844,9 +844,15 @@ def cmd_benchmark_domain(
     max_queries: int = 20,
     output_json: Path | None = None,
     output_md: Path | None = None,
+    run_live_mlx: bool = False,
 ) -> dict[str, Any]:
     """Runs a repeatable multi-category readiness benchmark on any onboarded domain."""
     import time
+
+    from context_scout.agents.scout_workflow import LocalGemmaClient
+    from context_scout.tuning.teacher_distiller import (
+        repair_and_constrain_code_pointers_json,
+    )
 
     index_path = domains_dir / domain_id / "corpus_index.json"
     if not index_path.exists():
@@ -1010,6 +1016,9 @@ def cmd_benchmark_domain(
     in_mem_repo = InMemoryRLSRepository()
     bound_repo = BoundGraphRepository(in_mem_repo)
     workflow = ScoutWorkflow(registry=registry, repo=bound_repo)
+    qlora_client = LocalGemmaClient(adapter_pool=registry.adapter_pool) if run_live_mlx else None
+    if qlora_client is not None:
+        qlora_client.set_active_domain(domain_id)
     principal = PrincipalContext(
         user_id="domain_benchmark_runner",
         role=RoleType.ENGINEER,
@@ -1020,6 +1029,8 @@ def cmd_benchmark_domain(
     file_hits = 0
     symbol_hits = 0
     preflight_passes = 0
+    qlora_valid_count = 0
+    qlora_latencies_ms: list[float] = []
     total_slices_checked = 0
     verbatim_exact_slices = 0
     latencies_ms: list[float] = []
@@ -1088,6 +1099,58 @@ def cmd_benchmark_domain(
 
         if isinstance(res, ImplementationContextPack):
             preflight_passes += 1
+            qlora_valid: bool | None = None
+            qlora_ms = 0.0
+            if qlora_client is not None and res.code_slices:
+                cand_lines = [
+                    f"Retrieved AST Candidate: [repo={s.repo_name} | "
+                    f"file={s.file_path} | symbol={s.qualified_symbol} | "
+                    f"lines={s.start_line}-{s.end_line} | "
+                    f"intent={s.modification_intent.value}]"
+                    for s in res.code_slices[:5]
+                ]
+                primary_s = res.code_slices[0]
+                short_s = primary_s.qualified_symbol.split(".")[-1]
+                qlora_prompt = (
+                    f"Localize the AST code slice for `{short_s}` in "
+                    f"`{primary_s.file_path}` to review implementation logic and performance.\n"
+                    + "\n".join(cand_lines)
+                )
+                tq0 = time.perf_counter()
+                try:
+                    raw_q = qlora_client._call_in_process_mlx(
+                        qlora_prompt,
+                        domain_id=domain_id,
+                        max_tokens=384,
+                    )
+                    qlora_ms = round((time.perf_counter() - tq0) * 1000.0, 2)
+                    validated_ptrs = repair_and_constrain_code_pointers_json(raw_q)
+                    if validated_ptrs:
+                        qlora_valid = True
+                        qlora_valid_count += 1
+                        chosen_sym = validated_ptrs[0].qualified_symbol
+                        chosen_file = validated_ptrs[0].file_path
+                        matched_idx = next(
+                            (
+                                idx_s
+                                for idx_s, sl_item in enumerate(res.code_slices)
+                                if sl_item.qualified_symbol == chosen_sym
+                                or sl_item.file_path == chosen_file
+                            ),
+                            0,
+                        )
+                        if matched_idx > 0:
+                            reordered = list(res.code_slices)
+                            promoted = reordered.pop(matched_idx)
+                            reordered.insert(0, promoted)
+                            res = res.model_copy(update={"code_slices": reordered})
+                    else:
+                        qlora_valid = False
+                except Exception:
+                    qlora_ms = round((time.perf_counter() - tq0) * 1000.0, 2)
+                    qlora_valid = False
+                qlora_latencies_ms.append(qlora_ms)
+
             loc_files = list(dict.fromkeys(s.file_path for s in res.code_slices))
             loc_syms = list(dict.fromkeys(s.qualified_symbol for s in res.code_slices))
             f_hit = f_path in loc_files[:5]
@@ -1157,6 +1220,8 @@ def cmd_benchmark_domain(
                     "file_recall_at_5": f_hit,
                     "symbol_recall_at_5": s_hit,
                     "preflight_passed": True,
+                    "qlora_schema_valid": qlora_valid,
+                    "qlora_latency_ms": qlora_ms,
                     "pack_tokens": res.pack_token_count,
                     "with_scout_input_tokens": with_scout_toks,
                     "without_scout_input_tokens": without_scout_toks,
@@ -1229,6 +1294,9 @@ def cmd_benchmark_domain(
     total_without_toks = sum(without_scout_tokens_list)
     total_with_toks = sum(with_scout_tokens_list)
 
+    sorted_qlora_lat = sorted(qlora_latencies_ms) if qlora_latencies_ms else [0.0]
+    median_qlora_lat_ms = round(sorted_qlora_lat[len(sorted_qlora_lat) // 2], 2)
+
     summary: dict[str, Any] = {
         "domain_id": domain_id,
         "repos_evaluated": repos_present,
@@ -1245,6 +1313,12 @@ def cmd_benchmark_domain(
         "symbol_recall_at_5_pct": round((symbol_hits / n_eval) * 100.0, 2),
         "preflight_pass_count": preflight_passes,
         "preflight_pass_pct": round((preflight_passes / n_eval) * 100.0, 2),
+        "live_mlx_qlora_enabled": run_live_mlx,
+        "qlora_schema_valid_count": qlora_valid_count if run_live_mlx else None,
+        "qlora_schema_validity_pct": (
+            round((qlora_valid_count / n_eval) * 100.0, 2) if run_live_mlx else None
+        ),
+        "median_qlora_latency_ms": median_qlora_lat_ms if run_live_mlx else None,
         "verbatim_slices_checked": total_slices_checked,
         "verbatim_slices_exact": verbatim_exact_slices,
         "verbatim_faithfulness_pct": round(
@@ -1283,6 +1357,16 @@ def cmd_benchmark_domain(
             f"(`{summary['symbol_recall_at_5_pct']}%`)",
             f"- **Pre-Flight Gate Pass Rate:** `{preflight_passes}/{len(task_results)}` "
             f"(`{summary['preflight_pass_pct']}%`)",
+            *(
+                [
+                    f"- **Live Local QLoRA (`Gemma-4-26B-A4B-it`) Schema Validity:** "
+                    f"`{qlora_valid_count}/{len(task_results)}` "
+                    f"(`{summary['qlora_schema_validity_pct']}%`, "
+                    f"median GPU latency `{median_qlora_lat_ms} ms`)"
+                ]
+                if run_live_mlx
+                else []
+            ),
             f"- **Byte-Exact Slice Faithfulness (VAL-02):** "
             f"`{verbatim_exact_slices}/{total_slices_checked}` "
             f"(`{summary['verbatim_faithfulness_pct']}%`)",
@@ -1420,6 +1504,11 @@ def main(argv: list[str] | None = None) -> int:
     p_bench.add_argument(
         "--output-md", type=Path, default=None, help="Optional path to save Markdown report"
     )
+    p_bench.add_argument(
+        "--live-mlx",
+        action="store_true",
+        help="Run live in-process MLX QLoRA inference on retrieved AST candidates",
+    )
 
     args = parser.parse_args(argv)
 
@@ -1480,6 +1569,7 @@ def main(argv: list[str] | None = None) -> int:
             max_queries=args.max_queries,
             output_json=args.output_json,
             output_md=args.output_md,
+            run_live_mlx=args.live_mlx,
         )
         print(json.dumps(out, indent=2))
         return 0
