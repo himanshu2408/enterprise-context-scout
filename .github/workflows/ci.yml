@@ -57,7 +57,7 @@ jobs:
           from pathlib import Path
           from context_scout.tuning.train_mlx_lora import LocalQLoRATrainer
           trainer = LocalQLoRATrainer()
-          for d_id, rel in [('trading_code_scout', 'adapters/gemma4_26b_code_scout'), ('quant_research_scout', 'adapters/gemma4_26b_quant_research')]:
+          for d_id, rel in [('trading_code_scout', 'adapters/gemma4_26b_code_scout'), ('quant_research_scout', 'adapters/gemma4_26b_quant_research'), ('polyglot_unseen_v2', 'adapters/gemma4_26b_polyglot_unseen_v2')]:
               out = Path('domains') / d_id / rel
               if not (out / 'adapters.safetensors').exists():
                   trainer.train(Path('data/tuning') / d_id / 'train.jsonl', Path('data/tuning') / d_id / 'valid.jsonl', out, domain_id=d_id, num_steps=4)
