@@ -63,6 +63,18 @@ export interface DocCitation {
   verbatim_quote: string;
 }
 
+export interface DomainKnowledgeBrief {
+  brief_title: string;
+  domain_id: string;
+  executive_summary: string;
+  formal_expression_or_rule: string | null;
+  core_findings_and_rules: string[];
+  domain_constraints_and_caveats: string[];
+  known_risks_and_failure_modes: string[];
+  structured_metadata: Record<string, string | number | boolean>;
+  verified_citations: DocCitation[];
+}
+
 export interface QuantStrategyBrief {
   strategy_name: string;
   target_markets: MarketRegime[];
@@ -99,6 +111,7 @@ export interface ContextPack {
   code_slices: VerbatimCodeSlice[];
   supporting_doc_citations: DocCitation[];
   quant_strategy_spec: QuantStrategyBrief | null;
+  domain_knowledge_brief?: DomainKnowledgeBrief | null;
   preflight_report: PreFlightValidationReport;
   local_tokens_consumed: number;
   pack_token_count: number;

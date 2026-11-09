@@ -144,7 +144,11 @@ class DomainPackManifest(BaseModel):
     embedding_dimensions: int = Field(default=768, ge=128, le=3072)
     mcp_read_tools_allowed: list[str] = Field(min_length=1)
     authority_rules: AuthorityRules
-    output_contract: Literal["ImplementationContextPack", "QuantStrategyBrief"]
+    output_contract: Literal[
+        "ImplementationContextPack",
+        "QuantStrategyBrief",
+        "DomainKnowledgeBrief",
+    ]
 
     @field_validator("base_model_id", "contextualizer_model_id", "embedding_model_id")
     @classmethod
@@ -190,6 +194,20 @@ class DocCitationSpan(BaseModel):
     verbatim_quote: str = Field(min_length=1)
 
 
+class DomainKnowledgeBrief(BaseModel):
+    """Domain-agnostic structured synthesis contract for any document or enterprise corpus."""
+
+    brief_title: str = Field(min_length=1)
+    domain_id: str = Field(min_length=1)
+    executive_summary: str = Field(min_length=1)
+    formal_expression_or_rule: str | None = None
+    core_findings_and_rules: list[str] = Field(min_length=1)
+    domain_constraints_and_caveats: list[str] = Field(min_length=1)
+    known_risks_and_failure_modes: list[str] = Field(min_length=1)
+    structured_metadata: dict[str, str | float | int | bool] = Field(default_factory=dict)
+    verified_citations: list[DocCitationSpan] = Field(min_length=1)
+
+
 class QuantStrategyBrief(BaseModel):
     """Structured extraction contract for Model 2 with Market-Regime Friction Gate (FIN-01)."""
 
@@ -209,6 +227,15 @@ class QuantStrategyBrief(BaseModel):
 
     @model_validator(mode="after")
     def _enforce_scepticism_gate(self) -> "QuantStrategyBrief":
+        is_non_financial_custom_domain = (
+            set(self.target_markets) <= {MarketRegime.GLOBAL_MULTI, MarketRegime.INTERNAL_ADR}
+            and self.reported_sharpe_ratio is None
+            and self.reported_max_drawdown_pct is None
+            and self.transaction_cost_bps_assumed is None
+            and self.friction_verdict == FrictionVerdict.REALISTIC_FRICTION
+        )
+        if is_non_financial_custom_domain:
+            return self
         if self.friction_verdict != FrictionVerdict.FAILS_AFTER_COSTS:
             computed_verdict = evaluate_market_friction_floor(
                 target_markets=self.target_markets,
@@ -253,6 +280,7 @@ class ImplementationContextPack(BaseModel):
     code_slices: list[VerbatimCodeSlice] = Field(default_factory=list)
     supporting_doc_citations: list[DocCitationSpan] = Field(default_factory=list)
     quant_strategy_spec: QuantStrategyBrief | None = None
+    domain_knowledge_brief: DomainKnowledgeBrief | None = None
     preflight_report: PreFlightValidationReport
     local_tokens_consumed: int = Field(ge=0)
     pack_token_count: int = Field(ge=1)

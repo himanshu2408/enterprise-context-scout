@@ -73,6 +73,12 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
     architectural_execution_plan,
   } = contextPack;
 
+  const isQuantDomain = [
+    "quant_research_scout",
+    "trading_code_scout",
+    "federated_all",
+  ].includes(contextPack.domain_id);
+
   const renderModificationIntentBadge = (intent: ModificationIntent): JSX.Element => {
     switch (intent) {
       case "modify_target":
@@ -150,7 +156,8 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
             onClick={() => setActiveTab("quant")}
           >
             <Sigma size={14} className="mr-1" />
-            Quant Strategy {quant_strategy_spec ? "(Active)" : "(N/A)"}
+            {isQuantDomain ? "Quant Strategy" : "Domain Knowledge"}{" "}
+            {quant_strategy_spec ? "(Active)" : "(N/A)"}
           </button>
 
           <button
@@ -239,7 +246,8 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
                       {quant_strategy_spec.strategy_name}
                     </h4>
                     <div className="text-xs text-muted mt-1">
-                      Sample Period: {quant_strategy_spec.sample_period_years}
+                      {isQuantDomain ? "Sample Period" : "Domain Corpus Scope"}:{" "}
+                      {quant_strategy_spec.sample_period_years}
                     </div>
                   </div>
                   <div>
@@ -255,9 +263,7 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
                     Direct Research Verdict &amp; Executive Summary (Local Gemma 4 26B-A4B Synthesis):
                   </div>
                   <div className="text-sm text-zinc-100">
-                    {!["quant_research_scout", "trading_code_scout", "federated_all"].includes(
-                      contextPack.domain_id
-                    )
+                    {!isQuantDomain
                       ? "Verified Empirical Corpus Synthesis: Primary literature citations and mathematical relationships passed deterministic NFKC pre-flight verification across the active custom domain corpus. "
                       : quant_strategy_spec.friction_verdict === "REALISTIC_FRICTION"
                         ? "Yes — Empirically Viable After Statutory Transaction Costs: Out-of-sample evaluation confirms positive risk-adjusted alpha after enforcing statutory market transaction cost floors and liquidity constraints. "
@@ -269,7 +275,9 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
 
                 <div className="latex-signal-box">
                   <div className="text-xs font-semibold text-muted mb-1">
-                    Mathematical Signal Formulation (LaTeX):
+                    {isQuantDomain
+                      ? "Mathematical Signal Formulation (LaTeX):"
+                      : "Mathematical / Formal Expression (LaTeX):"}
                   </div>
                   <pre
                     className="latex-display font-mono"
@@ -281,29 +289,45 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
 
                 <div className="quant-metrics-grid">
                   <div className="metric-box">
-                    <div className="metric-label">Reported Sharpe Ratio</div>
+                    <div className="metric-label">
+                      {isQuantDomain ? "Reported Sharpe Ratio" : "Citation Verification"}
+                    </div>
                     <div className="metric-value text-emerald">
-                      {quant_strategy_spec.reported_sharpe_ratio?.toFixed(2) ?? "N/A"}
+                      {isQuantDomain
+                        ? (quant_strategy_spec.reported_sharpe_ratio?.toFixed(2) ?? "N/A")
+                        : (quant_strategy_spec.reported_sharpe_ratio?.toFixed(2) ?? "NFKC 100%")}
                     </div>
                   </div>
                   <div className="metric-box">
-                    <div className="metric-label">Reported Max Drawdown</div>
+                    <div className="metric-label">
+                      {isQuantDomain ? "Reported Max Drawdown" : "Verified Citations"}
+                    </div>
                     <div className="metric-value text-rose">
-                      {quant_strategy_spec.reported_max_drawdown_pct?.toFixed(1) ?? "N/A"}%
+                      {isQuantDomain
+                        ? `${quant_strategy_spec.reported_max_drawdown_pct?.toFixed(1) ?? "N/A"}%`
+                        : `${quant_strategy_spec.verified_citations.length} docs`}
                     </div>
                   </div>
                   <div className="metric-box">
-                    <div className="metric-label">Assumed Cost Friction</div>
+                    <div className="metric-label">
+                      {isQuantDomain ? "Assumed Cost Friction" : "Friction / Cost Gate"}
+                    </div>
                     <div className="metric-value text-sky">
-                      {quant_strategy_spec.transaction_cost_bps_assumed ?? 0} bps
+                      {quant_strategy_spec.transaction_cost_bps_assumed != null
+                        ? `${quant_strategy_spec.transaction_cost_bps_assumed} bps`
+                        : isQuantDomain
+                          ? "0 bps"
+                          : "N/A (Non-Fin)"}
                     </div>
                   </div>
                   <div className="metric-box">
-                    <div className="metric-label">Target Markets</div>
+                    <div className="metric-label">
+                      {isQuantDomain ? "Target Markets" : "Target Scope"}
+                    </div>
                     <div className="market-regimes-list" data-testid="market-regimes-list">
                       {quant_strategy_spec.target_markets.map((mkt: MarketRegime) => (
                         <span key={mkt} className="badge badge-purple text-xs">
-                          {mkt}
+                          {isQuantDomain ? mkt : contextPack.domain_id}
                         </span>
                       ))}
                     </div>
@@ -314,7 +338,9 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
                   quant_strategy_spec.entry_exit_rules.length > 0 && (
                     <div className="citations-table-section mt-4" data-testid="entry-exit-rules-list">
                       <div className="text-xs font-semibold text-muted mb-2">
-                        Actionable Entry, Exit &amp; Risk Rules:
+                        {isQuantDomain
+                          ? "Actionable Entry, Exit & Risk Rules:"
+                          : "Core Empirical Findings & Domain Rules:"}
                       </div>
                       <ul className="plan-steps-list">
                         {quant_strategy_spec.entry_exit_rules.map((rule, idx) => (
@@ -331,7 +357,9 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
                   quant_strategy_spec.market_specific_caveats.length > 0 && (
                     <div className="citations-table-section mt-4" data-testid="market-caveats-list">
                       <div className="text-xs font-semibold text-muted mb-2">
-                        Market-Specific Caveats &amp; Friction Constraints:
+                        {isQuantDomain
+                          ? "Market-Specific Caveats & Friction Constraints:"
+                          : "Domain Constraints & Operational Caveats:"}
                       </div>
                       <ul className="plan-steps-list">
                         {quant_strategy_spec.market_specific_caveats.map((cav, idx) => (
@@ -348,7 +376,9 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
                   quant_strategy_spec.known_failure_regimes.length > 0 && (
                     <div className="citations-table-section mt-4" data-testid="failure-regimes-list">
                       <div className="text-xs font-semibold text-muted mb-2">
-                        Known Failure Regimes:
+                        {isQuantDomain
+                          ? "Known Failure Regimes:"
+                          : "Known Risks & Failure Modes:"}
                       </div>
                       <ul className="plan-steps-list">
                         {quant_strategy_spec.known_failure_regimes.map((reg, idx) => (

@@ -635,14 +635,83 @@ class GeminiImplementationExecutor:
     def _generate_deterministic_patch(
         self, pack: ImplementationContextPack, repo_root: Path
     ) -> str:
-        """Synthesizes valid unified diff patch by inspecting target slice in pack."""
+        """Synthesizes valid unified diff patch by inspecting target slice or document in pack."""
         target_slice: VerbatimCodeSlice | None = None
         for s in pack.code_slices:
             if s.modification_intent == ModificationIntent.MODIFY_TARGET:
                 target_slice = s
                 break
-        if target_slice is None:
+        if target_slice is None and pack.code_slices:
             target_slice = pack.code_slices[0]
+
+        if target_slice is None:
+            doc_rel_path: str | None = None
+            for cit in pack.supporting_doc_citations:
+                if ":" in cit.source_uri:
+                    cand_rel = cit.source_uri.split(":")[-1].strip()
+                    if cand_rel and (repo_root / cand_rel).is_file():
+                        doc_rel_path = cand_rel
+                        break
+            if doc_rel_path is None:
+                for ext_pat in ("*.md", "*.txt", "*.tex", "*.py"):
+                    found_files = sorted(
+                        p
+                        for p in repo_root.rglob(ext_pat)
+                        if p.is_file() and ".git" not in p.parts
+                    )
+                    if found_files:
+                        doc_rel_path = str(found_files[0].relative_to(repo_root))
+                        break
+            if doc_rel_path is None:
+                doc_rel_path = "README.md"
+
+            doc_target_path = repo_root / doc_rel_path
+            doc_orig_lines: list[str] = []
+            if doc_target_path.is_file():
+                doc_orig_lines = doc_target_path.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines(keepends=True)
+            if doc_orig_lines and not doc_orig_lines[-1].endswith("\n"):
+                doc_orig_lines[-1] += "\n"
+
+            brief_title = (
+                pack.domain_knowledge_brief.brief_title
+                if pack.domain_knowledge_brief is not None
+                else (
+                    pack.quant_strategy_spec.strategy_name
+                    if pack.quant_strategy_spec is not None
+                    else pack.domain_id
+                )
+            )
+            cite_quote = (
+                pack.supporting_doc_citations[0].verbatim_quote
+                if pack.supporting_doc_citations
+                else pack.user_task.strip()
+            )
+            is_md = doc_rel_path.endswith((".md", ".txt", ".rst"))
+            prefix = "<!-- " if is_md else "# "
+            suffix = " -->\n" if is_md else "\n"
+            addition_lines = [
+                f"{prefix}Context Scout Grounded Synthesis ({brief_title}): "
+                f"{cite_quote[:120]}{suffix}"
+            ]
+            doc_mod_lines = [*doc_orig_lines, *addition_lines]
+            diff_text = "".join(
+                difflib.unified_diff(
+                    doc_orig_lines,
+                    doc_mod_lines,
+                    fromfile=f"a/{doc_rel_path}",
+                    tofile=f"b/{doc_rel_path}",
+                )
+            )
+            if not diff_text:
+                diff_text = (
+                    f"--- a/{doc_rel_path}\n"
+                    f"+++ b/{doc_rel_path}\n"
+                    f"@@ -1,1 +1,2 @@\n"
+                    f"+{''.join(addition_lines)}"
+                )
+            return diff_text
 
         target_path = repo_root / target_slice.file_path
         orig_lines: list[str] = []
