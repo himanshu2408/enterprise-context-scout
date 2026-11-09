@@ -94,4 +94,41 @@ describe("CitationInspector Component", () => {
       screen.getByText("Intraday Momentum Volatility Breakout")
     ).toBeInTheDocument();
   });
+
+  it("renders domain-agnostic Domain Knowledge labels and metrics for non-quant custom domains", () => {
+    const customDomainPack = {
+      ...MOCK_CONTEXT_PACK,
+      domain_id: "crispr_biology_scout",
+      user_task: "How does Cas9 guide RNA mismatch affect off-target cleavage kinetics?",
+      code_slices: [],
+      quant_strategy_spec: {
+        ...MOCK_CONTEXT_PACK.quant_strategy_spec!,
+        strategy_name: "CRISPR-Cas9 Guide RNA Specificity",
+        reported_sharpe_ratio: null,
+        reported_max_drawdown_pct: null,
+        transaction_cost_bps_assumed: null,
+        entry_exit_rules: ["Cas9 endonuclease cleavage rate decreases exponentially."],
+        market_specific_caveats: ["Experimental assays require 10 mM Mg2+ cofactor concentration."],
+        known_failure_regimes: ["Severe off-target cleavage failure occurs at positions 18-20."],
+      },
+    };
+
+    render(<CitationInspector contextPack={customDomainPack} />);
+
+    expect(screen.getByTestId("tab-quant-strategy")).toHaveTextContent(
+      "Domain Knowledge (Active)"
+    );
+    expect(screen.getByText("Citation Verification")).toBeInTheDocument();
+    expect(screen.getByText("NFKC 100%")).toBeInTheDocument();
+    expect(screen.getByText("N/A (Non-Fin)")).toBeInTheDocument();
+    expect(
+      screen.getByText("Core Empirical Findings & Domain Rules:")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Domain Constraints & Operational Caveats:")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Known Risks & Failure Modes:")
+    ).toBeInTheDocument();
+  });
 });

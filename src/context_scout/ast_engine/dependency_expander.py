@@ -139,8 +139,14 @@ class ASTDependencyExpander:
             seen_type_sym_ids.add(target_sym.symbol_id)
             f_rec = visible_files[target_sym.file_id]
             end_l = target_sym.end_line
-            if (target_sym.end_line - target_sym.start_line) > 30:
-                end_l = min(target_sym.end_line, target_sym.start_line + 28)
+            if (
+                edge_kind in ("IMPORTS", "INHERITS")
+                or (
+                    edge_kind == "USES_TYPE"
+                    and focus_symbol.symbol_kind == "type_alias"
+                )
+            ) and (target_sym.end_line - target_sym.start_line) > 30:
+                end_l = min(target_sym.end_line, target_sym.start_line + 24)
             s_lines = f_rec.raw_content.splitlines()[target_sym.start_line - 1 : end_l]
             est = self.estimate_tokens("\n".join(s_lines))
             type_candidates.append(

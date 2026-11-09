@@ -334,6 +334,38 @@ _SYNC_SKIP_DIRS: Final[set[str]] = {
     ".ruff_cache",
 }
 
+CUSTOM_DOC_EXTENSIONS: Final[tuple[str, ...]] = (
+    ".md",
+    ".txt",
+    ".tex",
+    ".pdf",
+    ".rst",
+    ".json",
+    ".csv",
+    ".html",
+)
+
+
+def extract_document_text(file_path: Path) -> str:
+    """Extracts UTF-8 text from .pdf, .md, .txt, .tex, .rst, .json, .csv, or .html files."""
+    suffix = file_path.suffix.lower()
+    if suffix == ".pdf":
+        try:
+            from pypdf import PdfReader
+
+            reader = PdfReader(str(file_path))
+            pages = [page.extract_text() or "" for page in reader.pages]
+            extracted = "\n\n".join(p.strip() for p in pages if p.strip())
+            if extracted.strip():
+                return extracted
+        except Exception:
+            pass
+    raw_bytes = file_path.read_bytes()
+    if b"\x00" in raw_bytes[:8192] and suffix != ".pdf":
+        return ""
+    return raw_bytes.decode("utf-8", errors="replace").replace("\x00", "")
+
+
 
 def _should_skip_sync_parts(rel_parts: tuple[str, ...], is_multi_repo: bool) -> bool:
     for idx, part in enumerate(rel_parts):
@@ -450,7 +482,7 @@ def sync_custom_domain_corpus_if_needed(
             except Exception:
                 pass
 
-    if not source_dir_str or data.get("kind") != "code":
+    if not source_dir_str:
         _CUSTOM_CORPUS_MEM_CACHE[domain_id] = (stat_mtime, now, data)
         c_files = data.get("code_files", [])
         return {
@@ -459,7 +491,7 @@ def sync_custom_domain_corpus_if_needed(
             "modified": 0,
             "deleted": 0,
             "unchanged": len(c_files) or len(data.get("doc_chunks", [])),
-            "files_indexed": len(c_files),
+            "files_indexed": len(c_files) or len(data.get("doc_chunks", [])),
             "symbols_indexed": len(data.get("ast_symbols", [])),
             "edges_indexed": len(data.get("ast_edges", [])),
         }
@@ -473,10 +505,152 @@ def sync_custom_domain_corpus_if_needed(
             "added": 0,
             "modified": 0,
             "deleted": 0,
-            "unchanged": len(c_files),
-            "files_indexed": len(c_files),
+            "unchanged": len(c_files) or len(data.get("doc_chunks", [])),
+            "files_indexed": len(c_files) or len(data.get("doc_chunks", [])),
             "symbols_indexed": len(data.get("ast_symbols", [])),
             "edges_indexed": len(data.get("ast_edges", [])),
+        }
+
+    if data.get("kind") != "code":
+        from uuid import NAMESPACE_DNS
+
+        existing_chunks: list[dict[str, Any]] = list(data.get("doc_chunks", []))
+        existing_doc_by_rel: dict[str, dict[str, Any]] = {}
+        for chk in existing_chunks:
+            meta = chk.get("metadata_json") or {}
+            rel_k = str(meta.get("rel_path") or meta.get("filename") or "")
+            if rel_k:
+                existing_doc_by_rel[rel_k] = chk
+
+        live_docs: dict[str, tuple[Path, str]] = {}
+        doc_added: list[str] = []
+        doc_modified: list[str] = []
+        doc_unchanged = 0
+        for p in sorted(source_dir.rglob("*")):
+            if not p.is_file() or p.suffix.lower() not in CUSTOM_DOC_EXTENSIONS:
+                continue
+            rel_parts = p.relative_to(source_dir).parts
+            if _should_skip_sync_parts(rel_parts, False):
+                continue
+            rel_p = str(p.relative_to(source_dir))
+            try:
+                raw_b = p.read_bytes()
+                blob_sha = hashlib.sha1(raw_b).hexdigest()
+            except Exception:
+                continue
+            live_docs[rel_p] = (p, blob_sha)
+            old_chk = existing_doc_by_rel.get(rel_p) or existing_doc_by_rel.get(p.name)
+            if old_chk is None:
+                doc_added.append(rel_p)
+            else:
+                old_sha = str((old_chk.get("metadata_json") or {}).get("blob_sha", ""))
+                if old_sha and old_sha != blob_sha:
+                    doc_modified.append(rel_p)
+                elif not old_sha:
+                    new_txt = extract_document_text(p)
+                    if new_txt and new_txt != str(old_chk.get("verbatim_content", "")):
+                        doc_modified.append(rel_p)
+                    else:
+                        doc_unchanged += 1
+                else:
+                    doc_unchanged += 1
+
+        doc_deleted = {
+            k
+            for k in existing_doc_by_rel
+            if k not in live_docs and all(Path(lp).name != k for lp in live_docs)
+        }
+        if not doc_added and not doc_modified and not doc_deleted:
+            _CUSTOM_CORPUS_MEM_CACHE[domain_id] = (stat_mtime, now, data)
+            return {
+                "synced": False,
+                "added": 0,
+                "modified": 0,
+                "deleted": 0,
+                "unchanged": doc_unchanged,
+                "files_indexed": len(existing_chunks),
+                "symbols_indexed": 0,
+                "edges_indexed": 0,
+            }
+
+        mutated_doc_keys = set(doc_added) | set(doc_modified) | doc_deleted
+        kept_chunks: list[dict[str, Any]] = []
+        for chk in existing_chunks:
+            meta = chk.get("metadata_json") or {}
+            rel_k = str(meta.get("rel_path") or meta.get("filename") or "")
+            if rel_k not in mutated_doc_keys and Path(rel_k).name not in mutated_doc_keys:
+                kept_chunks.append(chk)
+
+        for rel_p in sorted(doc_added + doc_modified):
+            disk_p, blob_sha = live_docs[rel_p]
+            text = extract_document_text(disk_p)
+            if not text.strip():
+                continue
+            doc_title = disk_p.stem.replace("_", " ").replace("-", " ").title()
+            section_heading = "1. Empirical Findings"
+            for ln in text.splitlines():
+                s_ln = ln.strip()
+                if s_ln.startswith("# "):
+                    doc_title = s_ln[2:].strip()
+                    break
+                t_m = re.search(r"\\title\{([^\}]+)\}", s_ln)
+                if t_m:
+                    doc_title = t_m.group(1).strip()
+                    break
+            for ln in text.splitlines():
+                s_ln = ln.strip()
+                if s_ln.startswith("## "):
+                    section_heading = s_ln[3:].strip()
+                    break
+                sec_m = re.search(r"\\section\*?\{([^\}]+)\}", s_ln)
+                if sec_m:
+                    section_heading = sec_m.group(1).strip()
+                    break
+            chk_uuid = str(uuid5(NAMESPACE_DNS, f"{domain_id}:doc:{rel_p}:0"))
+            kept_chunks.append(
+                {
+                    "chunk_id": chk_uuid,
+                    "domain_id": domain_id,
+                    "doc_id": f"{domain_id}:{disk_p.stem}",
+                    "doc_title": doc_title,
+                    "source_uri": f"urn:{domain_id}:{rel_p}",
+                    "market_scope": MarketRegime.GLOBAL_MULTI.value,
+                    "authority_weight": 1.0,
+                    "section_heading": section_heading,
+                    "contextual_header": f"{doc_title} — {section_heading}",
+                    "verbatim_content": text,
+                    "metadata_json": {
+                        "filename": disk_p.name,
+                        "rel_path": rel_p,
+                        "blob_sha": blob_sha,
+                    },
+                    "allowed_scopes": [
+                        "public_eng",
+                        "public_quant",
+                        "quant_restricted",
+                        f"domain:{domain_id}",
+                    ],
+                }
+            )
+
+        data["doc_chunks"] = kept_chunks
+        try:
+            with open(cand, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            new_mtime = cand.stat().st_mtime_ns
+        except Exception:
+            new_mtime = stat_mtime
+        _CUSTOM_CORPUS_MEM_CACHE[domain_id] = (new_mtime, now, data)
+        _clear_parsed_cache_for_domain(domain_id)
+        return {
+            "synced": True,
+            "added": len(doc_added),
+            "modified": len(doc_modified),
+            "deleted": len(doc_deleted),
+            "unchanged": doc_unchanged,
+            "files_indexed": len(kept_chunks),
+            "symbols_indexed": 0,
+            "edges_indexed": 0,
         }
 
     # Scan live working-tree files under source_dir and compare git_blob_sha
@@ -700,9 +874,9 @@ def sync_custom_domain_corpus_if_needed(
 def _load_custom_domain_corpus(domain_id: str) -> dict[str, Any] | None:
     """Loads and auto-syncs domains/<domain_id>/corpus_index.json for custom domains."""
     res = sync_custom_domain_corpus_if_needed(domain_id)
-    if res is None:
-        return None
     cached = _CUSTOM_CORPUS_MEM_CACHE.get(domain_id)
+    if res is None and cached is None:
+        return None
     return cached[2] if cached is not None else None
 
 

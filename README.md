@@ -1,6 +1,10 @@
 # Enterprise Context Scout
 
-Local-first context discovery for coding agents. A small open-weights model explores the codebase at \$0 API cost; a deterministic gate verifies the result; only then does one paid Gemini call run on a compact, verified context pack.
+Local-first context discovery and verification for enterprise coding and knowledge agents. Instead of letting a paid cloud LLM burn 80–90% of its token budget searching directories and reading unrelated files across multi-turn tool loops, **Enterprise Context Scout** runs discovery locally at **\$0 API cost** using open-weights `google/gemma-4-26B-A4B-it` (4-bit MoE) + PostgreSQL 17 (`pgvector`, `pg_trgm`, `tsvector`, `FORCE ROW LEVEL SECURITY`) + `tree-sitter` AST dependency closure, validates completeness through a **4-check deterministic Pre-Flight Gate**, and sends a single compact `ImplementationContextPack` (`~1.9K–4.9K` tokens) to a paid frontier model (`Gemini 3.8 Flash` or `Gemini 4 Argon`) for 1-shot execution inside an isolated Git worktree sandbox.
+
+- **Eliminates Exploratory Token Waste (`82%–93%` Reduction):** Cuts median paid input tokens from **`17,473` to `1,949` (`-91.35%`)** on live `Gemini 3.8 Flash` end-to-end engineering tasks ($N=30$, reducing search turns from `96` to `0`), from **`32,486` to `1,923` (`-92.66%`)** across 50 polyglot repositories ($N=60$), and from **`26,509` to `4,898` (`-81.96%`)** across 30 real merged PRs on `encode/httpx` and `pallets/click`.
+- **Higher Implementation Accuracy than Unbounded Cloud Search (`100.0%` vs `96.67%`):** Delivers exact byte-sliced definitions, imported types, 2-hop database/DTO schemas, and diverse callers—improving symbol-level `Recall@5` on unseen repos from **`20.0%` (`6/30`) to `100.0%` (`30/30`)** and live `Gemini 3.8 Flash` runtime-verified implementation pass rate from **`96.67%` (`29/30`) to `100.0%` (`30/30`)**.
+- **Database-Kernel Security & Multi-Domain Extensibility (`0/22` Leaks, `22/22` Attacks Blocked):** Enforces multi-tenant access at the PostgreSQL 17 storage engine (`FORCE ROW LEVEL SECURITY` + out-of-band HMAC-SHA256 `PrincipalContext`) and onboards any codebase (10 languages) or document corpus (`.pdf`, `.md`, `.tex`, `.rst`, `.json`, `.csv`, `.html`) via declarative `domains/<id>/domain.yaml` manifests.
 
 ```mermaid
 flowchart LR
@@ -47,6 +51,19 @@ When coding agents explore repositories directly on paid frontier APIs (**Withou
 | **Prompt-injection & secret-redaction gate ($N=22$)** | **`22 of 22` payloads (`100.0%`)** | `18/18` active override/steganography/bidi/HTML-comment payloads blocked (`PromptInjectionSanitizer`) + `4/4` secret-leakage payloads redacted (`SecretRedactor`, including `INJ-11`) |
 | **Own-repo golden retrieval set ($N=17$ tasks)** | **`17 of 17` (`100.0%`)** | `8` code, `6` quant, `3` federated tasks on own repo (`src/context_scout/trading_strategies/`); same-corpus distillation overlap ([`reports/m6_eval_report.md`](reports/m6_eval_report.md)) |
 
+## Iterative Engineering Progression: From Baseline to Production
+
+Each architectural layer in **Enterprise Context Scout** was introduced to solve a measured failure mode observed during evaluation. The table below tracks the step-by-step progression from the initial multi-turn cloud baseline and untuned local model to the current production system:
+
+| Stage & Focus | Initial Baseline (Before) | Bottleneck Diagnosed | Architectural Improvement | Measured Result (After) & Delta |
+|---|---|---|---|---|
+| **Stage 1: Hybrid 3-Way Retrieval & 1-Hop AST Auto-Closure** | Multi-turn cloud `grep`/`read_file` loop (`26,481` median input tokens/PR; **`6 of 30` [`20.00%`] Symbol `Recall@5`** on unseen `httpx` & `click`) | Dense embeddings smear `camelCase`/`snake_case` identifiers; BM25 misses conceptual queries; fixed-window chunking severs functions from imported types, callers, and unit tests. | Combined 3-way Normalized RRF (`tsvector` BM25 + 768-dim `pgvector` + `pg_trgm`) with `tree-sitter` 1-hop dependency closure ($\le 3$ diverse callers across distinct files, $\le 1,500$ tokens) and byte-exact slicing (`DeterministicSlicer`). | Unseen File `Recall@5` reached **`27 of 30` (`90.00%`)**; Symbol `Recall@5` jumped **`20.00%` $\rightarrow$ `76.67%` (`23/30`, `+56.67%`)**; median input tokens dropped **`26,481` $\rightarrow$ `4,616` (`-81.81%`)**. |
+| **Stage 2: Domain QLoRA Specialization (`r=16`) & Prompt Compression** | Untuned `Gemma-4-26B-A4B-it` base model (**`19.44%` zero-shot** / `69.44%` few-shot JSON schema validity; `8.33%` AST skeleton recall; `1,690.6`-token prompt; `120.76 ms` TTFT) | Untuned open-weights models emit conversational prose or malformed line bounds unless given a heavy ~1.7K-token few-shot system prompt on every call. | Trained rank-16 QLoRA adapters (`9.97 MB`) on teacher-distilled, `PreFlightValidator`-filtered trajectories while freezing all 128 MoE `router.proj` gates; pinned adapters in `AdapterPool` (`0.018 ms` switch). | Held-out schema validity & AST recall rose **`19.44%` $\rightarrow$ `100.0%` (`36/36`)**; system prompt overhead fell **`1,690.6` $\rightarrow$ `56.6` tokens (`-96.65%`)**; prefill TTFT sped up **`29.89x` (`120.76 ms` $\rightarrow$ `4.04 ms`)**. |
+| **Stage 3: Solving Multi-Candidate QLoRA Overfitting Across 50 Unseen Repos** | 1-candidate QLoRA adapter dropped to **`4 of 30` (`13.33%`)** schema validity when given 5 competing AST candidates on unseen `httpx` & `click` repos | Training exclusively on 1-candidate prompts (`train_loss: 0.0008`) taught the adapter to copy a single candidate rather than discriminate among 5 competing RRF candidates. | Added deterministic grammar-constrained JSON repair (`repair_and_constrain_code_pointers_json`) and re-architected distillation (`gemma4_26b_polyglot_unseen_v2`) using 5-candidate hard-negative distractor prompts across **50 polyglot repos (`4,232` files, `51,130` symbols, `290,759` edges)**. | Frozen-adapter unseen validity jumped **`13.33%` (`4/30`) $\rightarrow$ `96.67%` (`29/30`, `+83.34%`)**; 50-repo live GPU QLoRA achieved **`59 of 60` (`98.33%`) schema validity & `Recall@5`** and **`92.66%` median token savings (`32,486` $\rightarrow$ `1,923` tokens)**. |
+| **Stage 4: Subword Stemming, God-Class Skeletonization & `<20ms` Live Git Sync** | `27 of 30` (`90.00%`) File & `23 of 30` (`76.67%`) Symbol `Recall@5` on unseen PRs (`3` symbol misses: `HTTPX-04`, `CLICK-01`, `CLICK-14`; token bloat on `>600`-line classes) | Morphological `-ing`/`-ion` mismatches (`parsing` vs `parse`), doc-symbol ranking noise, and slicing entire 700-line classes (`click.core.Command`) consumed excessive token budget. | Added morphological stem expansion, non-code symbol filtering, query-aware class skeletonization (`_skeletonize_large_python_class` for classes `>150` lines), and `<20ms` uncommitted working-tree Git Merkle overlay (`git status --porcelain` + `git ls-tree -r HEAD`). | Unseen File `Recall@5` rose **`90.00%` $\rightarrow$ `100.00%` (`30/30`)** and Symbol `Recall@5` rose **`76.67%` $\rightarrow$ `100.00%` (`30/30`, `+80.00%` over Arm A)** with zero adapter retraining and **`81.96%` median token savings**. |
+| **Stage 5: Live Runtime Compiler Audit & 4 Systemic Context-Shape Fixes** | **`27 of 30` (`90.00%`)** strict runtime & compiler pass rate for Arm B on the 30-task Senior-Engineer live `Gemini 3.8 Flash` benchmark (despite `30/30` structural pass) | Live Python/`ruff F821`/Node.js/PostgreSQL 17 execution exposed 3 context-shape failure classes: (1) cross-repo `Task` collision (`anyio` vs `rich`), (2) 1-hop stopping at `execution_orders` without 2-hop FK table `tenant_accounts`, and (3) disjoint out-of-order TSX slices lacking top-of-file imports. | Added (1) `focus_repo_name` cross-repo symbol isolation, (2) selective 2-hop `USES_TYPE`/`INHERITS` schema/DTO closure with a `350`-token reserved caller budget, (3) enclosing class state (`__init__`) & body-referenced type inference, and (4) ascending-line slice coalescing + import header attachment (`L1..last_import_line`). | Live `Gemini 3.8 Flash` 1-shot runtime-verified E2E pass rate rose **`90.00%` (`27/30`) $\rightarrow$ `100.00%` (`30/30`)** (surpassing multi-turn Arm A's `29/30` [`96.67%`]), with **`0` vs `96` search turns** and **`91.35%` median input token savings (`1,949` vs `17,473` tokens)**. |
+| **Stage 6: PostgreSQL 17 `FORCE RLS` Pushdown, Guardrails & Multi-Domain Decoupling** | Full-table CTE scans (`~180 ms`) bypassing HNSW under RLS; `21 of 22` (`95.45%`) prompt-injection block rate; finance heuristics bleeding into custom document domains | Outer `ROW_NUMBER()` without inner CTE `LIMIT` bypassed HNSW; HTML-comment split injections (`INJ-11`) bypassed single-pass regex; custom non-quant document domains inherited finance Sharpe/drawdown defaults. | Pushed `LIMIT` into 3-way RRF CTEs with `SET LOCAL hnsw.iterative_scan = 'relaxed_order'` (`<8 ms`); added pre/post-comment sanitization + `SecretRedactor`; decoupled `DomainKnowledgeBrief` and `doc_corpus_mcp` for arbitrary `.pdf`/`.md`/`.tex`/`.json`/`.html` corpora. | **`0 of 22` RBAC leaks (`100.0%`)**, **`22 of 22` (`100.0%`) injection & secret payloads blocked**, and **`100.0%` Pre-Flight & quote faithfulness** across code, quant finance, and general knowledge domains (`620` Python + `44` UI tests). |
+
 ## Limitations
 - **50-Repo Polyglot Benchmark Miss on Redacted Tier 4 Symptom Queries (`59 of 60` [`98.33%`] File & Symbol `Recall@5`, documented in [`reports/polyglot_unseen_v2_benchmark.md`](reports/polyglot_unseen_v2_benchmark.md)):**
   - Across `50` repositories (`4,232` files, `51,130` AST symbols, `290,759` directed AST edges), Tiers 1–3 achieve `45 of 45` (`100.0%`) File and Symbol `Recall@5` without file-path hints. On Tier 4 (`symptom_and_signature_discovery`, $n=15$), where the target symbol's own identifier is redacted (`target_symbol`) from both its signature and docstring hints, `14 of 15` (`93.33%`) localize the exact file and symbol, with `1` miss on Task 56 (`urllib3` — `emscripten_fetch_worker` in `urllib3/src/urllib3/contrib/emscripten/emscripten_fetch_worker.js`, where redacting the module identifier from a top-level JS worker script without a function signature causes lexical retrieval across `urllib3` to select Python HTTP connection modules instead).
@@ -61,12 +78,12 @@ When coding agents explore repositories directly on paid frontier APIs (**Withou
 
 When engineering teams point commercial LLMs directly at multi-file repositories and technical corpora, most input tokens are spent on exploratory search—scanning directory trees, tracing call graphs, and reading unrelated files—while naive fixed-window chunking severs functions from their imported types, callers, and test fixtures.
 
-**Enterprise Context Scout** separates **Local Discovery & Deterministic Verification** from **Single-Shot Paid Execution** across a declarative `DomainPack` architecture (demonstrated across two domains: **Domain 1 — Codebase Intelligence** and **Domain 2 — Quantitative Research Literature**):
+**Enterprise Context Scout** separates **Local Discovery & Deterministic Verification** from **Single-Shot Paid Execution** across a declarative `DomainPack` architecture (demonstrated across **Domain 1 — Codebase Intelligence**, **Domain 2 — Quantitative Research Literature**, and **Custom Knowledge/Document Corpora**):
 
 1. **Zero-Cost Local Discovery Engine (Open-Weights Gemma 4 + MCP + PostgreSQL 17 `FORCE RLS`):**
    - Codebase exploration and citation retrieval run locally using open-weights `google/gemma-4-26B-A4B-it` (MoE: 3.8B active parameters) with hot-swapped domain QLoRA adapters (`0.018 ms` in-memory pointer switch).
-   - **Domain 1 — Codebase Intelligence (`trading_code_scout`):** Git Blob-SHA Merkle incremental indexing (`<50ms` sync, commit-isolated via `git cat-file -p` plus live uncommitted working-tree overlay via `git status --porcelain`), 3-way Normalized Reciprocal Rank Fusion (`pg_trgm` + `tsvector` BM25 + 768-d `pgvector`), and polyglot `tree-sitter` / structural AST symbol & call graph across 10 languages (`.py`, `.ts`, `.tsx`, `.js`/`.jsx`, `.go`, `.rs`, `.java`, `.sql`, `.tf`, `.yaml`) with bounded 1-hop dependency closure ($\le 3$ callers, $\le 1,500$ tokens). Emits structured `CodeSlicePointer` objects sliced byte-for-byte with `git_commit_sha` provenance.
-   - **Domain 2 — Multi-Market Quantitative Research (`quant_research_scout`):** Declarative `domain.yaml` pack over 303 full-text arXiv/OpenAlex papers (`IN_NSE`, `DE_XETRA`, `US_EQUITY` — 14,331 chunks), lossless LaTeX/PDF equation and table chunking, Anthropic Contextual Retrieval (`google/gemma-4-E4B-it`), and a deterministic Market-Regime Quant Scepticism Gate.
+   - **Domain 1 — Codebase Intelligence (`trading_code_scout`):** Git Blob-SHA Merkle incremental indexing (`<50ms` sync, commit-isolated via `git cat-file -p` plus live uncommitted working-tree overlay via `git status --porcelain`), 3-way Normalized Reciprocal Rank Fusion (`pg_trgm` + `tsvector` BM25 + 768-d `pgvector`), and polyglot `tree-sitter` / structural AST symbol & call graph across 10 languages (`.py`, `.ts`, `.tsx`, `.js`/`.jsx`, `.go`, `.rs`, `.java`, `.sql`, `.tf`, `.yaml`) with bounded 1-hop dependency closure ($\le 3$ callers, $\le 1,500$ tokens, plus selective 2-hop schema/DTO closure). Emits structured `CodeSlicePointer` objects sliced byte-for-byte with `git_commit_sha` provenance.
+   - **Domain 2 — Multi-Market Quantitative Research (`quant_research_scout`) & General Document Corpora (`DomainKnowledgeBrief`):** Declarative `domain.yaml` pack over 303 full-text arXiv/OpenAlex papers (`IN_NSE`, `DE_XETRA`, `US_EQUITY` — 14,331 chunks), lossless LaTeX/PDF equation and table chunking, Anthropic Contextual Retrieval (`google/gemma-4-E4B-it`), and a deterministic Market-Regime Quant Scepticism Gate—plus domain-agnostic multi-format ingestion (`.pdf`, `.md`, `.tex`, `.rst`, `.json`, `.csv`, `.html`) and `doc_corpus_mcp` tools producing `DomainKnowledgeBrief` outputs for non-finance knowledge domains.
 2. **4-Check Deterministic Pre-Flight Quality Gate (`PreFlightValidator`):**
    - Verifies internal symbol resolution, target identifier grounding, Normalized RRF floor ($\ge 0.55$), and NFKC-normalized verbatim quote overlap ($\ge 0.98$) before any paid API call is made, with up to 2 local bounce-back turns at \$0 API cost.
 3. **Single-Shot Paid Execution & Isolated Worktree Sandbox:**
@@ -112,7 +129,7 @@ uv run python -m context_scout.evals.runner \
   --output-md reports/m6_eval_report.md \
   --fail-under-threshold
 
-# Run the full verification suite (617 Python tests + 43 Vitest UI tests + strict typechecks)
+# Run the full verification suite (620 Python tests + 44 Vitest UI tests + strict typechecks)
 uv run ruff check src tests
 uv run mypy --strict src tests
 uv run pytest -v
@@ -127,7 +144,7 @@ Any single repository, multi-repository directory, or document folder can be onb
 # Inspect auto-detected host hardware, quantization backend, and safe KV-cache budget
 uv run context-scout hardware
 
-# 1. Scaffold a new DomainPack (--domain-type code or research)
+# 1. Scaffold a new DomainPack (--domain-type code | knowledge | document | research)
 uv run context-scout init-domain \
   --domain-id payments_ledger_scout \
   --domain-type code \
@@ -178,14 +195,14 @@ enterprise-context-scout/
 ├── src/context_scout/
 │   ├── config.py                   # Environment config & runtime hardware auto-detection
 │   ├── cli.py                      # Custom-domain CLI (hardware | init-domain | distill | train | sync | query | benchmark-domain)
-│   ├── schemas/contracts.py        # Pydantic v2 contracts (PrincipalContext, CodeSlicePointer, ContextPack)
+│   ├── schemas/contracts.py        # Pydantic v2 contracts (PrincipalContext, CodeSlicePointer, DomainKnowledgeBrief, ContextPack)
 │   ├── db/                         # PostgreSQL 17 RLS session pool, 3-way RRF repositories & Okapi BM25
 │   │   ├── session.py              # RLSConnectionManager (psycopg_pool.ConnectionPool + SET LOCAL scopes)
 │   │   ├── repositories.py         # PostgresRLSRepository & InMemoryRLSRepository
 │   │   └── bm25.py                 # Smoothed Okapi BM25 lexical ranker
 │   ├── ast_engine/                 # Polyglot CST/AST extraction, bounded 1-hop closure & byte-exact slicing
 │   │   ├── extractor.py            # ASTExtractor (10 languages: Python, TS/TSX, JS, Go, Rust, Java, SQL, TF, YAML, MD)
-│   │   ├── dependency_expander.py  # ASTDependencyExpander (<=3 callers, <=1,500 tokens)
+│   │   ├── dependency_expander.py  # ASTDependencyExpander (<=3 callers, <=1,500 tokens + 2-hop schema/DTO closure)
 │   │   ├── deterministic_slicer.py # DeterministicSlicer (UTF-8 byte slicing + >=0.98 NFKC quote check)
 │   │   └── models.py               # AST node and edge data models
 │   ├── ingestion/                  # Incremental Git Merkle sync & multi-market academic paper ingestion
@@ -202,6 +219,7 @@ enterprise-context-scout/
 │   ├── mcp_servers/                # Model Context Protocol servers (mcp>=2.3.0, <=10 items, <=32KB cap)
 │   │   ├── code_repo_mcp.py        # 6 codebase tools (trigram grep, AST lookup, 1-hop closure, slicing, verified pack)
 │   │   ├── quant_corpus_mcp.py     # 4 quant research tools (hybrid RRF, equations/tables, friction gate)
+│   │   ├── doc_corpus_mcp.py       # 3 domain-agnostic document/knowledge tools (hybrid RRF, quote verify, section lookup)
 │   │   ├── common.py               # SQL query pushdown, payload truncation & out-of-band principal checks
 │   │   └── seed_code_corpus.py     # Idempotent PostgreSQL 17 corpus seeder
 │   ├── agents/                     # Google ADK 2.12 workflows, pre-flight gate & worktree executor
@@ -214,8 +232,8 @@ enterprise-context-scout/
 │   ├── evals/                      # Golden benchmark harness & N=30 unseen-repo two-arm A/B runner
 │   ├── tuning/                     # TeacherDistiller, MLX 4-bit QLoRA trainer & Vertex AI PEFT spec builder
 │   └── trading_strategies/         # 5 reference quant modules (GARCH, Kelly, OFI, Kalman, Almgren-Chriss)
-├── web-ui/                         # Strict TypeScript + React 18 Vite UI (zero `any`, 43 Vitest tests)
-└── tests/                          # 35 pytest suites (617 tests: unit, live PG17 RLS, adversarial, 6-repo & 50-repo E2E)
+├── web-ui/                         # Strict TypeScript + React 18 Vite UI (zero `any`, 44 Vitest tests)
+└── tests/                          # 35 pytest suites (620 tests: unit, live PG17 RLS, adversarial, 6-repo & 50-repo E2E)
 ```
 
 ---

@@ -43,6 +43,7 @@ from context_scout.db.repositories import (
 from context_scout.schemas.contracts import (
     CodeSlicePointer,
     DocCitationSpan,
+    DomainKnowledgeBrief,
     FrictionVerdict,
     ImplementationContextPack,
     InsufficientContextDiagnostic,
@@ -1557,7 +1558,7 @@ class LocalGemmaClient:
                 )
             )
 
-        assumed_bps = 12.0
+        assumed_bps: float | None = 12.0
         if MarketRegime.INDIA_NSE_BSE in target_markets:
             assumed_bps = 25.0
 
@@ -1576,10 +1577,94 @@ class LocalGemmaClient:
             "High volatility macroeconomic announcement windows",
             "Flash liquidity withdrawal regimes",
         ]
-        sharpe_ratio = 2.15
-        max_dd_pct = 4.8
+        sharpe_ratio: float | None = 2.15
+        max_dd_pct: float | None = 4.8
 
-        if "momentum" in prompt_lower:
+        if domain_id != "quant_research_scout" and chunks:
+            top_chk = chunks[0]
+            strategy_name = (
+                f"{top_chk.doc_title} — {top_chk.section_heading}"
+                if top_chk.section_heading
+                else f"{top_chk.doc_title} Empirical Synthesis"
+            )
+            target_markets = [MarketRegime.GLOBAL_MULTI]
+            sharpe_ratio = None
+            max_dd_pct = None
+            assumed_bps = None
+            combined_text = "\n".join(c.verbatim_content for c in chunks[:3])
+            math_match = re.search(r"\$\$?([^\$\n]{4,120})\$\$?", combined_text)
+            if math_match:
+                signal_latex = math_match.group(1).strip()
+            else:
+                signal_latex = r"E[Y \mid X] = f_{\theta}(\text{DomainContext})"
+
+            corpus_sentences: list[str] = []
+            caveat_sentences: list[str] = []
+            failure_sentences: list[str] = []
+            for chk in chunks[:3]:
+                for raw_ln in chk.verbatim_content.splitlines():
+                    s_ln = raw_ln.strip().lstrip("-*•0123456789. ")
+                    if len(s_ln) < 30 or s_ln.startswith("#") or s_ln.startswith("%"):
+                        continue
+                    s_lower = s_ln.lower()
+                    if any(
+                        fk in s_lower
+                        for fk in (
+                            "off-target",
+                            "failure",
+                            "fail",
+                            "degrad",
+                            "instability",
+                            "toxic",
+                            "error",
+                            "loss of",
+                            "breach",
+                            "violation",
+                            "penalty",
+                            "outage",
+                        )
+                    ):
+                        if s_ln not in failure_sentences:
+                            failure_sentences.append(s_ln)
+                    elif (
+                        any(
+                            ck in s_lower
+                            for ck in (
+                                "caveat",
+                                "constraint",
+                                "require",
+                                "threshold",
+                                "control",
+                                "concentration",
+                                "temperature",
+                                "condition",
+                                "must",
+                                "mandatory",
+                                "compliance",
+                            )
+                        )
+                        and s_ln not in caveat_sentences
+                    ):
+                        caveat_sentences.append(s_ln)
+                    if s_ln not in corpus_sentences:
+                        corpus_sentences.append(s_ln)
+
+            entry_exit_rules = (
+                corpus_sentences[:3]
+                if corpus_sentences
+                else [f"Apply protocol validated in {top_chk.doc_title}"]
+            )
+            market_caveats = (
+                caveat_sentences[:2]
+                if caveat_sentences
+                else [f"Grounded in {top_chk.doc_id} ({top_chk.section_heading})"]
+            )
+            failure_regimes = (
+                failure_sentences[:3]
+                if failure_sentences
+                else ["Out-of-distribution regime shift across experimental conditions"]
+            )
+        elif "momentum" in prompt_lower:
             if MarketRegime.INDIA_NSE_BSE in target_markets:
                 strategy_name = (
                     "Indian Equity Physical & Cross-Sectional Momentum Strategy (NSE/NIFTY)"
@@ -1662,80 +1747,6 @@ class LocalGemmaClient:
             )
         elif "ofi" in prompt_lower or "order flow" in prompt_lower:
             strategy_name = "Order Flow Imbalance Alpha & Micro-Price Strategy"
-        elif domain_id != "quant_research_scout" and chunks:
-            top_chk = chunks[0]
-            strategy_name = (
-                f"{top_chk.doc_title} — {top_chk.section_heading}"
-                if top_chk.section_heading
-                else f"{top_chk.doc_title} Empirical Synthesis"
-            )
-            target_markets = [MarketRegime.GLOBAL_MULTI]
-            combined_text = "\n".join(c.verbatim_content for c in chunks[:3])
-            math_match = re.search(r"\$\$?([^\$\n]{4,120})\$\$?", combined_text)
-            if math_match:
-                signal_latex = math_match.group(1).strip()
-            else:
-                signal_latex = r"E[Y \mid X] = f_{\theta}(\text{DomainContext})"
-
-            corpus_sentences: list[str] = []
-            caveat_sentences: list[str] = []
-            failure_sentences: list[str] = []
-            for chk in chunks[:3]:
-                for raw_ln in chk.verbatim_content.splitlines():
-                    s_ln = raw_ln.strip().lstrip("-*•0123456789. ")
-                    if len(s_ln) < 30 or s_ln.startswith("#") or s_ln.startswith("%"):
-                        continue
-                    s_lower = s_ln.lower()
-                    if any(
-                        fk in s_lower
-                        for fk in (
-                            "off-target",
-                            "failure",
-                            "fail",
-                            "degrad",
-                            "instability",
-                            "toxic",
-                            "error",
-                            "loss of",
-                        )
-                    ):
-                        if s_ln not in failure_sentences:
-                            failure_sentences.append(s_ln)
-                    elif (
-                        any(
-                            ck in s_lower
-                            for ck in (
-                                "caveat",
-                                "constraint",
-                                "require",
-                                "threshold",
-                                "control",
-                                "concentration",
-                                "temperature",
-                                "condition",
-                            )
-                        )
-                        and s_ln not in caveat_sentences
-                    ):
-                        caveat_sentences.append(s_ln)
-                    if s_ln not in corpus_sentences:
-                        corpus_sentences.append(s_ln)
-
-            entry_exit_rules = (
-                corpus_sentences[:3]
-                if corpus_sentences
-                else [f"Apply protocol validated in {top_chk.doc_title}"]
-            )
-            market_caveats = (
-                caveat_sentences[:2]
-                if caveat_sentences
-                else [f"Grounded in {top_chk.doc_id} ({top_chk.section_heading})"]
-            )
-            failure_regimes = (
-                failure_sentences[:3]
-                if failure_sentences
-                else ["Out-of-distribution regime shift across experimental conditions"]
-            )
 
         brief = QuantStrategyBrief(
             strategy_name=strategy_name,
@@ -1754,6 +1765,51 @@ class LocalGemmaClient:
         )
 
         return brief
+
+    def generate_domain_knowledge_brief(
+        self,
+        user_prompt: str,
+        domain_id: str,
+        repo: Any = None,
+        principal: PrincipalContext | None = None,
+        quant_brief: QuantStrategyBrief | None = None,
+    ) -> DomainKnowledgeBrief:
+        """Synthesizes a domain-agnostic DomainKnowledgeBrief for any document/knowledge domain."""
+        base_brief = quant_brief or self.generate_quant_brief(
+            user_prompt=user_prompt,
+            domain_id=domain_id,
+            repo=repo,
+            principal=principal,
+        )
+        metadata: dict[str, str | float | int | bool] = {
+            "domain_id": domain_id,
+            "verified_citations_count": len(base_brief.verified_citations),
+        }
+        if base_brief.reported_sharpe_ratio is not None:
+            metadata["reported_sharpe_ratio"] = base_brief.reported_sharpe_ratio
+        if base_brief.reported_max_drawdown_pct is not None:
+            metadata["reported_max_drawdown_pct"] = base_brief.reported_max_drawdown_pct
+        if base_brief.transaction_cost_bps_assumed is not None:
+            metadata["transaction_cost_bps_assumed"] = base_brief.transaction_cost_bps_assumed
+
+        summary_quote = (
+            base_brief.verified_citations[0].verbatim_quote
+            if base_brief.verified_citations
+            else base_brief.entry_exit_rules[0]
+        )
+        return DomainKnowledgeBrief(
+            brief_title=base_brief.strategy_name,
+            domain_id=domain_id,
+            executive_summary=(
+                f"Grounded synthesis for {base_brief.strategy_name}: {summary_quote}"
+            ),
+            formal_expression_or_rule=base_brief.mathematical_signal_latex,
+            core_findings_and_rules=list(base_brief.entry_exit_rules),
+            domain_constraints_and_caveats=list(base_brief.market_specific_caveats),
+            known_risks_and_failure_modes=list(base_brief.known_failure_regimes),
+            structured_metadata=metadata,
+            verified_citations=list(base_brief.verified_citations),
+        )
 
 
 class ScoutWorkflow:
@@ -2059,12 +2115,14 @@ class ScoutWorkflow:
             and has_quant_scope
         )
 
-        quant_brief: QuantStrategyBrief | None = None
-        if (
-            manifest.output_contract == "QuantStrategyBrief"
+        is_doc_domain = (
+            manifest.output_contract in ("QuantStrategyBrief", "DomainKnowledgeBrief")
             or domain_id == "quant_research_scout"
             or auto_quant_route
-        ):
+        )
+        quant_brief: QuantStrategyBrief | None = None
+        domain_knowledge_brief: DomainKnowledgeBrief | None = None
+        if is_doc_domain:
             quant_domain = "quant_research_scout" if auto_quant_route else domain_id
             quant_brief = self.local_client.generate_quant_brief(
                 user_prompt=user_prompt,
@@ -2073,13 +2131,16 @@ class ScoutWorkflow:
                 principal=principal,
                 bounce_back_feedback=None,
             )
+            domain_knowledge_brief = self.local_client.generate_domain_knowledge_brief(
+                user_prompt=user_prompt,
+                domain_id=quant_domain,
+                repo=self.repo,
+                principal=principal,
+                quant_brief=quant_brief,
+            )
             supporting_doc_citations = list(quant_brief.verified_citations)
 
-        if (
-            manifest.output_contract == "QuantStrategyBrief"
-            or domain_id == "quant_research_scout"
-            or auto_quant_route
-        ):
+        if is_doc_domain:
             candidate_pointers = []
         else:
             candidate_pointers = self.local_client.generate_code_pointers(
@@ -2362,6 +2423,7 @@ class ScoutWorkflow:
             code_slices=hydrated_slices,
             supporting_doc_citations=supporting_doc_citations or [],
             quant_strategy_spec=quant_brief,
+            domain_knowledge_brief=domain_knowledge_brief,
             preflight_report=final_report,
             local_tokens_consumed=local_tokens_consumed,
             pack_token_count=est_pack_tokens,
