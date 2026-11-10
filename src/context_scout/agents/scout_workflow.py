@@ -674,10 +674,7 @@ class LocalGemmaClient:
             f.file_id
             for f in visible_files
             if f.file_path in candidates_to_search
-            or any(
-                "/" in cand and f.file_path.endswith(cand)
-                for cand in candidates_to_search
-            )
+            or any("/" in cand and f.file_path.endswith(cand) for cand in candidates_to_search)
             or (
                 "." in f.file_path.split("/")[-1]
                 and f.file_path.split("/")[-1] in candidates_to_search
@@ -737,9 +734,7 @@ class LocalGemmaClient:
             ):
                 continue
             sym_repo_l = (
-                files_by_id[sym.file_id].repo_name.lower()
-                if sym.file_id in files_by_id
-                else ""
+                files_by_id[sym.file_id].repo_name.lower() if sym.file_id in files_by_id else ""
             )
             parts = sym.qualified_name.split(".")
             short_name = parts[-1]
@@ -934,9 +929,7 @@ class LocalGemmaClient:
         for sym in [] if skip_nl_scan else visible_symbols:
             if mentioned_repo_names_l:
                 sym_r_l = (
-                    files_by_id[sym.file_id].repo_name.lower()
-                    if sym.file_id in files_by_id
-                    else ""
+                    files_by_id[sym.file_id].repo_name.lower() if sym.file_id in files_by_id else ""
                 )
                 if sym_r_l not in mentioned_repo_names_l:
                     continue
@@ -1087,9 +1080,8 @@ class LocalGemmaClient:
                     if re.search(rf",\s*{re.escape(kw_name)}\s*=", body_l):
                         score += 14.0
                         matched_terms += 2
-            if (
-                explicit_kwarg_names & {"ensure_ascii", "allow_nan", "separators", "sort_keys"}
-                and ("dumps" in sum_l or "dumps" in body_l)
+            if explicit_kwarg_names & {"ensure_ascii", "allow_nan", "separators", "sort_keys"} and (
+                "dumps" in sum_l or "dumps" in body_l
             ):
                 score += 16.0
                 matched_terms += 2
@@ -1123,15 +1115,10 @@ class LocalGemmaClient:
                 if s_item.symbol_kind == "type_alias":
                     if type_alias_counts.get(s_item.file_id, 0) >= 1:
                         continue
-                    type_alias_counts[s_item.file_id] = (
-                        type_alias_counts.get(s_item.file_id, 0) + 1
-                    )
+                    type_alias_counts[s_item.file_id] = type_alias_counts.get(s_item.file_id, 0) + 1
                 q_parts = s_item.qualified_name.split(".")
                 parent_key = ".".join(q_parts[:-1]) if len(q_parts) <= 3 else ".".join(q_parts[:3])
-                if (
-                    parent_counts.get(parent_key, 0) >= 2
-                    and s_item.symbol_kind != "class"
-                ):
+                if parent_counts.get(parent_key, 0) >= 2 and s_item.symbol_kind != "class":
                     continue
                 if s_item.symbol_kind != "type_alias":
                     parent_counts[parent_key] = parent_counts.get(parent_key, 0) + 1
@@ -1404,50 +1391,25 @@ class LocalGemmaClient:
         if MarketRegime.INDIA_NSE_BSE in target_markets:
             assumed_bps = 25.0
 
-        prompt_lower = user_prompt.lower()
-        is_ofi = "ofi" in prompt_lower or "order flow" in prompt_lower or (
-            top_chk is not None and "order flow" in top_chk.verbatim_content.lower()
+        strategy_name = (
+            f"{top_chk.doc_title} Synthesis" if top_chk else "Verified Empirical Research Strategy"
         )
-        if is_ofi:
-            strategy_name = "Adaptive Order Flow Imbalance Cross-Market Strategy"
-            signal_latex = r"\text{OFI}_t = \sum_{k=1}^K \Delta q_{k,t} \cdot I_{k,t}"
-            entry_exit_rules = [
-                "Enter long when OFI exceeds +1.5 sigma threshold",
-                "Exit position when OFI mean-reverts to zero or at 300ms horizon",
-                "Enforce hard stop-loss at 15.0 bps adverse spread excursion",
-            ]
-            market_caveats = [
-                "Requires ultra-low latency hardware colocation",
-                "Spread elasticity varies significantly during opening and closing auctions",
-            ]
-            failure_regimes = [
-                "High volatility macroeconomic announcement windows",
-                "Flash liquidity withdrawal regimes",
-            ]
-            sharpe_ratio = 2.15
-            max_dd_pct = 4.8
-        else:
-            strategy_name = (
-                f"{top_chk.doc_title} Synthesis"
-                if top_chk
-                else "Verified Empirical Research Strategy"
-            )
-            signal_latex = r"E[Y \mid X] = f_{\theta}(\text{DomainContext})"
-            entry_exit_rules = [
-                f"Grounded in verified citation from {top_chk.doc_title if top_chk else 'corpus'}",
-                "Follow verified quantitative rules from retrieved evidence",
-                "Enforce strict stop-loss on adverse excursion",
-            ]
-            market_caveats = [
-                "Requires empirical validation across historical market regimes",
-                "Transaction friction and execution latency must be evaluated",
-            ]
-            failure_regimes = [
-                "High volatility macroeconomic announcement windows",
-                "Flash liquidity withdrawal regimes",
-            ]
-            sharpe_ratio = 2.0
-            max_dd_pct = 5.0
+        signal_latex = r"E[Y \mid X] = f_{\theta}(\text{DomainContext})"
+        entry_exit_rules = [
+            f"Grounded in verified citation from {top_chk.doc_title if top_chk else 'corpus'}",
+            "Follow verified quantitative rules from retrieved evidence",
+            "Enforce strict stop-loss on adverse excursion",
+        ]
+        market_caveats = [
+            "Requires empirical validation across historical market regimes",
+            "Transaction friction and execution latency must be evaluated",
+        ]
+        failure_regimes = [
+            "High volatility macroeconomic announcement windows",
+            "Flash liquidity withdrawal regimes",
+        ]
+        sharpe_ratio: float | None = 2.0
+        max_dd_pct: float | None = 5.0
 
         if domain_id != "quant_research_scout" and chunks:
             top_chk = chunks[0]
@@ -2219,6 +2181,7 @@ class ScoutWorkflow:
                 paid_tokens_spent=0,
             )
 
+        val_domain = "quant_research_scout" if auto_quant_route else domain_id
         initial_report = self.validator.validate(
             code_slices=hydrated_slices,
             user_prompt=user_prompt,
@@ -2226,7 +2189,7 @@ class ScoutWorkflow:
             normalized_rrf_score=normalized_rrf_score,
             repo=self.repo,
             principal=principal,
-            domain_id=domain_id,
+            domain_id=val_domain,
             doc_chunks=doc_chunks,
         )
 
@@ -2285,7 +2248,7 @@ class ScoutWorkflow:
                 normalized_rrf_score=normalized_rrf_score,
                 repo=self.repo,
                 principal=principal,
-                domain_id=domain_id,
+                domain_id=val_domain,
                 doc_chunks=doc_chunks,
             )
 
@@ -2546,9 +2509,7 @@ class ScoutWorkflow:
                         start_line=1,
                         end_line=last_header_line,
                         qualified_symbol=primary.qualified_symbol,
-                        selection_reason=(
-                            f"Top-of-file import header for {primary.file_path}"
-                        ),
+                        selection_reason=(f"Top-of-file import header for {primary.file_path}"),
                         modification_intent=ModificationIntent.REFERENCE_ONLY,
                     )
                     hdr_slice = self.slicer.slice_pointer(

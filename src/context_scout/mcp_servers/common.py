@@ -11,6 +11,7 @@ from uuid import UUID
 from context_scout.config import ScoutSettings
 from context_scout.db.repositories import (
     ASTEdgeRecord,
+    ASTNeighborhoodRecord,
     ASTSymbolRecord,
     CodeFileRecord,
     DocChunkRecord,
@@ -579,6 +580,25 @@ class PostgresScoutGraphAdapter:
             """
             rows = conn.execute(sql, (domain_id, valid_uuids)).fetchall()
             return [self._row_to_doc_chunk(r) for r in rows]
+
+    def traverse_1hop_neighborhood(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        focus_symbol_id: UUID | str,
+        max_direct_callers: int = 3,
+    ) -> list[ASTNeighborhoodRecord]:
+        """Executes memory-bounded recursive CTE 1-hop AST closure directly in PostgreSQL 17."""
+        from context_scout.db.repositories import PostgresRLSRepository
+
+        repo = PostgresRLSRepository()
+        with scoped_db_session(self.connection_manager, principal) as conn:
+            return repo.traverse_1hop_neighborhood(
+                conn=conn,
+                domain_id=domain_id,
+                focus_symbol_id=focus_symbol_id,
+                max_direct_callers=max_direct_callers,
+            )
 
 
 __all__ = [
