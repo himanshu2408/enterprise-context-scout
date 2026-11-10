@@ -56,7 +56,13 @@ def principal() -> PrincipalContext:
     return PrincipalContext(
         user_id="lead_quant_dev",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "repo:trading_strategies", "corpus:quant_papers"],
+        allowed_scopes=[
+            "public_eng",
+            "repo:trading_strategies",
+            "corpus:quant_papers",
+            "domain:quant_research_scout",
+            "domain:trading_code_scout",
+        ],
     )
 
 
