@@ -97,6 +97,14 @@ class DeterministicSlicer:
                 end_line=pointer.end_line,
                 query_text=f"{query_text} {pointer.selection_reason}",
             )
+        commit_sha = file_record.git_commit_sha or "0000000"
+        if len(commit_sha) < 7:
+            commit_sha = commit_sha.ljust(7, "0")
+
+        blob_sha = file_record.git_blob_sha or "0000000"
+        if len(blob_sha) < 7:
+            blob_sha = blob_sha.ljust(7, "0")
+
         return VerbatimCodeSlice(
             repo_name=pointer.repo_name,
             file_path=pointer.file_path,
@@ -105,8 +113,8 @@ class DeterministicSlicer:
             qualified_symbol=pointer.qualified_symbol,
             selection_reason=pointer.selection_reason,
             modification_intent=pointer.modification_intent,
-            git_commit_sha=file_record.git_commit_sha,
-            git_blob_sha=file_record.git_blob_sha,
+            git_commit_sha=commit_sha,
+            git_blob_sha=blob_sha,
             verbatim_code_with_lines=verbatim_code,
             auto_expanded_by_ast=auto_expanded_by_ast,
         )
@@ -224,6 +232,7 @@ class DeterministicSlicer:
         source_text: str,
         min_overlap_ratio: float = MIN_QUOTE_OVERLAP_RATIO,
         strict: bool = False,
+        reject_absent_tokens: bool = False,
     ) -> QuoteVerificationResult:
         """Verifies quote against source text using NFKC normalization and token overlap.
 
@@ -292,29 +301,65 @@ class DeterministicSlicer:
         matching_tokens_count = sum(block.size for block in local_matcher.get_matching_blocks())
         overlap_ratio = round(matching_tokens_count / len(q_tokens), 6)
 
+        # Detect tokens in quote that were substituted, inserted, or unaligned in sequence matching
+        unmatched_tokens: list[str] = []
+        omitted_tokens: list[str] = []
+        for tag, i1, i2, j1, j2 in local_matcher.get_opcodes():
+            if tag in ("replace", "delete"):
+                unmatched_tokens.extend(q_tokens[i1:i2])
+            elif tag == "insert" and 0 < i1 < len(q_tokens):
+                # Intra-sentence omission: middle tokens omitted from quote
+                omitted_tokens.extend(source_window[j1:j2])
+
+        # Detect hallucinated tokens completely absent from source window
+        absent_tokens = [t for t in q_tokens if t not in source_window]
+        all_rejected_tokens = list(
+            dict.fromkeys(unmatched_tokens + absent_tokens + omitted_tokens)
+        )
+
         is_valid = overlap_ratio >= min_overlap_ratio
+        if reject_absent_tokens and all_rejected_tokens:
+            is_valid = False
 
         error_code = None
         error_reason = None
         unmatched: list[str] = []
 
         if not is_valid:
-            unmatched = [t for t in q_tokens if t not in source_window]
-            # Check for truncation: quote is a strict prefix of the aligned source segment
-            matched_slice = s_tokens[match.b : match.b + len(q_tokens)]
-            has_trailing_source = (match.b + len(q_tokens)) < len(s_tokens)
-            if has_trailing_source and q_tokens == matched_slice:
-                error_code = SlicerErrorCode.TRUNCATED_QUOTE
-                error_reason = "Quote is truncated mid-line"
-                if strict:
-                    raise TruncatedLineError(error_reason)
-            else:
+            unmatched = all_rejected_tokens if all_rejected_tokens else absent_tokens
+            if all_rejected_tokens:
                 error_code = SlicerErrorCode.HALLUCINATED_QUOTE
-                error_reason = (
-                    f"Quote failed verification (overlap {overlap_ratio:.4f} < {min_overlap_ratio})"
-                )
+                if omitted_tokens and not unmatched_tokens and not absent_tokens:
+                    error_reason = (
+                        f"Quote failed verification: contains non-contiguous intra-sentence "
+                        f"omission of {len(omitted_tokens)} tokens from source text: "
+                        f"{omitted_tokens[:3]}"
+                    )
+                else:
+                    error_reason = (
+                        f"Quote failed verification: contains {len(all_rejected_tokens)} "
+                        f"hallucinated or substituted tokens not matched in source text: "
+                        f"{all_rejected_tokens[:3]}"
+                    )
                 if strict:
                     raise HallucinatedQuoteError(error_reason)
+            else:
+                # Check for truncation: quote is a strict prefix of the aligned source segment
+                matched_slice = s_tokens[match.b : match.b + len(q_tokens)]
+                has_trailing_source = (match.b + len(q_tokens)) < len(s_tokens)
+                if has_trailing_source and q_tokens == matched_slice:
+                    error_code = SlicerErrorCode.TRUNCATED_QUOTE
+                    error_reason = "Quote is truncated mid-line"
+                    if strict:
+                        raise TruncatedLineError(error_reason)
+                else:
+                    error_code = SlicerErrorCode.HALLUCINATED_QUOTE
+                    error_reason = (
+                        f"Quote failed verification (overlap {overlap_ratio:.4f} < "
+                        f"{min_overlap_ratio})"
+                    )
+                    if strict:
+                        raise HallucinatedQuoteError(error_reason)
 
         return QuoteVerificationResult(
             is_valid=is_valid,
@@ -331,12 +376,14 @@ class DeterministicSlicer:
         citation: DocCitationSpan,
         chunk_content: str,
         min_overlap_ratio: float = MIN_QUOTE_OVERLAP_RATIO,
+        reject_absent_tokens: bool = True,
     ) -> QuoteVerificationResult:
         """Verifies a DocCitationSpan against verbatim chunk content."""
         return self.verify_quote(
             quote=citation.verbatim_quote,
             source_text=chunk_content,
             min_overlap_ratio=min_overlap_ratio,
+            reject_absent_tokens=reject_absent_tokens,
         )
 
 

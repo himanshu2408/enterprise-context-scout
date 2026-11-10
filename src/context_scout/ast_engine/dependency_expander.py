@@ -8,6 +8,7 @@ from uuid import UUID
 from context_scout.ast_engine.models import ASTExpansionCandidate, ASTExpansionResult
 from context_scout.db.repositories import (
     ASTEdgeRecord,
+    ASTNeighborhoodRecord,
     ASTSymbolRecord,
     CodeFileRecord,
 )
@@ -32,6 +33,14 @@ class ScoutGraphRepository(Protocol):
     def list_visible_ast_edges(
         self, principal: PrincipalContext, domain_id: str
     ) -> list[ASTEdgeRecord]: ...
+
+    def traverse_1hop_neighborhood(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        focus_symbol_id: UUID | str,
+        max_direct_callers: int = 3,
+    ) -> list[ASTNeighborhoodRecord]: ...
 
 
 class ASTDependencyExpander:
@@ -64,6 +73,16 @@ class ASTDependencyExpander:
         domain_id: str,
     ) -> ASTExpansionResult:
         """Performs bounded 1-hop AST closure under RLS and SEC-03 token budget."""
+        if hasattr(repo, "traverse_1hop_neighborhood"):
+            try:
+                neighbors = repo.traverse_1hop_neighborhood(
+                    principal, domain_id, focus_symbol.symbol_id, self.max_direct_callers
+                )
+                if neighbors:
+                    return self._build_result_from_neighbors(focus_symbol, neighbors)
+            except Exception:
+                pass
+
         visible_symbols = {
             s.symbol_id: s for s in repo.list_visible_ast_symbols(principal, domain_id)
         }
@@ -352,6 +371,139 @@ class ASTDependencyExpander:
                 target_list.append(
                     CodeSlicePointer(
                         repo_name=visible_files[cand.symbol.file_id].repo_name,
+                        file_path=cand.file_path,
+                        start_line=cand.start_line,
+                        end_line=cand.end_line,
+                        qualified_symbol=cand.symbol.qualified_name,
+                        selection_reason=(
+                            f"1-hop {cand.edge_kind} dependency for {focus_symbol.qualified_name}"
+                        ),
+                        modification_intent=cand.intent,
+                    )
+                )
+                accumulated_tokens += cand.estimated_tokens
+            else:
+                budget_exhausted = True
+                dropped_count += 1
+
+        return ASTExpansionResult(
+            focus_symbol=focus_symbol,
+            imported_type_slices=type_slices,
+            caller_slices=caller_slices,
+            test_fixture_slices=test_slices,
+            total_expansion_tokens=accumulated_tokens,
+            budget_exhausted=budget_exhausted,
+            dropped_candidates_count=dropped_count,
+        )
+
+    def _build_result_from_neighbors(
+        self,
+        focus_symbol: ASTSymbolRecord,
+        neighbors: list[ASTNeighborhoodRecord],
+    ) -> ASTExpansionResult:
+        type_candidates: list[ASTExpansionCandidate] = []
+        raw_caller_candidates: list[ASTExpansionCandidate] = []
+        test_candidates: list[ASTExpansionCandidate] = []
+
+        for rec in neighbors:
+            if rec.intent_role == "imported_type":
+                end_l = rec.symbol.end_line
+                if (
+                    rec.edge_kind in ("IMPORTS", "INHERITS")
+                    or (
+                        rec.edge_kind == "USES_TYPE"
+                        and focus_symbol.symbol_kind == "type_alias"
+                    )
+                ) and (rec.symbol.end_line - rec.symbol.start_line) > 30:
+                    end_l = min(rec.symbol.end_line, rec.symbol.start_line + 24)
+                s_lines = rec.file.raw_content.splitlines()[rec.symbol.start_line - 1 : end_l]
+                est = self.estimate_tokens("\n".join(s_lines))
+                type_candidates.append(
+                    ASTExpansionCandidate(
+                        symbol=rec.symbol,
+                        edge_kind=rec.edge_kind,  # type: ignore[arg-type]
+                        intent=ModificationIntent.IMPORTED_TYPE,
+                        start_line=rec.symbol.start_line,
+                        end_line=end_l,
+                        estimated_tokens=est,
+                        file_path=rec.file.file_path,
+                        diversity_key=rec.file.file_path,
+                    )
+                )
+            elif rec.intent_role == "direct_caller":
+                call_line = self._find_call_site_line(
+                    rec.file.raw_content, rec.symbol, focus_symbol.qualified_name
+                )
+                start_l = max(rec.symbol.start_line, call_line - 5)
+                end_l = min(rec.symbol.end_line, call_line + 5)
+                snippet_lines = rec.file.raw_content.splitlines()[start_l - 1 : end_l]
+                est = self.estimate_tokens("\n".join(snippet_lines))
+                raw_caller_candidates.append(
+                    ASTExpansionCandidate(
+                        symbol=rec.symbol,
+                        edge_kind="CALLS",
+                        intent=ModificationIntent.DIRECT_CALLER,
+                        start_line=start_l,
+                        end_line=end_l,
+                        estimated_tokens=est,
+                        file_path=rec.file.file_path,
+                        diversity_key=rec.file.file_path,
+                    )
+                )
+            elif rec.intent_role == "test_fixture":
+                start_l = rec.symbol.start_line
+                end_l = min(rec.symbol.end_line, rec.symbol.start_line + 35)
+                snippet_lines = rec.file.raw_content.splitlines()[start_l - 1 : end_l]
+                est = self.estimate_tokens("\n".join(snippet_lines))
+                test_candidates.append(
+                    ASTExpansionCandidate(
+                        symbol=rec.symbol,
+                        edge_kind="TESTED_BY",
+                        intent=ModificationIntent.TEST_FIXTURE,
+                        start_line=start_l,
+                        end_line=end_l,
+                        estimated_tokens=est,
+                        file_path=rec.file.file_path,
+                        diversity_key=rec.file.file_path,
+                    )
+                )
+
+        selected_callers = self._select_diverse_callers(
+            raw_caller_candidates,
+            limit=self.max_direct_callers,
+            focus_file_path="",
+        )
+        test_candidate = test_candidates[0] if test_candidates else None
+
+        accumulated_tokens = 0
+        budget_exhausted = False
+        dropped_count = 0
+
+        type_slices: list[CodeSlicePointer] = []
+        caller_slices: list[CodeSlicePointer] = []
+        test_slices: list[CodeSlicePointer] = []
+
+        all_candidates_ordered: list[tuple[ASTExpansionCandidate, list[CodeSlicePointer]]] = []
+        primary_types = [(c, type_slices) for c in type_candidates[:2]]
+        secondary_types = [(c, type_slices) for c in type_candidates[2:]]
+        primary_caller = [(c, caller_slices) for c in selected_callers[:1]]
+        secondary_callers = [(c, caller_slices) for c in selected_callers[1:]]
+        all_candidates_ordered.extend(primary_types)
+        all_candidates_ordered.extend(primary_caller)
+        all_candidates_ordered.extend(secondary_types)
+        all_candidates_ordered.extend(secondary_callers)
+        if test_candidate:
+            all_candidates_ordered.append((test_candidate, test_slices))
+
+        file_map = {rec.symbol.symbol_id: rec.file for rec in neighbors}
+
+        for cand, target_list in all_candidates_ordered:
+            f_rec = file_map.get(cand.symbol.symbol_id)
+            repo_name = f_rec.repo_name if f_rec else ""
+            if accumulated_tokens + cand.estimated_tokens <= self.max_expansion_token_budget:
+                target_list.append(
+                    CodeSlicePointer(
+                        repo_name=repo_name,
                         file_path=cand.file_path,
                         start_line=cand.start_line,
                         end_line=cand.end_line,

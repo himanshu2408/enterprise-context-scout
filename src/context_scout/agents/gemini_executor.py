@@ -32,7 +32,7 @@ from uuid import UUID
 from psycopg import Connection
 
 from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
-from context_scout.config import validate_google_model_id
+from context_scout.config import validate_google_model_id, validate_vertex_location
 from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
 from context_scout.db.session import RLSConnectionManager
 from context_scout.schemas.contracts import (
@@ -446,16 +446,96 @@ class GeminiImplementationExecutor:
     def __init__(
         self,
         model_id: str = DEFAULT_FAST_MODEL_ID,
+        project: str | None = None,
+        location: str | None = None,
+        vertexai: bool = True,
+        credentials: Any | None = None,
+        service_token: str | None = None,
         api_key: str | None = None,
         rls_conn_manager: RLSConnectionManager | None = None,
         require_confirmation: bool = True,
+        allow_non_eu_regions: bool = False,
+        client: Any | None = None,
     ) -> None:
         self.model_id = validate_google_model_id(model_id)
+        self.vertexai = vertexai
+        self.allow_non_eu_regions = (
+            allow_non_eu_regions
+            or os.environ.get("SCOUT_ALLOW_NON_EU_REGIONS", "").strip().lower() in ("true", "1")
+        )
+
+        # Resolve GCP Project
+        self.project = (
+            project
+            or os.environ.get("SCOUT_GCP_PROJECT")
+            or os.environ.get("GOOGLE_CLOUD_PROJECT")
+            or os.environ.get("GCP_PROJECT")
+        )
+
+        # Resolve and validate Vertex AI Location (EU data residency default)
+        raw_location = (
+            location
+            or os.environ.get("SCOUT_GCP_LOCATION")
+            or os.environ.get("GOOGLE_CLOUD_LOCATION")
+            or "europe-west3"
+        )
+        self.location = validate_vertex_location(
+            raw_location, allow_non_eu=self.allow_non_eu_regions
+        )
+
+        # Token authentication & Secret Hygiene (no raw API key requirement)
+        self.service_token = service_token or os.environ.get("SCOUT_SERVICE_TOKEN")
+        self.credentials = credentials
+        if self.credentials is None and self.service_token:
+            try:
+                from google.oauth2 import credentials as oauth2_creds
+
+                self.credentials = oauth2_creds.Credentials(token=self.service_token)
+            except ImportError:
+                pass
+
+        # Optional backwards-compatibility API key
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+
+        # Injected client for testing / dependency injection
+        self._injected_client = client
+
         self.rls_conn_manager = rls_conn_manager
         self.require_confirmation = require_confirmation
         self.slicer = DeterministicSlicer()
         self.last_usage_metadata: dict[str, int] | None = None
+
+    def is_live_configured(self) -> bool:
+        """Determines whether live Gemini API execution is configured."""
+        if self._injected_client is not None:
+            return True
+        if self.vertexai:
+            return bool(
+                self.project
+                or self.service_token
+                or self.credentials
+                or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            )
+        return bool(self.api_key)
+
+    def _create_genai_client(self) -> Any:
+        """Instantiates google-genai Client configured for Vertex AI EU data residency."""
+        if self._injected_client is not None:
+            return self._injected_client
+
+        assert genai is not None, "google-genai SDK must be installed"
+
+        if self.vertexai:
+            client_kwargs: dict[str, Any] = {
+                "vertexai": True,
+                "project": self.project,
+                "location": self.location,
+            }
+            if self.credentials is not None:
+                client_kwargs["credentials"] = self.credentials
+            return genai.Client(**client_kwargs)
+        else:
+            return genai.Client(api_key=self.api_key)
 
     def check_principal_budget(
         self,
@@ -522,7 +602,7 @@ class GeminiImplementationExecutor:
             patch_diff: str
             if custom_patch is not None:
                 patch_diff = custom_patch
-            elif self.api_key and genai is not None:
+            elif self.is_live_configured() and genai is not None:
                 patch_diff = self._generate_gemini_patch(pack, repo_root)
             else:
                 patch_diff = self._generate_deterministic_patch(pack, repo_root)
@@ -758,7 +838,7 @@ class GeminiImplementationExecutor:
         assert genai_types is not None
         self.last_usage_metadata = None
         try:
-            client = genai.Client(api_key=self.api_key)
+            client = self._create_genai_client()
             prompt = self._build_gemini_prompt(pack)
             response = client.models.generate_content(
                 model=self.model_id,

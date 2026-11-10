@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from context_scout.api.routes import api_router
+from context_scout.security.rbac import _CURRENT_PRINCIPAL
 from context_scout.telemetry import ScoutTelemetryTracer
 
 logger = logging.getLogger(__name__)
@@ -59,9 +60,13 @@ def create_app() -> FastAPI:
             principal_user = request.headers.get("X-Principal-User-Id", "anonymous")
             span.set_attribute("context_scout.principal_id", principal_user)
 
-            response: Response = await call_next(request)
-            span.set_attribute("http.status_code", response.status_code)
-            return response
+            token = _CURRENT_PRINCIPAL.set(None)
+            try:
+                response: Response = await call_next(request)
+                span.set_attribute("http.status_code", response.status_code)
+                return response
+            finally:
+                _CURRENT_PRINCIPAL.reset(token)
 
     # 3. Mount versioned API routes under /api/v1
     app.include_router(api_router, prefix="/api/v1")

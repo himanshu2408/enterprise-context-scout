@@ -54,9 +54,55 @@ DEFAULT_ROLE_SCOPES: Final[dict[RoleType, list[str]]] = {
 
 DEFAULT_AUTH_HMAC_SECRET: Final[str] = "scout-dev-hmac-secret-override-in-prod-sec04"
 
+INSECURE_DEFAULT_SECRETS: Final[frozenset[str]] = frozenset(
+    {
+        "scout-dev-hmac-secret-override-in-prod-sec04",
+        "scout-dev-secret-key-change-in-production",
+        "changeme",
+        "secret",
+        "dev-secret",
+        "insecure-default-secret",
+    }
+)
+
+
+def is_production_environment() -> bool:
+    """Detects whether context-scout is operating in a production or staging environment."""
+    env = (
+        os.environ.get("SCOUT_ENV")
+        or os.environ.get("ENVIRONMENT")
+        or os.environ.get("ENV")
+        or ""
+    ).strip().lower()
+    return env in {"production", "prod", "staging"}
+
 
 def _resolve_auth_secret(secret_key: str | None = None) -> bytes:
+    """Resolves HMAC secret key with production safety enforcement (SEC-VULN-01)."""
     raw = secret_key or os.environ.get("SCOUT_AUTH_HMAC_SECRET") or DEFAULT_AUTH_HMAC_SECRET
+    allow_insecure = os.environ.get("SCOUT_ALLOW_INSECURE_DEV_SECRET", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+    if (
+        is_production_environment()
+        and not allow_insecure
+        and (raw in INSECURE_DEFAULT_SECRETS or len(raw) < 32)
+    ):
+        raise RuntimeError(
+            "Insecure default or weak HMAC secret detected in production environment. "
+            "A cryptographically secure SCOUT_AUTH_HMAC_SECRET (minimum 32 characters) "
+            "must be configured in production (SEC-VULN-01)."
+        )
+
+    if raw in INSECURE_DEFAULT_SECRETS:
+        logger.warning(
+            "Using default development HMAC secret for SCOUT_AUTH_HMAC_SECRET. "
+            "This is insecure and strictly prohibited in production environments."
+        )
+
     return raw.encode("utf-8")
 
 
@@ -156,11 +202,19 @@ def get_principal_context(
     authorization: Annotated[str | None, Header()] = None,
 ) -> PrincipalContext:
     """Extracts immutable PrincipalContext out-of-band from signed token or headers (SEC-04)."""
-    require_signed = os.environ.get("SCOUT_REQUIRE_SIGNED_AUTH", "false").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    raw_require = os.environ.get("SCOUT_REQUIRE_SIGNED_AUTH")
+    if raw_require is None or not raw_require.strip():
+        require_signed = True
+    else:
+        require_signed = raw_require.strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+            "disable",
+            "disabled",
+        }
+
     if authorization and authorization.strip():
         auth_val = authorization.strip()
         if not auth_val.lower().startswith("bearer "):
@@ -176,10 +230,7 @@ def get_principal_context(
     if require_signed:
         raise HTTPException(
             status_code=401,
-            detail=(
-                "Signed Authorization Bearer token is required when "
-                "SCOUT_REQUIRE_SIGNED_AUTH=true (SEC-04)."
-            ),
+            detail="Signed Authorization Bearer token is required.",
         )
 
     user_id = (x_principal_user_id or "demo_engineer").strip()
@@ -209,6 +260,14 @@ def get_principal_context(
     # Bind out-of-band contextvar
     _CURRENT_PRINCIPAL.set(principal)
     return principal
+
+
+def reset_current_principal(token: Any = None) -> None:
+    """Explicitly resets the session principal ContextVar (SEC-04)."""
+    if token is not None:
+        _CURRENT_PRINCIPAL.reset(token)
+    else:
+        _CURRENT_PRINCIPAL.set(None)
 
 
 @dataclass

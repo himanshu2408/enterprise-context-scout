@@ -1,5 +1,6 @@
 """Multi-language Tree-Sitter AST extractor for Python and TypeScript/TSX."""
 
+import logging
 import re
 from typing import Final, Literal
 
@@ -8,6 +9,8 @@ import tree_sitter_typescript as tstypescript
 from tree_sitter import Language, Node, Parser, Tree
 
 from context_scout.ast_engine.models import ParsedEdge, ParsedSymbol
+
+logger = logging.getLogger(__name__)
 
 PY_PRIMITIVES: Final[set[str]] = {
     "int",
@@ -127,59 +130,154 @@ class ASTExtractor:
         language: str,
         file_path: str = "",
         module_prefix: str = "",
+        repo_name: str = "",
     ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
         """Parses source code into symbols and directed edges."""
         if not module_prefix and file_path:
             module_prefix = _derive_module_prefix(file_path)
 
+        # ---------------------------------------------------------------------
+        # F10 Integration Bridge: Check Declarative PluginRegistry First
+        # ---------------------------------------------------------------------
+        try:
+            from context_scout.plugins.registry import PluginRegistry
+
+            plugin = None
+            if file_path:
+                plugin = PluginRegistry.get_plugin_for_file(file_path)
+            if plugin is None and language:
+                plugin = PluginRegistry.get_language_plugin(language)
+
+            if plugin is not None:
+                symbols, edges = plugin.extract_ast(
+                    code=code,
+                    file_path=file_path,
+                    repo_name=repo_name,
+                    module_prefix=module_prefix,
+                )
+                return symbols, edges
+        except Exception as bridge_exc:
+            logger.warning(
+                "Plugin delegation for '%s' (%s) fell through to built-in: %s",
+                file_path,
+                language,
+                bridge_exc,
+            )
+
         code_bytes = code.encode("utf-8")
         lang_lower = language.lower()
 
+        raw_symbols: list[ParsedSymbol]
+        raw_edges: list[ParsedEdge]
+
         if lang_lower in ("python", "py"):
             self._active_tree = self.py_parser.parse(code_bytes)
-            return self._extract_python(
+            raw_symbols, raw_edges = self._extract_python(
                 self._active_tree.root_node, code_bytes, module_prefix, file_path
             )
         elif lang_lower in ("typescript", "ts", "javascript", "js", "mjs", "cjs"):
             self._active_tree = self.ts_parser.parse(code_bytes)
-            return self._extract_typescript(
+            raw_symbols, raw_edges = self._extract_typescript(
                 self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=False
             )
         elif lang_lower in ("tsx", "jsx"):
             self._active_tree = self.tsx_parser.parse(code_bytes)
-            return self._extract_typescript(
+            raw_symbols, raw_edges = self._extract_typescript(
                 self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=True
             )
         elif lang_lower == "sql" or file_path.endswith(".sql"):
-            return self._extract_sql(code, code_bytes, module_prefix)
+            raw_symbols, raw_edges = self._extract_sql(code, code_bytes, module_prefix)
         elif lang_lower in ("yaml", "yml") or file_path.endswith((".yaml", ".yml")):
-            return self._extract_yaml(code, code_bytes, module_prefix, file_path)
+            raw_symbols, raw_edges = self._extract_yaml(code, code_bytes, module_prefix, file_path)
         elif lang_lower in ("terraform", "hcl", "tf") or file_path.endswith(".tf"):
-            return self._extract_terraform(code, code_bytes, module_prefix)
+            raw_symbols, raw_edges = self._extract_terraform(code, code_bytes, module_prefix)
         elif lang_lower in ("go", "golang") or file_path.endswith(".go"):
-            return self._extract_compiled_lang(code, code_bytes, module_prefix, "go")
+            raw_symbols, raw_edges = self._extract_compiled_lang(
+                code, code_bytes, module_prefix, "go"
+            )
         elif lang_lower in ("rust", "rs") or file_path.endswith(".rs"):
-            return self._extract_compiled_lang(code, code_bytes, module_prefix, "rust")
+            raw_symbols, raw_edges = self._extract_compiled_lang(
+                code, code_bytes, module_prefix, "rust"
+            )
         elif lang_lower == "java" or file_path.endswith(".java"):
-            return self._extract_compiled_lang(code, code_bytes, module_prefix, "java")
+            raw_symbols, raw_edges = self._extract_compiled_lang(
+                code, code_bytes, module_prefix, "java"
+            )
         elif lang_lower in ("markdown", "md") or file_path.endswith(".md"):
-            return self._extract_markdown(code, code_bytes, module_prefix)
+            raw_symbols, raw_edges = self._extract_markdown(code, code_bytes, module_prefix)
         else:
             if file_path.endswith(".py"):
                 self._active_tree = self.py_parser.parse(code_bytes)
-                return self._extract_python(
+                raw_symbols, raw_edges = self._extract_python(
                     self._active_tree.root_node, code_bytes, module_prefix, file_path
                 )
             elif file_path.endswith((".tsx", ".jsx")):
                 self._active_tree = self.tsx_parser.parse(code_bytes)
-                return self._extract_typescript(
+                raw_symbols, raw_edges = self._extract_typescript(
                     self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=True
                 )
             else:
                 self._active_tree = self.ts_parser.parse(code_bytes)
-                return self._extract_typescript(
+                raw_symbols, raw_edges = self._extract_typescript(
                     self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=False
                 )
+
+        if not repo_name:
+            return raw_symbols, raw_edges
+
+        # Repo-qualify symbols and edges (F09)
+        mod = module_prefix if module_prefix else _derive_module_prefix(file_path) or "root"
+        qual_map: dict[str, str] = {}
+        new_symbols: list[ParsedSymbol] = []
+        for s in raw_symbols:
+            bare = s.name
+            if module_prefix and s.qualified_name.startswith(module_prefix):
+                suffix = s.qualified_name[len(module_prefix) :].lstrip(".")
+                bare = suffix or s.name
+            elif "." in s.qualified_name:
+                bare = s.qualified_name.split(".")[-1]
+
+            repo_qual_id = f"{repo_name}::{mod}::{bare}"
+            qual_map[s.qualified_name] = repo_qual_id
+            new_symbols.append(
+                ParsedSymbol(
+                    name=s.name,
+                    qualified_name=repo_qual_id,
+                    symbol_kind=s.symbol_kind,
+                    start_line=s.start_line,
+                    end_line=s.end_line,
+                    start_byte=s.start_byte,
+                    end_byte=s.end_byte,
+                    signature=s.signature,
+                    signature_skeleton=s.signature_skeleton,
+                    docstring=s.docstring,
+                    contextual_summary=s.contextual_summary,
+                    repo_name=repo_name,
+                    repo_qualified_id=repo_qual_id,
+                    bare_name=bare,
+                )
+            )
+
+        new_edges: list[ParsedEdge] = []
+        for e in raw_edges:
+            src_qual = qual_map.get(
+                e.source_qualified_name, f"{repo_name}::{mod}::{e.source_qualified_name}"
+            )
+            tgt_qual = qual_map.get(e.target_qualified_name, e.target_qualified_name)
+            is_cross = e.is_cross_repo or (
+                "::" in tgt_qual and not tgt_qual.startswith(f"{repo_name}::")
+            )
+            new_edges.append(
+                ParsedEdge(
+                    source_qualified_name=src_qual,
+                    target_qualified_name=tgt_qual,
+                    edge_kind=e.edge_kind,
+                    target_repo_qualified_id=qual_map.get(e.target_qualified_name),
+                    is_cross_repo=is_cross,
+                )
+            )
+
+        return new_symbols, new_edges
 
     def _extract_python(
         self,
@@ -1433,4 +1531,34 @@ class ASTExtractor:
                         )
                     )
         return symbols, edges
+
+
+def match_symbol_identifier(candidate: str, record_qualified_name: str) -> bool:
+    """Matches query symbol candidates against repo-qualified symbols."""
+    if candidate == record_qualified_name:
+        return True
+    if "::" in record_qualified_name:
+        parts = record_qualified_name.split("::")
+        bare_name = parts[-1]
+        # Match bare name (e.g. 'TokenValidator' or 'Order.AddOrderItem')
+        if candidate == bare_name or candidate == bare_name.split(".")[-1]:
+            return True
+        # Match module.bare name (e.g. 'services.auth.TokenValidator')
+        if len(parts) >= 2:
+            legacy_dot_format = f"{parts[1]}.{bare_name}"
+            if candidate == legacy_dot_format:
+                return True
+        # Suffix match
+        if record_qualified_name.endswith(f"::{candidate}"):
+            return True
+    else:
+        if (
+            record_qualified_name.endswith(f".{candidate}")
+            or record_qualified_name.split(".")[-1] == candidate.split(".")[-1]
+        ):
+            return True
+    return False
+
+
+__all__ = ["ASTExtractor", "match_symbol_identifier"]
 

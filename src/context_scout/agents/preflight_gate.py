@@ -20,10 +20,13 @@ from uuid import UUID
 
 from psycopg import Connection
 
+from context_scout.agents.citation_gate import DocumentCitationGate
 from context_scout.ast_engine.dependency_expander import ASTDependencyExpander
 from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
+from context_scout.ast_engine.extractor import match_symbol_identifier
 from context_scout.db.repositories import (
     ASTEdgeRecord,
+    ASTNeighborhoodRecord,
     ASTSymbolRecord,
     CodeFileRecord,
     DocChunkRecord,
@@ -891,6 +894,26 @@ class BoundGraphRepository:
         self._repo = repo
         self._conn = conn
 
+    def traverse_1hop_neighborhood(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        focus_symbol_id: UUID | str,
+        max_direct_callers: int = 3,
+    ) -> list[ASTNeighborhoodRecord]:
+        if hasattr(self._repo, "traverse_1hop_neighborhood"):
+            try:
+                if self._conn is not None:
+                    return self._repo.traverse_1hop_neighborhood(
+                        self._conn, domain_id, focus_symbol_id, max_direct_callers
+                    )
+                return self._repo.traverse_1hop_neighborhood(
+                    principal, domain_id, focus_symbol_id, max_direct_callers
+                )
+            except (TypeError, Exception):
+                pass
+        return []
+
     def list_visible_code_files(
         self, principal: PrincipalContext, domain_id: str
     ) -> list[CodeFileRecord]:
@@ -1308,9 +1331,14 @@ class PreFlightValidator:
         min_citation_overlap: float = DEFAULT_MIN_CITATION_OVERLAP,
         principal: PrincipalContext | None = None,
         domain_id: str | None = None,
+        citation_gate: DocumentCitationGate | None = None,
     ) -> None:
         self.repo = repo
         self.slicer = slicer or DeterministicSlicer()
+        self.citation_gate = citation_gate or DocumentCitationGate(
+            min_overlap_ratio=min_citation_overlap,
+            require_citations_default=False,
+        )
         self.expander = expander or ASTDependencyExpander(
             max_direct_callers=3,
             max_expansion_token_budget=1500,
@@ -1557,7 +1585,7 @@ class PreFlightValidator:
             # Look up focus symbol in repository AST symbols
             focus_sym: ASTSymbolRecord | None = None
             for sym_rec in visible_symbols:
-                if sym_rec.qualified_name == target_slice.qualified_symbol:
+                if match_symbol_identifier(target_slice.qualified_symbol, sym_rec.qualified_name):
                     focus_sym = sym_rec
                     break
 
@@ -1566,7 +1594,10 @@ class PreFlightValidator:
                 target_short = target_slice.qualified_symbol.split(".")[-1]
                 for sym_rec in visible_symbols:
                     if (
-                        sym_rec.qualified_name.split(".")[-1] == target_short
+                        (
+                            sym_rec.qualified_name.split(".")[-1] == target_short
+                            or sym_rec.qualified_name.split("::")[-1] == target_short
+                        )
                         and sym_rec.file_id in visible_files_by_id
                         and visible_files_by_id[sym_rec.file_id].file_path == target_slice.file_path
                     ):
@@ -1662,10 +1693,14 @@ class PreFlightValidator:
                             focus_repo_name is not None
                             and sf is not None
                             and sf.repo_name != focus_repo_name
+                            and not getattr(edge, "is_cross_repo", False)
+                            and "::" not in edge.target_qualified_name
                         ):
                             continue
-                        if sym_rec.qualified_name == rel_suffix or sym_rec.qualified_name.endswith(
-                            "." + rel_suffix
+                        if (
+                            sym_rec.qualified_name == rel_suffix
+                            or sym_rec.qualified_name.endswith("." + rel_suffix)
+                            or match_symbol_identifier(rel_suffix, sym_rec.qualified_name)
                         ):
                             target_sym = sym_rec
                             break
@@ -1681,12 +1716,20 @@ class PreFlightValidator:
                                 focus_repo_name is not None
                                 and sf is not None
                                 and sf.repo_name != focus_repo_name
+                                and not getattr(edge, "is_cross_repo", False)
+                                and "::" not in edge.target_qualified_name
                             ):
                                 continue
-                            if sym_rec.qualified_name == edge.target_qualified_name or (
-                                sym_rec.qualified_name.split(".")[-1] == target_clean
-                                and sym_rec.symbol_kind
-                                in ("class", "interface", "type_alias", "function")
+                            if (
+                                sym_rec.qualified_name == edge.target_qualified_name
+                                or match_symbol_identifier(
+                                    edge.target_qualified_name, sym_rec.qualified_name
+                                )
+                                or (
+                                    sym_rec.qualified_name.split(".")[-1] == target_clean
+                                    and sym_rec.symbol_kind
+                                    in ("class", "interface", "type_alias", "function")
+                                )
                             ):
                                 target_sym = sym_rec
                                 break
@@ -1698,13 +1741,17 @@ class PreFlightValidator:
                         and target_sym.file_id != focus_sym.file_id
                     ):
                         continue
-                    sym_clean = target_sym.qualified_name.split(".")[-1]
-                    edge_clean = edge.target_qualified_name.split(".")[-1]
+                    sym_clean = target_sym.qualified_name.split(".")[-1].split("::")[-1]
+                    edge_clean = edge.target_qualified_name.split(".")[-1].split("::")[-1]
                     is_covered = (
                         target_sym.qualified_name in covered_symbols
                         or sym_clean in covered_symbols
                         or edge.target_qualified_name in covered_symbols
                         or edge_clean in covered_symbols
+                        or any(
+                            match_symbol_identifier(c, target_sym.qualified_name)
+                            for c in covered_symbols
+                        )
                     )
 
                     if not is_covered:
@@ -1780,56 +1827,67 @@ class PreFlightValidator:
         if not citations:
             return True, []
 
-        # Build chunk lookup index
-        chunk_content_map: dict[str, str] = {}
-        if isinstance(doc_chunks, dict):
-            for k, v in doc_chunks.items():
-                chunk_content_map[str(k)] = str(v)
-        elif isinstance(doc_chunks, list):
-            for c in doc_chunks:
-                chunk_content_map[str(c.chunk_id)] = c.verbatim_content
+        # Build chunk collection preserving full DocChunkRecord metadata
+        corpus_chunks_for_gate: list[Any] | dict[str, str]
+        if isinstance(doc_chunks, list):
+            corpus_chunks_for_gate = list(doc_chunks)
+        elif isinstance(doc_chunks, dict):
+            corpus_chunks_for_gate = {str(k): str(v) for k, v in doc_chunks.items()}
         else:
-            visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
-            for c in visible_chunks:
-                chunk_content_map[str(c.chunk_id)] = c.verbatim_content
+            corpus_chunks_for_gate = list(bound_repo.list_visible_doc_chunks(principal, domain_id))
+
+        known_ids: set[str] = set()
+        if isinstance(corpus_chunks_for_gate, list):
+            known_ids = {str(getattr(c, "chunk_id", "")) for c in corpus_chunks_for_gate}
+        elif isinstance(corpus_chunks_for_gate, dict):
+            known_ids = set(corpus_chunks_for_gate.keys())
 
         missing_ids = [
-            str(cit.chunk_id) for cit in citations if str(cit.chunk_id) not in chunk_content_map
+            str(cit.chunk_id) for cit in citations if str(cit.chunk_id) not in known_ids
         ]
         if missing_ids and bound_repo._repo is not None:
-            for lookup_domain in dict.fromkeys([domain_id, "quant_research_scout"]):
+            candidate_domains = [domain_id]
+            for scope in principal.allowed_scopes:
+                if scope.startswith("domain:"):
+                    candidate_domains.append(scope.split(":", 1)[1])
+            if "default" not in candidate_domains:
+                candidate_domains.append("default")
+            if "quant_research_scout" not in candidate_domains:
+                candidate_domains.append("quant_research_scout")
+            for lookup_domain in dict.fromkeys(candidate_domains):
                 fetched = bound_repo.get_doc_chunks_by_ids(
                     principal=principal,
                     domain_id=lookup_domain,
                     chunk_ids=missing_ids,
                 )
-                for c in fetched:
-                    chunk_content_map[str(c.chunk_id)] = c.verbatim_content
+                if isinstance(corpus_chunks_for_gate, list):
+                    corpus_chunks_for_gate.extend(fetched)
+                elif isinstance(corpus_chunks_for_gate, dict):
+                    for fc in fetched:
+                        corpus_chunks_for_gate[str(fc.chunk_id)] = fc.verbatim_content
+                for f in fetched:
+                    known_ids.add(str(getattr(f, "chunk_id", "")))
+                missing_ids = [m for m in missing_ids if m not in known_ids]
+                if not missing_ids:
+                    break
 
-        failed_reasons: list[str] = []
-        for cit in citations:
-            chunk_text = chunk_content_map.get(str(cit.chunk_id))
-            if not chunk_text:
-                q_snippet = cit.verbatim_quote[:40]
-                failed_reasons.append(
-                    f"Chunk ID '{cit.chunk_id}' for quote '{q_snippet}...' not found in corpus"
-                )
-                continue
-
-            verification = self.slicer.verify_doc_citation(
-                citation=cit,
-                chunk_content=chunk_text,
-                min_overlap_ratio=self.min_citation_overlap,
-            )
-            if not verification.is_valid:
-                failed_reasons.append(
-                    f"Quote from chunk '{cit.chunk_id}' failed verbatim verification: "
-                    f"overlap {verification.token_overlap_ratio:.4f} "
-                    f"< {self.min_citation_overlap:.2f} ({verification.error_reason})"
-                )
-
-        passed = len(failed_reasons) == 0
-        return passed, failed_reasons
+        res = self.citation_gate.verify_citations(
+            citations=citations,
+            corpus_chunks=corpus_chunks_for_gate,
+            domain_id=domain_id,
+            require_citations=False,
+        )
+        failed_reasons = []
+        for _, r in res.failed_citations:
+            if (
+                "failed verbatim verification" not in r
+                and "not in corpus" not in r
+                and "rejected" not in r
+            ):
+                failed_reasons.append(f"Quote failed verbatim verification: {r}")
+            else:
+                failed_reasons.append(r)
+        return res.passed, failed_reasons
 
     def validate(
         self,

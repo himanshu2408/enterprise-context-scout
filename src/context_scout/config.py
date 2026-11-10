@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Final
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ALLOWED_GOOGLE_MODEL_PREFIXES: Final[tuple[str, ...]] = (
@@ -28,6 +28,36 @@ PROHIBITED_STALE_MODEL_REGEX: Final[re.Pattern[str]] = re.compile(
     r"(?:^|/)(?:text-embedding-004|gemini-ultra|gemma-[123](?:-|$)|codegemma)",
     re.IGNORECASE,
 )
+
+ALLOWED_EU_REGIONS: Final[frozenset[str]] = frozenset(
+    {
+        "europe-west1",  # Belgium
+        "europe-west2",  # London (UK)
+        "europe-west3",  # Frankfurt (Germany) - Primary Default
+        "europe-west4",  # Eemshaven (Netherlands)
+        "europe-west6",  # Zurich (Switzerland)
+        "europe-west8",  # Milan (Italy)
+        "europe-west9",  # Paris (France)
+        "europe-west10",  # Berlin (Germany)
+        "europe-west12",  # Turin (Italy)
+        "europe-north1",  # Hamina (Finland)
+        "europe-central2",  # Warsaw (Poland)
+        "europe-southwest1",  # Madrid (Spain)
+    }
+)
+
+
+def validate_vertex_location(location: str, allow_non_eu: bool = False) -> str:
+    """Enforces EU data residency for Vertex AI execution unless explicitly overridden."""
+    cleaned = location.strip().lower()
+    if not allow_non_eu and not (cleaned.startswith("europe-") or cleaned in ALLOWED_EU_REGIONS):
+        raise ValueError(
+            f"Vertex AI region '{location}' violates EU data residency policy. "
+            "Only EU regions (e.g. 'europe-west3') are permitted to comply with GDPR data "
+            "residency requirements, unless allow_non_eu_regions=True "
+            "(or SCOUT_ALLOW_NON_EU_REGIONS=true) is explicitly configured."
+        )
+    return cleaned
 
 
 def validate_google_model_id(model_id: str) -> str:
@@ -78,6 +108,28 @@ class ScoutSettings(BaseSettings):
         default_factory=lambda: Path(__file__).resolve().parents[2] / "domains"
     )
 
+    # GCP Vertex AI Data Residency & Secret Hygiene Settings
+    gcp_project: str | None = Field(
+        default=None,
+        description="Google Cloud Project ID for Vertex AI execution.",
+    )
+    gcp_location: str = Field(
+        default="europe-west3",
+        description="Google Cloud Region for Vertex AI execution (default: europe-west3).",
+    )
+    use_vertex_ai: bool = Field(
+        default=True,
+        description="Enforces Google Cloud Vertex AI mode instead of Developer API.",
+    )
+    service_token: str | None = Field(
+        default=None,
+        description="Read-only service bearer token for Vertex AI authentication.",
+    )
+    allow_non_eu_regions: bool = Field(
+        default=False,
+        description="Allows non-EU Vertex AI regions if explicitly enabled.",
+    )
+
     @field_validator(
         "primary_model_id",
         "contextualizer_model_id",
@@ -89,6 +141,14 @@ class ScoutSettings(BaseSettings):
     @classmethod
     def _enforce_google_models(cls, value: str) -> str:
         return validate_google_model_id(value)
+
+    @model_validator(mode="after")
+    def _enforce_residency_rules(self) -> "ScoutSettings":
+        if self.use_vertex_ai and self.gcp_location:
+            self.gcp_location = validate_vertex_location(
+                self.gcp_location, allow_non_eu=self.allow_non_eu_regions
+            )
+        return self
 
 
 def detect_hardware_profile(

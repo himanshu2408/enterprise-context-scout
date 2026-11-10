@@ -5,6 +5,7 @@ import math
 import subprocess
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Literal
 from uuid import UUID, uuid4
@@ -126,6 +127,16 @@ _COMMIT_TREE_CACHE: dict[tuple[str, str], dict[str, str]] = {}
 _WT_BLOB_CACHE: dict[tuple[str, int, int], str] = {}
 
 
+@dataclass(frozen=True)
+class MerkleBlobDiff:
+    """Commit-to-commit tree diff partitioned by file operation (F08)."""
+
+    added: dict[str, str]  # file_path -> new_blob_sha
+    modified: dict[str, tuple[str, str]]  # file_path -> (old_blob_sha, new_blob_sha)
+    deleted: dict[str, str]  # file_path -> old_blob_sha
+    renamed: list[tuple[str, str, str, str]]  # (old_path, new_path, old_blob, new_blob)
+
+
 class MerkleSyncStats(BaseModel):
     """Statistics emitted by Merkle incremental synchronization."""
 
@@ -183,6 +194,8 @@ def _resolve_commit_sha(repo_dir: Path, ref: str = "HEAD") -> str:
 
 class GitMerkleIndexer:
     """Git Blob-SHA Merkle incremental indexer with Tree-Sitter AST extraction."""
+
+    EMPTY_TREE_SHA: Final[str] = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
     def __init__(
         self,
@@ -347,6 +360,61 @@ class GitMerkleIndexer:
         modified = {p for p, s in current.items() if p in existing and existing[p] != s}
         deleted = set(existing.keys()) - set(current.keys())
         return unchanged, new, modified, deleted
+
+    def diff_commit_blobs(
+        self,
+        repo_dir: Path,
+        before_sha: str,
+        after_sha: str,
+    ) -> MerkleBlobDiff:
+        """Diffs commit trees using git diff-tree -r --raw in <25ms (F08)."""
+        effective_before = (
+            self.EMPTY_TREE_SHA
+            if not before_sha or before_sha == "0" * 40 or before_sha.strip() == ""
+            else before_sha
+        )
+        proc = subprocess.run(
+            ["git", "-C", str(repo_dir), "diff-tree", "-r", "--raw", effective_before, after_sha],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        added: dict[str, str] = {}
+        modified: dict[str, tuple[str, str]] = {}
+        deleted: dict[str, str] = {}
+        renamed: list[tuple[str, str, str, str]] = []
+
+        for line in proc.stdout.splitlines():
+            if not line.startswith(":"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            meta = parts[0]
+            file_path = parts[1]
+            meta_tokens = meta[1:].split()
+            if len(meta_tokens) < 5:
+                continue
+            old_blob = meta_tokens[2]
+            new_blob = meta_tokens[3]
+            status = meta_tokens[4]
+
+            if not self._is_indexable_text_path(file_path):
+                continue
+
+            if status == "A":
+                added[file_path] = new_blob
+            elif status == "M":
+                modified[file_path] = (old_blob, new_blob)
+            elif status == "D":
+                deleted[file_path] = old_blob
+            elif status.startswith("R"):
+                old_path = file_path
+                new_path = parts[2] if len(parts) > 2 else file_path
+                renamed.append((old_path, new_path, old_blob, new_blob))
+
+        return MerkleBlobDiff(added=added, modified=modified, deleted=deleted, renamed=renamed)
 
     def _detect_language(self, file_path: str) -> str | None:
         for ext, lang in LANG_MAP.items():
@@ -755,6 +823,529 @@ class GitMerkleIndexer:
             cache_hit=False,
         )
 
+    def sync_push_incremental_postgres(
+        self,
+        repo_dir: Path,
+        conn: Connection[tuple[object, ...]],
+        repo: PostgresRLSRepository,
+        principal: PrincipalContext,
+        domain_id: str,
+        repo_name: str,
+        before_sha: str,
+        after_sha: str,
+        allowed_scopes: list[str] | None = None,
+    ) -> MerkleSyncStats:
+        """Executes surgical incremental update on push in <50ms without dropping inward edges."""
+        start_time = time.perf_counter()
+        scopes = allowed_scopes or principal.allowed_scopes
+
+        diff = self.diff_commit_blobs(repo_dir, before_sha, after_sha)
+
+        # 1. Process deletions
+        all_deleted_paths = set(diff.deleted.keys()) | {r[0] for r in diff.renamed}
+        if all_deleted_paths:
+            conn.execute(
+                """
+                DELETE FROM code_files
+                WHERE domain_id = %s AND repo_name = %s AND file_path = ANY(%s);
+                """,
+                (domain_id, repo_name, list(all_deleted_paths)),
+            )
+
+        # 2. Process modified files: delete old symbols (cascades outward edges, NULLs inward edges)
+        all_modified_paths = set(diff.modified.keys())
+        if all_modified_paths:
+            conn.execute(
+                """
+                DELETE FROM ast_symbols
+                WHERE domain_id = %s
+                  AND file_id IN (
+                      SELECT file_id FROM code_files
+                      WHERE domain_id = %s AND repo_name = %s AND file_path = ANY(%s)
+                  );
+                """,
+                (domain_id, domain_id, repo_name, list(all_modified_paths)),
+            )
+
+        # 3. Parse and insert added and modified files
+        to_index_paths = set(diff.added.keys()) | all_modified_paths | {r[1] for r in diff.renamed}
+        total_symbols = 0
+        total_edges = 0
+
+        repo_symbol_map: dict[str, UUID] = {}
+        existing_sym_rows = conn.execute(
+            """
+            SELECT s.symbol_id, s.qualified_name
+            FROM ast_symbols s
+            JOIN code_files f ON f.file_id = s.file_id
+            WHERE s.domain_id = %s AND f.repo_name = %s;
+            """,
+            (domain_id, repo_name),
+        ).fetchall()
+        for s_row in existing_sym_rows:
+            repo_symbol_map[str(s_row[1])] = UUID(str(s_row[0]))
+
+        newly_inserted_file_ids: list[UUID] = []
+        parsed_files_data = []
+
+        for f_path in sorted(to_index_paths):
+            new_blob_sha = (
+                diff.added.get(f_path)
+                or (diff.modified[f_path][1] if f_path in diff.modified else None)
+                or next((r[3] for r in diff.renamed if r[1] == f_path), "")
+            )
+            raw_content = self._read_blob_or_disk(repo_dir, f_path, new_blob_sha or "", after_sha)
+            if raw_content is None:
+                continue
+            lang = self._detect_language(f_path)
+            lines = raw_content.splitlines()
+
+            file_id = uuid4()
+            row = conn.execute(
+                """
+                INSERT INTO code_files (
+                    file_id, domain_id, repo_name, file_path,
+                    git_commit_sha, git_blob_sha, language,
+                    allowed_scopes, raw_content, line_count
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (domain_id, repo_name, file_path) DO UPDATE SET
+                    git_commit_sha = EXCLUDED.git_commit_sha,
+                    git_blob_sha = EXCLUDED.git_blob_sha,
+                    raw_content = EXCLUDED.raw_content,
+                    line_count = EXCLUDED.line_count,
+                    indexed_at = NOW()
+                RETURNING file_id;
+                """,
+                (
+                    file_id,
+                    domain_id,
+                    repo_name,
+                    f_path,
+                    after_sha,
+                    new_blob_sha or "",
+                    lang or "text",
+                    scopes,
+                    raw_content,
+                    len(lines),
+                ),
+            ).fetchone()
+            actual_file_id = UUID(str(row[0])) if row else file_id
+            newly_inserted_file_ids.append(actual_file_id)
+
+            if not lang:
+                continue
+
+            symbols, edges = self.extractor.parse_source(
+                raw_content, lang, file_path=f_path, repo_name=repo_name
+            )
+            file_symbol_map: dict[str, UUID] = {}
+            symbol_embeddings = self._compute_symbol_embeddings(
+                symbols, blob_sha=new_blob_sha or ""
+            )
+
+            for parsed_sym, emb in zip(symbols, symbol_embeddings, strict=True):
+                sym_id = uuid4()
+                sym_rec = ASTSymbolRecord(
+                    symbol_id=sym_id,
+                    file_id=actual_file_id,
+                    domain_id=domain_id,
+                    qualified_name=parsed_sym.qualified_name,
+                    symbol_kind=parsed_sym.symbol_kind,  # type: ignore[arg-type]
+                    start_line=parsed_sym.start_line,
+                    end_line=parsed_sym.end_line,
+                    signature_skeleton=parsed_sym.signature_skeleton,
+                    contextual_summary=parsed_sym.contextual_summary,
+                    allowed_scopes=scopes,
+                    embedding=emb,
+                )
+                repo.insert_ast_symbol(conn, sym_rec)
+                file_symbol_map[parsed_sym.qualified_name] = sym_id
+                repo_symbol_map[parsed_sym.qualified_name] = sym_id
+                total_symbols += 1
+
+            parsed_files_data.append((actual_file_id, scopes, edges, file_symbol_map))
+
+        # 4. Insert outward edges
+        for _actual_file_id, file_scopes, edges, file_symbol_map in parsed_files_data:
+            for edge in edges:
+                src_id = file_symbol_map.get(edge.source_qualified_name) or repo_symbol_map.get(
+                    edge.source_qualified_name
+                )
+                if not src_id:
+                    continue
+
+                target_id = repo_symbol_map.get(edge.target_qualified_name)
+                target_qual = edge.target_qualified_name
+                if not target_id:
+                    target_qual = f"UNRESOLVED::{edge.target_qualified_name}"
+
+                edge_rec = ASTEdgeRecord(
+                    edge_id=uuid4(),
+                    domain_id=domain_id,
+                    source_symbol_id=src_id,
+                    target_qualified_name=target_qual,
+                    target_symbol_id=target_id,
+                    edge_kind=edge.edge_kind,
+                    allowed_scopes=file_scopes,
+                    target_repo_qualified_id=edge.target_repo_qualified_id,
+                    is_cross_repo=edge.is_cross_repo or target_id is None,
+                )
+                repo.insert_ast_edge(conn, edge_rec)
+                total_edges += 1
+
+        # 5. Inward Edge Re-link: restore existing inward edges targeting updated symbols
+        if newly_inserted_file_ids:
+            conn.execute(
+                """
+                UPDATE ast_edges e
+                SET target_symbol_id = s.symbol_id,
+                    target_qualified_name = s.qualified_name
+                FROM ast_symbols s
+                WHERE s.domain_id = %s
+                  AND s.file_id = ANY(%s)
+                  AND e.domain_id = s.domain_id
+                  AND e.target_symbol_id IS NULL
+                  AND (
+                      e.target_qualified_name = s.qualified_name
+                      OR e.target_qualified_name = ('UNRESOLVED::' || s.qualified_name)
+                      OR ('UNRESOLVED::' || e.target_qualified_name) = s.qualified_name
+                      OR s.qualified_name LIKE ('%%::' || e.target_qualified_name)
+                  );
+                """,
+                (domain_id, newly_inserted_file_ids),
+            )
+
+        # 6. Reconcile cross-repo edges
+        self.reconcile_cross_repo_edges_postgres(conn, domain_id)
+
+        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        return MerkleSyncStats(
+            total_files_scanned=len(to_index_paths),
+            unchanged_files_skipped=0,
+            new_files_indexed=len(diff.added),
+            modified_files_reindexed=len(diff.modified),
+            deleted_files_removed=len(all_deleted_paths),
+            total_symbols_stored=total_symbols,
+            total_edges_stored=total_edges,
+            duration_ms=duration_ms,
+            commit_sha=after_sha,
+            cache_hit=False,
+        )
+
+    def reconcile_cross_repo_edges_postgres(
+        self, conn: Connection[tuple[object, ...]], domain_id: str
+    ) -> int:
+        """Phase 2: Resolves UNRESOLVED cross-repo edges across repositories under RLS (F09)."""
+        res = conn.execute(
+            """
+            WITH candidate_matches AS (
+                SELECT
+                    e.edge_id,
+                    s.symbol_id AS matched_symbol_id,
+                    s.qualified_name AS matched_qual_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY e.edge_id
+                        ORDER BY (s.allowed_scopes && e.allowed_scopes) DESC, s.symbol_id
+                    ) AS match_rank
+                FROM ast_edges e
+                JOIN ast_symbols s ON s.domain_id = e.domain_id
+                WHERE e.domain_id = %s
+                  AND e.target_symbol_id IS NULL
+                  AND e.target_qualified_name LIKE 'UNRESOLVED::%%'
+                  AND (
+                      s.qualified_name = SUBSTRING(e.target_qualified_name FROM 13)
+                      OR s.qualified_name LIKE (
+                          '%%::' || SUBSTRING(e.target_qualified_name FROM 13)
+                      )
+                      OR s.qualified_name LIKE (
+                          '%%' || REPLACE(SUBSTRING(e.target_qualified_name FROM 13), '.', '::%%')
+                      )
+                  )
+                  AND e.allowed_scopes && s.allowed_scopes
+            )
+            UPDATE ast_edges e
+            SET target_symbol_id = cm.matched_symbol_id,
+                target_qualified_name = cm.matched_qual_id,
+                is_cross_repo = TRUE
+            FROM candidate_matches cm
+            WHERE e.edge_id = cm.edge_id AND cm.match_rank = 1;
+            """,
+            (domain_id,),
+        )
+        return res.rowcount if hasattr(res, "rowcount") and res.rowcount != -1 else 0
+
+    def sync_push_incremental_inmemory(
+        self,
+        repo_dir: Path,
+        repo: InMemoryRLSRepository,
+        principal: PrincipalContext,
+        domain_id: str,
+        repo_name: str,
+        before_sha: str,
+        after_sha: str,
+        allowed_scopes: list[str] | None = None,
+    ) -> MerkleSyncStats:
+        """Executes surgical incremental update on push in InMemoryRLSRepository (F08, F09)."""
+        start_time = time.perf_counter()
+        scopes = allowed_scopes or principal.allowed_scopes
+
+        diff = self.diff_commit_blobs(repo_dir, before_sha, after_sha)
+
+        all_deleted_paths = set(diff.deleted.keys()) | {r[0] for r in diff.renamed}
+        all_modified_paths = set(diff.modified.keys())
+
+        # 1. Process deletions
+        for file_id, file_rec in list(repo._files.items()):
+            if (
+                file_rec.domain_id == domain_id
+                and file_rec.repo_name == repo_name
+                and file_rec.file_path in all_deleted_paths
+            ):
+                repo.delete_code_file(principal, file_id)
+
+        # 2. Process modified files: delete old symbols & outward edges, preserve inward edges
+        for file_id, file_rec in list(repo._files.items()):
+            if (
+                file_rec.domain_id == domain_id
+                and file_rec.repo_name == repo_name
+                and file_rec.file_path in all_modified_paths
+            ):
+                sym_ids_to_del = {
+                    s_id for s_id, sym in repo._symbols.items() if sym.file_id == file_id
+                }
+                for s_id in sym_ids_to_del:
+                    repo._symbols.pop(s_id, None)
+
+                # Outward edges
+                outward_edge_ids = {
+                    e_id for e_id, edge in repo._edges.items()
+                    if edge.source_symbol_id in sym_ids_to_del
+                }
+                for e_id in outward_edge_ids:
+                    repo._edges.pop(e_id, None)
+
+                # Inward edges -> target_symbol_id = None
+                for e_id, edge in list(repo._edges.items()):
+                    if edge.target_symbol_id in sym_ids_to_del:
+                        repo._edges[e_id] = ASTEdgeRecord(
+                            edge_id=edge.edge_id,
+                            domain_id=edge.domain_id,
+                            source_symbol_id=edge.source_symbol_id,
+                            target_qualified_name=edge.target_qualified_name,
+                            target_symbol_id=None,
+                            edge_kind=edge.edge_kind,
+                            allowed_scopes=edge.allowed_scopes,
+                            target_repo_qualified_id=edge.target_repo_qualified_id,
+                            is_cross_repo=edge.is_cross_repo,
+                        )
+
+        # 3. Parse and insert added and modified files
+        to_index_paths = set(diff.added.keys()) | all_modified_paths | {r[1] for r in diff.renamed}
+        total_symbols = 0
+        total_edges = 0
+
+        repo_symbol_map: dict[str, UUID] = {}
+        for s_id, s_rec in repo._symbols.items():
+            if s_rec.domain_id == domain_id:
+                f_rec = repo._files.get(s_rec.file_id)
+                if f_rec and f_rec.repo_name == repo_name:
+                    repo_symbol_map[s_rec.qualified_name] = s_id
+
+        newly_inserted_file_ids: list[UUID] = []
+        parsed_files_data = []
+
+        for f_path in sorted(to_index_paths):
+            new_blob_sha = (
+                diff.added.get(f_path)
+                or (diff.modified[f_path][1] if f_path in diff.modified else None)
+                or next((r[3] for r in diff.renamed if r[1] == f_path), "")
+            )
+            raw_content = self._read_blob_or_disk(repo_dir, f_path, new_blob_sha or "", after_sha)
+            if raw_content is None:
+                continue
+            lang = self._detect_language(f_path)
+            lines = raw_content.splitlines()
+
+            # Existing file_id if modifying
+            existing_fid = next(
+                (
+                    f_id
+                    for f_id, f_rec in repo._files.items()
+                    if f_rec.domain_id == domain_id
+                    and f_rec.repo_name == repo_name
+                    and f_rec.file_path == f_path
+                ),
+                None,
+            )
+            actual_file_id = existing_fid or uuid4()
+
+            file_rec = CodeFileRecord(
+                file_id=actual_file_id,
+                domain_id=domain_id,
+                repo_name=repo_name,
+                file_path=f_path,
+                git_commit_sha=after_sha,
+                git_blob_sha=new_blob_sha or "",
+                language=lang or "text",
+                allowed_scopes=scopes,
+                raw_content=raw_content,
+                line_count=len(lines),
+            )
+            repo.insert_code_file(principal, file_rec)
+            newly_inserted_file_ids.append(actual_file_id)
+
+            if not lang:
+                continue
+
+            symbols, edges = self.extractor.parse_source(
+                raw_content, lang, file_path=f_path, repo_name=repo_name
+            )
+            file_symbol_map: dict[str, UUID] = {}
+            symbol_embeddings = self._compute_symbol_embeddings(
+                symbols, blob_sha=new_blob_sha or ""
+            )
+
+            for parsed_sym, emb in zip(symbols, symbol_embeddings, strict=True):
+                sym_id = uuid4()
+                sym_rec = ASTSymbolRecord(
+                    symbol_id=sym_id,
+                    file_id=actual_file_id,
+                    domain_id=domain_id,
+                    qualified_name=parsed_sym.qualified_name,
+                    symbol_kind=parsed_sym.symbol_kind,  # type: ignore[arg-type]
+                    start_line=parsed_sym.start_line,
+                    end_line=parsed_sym.end_line,
+                    signature_skeleton=parsed_sym.signature_skeleton,
+                    contextual_summary=parsed_sym.contextual_summary,
+                    allowed_scopes=scopes,
+                    embedding=emb,
+                )
+                repo.insert_ast_symbol(principal, sym_rec)
+                file_symbol_map[parsed_sym.qualified_name] = sym_id
+                repo_symbol_map[parsed_sym.qualified_name] = sym_id
+                total_symbols += 1
+
+            parsed_files_data.append((actual_file_id, scopes, edges, file_symbol_map))
+
+        # 4. Insert outward edges
+        for _actual_file_id, file_scopes, edges, file_symbol_map in parsed_files_data:
+            for edge in edges:
+                src_id = file_symbol_map.get(edge.source_qualified_name) or repo_symbol_map.get(
+                    edge.source_qualified_name
+                )
+                if not src_id:
+                    continue
+
+                target_id = repo_symbol_map.get(edge.target_qualified_name)
+                target_qual = edge.target_qualified_name
+                if not target_id:
+                    target_qual = f"UNRESOLVED::{edge.target_qualified_name}"
+
+                edge_rec = ASTEdgeRecord(
+                    edge_id=uuid4(),
+                    domain_id=domain_id,
+                    source_symbol_id=src_id,
+                    target_qualified_name=target_qual,
+                    target_symbol_id=target_id,
+                    edge_kind=edge.edge_kind,
+                    allowed_scopes=file_scopes,
+                    target_repo_qualified_id=edge.target_repo_qualified_id,
+                    is_cross_repo=edge.is_cross_repo or target_id is None,
+                )
+                repo.insert_ast_edge(principal, edge_rec)
+                total_edges += 1
+
+        # 5. Inward Edge Re-link in memory
+        newly_inserted_syms = [
+            s
+            for s in repo._symbols.values()
+            if s.domain_id == domain_id and s.file_id in newly_inserted_file_ids
+        ]
+        for s in newly_inserted_syms:
+            for e_id, edge in list(repo._edges.items()):
+                if edge.domain_id == domain_id and edge.target_symbol_id is None:
+                    t_qual = edge.target_qualified_name
+                    if (
+                        t_qual == s.qualified_name
+                        or t_qual == f"UNRESOLVED::{s.qualified_name}"
+                        or f"UNRESOLVED::{t_qual}" == s.qualified_name
+                        or s.qualified_name.endswith(f"::{t_qual}")
+                    ):
+                        repo._edges[e_id] = ASTEdgeRecord(
+                            edge_id=edge.edge_id,
+                            domain_id=edge.domain_id,
+                            source_symbol_id=edge.source_symbol_id,
+                            target_qualified_name=s.qualified_name,
+                            target_symbol_id=s.symbol_id,
+                            edge_kind=edge.edge_kind,
+                            allowed_scopes=edge.allowed_scopes,
+                            target_repo_qualified_id=edge.target_repo_qualified_id,
+                            is_cross_repo=edge.is_cross_repo,
+                        )
+
+        # 6. Reconcile cross-repo edges in memory
+        self.reconcile_cross_repo_edges_inmemory(repo, domain_id)
+
+        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        return MerkleSyncStats(
+            total_files_scanned=len(to_index_paths),
+            unchanged_files_skipped=0,
+            new_files_indexed=len(diff.added),
+            modified_files_reindexed=len(diff.modified),
+            deleted_files_removed=len(all_deleted_paths),
+            total_symbols_stored=total_symbols,
+            total_edges_stored=total_edges,
+            duration_ms=duration_ms,
+            commit_sha=after_sha,
+            cache_hit=False,
+        )
+
+    def reconcile_cross_repo_edges_inmemory(
+        self, repo: InMemoryRLSRepository, domain_id: str
+    ) -> int:
+        """Phase 2: Resolves UNRESOLVED cross-repo edges in InMemoryRLSRepository (F09)."""
+        from context_scout.db.repositories import _scopes_intersect
+
+        resolved_count = 0
+        all_symbols = [s for s in repo._symbols.values() if s.domain_id == domain_id]
+
+        for e_id, edge in list(repo._edges.items()):
+            if (
+                edge.domain_id == domain_id
+                and edge.target_symbol_id is None
+                and edge.target_qualified_name.startswith("UNRESOLVED::")
+            ):
+                unresolved_target = edge.target_qualified_name[12:]
+                candidate: ASTSymbolRecord | None = None
+                for s in all_symbols:
+                    if not _scopes_intersect(edge.allowed_scopes, s.allowed_scopes):
+                        continue
+                    if (
+                        s.qualified_name == unresolved_target
+                        or s.qualified_name.endswith(f"::{unresolved_target}")
+                        or s.qualified_name.endswith(f"::{unresolved_target.replace('.', '::')}")
+                        or unresolved_target in s.qualified_name
+                    ):
+                        candidate = s
+                        break
+
+                if candidate is not None:
+                    repo._edges[e_id] = ASTEdgeRecord(
+                        edge_id=edge.edge_id,
+                        domain_id=edge.domain_id,
+                        source_symbol_id=edge.source_symbol_id,
+                        target_qualified_name=candidate.qualified_name,
+                        target_symbol_id=candidate.symbol_id,
+                        edge_kind=edge.edge_kind,
+                        allowed_scopes=edge.allowed_scopes,
+                        target_repo_qualified_id=candidate.qualified_name,
+                        is_cross_repo=True,
+                    )
+                    resolved_count += 1
+
+        return resolved_count
+
 
 def sync_tracked_in_memory_repos(
     repo: Any, principal: PrincipalContext, domain_id: str
@@ -794,6 +1385,7 @@ def sync_tracked_in_memory_repos(
 __all__ = [
     "CODE_EXTENSIONS",
     "GitMerkleIndexer",
+    "MerkleBlobDiff",
     "MerkleSyncStats",
     "compute_git_blob_sha",
     "generate_deterministic_embedding",
