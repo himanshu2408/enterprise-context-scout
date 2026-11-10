@@ -208,12 +208,141 @@ class DeterministicSlicer:
         """Deterministic tokenization over words and punctuation."""
         return re.findall(r"\w+|[^\w\s]", text)
 
-    def _has_unclosed_delimiters(self, text: str) -> bool:
+    @staticmethod
+    def _strip_comments_and_strings(code: str, file_path: str = "") -> tuple[str, bool]:
+        """Strips comments and string literals across Python, TypeScript, and C#.
+
+        Returns:
+            (sanitized_code, has_unclosed_quote_or_comment)
+        """
+        ext = file_path.lower()
+        is_hash_comment_lang = not ext.endswith(
+            (".ts", ".tsx", ".js", ".jsx", ".cs", ".java", ".c", ".cpp")
+        )
+
+        chars: list[str] = []
+        i = 0
+        n = len(code)
+        has_unclosed_quote = False
+
+        while i < n:
+            # Python triple-double quotes \"\"\"
+            if code[i : i + 3] == '"""':
+                end = code.find('"""', i + 3)
+                if end == -1:
+                    has_unclosed_quote = True
+                    break
+                i = end + 3
+                chars.append(" ")
+                continue
+            # Python triple-single quotes '''
+            if code[i : i + 3] == "'''":
+                end = code.find("'''", i + 3)
+                if end == -1:
+                    has_unclosed_quote = True
+                    break
+                i = end + 3
+                chars.append(" ")
+                continue
+            # C# / TS / C block comments /* ... */
+            if code[i : i + 2] == "/*":
+                end = code.find("*/", i + 2)
+                if end == -1:
+                    has_unclosed_quote = True
+                    break
+                i = end + 2
+                chars.append(" ")
+                continue
+            # Single-line comment //
+            if code[i : i + 2] == "//":
+                end = code.find("\n", i + 2)
+                if end == -1:
+                    break
+                i = end
+                continue
+            # Single-line comment # (Python, Terraform, Shell)
+            if code[i] == "#" and is_hash_comment_lang:
+                end = code.find("\n", i + 1)
+                if end == -1:
+                    break
+                i = end
+                continue
+            # Double-quoted string literal "..."
+            if code[i] == '"':
+                j = i + 1
+                closed = False
+                while j < n:
+                    if code[j] == "\\":
+                        j += 2
+                        continue
+                    if code[j] == '"':
+                        closed = True
+                        j += 1
+                        break
+                    if code[j] == "\n":
+                        break
+                    j += 1
+                if not closed:
+                    has_unclosed_quote = True
+                    break
+                i = j
+                chars.append(" ")
+                continue
+            # Single-quoted string literal '...'
+            if code[i] == "'":
+                j = i + 1
+                closed = False
+                while j < n:
+                    if code[j] == "\\":
+                        j += 2
+                        continue
+                    if code[j] == "'":
+                        closed = True
+                        j += 1
+                        break
+                    if code[j] == "\n":
+                        break
+                    j += 1
+                if not closed:
+                    has_unclosed_quote = True
+                    break
+                i = j
+                chars.append(" ")
+                continue
+            # Backtick template literal `...`
+            if code[i] == "`":
+                j = i + 1
+                closed = False
+                while j < n:
+                    if code[j] == "\\":
+                        j += 2
+                        continue
+                    if code[j] == "`":
+                        closed = True
+                        j += 1
+                        break
+                    j += 1
+                if not closed:
+                    has_unclosed_quote = True
+                    break
+                i = j
+                chars.append(" ")
+                continue
+
+            chars.append(code[i])
+            i += 1
+
+        return "".join(chars), has_unclosed_quote
+
+    def _has_unclosed_delimiters(self, text: str, file_path: str = "") -> bool:
+        cleaned, unclosed_quote = self._strip_comments_and_strings(text, file_path=file_path)
+        if unclosed_quote:
+            return True
         # Strip standard half-open mathematical interval notation (e.g., "[0, T)", "(0, 1]")
         cleaned = re.sub(
             r"(?:(?:\bin\b|[∈=:])\s*)?[\[\(]\s*[^\]\)\(\[\n,;]{1,20}\s*,\s*[^\]\)\(\[\n,;]{1,20}\s*[\]\)]",
             "",
-            text,
+            cleaned,
         )
         counts = {
             "(": cleaned.count("(") - cleaned.count(")"),
