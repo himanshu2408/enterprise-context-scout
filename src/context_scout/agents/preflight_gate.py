@@ -1531,7 +1531,7 @@ class PreFlightValidator:
         novel_target_identifiers: list[str] = []
         has_creation_verb = bool(
             re.search(
-                r"\b(?:add|create|implement|introduce|write|define|generate|build|provision|configure|setup|deploy|declare)\b",
+                r"\b(?:add|create|creating|implement|implementing|introduce|introducing|write|writing|define|defining|generate|generating|build|building|provision|configure|setup|deploy|declare|output|outputting|save|saving|export|exporting)\b",
                 user_prompt,
                 re.IGNORECASE,
             )
@@ -1655,18 +1655,31 @@ class PreFlightValidator:
                 # in modification, inspection, refactoring, or deletion tasks.
                 is_novel_creation = bool(
                     re.search(
-                        r"\b(?:add|create|implement|introduce|write|define|generate|build|provision|configure|setup|deploy|declare)\s+"
-                        r"(?:a\s+|an\s+|the\s+)?(?:new\s+)?"
-                        r"(?:[a-zA-Z0-9_\-]+\s+){0,3}"
+                        r"\b(?:add|create|creating|implement|implementing|introduce|introducing|write|writing|define|defining|generate|generating|build|building|provision|configure|setup|deploy|declare|output|outputting|save|saving|export|exporting)\s+"
+                        r"(?:a\s+|an\s+|the\s+)?(?:new\s+|novel\s+|brand\s+new\s+)?"
+                        r"(?:[a-zA-Z0-9_\-]+\s+){0,4}"
                         r"[`'\"]?" + re.escape(candidate) + r"[`'\"]?\b",
+                        user_prompt,
+                        re.IGNORECASE,
+                    )
+                    or re.search(
+                        r"\b(?:novel|brand\s+new|new)\s+(?:file|target|module|script|class|interface|type|struct|component)\s+"
+                        r"[`'\"]?" + re.escape(candidate) + r"[`'\"]?\b",
+                        user_prompt,
+                        re.IGNORECASE,
+                    )
+                    or re.search(
+                        r"\b(?:writing|outputting|saving|exporting)\s+(?:output\s+)?(?:to\s+)?(?:novel\s+|new\s+)?(?:file\s+)?[`'\"]?"
+                        + re.escape(candidate)
+                        + r"[`'\"]?\b",
                         user_prompt,
                         re.IGNORECASE,
                     )
                     or (
                         has_creation_verb
                         and re.search(
-                            r"\b(?:and|or|,)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:helper\s+)?"
-                            r"(?:method|function|class|interface|type|struct)?\s*"
+                            r"\b(?:and|or|,)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+|novel\s+)?(?:helper\s+)?"
+                            r"(?:method|function|class|interface|type|struct|file)?\s*"
                             r"[`'\"]?" + re.escape(candidate) + r"[`'\"]?\b",
                             user_prompt,
                             re.IGNORECASE,
@@ -2022,10 +2035,17 @@ class PreFlightValidator:
         missing_ids = [str(cit.chunk_id) for cit in citations if str(cit.chunk_id) not in known_ids]
         if missing_ids and bound_repo._repo is not None:
             candidate_domains = [domain_id]
+            if isinstance(doc_chunks, list):
+                for c in doc_chunks:
+                    c_dom = getattr(c, "domain_id", None)
+                    if c_dom and c_dom not in candidate_domains:
+                        candidate_domains.append(c_dom)
+            if "quant_research_scout" not in candidate_domains:
+                candidate_domains.append("quant_research_scout")
             for scope in principal.allowed_scopes:
                 if scope.startswith("domain:"):
                     target_dom = scope.split(":", 1)[1].strip()
-                    if target_dom:
+                    if target_dom and target_dom not in candidate_domains:
                         candidate_domains.append(target_dom)
             for lookup_domain in dict.fromkeys(candidate_domains):
                 fetched = bound_repo.get_doc_chunks_by_ids(
@@ -2066,6 +2086,9 @@ class PreFlightValidator:
         self,
         cleaned_code: str,
         slice_item: VerbatimCodeSlice,
+        bound_repo: Any | None = None,
+        principal: Any | None = None,
+        domain_id: str | None = None,
     ) -> bool:
         """Determines if unclosed delimiters in a partial caller/type window
         are an artifact of multi-line call/expression window truncation,
@@ -2082,16 +2105,17 @@ class PreFlightValidator:
 
         # 2. Repository check: if underlying symbol exists in repository,
         # check if expanding to full symbol boundaries closes the delimiter
-        if self.repo is not None:
+        repo_target = bound_repo or self.repo
+        if repo_target is not None:
             try:
-                bound_repo = self._resolve_graph_repo(self.repo)
-                principal = self._resolve_principal(self.principal)
-                domain = self.domain_id or (
+                b_repo = self._resolve_graph_repo(repo_target)
+                p_ctx = self._resolve_principal(principal or self.principal)
+                domain = domain_id or self.domain_id or (
                     self.domain_config.domain_id if self.domain_config else ""
                 )
 
                 candidate_domains = [domain] if domain else []
-                for scope in principal.allowed_scopes:
+                for scope in p_ctx.allowed_scopes:
                     if scope.startswith("domain:"):
                         d = scope.split(":", 1)[1].strip()
                         if d and d not in candidate_domains:
@@ -2100,10 +2124,10 @@ class PreFlightValidator:
                     candidate_domains = ["default"]
 
                 for dom in candidate_domains:
-                    files = bound_repo.list_visible_code_files(principal, dom)
+                    files = b_repo.list_visible_code_files(p_ctx, dom)
                     file_rec = next((f for f in files if f.file_path == slice_item.file_path), None)
                     if file_rec is not None:
-                        syms = bound_repo.list_visible_ast_symbols(principal, dom)
+                        syms = b_repo.list_visible_ast_symbols(p_ctx, dom)
                         matching_sym = next(
                             (
                                 s
@@ -2128,7 +2152,11 @@ class PreFlightValidator:
         return False
 
     def check_ast_syntax(
-        self, code_slices: list[VerbatimCodeSlice]
+        self,
+        code_slices: list[VerbatimCodeSlice],
+        bound_repo: Any | None = None,
+        principal: Any | None = None,
+        domain_id: str | None = None,
     ) -> tuple[bool, list[str], list[MissingItemRecord]]:
         """Check 1: Verifies all code slices parse cleanly under language parser."""
         import textwrap
@@ -2179,7 +2207,13 @@ class PreFlightValidator:
                 err_msg = "Unclosed syntax delimiters in code slice"
             elif has_delim_error:
                 if is_partial_window:
-                    if not self._is_valid_partial_window_truncation(cleaned_code, s):
+                    if not self._is_valid_partial_window_truncation(
+                        cleaned_code,
+                        s,
+                        bound_repo=bound_repo,
+                        principal=principal,
+                        domain_id=domain_id,
+                    ):
                         has_error = True
                         err_msg = "Unclosed syntax delimiters in code slice"
                 else:
@@ -2303,10 +2337,17 @@ class PreFlightValidator:
         ]
         if citation_ids and bound_repo._repo is not None:
             candidate_domains = [domain_id]
+            if isinstance(doc_chunks, list):
+                for c in doc_chunks:
+                    c_dom = getattr(c, "domain_id", None)
+                    if c_dom and c_dom not in candidate_domains:
+                        candidate_domains.append(c_dom)
+            if "quant_research_scout" not in candidate_domains:
+                candidate_domains.append("quant_research_scout")
             for scope in principal.allowed_scopes:
                 if scope.startswith("domain:"):
                     target_dom = scope.split(":", 1)[1].strip()
-                    if target_dom:
+                    if target_dom and target_dom not in candidate_domains:
                         candidate_domains.append(target_dom)
             for lookup_domain in dict.fromkeys(candidate_domains):
                 specific_chunks = bound_repo.get_doc_chunks_by_ids(
@@ -2559,10 +2600,12 @@ class PreFlightValidator:
                     if c not in all_citations:
                         all_citations.append(c)
 
-            # ---------------------------------------------------------------------
-            # Check 1: AST Syntax & Structural Well-Formedness
-            # ---------------------------------------------------------------------
-            check_1_passed, syntax_errors, syntax_missing = self.check_ast_syntax(active_slices)
+            check_1_passed, syntax_errors, syntax_missing = self.check_ast_syntax(
+                active_slices,
+                bound_repo=bound_repo,
+                principal=active_principal,
+                domain_id=active_domain,
+            )
 
             # ---------------------------------------------------------------------
             # Check 2: 1-Hop AST Dependency Closure & Prompt Reference Coverage

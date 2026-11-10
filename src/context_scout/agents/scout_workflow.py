@@ -59,6 +59,7 @@ from context_scout.security.guardrails import (
 )
 from context_scout.security.rbac import DomainAuthorizationGate
 from context_scout.telemetry import ScoutTelemetryTracer
+from context_scout.telemetry.cost_governance import DEFAULT_EXPLORATION_TOKEN_KILL_SWITCH
 
 logger = logging.getLogger(__name__)
 
@@ -2352,6 +2353,26 @@ class ScoutWorkflow:
         if not visible_files and supporting_doc_citations:
             total_code_tokens_explored = max(est_pack_tokens, 15000)
         local_tokens_consumed = max(est_pack_tokens, total_code_tokens_explored)
+
+        if local_tokens_consumed > DEFAULT_EXPLORATION_TOKEN_KILL_SWITCH:
+            logger.warning(
+                "Exploration token kill-switch triggered: cumulative local tokens %d > cap %d",
+                local_tokens_consumed,
+                DEFAULT_EXPLORATION_TOKEN_KILL_SWITCH,
+            )
+            return InsufficientContextDiagnostic(
+                trace_id=active_trace_id,
+                domain_id=domain_id,
+                reason=(
+                    f"Automated kill-switch triggered: cumulative exploration tokens "
+                    f"({local_tokens_consumed:,}) exceeded safety ceiling "
+                    f"({DEFAULT_EXPLORATION_TOKEN_KILL_SWITCH:,})"
+                ),
+                missing_symbols=[],
+                partial_candidate_files=[],
+                failure_check="kill_switch_exploration_breached",
+                paid_tokens_spent=0,
+            )
 
         pack = ImplementationContextPack(
             trace_id=active_trace_id,

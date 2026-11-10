@@ -14,7 +14,11 @@ from fastapi.responses import RedirectResponse
 from context_scout.api.dependencies import validate_auth_secret
 from context_scout.api.routes import api_router
 from context_scout.security.rbac import _CURRENT_PRINCIPAL
-from context_scout.telemetry import ScoutTelemetryTracer
+from context_scout.telemetry import (
+    ATTR_SCOUT_PRINCIPAL_ID,
+    ScoutTelemetryTracer,
+    extract_trace_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +68,16 @@ def create_app() -> FastAPI:
         tracer = ScoutTelemetryTracer.get_instance()
         route_path = request.url.path
         method = request.method
-        with tracer.tracer.start_as_current_span(f"http.{method.lower()}.{route_path}") as span:
+        carrier = dict(request.headers)
+        extracted_ctx = extract_trace_context(carrier)
+        with tracer.tracer.start_as_current_span(
+            f"http.{method.lower()}.{route_path}",
+            context=extracted_ctx,
+        ) as span:
             span.set_attribute("http.method", method)
             span.set_attribute("http.url", str(request.url))
             principal_user = request.headers.get("X-Principal-User-Id", "anonymous")
+            span.set_attribute(ATTR_SCOUT_PRINCIPAL_ID, principal_user)
             span.set_attribute("context_scout.principal_id", principal_user)
 
             token = _CURRENT_PRINCIPAL.set(None)

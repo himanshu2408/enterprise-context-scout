@@ -47,6 +47,12 @@ from context_scout.schemas.contracts import (
     VerbatimCodeSlice,
 )
 from context_scout.telemetry import ScoutTelemetryTracer
+from context_scout.telemetry.cost_governance import (
+    BudgetExceededError,
+    CostEstimateReport,
+    PaidComputeCostEstimator,
+    SessionBudgetTracker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +68,6 @@ try:
 except ImportError:
     genai = None  # type: ignore[assignment]
     genai_types = None  # type: ignore[assignment]
-
-
-class BudgetExceededError(RuntimeError):
-    """Raised when a principal's session paid token budget would be exceeded."""
 
 
 def apply_search_replace_or_hunk_blocks(
@@ -503,6 +505,8 @@ class GeminiImplementationExecutor:
         self.rls_conn_manager = rls_conn_manager
         self.require_confirmation = require_confirmation
         self.slicer = DeterministicSlicer()
+        self.cost_estimator = PaidComputeCostEstimator()
+        self.budget_tracker = SessionBudgetTracker.get_instance()
         self.last_usage_metadata: dict[str, int] | None = None
 
     def is_live_configured(self) -> bool:
@@ -555,12 +559,16 @@ class GeminiImplementationExecutor:
         elif repo is not None and conn is not None:
             consumed = repo.get_principal_paid_tokens_consumed(conn, principal.user_id)
 
+        budget_cap = (
+            getattr(principal, "session_budget_tokens", None)
+            or getattr(principal, "max_session_paid_tokens", 16_000)
+        )
         projected = consumed + pack.pack_token_count
-        if projected > principal.max_session_paid_tokens:
+        if projected > budget_cap:
             raise BudgetExceededError(
                 f"Principal '{principal.user_id}' exceeded session token budget: "
                 f"consumed {consumed} + requested {pack.pack_token_count} > cap "
-                f"{principal.max_session_paid_tokens}"
+                f"{budget_cap}"
             )
 
     def execute_implementation(
@@ -573,10 +581,15 @@ class GeminiImplementationExecutor:
         custom_patch: str | None = None,
         missing_context_requests: list[MissingContextRequest] | None = None,
         auto_confirm: bool = False,
+        user_confirmed: bool = False,
+        confirmation_callback: Callable[[CostEstimateReport], bool] | None = None,
+        max_output_tokens: int = 4096,
         lint_cmd: list[str] | None = None,
         test_cmd: list[str] | None = None,
     ) -> tuple[PatchExecutionResult, ExecutionTelemetryRecord]:
-        """Runs end-to-end handoff: budget check -> patch synthesis -> sandbox -> telemetry."""
+        """Runs end-to-end handoff:
+        budget check -> confirmation gate -> patch synthesis -> sandbox -> telemetry.
+        """
         tracer = ScoutTelemetryTracer.get_instance()
         with tracer.trace_executor(
             span_name="scout.executor.handoff",
@@ -588,8 +601,7 @@ class GeminiImplementationExecutor:
             start_time = time.perf_counter()
 
             # 1. Enforce Budget Check
-            if conn is not None or repo is not None:
-                self.check_principal_budget(principal, pack, conn=conn, repo=repo)
+            self.check_principal_budget(principal, pack, conn=conn, repo=repo)
 
             # 2. Process Missing Context Requests if any
             miss_events: list[dict[str, Any]] = []
@@ -598,7 +610,23 @@ class GeminiImplementationExecutor:
                     miss_event = self._resolve_missing_context(req, pack, repo_root)
                     miss_events.append(miss_event.model_dump())
 
-            # 3. Patch Synthesis (Live API or Deterministic Fallback)
+            # 3. Upfront Blocking Paid Compute Confirmation Gate
+            cost_report = self.cost_estimator.calculate_cost_estimate(
+                model_id=self.model_id,
+                estimated_input_tokens=pack.pack_token_count,
+                max_output_tokens=max_output_tokens,
+            )
+            will_invoke_paid_model = (
+                custom_patch is None and self.is_live_configured() and genai is not None
+            )
+            if will_invoke_paid_model:
+                self.cost_estimator.request_paid_execution_confirmation(
+                    cost_report,
+                    confirmation_callback=confirmation_callback,
+                    auto_approve=user_confirmed or auto_confirm,
+                )
+
+            # 4. Patch Synthesis (Live API or Deterministic Fallback)
             patch_diff: str
             if custom_patch is not None:
                 patch_diff = custom_patch
