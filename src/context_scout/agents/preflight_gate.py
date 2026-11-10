@@ -318,6 +318,42 @@ PROMPT_STOPWORDS: Final[set[str]] = {
     "provided",
     "including",
     "include",
+    "sql",
+    "kms",
+    "postgresql",
+    "postgres",
+    "redis",
+    "kafka",
+    "mysql",
+    "grpc",
+    "http",
+    "https",
+    "rest",
+    "api",
+    "json",
+    "yaml",
+    "xml",
+    "jwt",
+    "oauth",
+    "oidc",
+    "iam",
+    "gcp",
+    "aws",
+    "azure",
+    "docker",
+    "k8s",
+    "kubernetes",
+    "terraform",
+    "linux",
+    "cloud",
+    "private",
+    "cluster",
+    "encryption",
+    "quantstrategybrief",
+    "domainknowledgebrief",
+    "implementationcontextpack",
+    "strategybrief",
+    "brief",
 }
 
 CUSTOM_CORPUS_INDEX_PATHS: dict[str, Path] = {}
@@ -371,7 +407,6 @@ def extract_document_text(file_path: Path) -> str:
     if b"\x00" in raw_bytes[:8192] and suffix != ".pdf":
         return ""
     return raw_bytes.decode("utf-8", errors="replace").replace("\x00", "")
-
 
 
 def _should_skip_sync_parts(rel_parts: tuple[str, ...], is_multi_repo: bool) -> bool:
@@ -737,17 +772,11 @@ def sync_custom_domain_corpus_if_needed(
     kept_files = [f for f in existing_files if str(f.get("file_path")) not in mutated_paths]
     all_symbols: list[dict[str, Any]] = list(data.get("ast_symbols", []))
     mutated_symbol_ids = {
-        str(s["symbol_id"])
-        for s in all_symbols
-        if str(s.get("file_id")) in mutated_file_ids
+        str(s["symbol_id"]) for s in all_symbols if str(s.get("file_id")) in mutated_file_ids
     }
-    kept_symbols = [
-        s for s in all_symbols if str(s.get("file_id")) not in mutated_file_ids
-    ]
+    kept_symbols = [s for s in all_symbols if str(s.get("file_id")) not in mutated_file_ids]
     all_edges: list[dict[str, Any]] = list(data.get("ast_edges", []))
-    kept_edges = [
-        e for e in all_edges if str(e.get("source_symbol_id")) not in mutated_symbol_ids
-    ]
+    kept_edges = [e for e in all_edges if str(e.get("source_symbol_id")) not in mutated_symbol_ids]
 
     qual_to_sym_id: dict[str, str] = {
         str(s["qualified_name"]): str(s["symbol_id"]) for s in kept_symbols
@@ -789,9 +818,7 @@ def sync_custom_domain_corpus_if_needed(
             else rel_path
         )
         try:
-            parsed_syms, parsed_edges = extractor.parse_source(
-                raw_text, lang, file_path=sub_rel
-            )
+            parsed_syms, parsed_edges = extractor.parse_source(raw_text, lang, file_path=sub_rel)
         except Exception:
             parsed_syms, parsed_edges = [], []
 
@@ -1458,7 +1485,7 @@ class PreFlightValidator:
         explicit_candidates, unquoted_candidates = self.extract_prompt_candidates(user_prompt)
         all_candidates = explicit_candidates | unquoted_candidates
 
-        if not all_candidates:
+        if not all_candidates or (not visible_symbols and not visible_files):
             return [], []
 
         # Build repository symbol and file lookup indices (scoped to target repo when multi-repo)
@@ -1471,9 +1498,7 @@ class PreFlightValidator:
         distinct_all_repos = {f.repo_name for f in visible_files}
         scope_to_target_repo = bool(target_repos and len(distinct_all_repos) > 1)
         scoped_files = [
-            f
-            for f in visible_files
-            if not scope_to_target_repo or f.repo_name in target_repos
+            f for f in visible_files if not scope_to_target_repo or f.repo_name in target_repos
         ]
         scoped_file_ids = {f.file_id for f in scoped_files}
 
@@ -1493,18 +1518,33 @@ class PreFlightValidator:
 
         known_files_by_path: dict[str, CodeFileRecord] = {}
         known_files_by_name: dict[str, CodeFileRecord] = {}
+        known_files_by_stem: dict[str, CodeFileRecord] = {}
+        known_dirs: set[str] = set()
         for f in scoped_files:
             known_files_by_path[f.file_path] = f
             file_name = f.file_path.split("/")[-1]
             known_files_by_name[file_name] = f
+            known_files_by_stem[file_name.rsplit(".", 1)[0]] = f
+            known_dirs.update(part for part in f.file_path.split("/")[:-1] if part and part != ".")
 
         missing_reference_identifiers: list[str] = []
         novel_target_identifiers: list[str] = []
+        has_creation_verb = bool(
+            re.search(
+                r"\b(?:add|create|implement|introduce|write|define|generate|build|provision|configure|setup|deploy|declare)\b",
+                user_prompt,
+                re.IGNORECASE,
+            )
+        )
 
         for candidate in sorted(all_candidates):
             is_explicit = candidate in explicit_candidates
-            is_code_shaped = (
+            is_camel_or_pascal = (
                 any(c.isupper() for c in candidate[1:])
+                and any(c.islower() for c in candidate)
+            )
+            is_code_shaped = (
+                is_camel_or_pascal
                 or "_" in candidate
                 or "." in candidate
                 or (
@@ -1522,6 +1562,8 @@ class PreFlightValidator:
             is_existing_file = (
                 candidate in known_files_by_path
                 or candidate in known_files_by_name
+                or candidate in known_files_by_stem
+                or candidate in known_dirs
                 or any(f.endswith("/" + candidate) for f in known_files_by_path)
             )
 
@@ -1529,12 +1571,19 @@ class PreFlightValidator:
                 # Existing Reference Symbol/File -> Must be covered in code_slices
                 covered = False
                 for s in code_slices:
-                    if s.qualified_symbol == candidate or s.qualified_symbol.endswith(
-                        "." + candidate
+                    if (
+                        s.qualified_symbol == candidate
+                        or s.qualified_symbol.endswith("." + candidate)
+                        or s.qualified_symbol.endswith(":" + candidate)
                     ):
                         covered = True
                         break
-                    if s.file_path == candidate or s.file_path.endswith("/" + candidate):
+                    if (
+                        s.file_path == candidate
+                        or s.file_path.endswith("/" + candidate)
+                        or s.file_path.split("/")[-1].rsplit(".", 1)[0] == candidate
+                        or candidate in s.file_path.split("/")
+                    ):
                         covered = True
                         break
                     # Symbol span coverage
@@ -1555,12 +1604,122 @@ class PreFlightValidator:
                     if re.search(r"\b" + re.escape(candidate) + r"\b", s.verbatim_code_with_lines):
                         covered = True
                         break
+                    # Dot-separated identifier component coverage (e.g. Class.method)
+                    if "." in candidate and all(
+                        re.search(r"\b" + re.escape(part) + r"\b", s.verbatim_code_with_lines)
+                        or s.qualified_symbol.endswith("." + part)
+                        or s.qualified_symbol.endswith(":" + part)
+                        for part in candidate.split(".")
+                    ):
+                        covered = True
+                        break
 
                 if not covered:
                     missing_reference_identifiers.append(candidate)
             else:
-                # Novel identifier (to be created or not in repo) -> never causes failure
-                novel_target_identifiers.append(candidate)
+                # Candidate is NOT in repository symbol or file index.
+                # If candidate is already covered in retrieved code_slices, it is not missing.
+                covered = False
+                for s in code_slices:
+                    if (
+                        s.qualified_symbol == candidate
+                        or s.qualified_symbol.endswith("." + candidate)
+                        or s.qualified_symbol.endswith(":" + candidate)
+                    ):
+                        covered = True
+                        break
+                    if (
+                        s.file_path == candidate
+                        or s.file_path.endswith("/" + candidate)
+                        or s.file_path.split("/")[-1].rsplit(".", 1)[0] == candidate
+                        or candidate in s.file_path.split("/")
+                    ):
+                        covered = True
+                        break
+                    if re.search(r"\b" + re.escape(candidate) + r"\b", s.verbatim_code_with_lines):
+                        covered = True
+                        break
+                    if "." in candidate and all(
+                        re.search(r"\b" + re.escape(part) + r"\b", s.verbatim_code_with_lines)
+                        or s.qualified_symbol.endswith("." + part)
+                        or s.qualified_symbol.endswith(":" + part)
+                        for part in candidate.split(".")
+                    ):
+                        covered = True
+                        break
+
+                if covered:
+                    novel_target_identifiers.append(candidate)
+                    continue
+
+                # Partition novel identifiers to be created vs unindexed target symbols referenced
+                # in modification, inspection, refactoring, or deletion tasks.
+                is_novel_creation = bool(
+                    re.search(
+                        r"\b(?:add|create|implement|introduce|write|define|generate|build|provision|configure|setup|deploy|declare)\s+"
+                        r"(?:a\s+|an\s+|the\s+)?(?:new\s+)?"
+                        r"(?:[a-zA-Z0-9_\-]+\s+){0,3}"
+                        r"[`'\"]?" + re.escape(candidate) + r"[`'\"]?\b",
+                        user_prompt,
+                        re.IGNORECASE,
+                    )
+                    or (
+                        has_creation_verb
+                        and re.search(
+                            r"\b(?:and|or|,)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:helper\s+)?"
+                            r"(?:method|function|class|interface|type|struct)?\s*"
+                            r"[`'\"]?" + re.escape(candidate) + r"[`'\"]?\b",
+                            user_prompt,
+                            re.IGNORECASE,
+                        )
+                    )
+                )
+                is_modification_inspection = bool(
+                    re.search(
+                        r"\b(?:refactor|modify|update|inspect|debug|fix|patch|trace|delete|remove|call|import|export|from|into|in|within)\s+"
+                        r"(?:class|struct|function|def|fn|method|interface|type|file|module|symbol|component|service|handler|manager|controller|repo|repository|domain)?\s*"
+                        r"[`'\"]?" + re.escape(candidate) + r"[`'\"]?\b",
+                        user_prompt,
+                        re.IGNORECASE,
+                    )
+                    or re.search(
+                        r"\b(?:class|def|fn|function|method|interface|type|struct|enum|file|module)\s+[`'\"]?"
+                        + re.escape(candidate)
+                        + r"[`'\"]?\b",
+                        user_prompt,
+                        re.IGNORECASE,
+                    )
+                    or (
+                        "/" in candidate
+                        or candidate.endswith(
+                            (
+                                ".py",
+                                ".ts",
+                                ".tsx",
+                                ".js",
+                                ".jsx",
+                                ".cs",
+                                ".go",
+                                ".rs",
+                                ".java",
+                                ".json",
+                                ".yaml",
+                                ".yml",
+                                ".toml",
+                                ".sql",
+                                ".md",
+                            )
+                        )
+                    )
+                )
+                if (
+                    (is_explicit or is_code_shaped)
+                    and (is_modification_inspection or not is_novel_creation)
+                    and not is_novel_creation
+                ):
+                    missing_reference_identifiers.append(candidate)
+                else:
+                    novel_target_identifiers.append(candidate)
 
         return missing_reference_identifiers, novel_target_identifiers
 
@@ -1758,10 +1917,7 @@ class PreFlightValidator:
 
                 # If this is an internal repository symbol, verify it is present in code_slices
                 if target_sym is not None:
-                    if (
-                        edge.edge_kind == "CALLS"
-                        and target_sym.file_id != focus_sym.file_id
-                    ):
+                    if edge.edge_kind == "CALLS" and target_sym.file_id != focus_sym.file_id:
                         continue
                     sym_clean = target_sym.qualified_name.split(".")[-1].split("::")[-1]
                     edge_clean = edge.target_qualified_name.split(".")[-1].split("::")[-1]
@@ -1818,7 +1974,7 @@ class PreFlightValidator:
     def check_rrf_threshold(
         self,
         normalized_rrf_score: float | None,
-        cross_encoder_score: float | None,
+        cross_encoder_score: float | None = None,
     ) -> tuple[bool, float]:
         """Verifies top Normalized RRF score >= 0.55 (BLK-01) or cross-encoder score >= 0.60."""
         if normalized_rrf_score is not None:
@@ -1864,9 +2020,7 @@ class PreFlightValidator:
         elif isinstance(corpus_chunks_for_gate, dict):
             known_ids = set(corpus_chunks_for_gate.keys())
 
-        missing_ids = [
-            str(cit.chunk_id) for cit in citations if str(cit.chunk_id) not in known_ids
-        ]
+        missing_ids = [str(cit.chunk_id) for cit in citations if str(cit.chunk_id) not in known_ids]
         if missing_ids and bound_repo._repo is not None:
             candidate_domains = [domain_id]
             for scope in principal.allowed_scopes:
@@ -1946,6 +2100,15 @@ class PreFlightValidator:
             has_error = False
             err_msg = ""
 
+            # Direct caller slices and imported types are partial excerpts/windows;
+            # verify unclosed delimiters but do not treat excerpt boundaries as
+            # whole-module parse syntax errors
+            if s.modification_intent in (
+                ModificationIntent.DIRECT_CALLER,
+                ModificationIntent.IMPORTED_TYPE,
+            ):
+                continue
+
             # Check unclosed delimiters
             if self.slicer._has_unclosed_delimiters(cleaned_code):
                 has_error = True
@@ -2022,17 +2185,21 @@ class PreFlightValidator:
 
         permitted_slices: list[VerbatimCodeSlice] = []
         for s in code_slices:
-            f_scopes = file_scopes_map.get(s.file_path, {"public_eng", f"repo:{s.repo_name}"})
-            repo_scope = f"repo:{s.repo_name}"
-            repo_read_scope = f"repo:{s.repo_name}:read"
-            if (
-                bool(allowed_set & f_scopes)
-                or repo_scope in allowed_set
-                or repo_read_scope in allowed_set
-                or "public_eng" in allowed_set
-                or "*" in allowed_set
-                or "admin" in allowed_set
-            ):
+            if s.file_path not in file_scopes_map:
+                excised_items.append(f"code:{s.repo_name}/{s.file_path}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="scope",
+                        identifier=f"{s.repo_name}/{s.file_path}",
+                        reason=(
+                            f"Principal '{principal.user_id}' lacks visibility "
+                            f"into file '{s.file_path}'"
+                        ),
+                    )
+                )
+                continue
+            f_scopes = file_scopes_map[s.file_path]
+            if bool(allowed_set & f_scopes) or "*" in allowed_set or "admin" in allowed_set:
                 permitted_slices.append(s)
             else:
                 excised_items.append(f"code:{s.repo_name}/{s.file_path}")
@@ -2040,18 +2207,68 @@ class PreFlightValidator:
                     MissingItemRecord(
                         kind="scope",
                         identifier=f"{s.repo_name}/{s.file_path}",
-                        reason=f"Principal '{principal.user_id}' lacks required scopes {f_scopes}",
+                        reason=(
+                            f"Principal '{principal.user_id}' lacks required "
+                            f"scopes {sorted(f_scopes)}"
+                        ),
                     )
                 )
 
+        visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
+        chunk_scopes_map = {str(c.chunk_id): set(c.allowed_scopes) for c in visible_chunks}
+        citation_ids = [str(c.chunk_id) for c in citations if c.chunk_id]
+        if citation_ids:
+            specific_chunks = bound_repo.get_doc_chunks_by_ids(principal, domain_id, citation_ids)
+            for sc in specific_chunks:
+                chunk_scopes_map[str(sc.chunk_id)] = set(sc.allowed_scopes)
+
         permitted_citations: list[DocCitationSpan] = []
         for c in citations:
-            permitted_citations.append(c)
+            c_scopes = chunk_scopes_map.get(str(c.chunk_id))
+            if c_scopes is None:
+                excised_items.append(f"doc:{c.doc_id}:{c.chunk_id}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="scope",
+                        identifier=f"{c.doc_id}:{c.chunk_id}",
+                        reason=(
+                            f"Principal '{principal.user_id}' lacks visibility "
+                            f"into document chunk '{c.chunk_id}'"
+                        ),
+                    )
+                )
+            elif bool(allowed_set & c_scopes) or "*" in allowed_set or "admin" in allowed_set:
+                permitted_citations.append(c)
+            else:
+                excised_items.append(f"doc:{c.doc_id}:{c.chunk_id}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="scope",
+                        identifier=f"{c.doc_id}:{c.chunk_id}",
+                        reason=(
+                            f"Principal '{principal.user_id}' lacks required "
+                            f"scopes {sorted(c_scopes)}"
+                        ),
+                    )
+                )
 
         passed = True
         if len(code_slices) > 0 and len(permitted_slices) == 0:
             passed = False
-        if len(excised_items) > 0 and len(permitted_slices) == 0 and len(permitted_citations) == 0:
+        if len(citations) > 0 and len(permitted_citations) == 0:
+            passed = False
+        if len(excised_items) > 0 and (
+            len(permitted_slices) == 0 and len(permitted_citations) == 0
+        ):
+            passed = False
+        if any(
+            (
+                s.modification_intent == ModificationIntent.MODIFY_TARGET
+                or str(s.modification_intent) == "modify_target"
+            )
+            and f"code:{s.repo_name}/{s.file_path}" in excised_items
+            for s in code_slices
+        ):
             passed = False
 
         return passed, permitted_slices, permitted_citations, excised_items, missing_items
@@ -2113,11 +2330,17 @@ class PreFlightValidator:
                 continue
 
             f_rec = files_by_path.get(s.file_path)
-            if (
-                f_rec is not None
-                and f_rec.git_blob_sha
-                and f_rec.git_blob_sha != s.git_blob_sha
-            ):
+            if f_rec is None:
+                unanchored.append(f"Phantom file not found in repository: {s.file_path}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="provenance",
+                        identifier=s.file_path,
+                        reason=f"File not found in repository records: {s.file_path}",
+                    )
+                )
+                continue
+            if f_rec.git_blob_sha and f_rec.git_blob_sha != s.git_blob_sha:
                 unanchored.append(
                     f"Blob SHA mismatch in {s.file_path}: {s.git_blob_sha} vs {f_rec.git_blob_sha}"
                 )
@@ -2147,14 +2370,16 @@ class PreFlightValidator:
             return True, [], []
 
         visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
-        chunks_by_id = {c.chunk_id: c for c in visible_chunks}
+        chunks_by_id = {str(c.chunk_id): c for c in visible_chunks}
+        if isinstance(doc_chunks, list):
+            for c in doc_chunks:
+                if isinstance(c, DocChunkRecord):
+                    chunks_by_id[str(c.chunk_id)] = c
 
-        neg_resolutions = set(
-            r.lower() for r in self.domain_config.jira_negative_resolutions
-        )
+        neg_resolutions = set(r.lower() for r in self.domain_config.jira_negative_resolutions)
 
         for cit in citations:
-            chunk = chunks_by_id.get(cit.chunk_id)
+            chunk = chunks_by_id.get(str(cit.chunk_id))
             if chunk is not None:
                 if chunk.is_stale:
                     stale_items.append(f"stale_chunk:{cit.chunk_id}")
@@ -2165,7 +2390,8 @@ class PreFlightValidator:
                             reason=f"Chunk {cit.chunk_id} marked stale/superseded",
                         )
                     )
-                res_val = str(chunk.metadata.get("resolution", "")).strip().lower()
+                meta = getattr(chunk, "metadata_json", {}) or {}
+                res_val = str(meta.get("resolution", "")).strip().lower()
                 if res_val and res_val in neg_resolutions:
                     stale_items.append(f"negative_resolution:{cit.chunk_id}:{res_val}")
                     missing_items.append(
@@ -2377,6 +2603,19 @@ class PreFlightValidator:
                 "check_6_freshness": check_6_passed,
             }
             all_passed = all(check_results.values())
+            if not active_slices and not all_citations:
+                all_passed = False
+                check_results["check_2_closure"] = False
+                all_missing_items.append(
+                    MissingItemRecord(
+                        kind="file",
+                        identifier=active_domain,
+                        reason=(
+                            "Context pack contains zero code slices and zero "
+                            "supporting document citations"
+                        ),
+                    )
+                )
 
             bounce_back_feedback: str | None = None
             if not all_passed:

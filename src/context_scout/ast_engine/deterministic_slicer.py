@@ -157,10 +157,7 @@ class DeterministicSlicer:
         if len(method_spans) <= 3:
             return self.slice_lines(raw_content, start_line, end_line, line_number_width)
 
-        q_terms = {
-            w.lower()
-            for w in re.findall(r"[A-Za-z0-9_]{3,}", query_text)
-        }
+        q_terms = {w.lower() for w in re.findall(r"[A-Za-z0-9_]{3,}", query_text)}
         scored_methods: list[tuple[int, str]] = []
         for m_name, m_start, m_end in method_spans:
             if m_name == "__init__":
@@ -287,7 +284,8 @@ class DeterministicSlicer:
         else:
             error_reason = (
                 "Quote failed verification: quote is not an exact contiguous substring of source "
-                "text (tokens exist in source but sequence is altered or omitted)"
+                "text (tokens exist in source but sequence is altered or contains "
+                "token omission / omitted tokens)"
             )
 
         if strict:
