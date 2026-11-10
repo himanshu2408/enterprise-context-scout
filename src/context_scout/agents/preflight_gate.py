@@ -1539,9 +1539,8 @@ class PreFlightValidator:
 
         for candidate in sorted(all_candidates):
             is_explicit = candidate in explicit_candidates
-            is_camel_or_pascal = (
-                any(c.isupper() for c in candidate[1:])
-                and any(c.islower() for c in candidate)
+            is_camel_or_pascal = any(c.isupper() for c in candidate[1:]) and any(
+                c.islower() for c in candidate
             )
             is_code_shaped = (
                 is_camel_or_pascal
@@ -2025,11 +2024,9 @@ class PreFlightValidator:
             candidate_domains = [domain_id]
             for scope in principal.allowed_scopes:
                 if scope.startswith("domain:"):
-                    candidate_domains.append(scope.split(":", 1)[1])
-            if "default" not in candidate_domains:
-                candidate_domains.append("default")
-            if "quant_research_scout" not in candidate_domains:
-                candidate_domains.append("quant_research_scout")
+                    target_dom = scope.split(":", 1)[1].strip()
+                    if target_dom:
+                        candidate_domains.append(target_dom)
             for lookup_domain in dict.fromkeys(candidate_domains):
                 fetched = bound_repo.get_doc_chunks_by_ids(
                     principal=principal,
@@ -2064,6 +2061,71 @@ class PreFlightValidator:
             else:
                 failed_reasons.append(r)
         return res.passed, failed_reasons
+
+    def _is_valid_partial_window_truncation(
+        self,
+        cleaned_code: str,
+        slice_item: VerbatimCodeSlice,
+    ) -> bool:
+        """Determines if unclosed delimiters in a partial caller/type window
+        are an artifact of multi-line call/expression window truncation,
+        rather than a broken single-line syntax error.
+        """
+        lines = [ln.strip() for ln in cleaned_code.splitlines() if ln.strip()]
+        if not lines:
+            return False
+
+        # 1. Structural check: multi-line expression ending cleanly on an argument or comma
+        last_line = lines[-1]
+        if len(lines) >= 2 and last_line.endswith(","):
+            return True
+
+        # 2. Repository check: if underlying symbol exists in repository,
+        # check if expanding to full symbol boundaries closes the delimiter
+        if self.repo is not None:
+            try:
+                bound_repo = self._resolve_graph_repo(self.repo)
+                principal = self._resolve_principal(self.principal)
+                domain = self.domain_id or (
+                    self.domain_config.domain_id if self.domain_config else ""
+                )
+
+                candidate_domains = [domain] if domain else []
+                for scope in principal.allowed_scopes:
+                    if scope.startswith("domain:"):
+                        d = scope.split(":", 1)[1].strip()
+                        if d and d not in candidate_domains:
+                            candidate_domains.append(d)
+                if not candidate_domains:
+                    candidate_domains = ["default"]
+
+                for dom in candidate_domains:
+                    files = bound_repo.list_visible_code_files(principal, dom)
+                    file_rec = next((f for f in files if f.file_path == slice_item.file_path), None)
+                    if file_rec is not None:
+                        syms = bound_repo.list_visible_ast_symbols(principal, dom)
+                        matching_sym = next(
+                            (
+                                s
+                                for s in syms
+                                if s.qualified_name == slice_item.qualified_symbol
+                                and s.file_id == file_rec.file_id
+                            ),
+                            None,
+                        )
+                        if matching_sym is not None:
+                            full_lines = file_rec.raw_content.splitlines()[
+                                matching_sym.start_line - 1 : matching_sym.end_line
+                            ]
+                            full_code = "\n".join(full_lines)
+                            if not self.slicer._has_unclosed_delimiters(
+                                full_code, file_path=slice_item.file_path
+                            ):
+                                return True
+            except Exception as e:
+                logger.debug("Failed symbol boundary expansion check: %s", e)
+
+        return False
 
     def check_ast_syntax(
         self, code_slices: list[VerbatimCodeSlice]
@@ -2100,15 +2162,35 @@ class PreFlightValidator:
             has_error = False
             err_msg = ""
 
-            # Check unclosed delimiters on ALL slices (including partial caller / type windows)
-            if self.slicer._has_unclosed_delimiters(cleaned_code):
+            is_partial_window = s.modification_intent in (
+                ModificationIntent.DIRECT_CALLER,
+                ModificationIntent.IMPORTED_TYPE,
+            )
+
+            stripped_code, unclosed_quote = self.slicer._strip_comments_and_strings(
+                cleaned_code, file_path=s.file_path
+            )
+            has_delim_error = self.slicer._has_unclosed_delimiters(
+                cleaned_code, file_path=s.file_path
+            )
+
+            if unclosed_quote:
                 has_error = True
                 err_msg = "Unclosed syntax delimiters in code slice"
+            elif has_delim_error:
+                if is_partial_window:
+                    if not self._is_valid_partial_window_truncation(cleaned_code, s):
+                        has_error = True
+                        err_msg = "Unclosed syntax delimiters in code slice"
+                else:
+                    has_error = True
+                    err_msg = "Unclosed syntax delimiters in code slice"
 
-            # Check parentheses nesting depth (> 10 levels) on ALL slices
+            # Check parentheses nesting depth (> 10 levels) on sanitized code
+            # (excluding string literals & comments)
             depth = 0
             max_depth = 0
-            for ch in cleaned_code:
+            for ch in stripped_code:
                 if ch in "([{":
                     depth += 1
                     max_depth = max(max_depth, depth)
@@ -2117,14 +2199,6 @@ class PreFlightValidator:
             if max_depth > 10:
                 has_error = True
                 err_msg = f"Nesting depth ({max_depth}) exceeds maximum limit (10)"
-
-            # Direct caller slices and imported types are partial excerpts/windows;
-            # verify unclosed delimiters and nesting depth (performed above), but do not treat
-            # excerpt boundaries as whole-module parse syntax errors if delimiters are balanced.
-            is_partial_window = s.modification_intent in (
-                ModificationIntent.DIRECT_CALLER,
-                ModificationIntent.IMPORTED_TYPE,
-            )
 
             # Whole-module tree-sitter parsing is only performed on full slices
             # when no delimiter/nesting error exists
@@ -2231,11 +2305,9 @@ class PreFlightValidator:
             candidate_domains = [domain_id]
             for scope in principal.allowed_scopes:
                 if scope.startswith("domain:"):
-                    candidate_domains.append(scope.split(":", 1)[1])
-            if "default" not in candidate_domains:
-                candidate_domains.append("default")
-            if "quant_research_scout" not in candidate_domains:
-                candidate_domains.append("quant_research_scout")
+                    target_dom = scope.split(":", 1)[1].strip()
+                    if target_dom:
+                        candidate_domains.append(target_dom)
             for lookup_domain in dict.fromkeys(candidate_domains):
                 specific_chunks = bound_repo.get_doc_chunks_by_ids(
                     principal=principal,
