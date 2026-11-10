@@ -71,11 +71,13 @@ class CodeSpanPointer(BaseModel):
     line_end: int
     symbol_id: str | None = None
 
+
 class DocSpanPointer(BaseModel):
     source_type: Literal["confluence", "jira"]
     item_id: str
     version_or_status: str
     verbatim_quote: str
+
 
 class ExtractiveDiscoveryPack(BaseModel):
     query_id: str
@@ -83,8 +85,7 @@ class ExtractiveDiscoveryPack(BaseModel):
     doc_pointers: list[DocSpanPointer]
     raw_quotes: list[str]
     non_evidence_scratchpad: str = Field(
-        default="", 
-        description="Local reasoning scratchpad. NEVER passed to paid frontier models."
+        default="", description="Local reasoning scratchpad. NEVER passed to paid frontier models."
     )
 ```
 
@@ -99,8 +100,11 @@ The fixed 50% claim ratio is replaced by a configurable policy engine:
 ```python
 class ClaimVerificationPolicy(str, Enum):
     STRICT_ABSTAIN_ON_ANY_UNVERIFIED = "strict_abstain"  # Any unverified claim triggers abstention
-    PRUNE_AND_MARK_LOW_TRUST = "prune_and_warn"         # Prune unverifiable claims, continue if verified >= min_count
-    MIN_VERIFIED_COUNT = "min_verified_count"           # Require at least N verified claims
+    PRUNE_AND_MARK_LOW_TRUST = (
+        "prune_and_warn"  # Prune unverifiable claims, continue if verified >= min_count
+    )
+    MIN_VERIFIED_COUNT = "min_verified_count"  # Require at least N verified claims
+
 
 class ClaimVerifierConfig(BaseModel):
     policy: ClaimVerificationPolicy = ClaimVerificationPolicy.STRICT_ABSTAIN_ON_ANY_UNVERIFIED

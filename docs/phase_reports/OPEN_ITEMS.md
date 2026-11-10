@@ -29,6 +29,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
 | **E18** | Modularity / Proof | Extensibility proof: "Build your own plugin/connector" guide, toy plugin test, multi-company config test | OPEN | PENDING |
 | **F19** | Milestone 4 Design | Present deterministic abstention and Gemma claim verification design for user review before implementation | IMPLEMENTED | PENDING AUDITOR |
 | **F20** | Execution Protocol | Zero-assumptions rule: Message parent agent to ask user when uncertain; one concern per commit/PR | IN_PROGRESS | Sentinel Enforced |
+| **M4-OI-03** | Evaluation Hygiene | Real-Corpus Benchmark Evaluation Harness (Pinned SHAs, Tree-sitter AST in Postgres, Pinned URLs, User Approval for Cloning) | OPEN | PENDING |
 
 ---
 
@@ -199,6 +200,16 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
 
 #### D15. Live Pricing & Token Accounting Gate
 - **Requirement**: Enforce cost estimation gate before every paid model compute call with live search verification. Verify actual token accounting capabilities across subagents. Validate Vertex AI EU region and active model IDs against current official documentation without API keys.
+- **Status**: OPEN
+- **Evidence**:
+  ```
+  [Command]: PENDING AUDITOR RUN
+  [Output]: PENDING AUDITOR RUN
+  ```
+- **Auditor**: PENDING
+
+#### M4-OI-03. Real-Corpus Benchmark Evaluation Harness
+- **Requirement**: Manifest with pinned commit SHAs + public repo URLs, real files indexed through tree-sitter/polyglot parsers into PostgreSQL store, mechanically derived queries, replacing synthetic-fixture assertions once real-corpus run is available. Outbound cloning requires explicit user approval of proposed URLs, pinned SHAs, and disk size.
 - **Status**: OPEN
 - **Evidence**:
   ```
