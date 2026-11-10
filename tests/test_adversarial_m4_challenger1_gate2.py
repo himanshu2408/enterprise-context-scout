@@ -236,7 +236,7 @@ class TestLivePostgresBenchmarkIsolationAndTeardown:
         conn = postgres_admin_conn
         canary_domain = f"canary_verification_domain_{uuid.uuid4().hex[:8]}"
         canary_fid = uuid.uuid4()
-        shared_repo = "dotnet/eShop"
+        shared_repo = f"canary_repo_{uuid.uuid4().hex[:8]}"
 
         try:
             conn.execute(

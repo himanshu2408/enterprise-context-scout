@@ -39,6 +39,7 @@ and verified by the canary non-interference regression test.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import urllib.request
 import uuid
@@ -1152,6 +1153,8 @@ class TestStorageParityAndNeutralScopes:
                         "Flawed teardown mutation did not delete canary row as expected!"
                     )
             finally:
+                with contextlib.suppress(Exception):
+                    conn.rollback()
                 conn.execute(
                     "DELETE FROM code_files WHERE domain_id = %s;", (canary_domain,)
                 )
