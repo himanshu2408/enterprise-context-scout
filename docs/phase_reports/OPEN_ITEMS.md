@@ -27,9 +27,11 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
 | **E16** | Modularity / No Coupling | Elimination of company-specific names/workflows; modular plugins/configuration with neutral defaults | IMPLEMENTED (M4 Config) | PENDING AUDITOR |
 | **E17** | Modularity / Connectors | Support for Atlassian Cloud vs Server/Data Center and GitLab SaaS vs Self-Managed behind adapters | RESOLVED (Cloud Prioritized) | Confirmed by User |
 | **E18** | Modularity / Proof | Extensibility proof: "Build your own plugin/connector" guide, toy plugin test, multi-company config test | OPEN | PENDING |
-| **F19** | Milestone 4 Design | Present deterministic abstention and Gemma claim verification design for user review before implementation | IMPLEMENTED | PENDING AUDITOR |
+| **F19** | Milestone 4 Design | Present deterministic abstention and Gemma claim verification design for user review before implementation | RESOLVED (M4 Gate 4 Certified) | teamwork_auditor_m4_r4_1 (CLEAN) |
 | **F20** | Execution Protocol | Zero-assumptions rule: Message parent agent to ask user when uncertain; one concern per commit/PR | IN_PROGRESS | Sentinel Enforced |
-| **M4-OI-03** | Evaluation Hygiene | Real-Corpus Benchmark Evaluation Harness (Pinned SHAs, Tree-sitter AST in Postgres, Pinned URLs, User Approval for Cloning) | OPEN | PENDING |
+| **M4-OI-01** | Parsers / Verification | AST Syntax Gate: Delimiter sanitization & valid partial caller window truncation without false positives | RESOLVED (Iter 4) | teamwork_auditor_m4_r4_1 (CLEAN) |
+| **M4-OI-02** | Security / Tenancy | Rule E16 Multi-Tenant Isolation: Purge hardcoded fallback domains ("default", "quant_research_scout") | RESOLVED (Iter 4) | teamwork_auditor_m4_r4_1 (CLEAN) |
+| **M4-OI-03** | Evaluation Hygiene | Real-Corpus Benchmark Evaluation Harness (Pinned SHAs, Tree-sitter AST in Postgres, Pinned URLs, User Approval for Cloning) | OPEN (Awaiting User Approval) | PENDING |
 
 ---
 
@@ -266,17 +268,18 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
 
 #### F19. Milestone 4 Design Review & Production Implementation
 - **Requirement**: Present the complete Milestone 4 design (deterministic 6-check abstention code gates, exact NFKC claim-to-source-span mapping, and wrong-answer rate benchmarking) for explicit user review, and implement with mechanical $0-spend proof.
-- **Status**: IMPLEMENTED (Verified by Worker; Pending Forensic Auditor Review)
+- **Status**: RESOLVED (Milestone 4 Iteration 4 Certified CLEAN)
 - **Evidence**:
   ```
-  [Command]: uv run pytest tests/test_zero_spend_abstention.py tests/test_preflight_gate.py tests/e2e/test_tier4_statistical_suites.py -v
-  [Output]: 47 passed in 1.10s
-    - tests/test_zero_spend_abstention.py: 4/4 passed (all 300 EVAL-01 unanswerable queries verified with 0 calls, 0 paid tokens, Clopper-Pearson 95% lower bound 98.78%).
-    - tests/test_preflight_gate.py: 13/13 passed (6 checks: AST syntax, 1-hop closure, RRF 0.65 threshold, scope mirroring, cryptographic provenance, document freshness).
-    - tests/e2e/test_tier4_statistical_suites.py: 30/30 passed (EVAL-01..EVAL-05 statistical suites).
+  [Command]: uv run pytest tests/test_zero_spend_abstention.py tests/test_preflight_gate.py tests/e2e/ -v
+  [Output]: 371 passed in 68.35s (13 in test_zero_spend_abstention, 18 in test_preflight_gate, 340 in e2e).
+    - tests/test_zero_spend_abstention.py: 13/13 passed (all 300 EVAL-01 unanswerable queries verified with 0 calls, 0 paid tokens, dynamic Clopper-Pearson 95% two-sided lower bound 98.78%, one-sided lower bound 99.01%, error rate <= 1.0%; all 300 EVAL-04 answerable queries verified with 0.0% wrongful refusal rate).
+    - tests/test_preflight_gate.py: 18/18 passed (6 checks: AST syntax, 1-hop closure, RRF 0.65 threshold, scope mirroring, cryptographic provenance, document freshness).
+    - Live PostgreSQL 17 Forced RLS verified across all 7 tables with 0 residual rows post-teardown.
   [Design Artifact]: enterprise-context-scout/docs/M4_DESIGN.md
+  [Phase Report]: enterprise-context-scout/docs/phase_reports/M4_PHASE_REPORT.md
   ```
-- **Auditor**: PENDING AUDITOR RUN
+- **Auditor**: teamwork_auditor_m4_r4_1 (CERTIFIED CLEAN across all 12 forensic checks)
 
 #### F20. Zero-Assumptions & Single-Concern PR Discipline
 - **Requirement**: Always ask parent/user when uncertain; never make unverified assumptions. Implement fixes in focused, isolated branches and PRs (one concern per commit/PR).
@@ -287,3 +290,29 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
   [Output]: Zero unapproved assumptions; user directives recorded in ORIGINAL_REQUEST.md and OPEN_ITEMS.md
   ```
 - **Auditor**: Sentinel Monitored
+
+#### M4-OI-01. AST Syntax Gate Delimiter Sanitization & Valid Partial Window Truncation
+- **Requirement**: Ensure Preflight Check 1 (AST syntax) does not produce false positives on valid multi-line continuation argument windows ending in commas (resolving the Guard 17 regression) or strings/comments containing delimiters, while catching unclosed quotes and single-line truncated expressions.
+- **Status**: RESOLVED (Milestone 4 Iteration 4)
+- **Evidence**:
+  ```
+  [Command]: uv run pytest tests/test_preflight_gate.py tests/test_adversarial_m4_challenger1_iter3.py tests/test_adversarial_m4_challenger1_iter4.py -v
+  [Output]: 47 passed in 0.25s (18 in test_preflight_gate, 17 in iter3, 12 in iter4).
+  [Command]: uv run pytest tests/test_enterprise_regression_guards.py -k test_multi_persona_natural_language_queries_across_code_and_quant_domains -v
+  [Output]: 1 passed, 24 deselected in 15.80s (Guard 17 regression resolved).
+  [Implementation]:
+    - ast_engine/deterministic_slicer.py: _strip_comments_and_strings strips Python, TypeScript, and C# comments and quotes, and flags unclosed quotes.
+    - agents/preflight_gate.py: _is_valid_partial_window_truncation permits valid multi-line continuation arguments ending in commas for DIRECT_CALLER and IMPORTED_TYPE slices, while rejecting single-line broken expressions and never exempting MODIFY_TARGET.
+  ```
+- **Auditor**: teamwork_auditor_m4_r4_1 (Check 8 & Check 9 PASS)
+
+#### M4-OI-02. Multi-Tenant Candidate Domain Isolation & Fallback Purge (Rule E16)
+- **Requirement**: Eliminate hardcoded domain strings ("default", "quant_research_scout") from candidate domain resolution in PreFlightValidator, ensuring strict multi-tenant isolation and adherence to Rule E16 (zero workflow coupling / neutral defaults).
+- **Status**: RESOLVED (Milestone 4 Iteration 4)
+- **Evidence**:
+  ```
+  [Command]: uv run pytest tests/test_adversarial_m4_challenger1_iter3.py tests/test_adversarial_m4_challenger1_iter4.py -k TestCrossDomainTenantIsolationStressing -v
+  [Output]: 8 passed in 0.12s.
+  [Verification]: Direct code audit of preflight_gate.py lines 2024-2030 and 2304-2311 confirms candidate domains are populated strictly from [domain_id] plus explicit signed domain:* scopes. Challenger tests assert is_leaked is False.
+  ```
+- **Auditor**: teamwork_auditor_m4_r4_1 (Check 4 & Check 7 PASS)
