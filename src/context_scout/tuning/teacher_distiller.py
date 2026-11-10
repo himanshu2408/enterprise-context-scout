@@ -748,8 +748,11 @@ class TeacherDistiller:
         pool_shuffled = list(pool_symbols)
         self._rng.shuffle(pool_shuffled)
         sym_idx = 0
+        max_attempts = max(100, target_count * 20)
+        attempts = 0
 
-        while len(split_examples) < target_count and pool_shuffled:
+        while len(split_examples) < target_count and pool_shuffled and attempts < max_attempts:
+            attempts += 1
             sym = pool_shuffled[sym_idx % len(pool_shuffled)]
             sym_idx += 1
             f_rec = files_by_id[sym.file_id]
