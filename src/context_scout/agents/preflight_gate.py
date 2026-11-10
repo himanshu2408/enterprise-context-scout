@@ -2100,21 +2100,12 @@ class PreFlightValidator:
             has_error = False
             err_msg = ""
 
-            # Direct caller slices and imported types are partial excerpts/windows;
-            # verify unclosed delimiters but do not treat excerpt boundaries as
-            # whole-module parse syntax errors
-            if s.modification_intent in (
-                ModificationIntent.DIRECT_CALLER,
-                ModificationIntent.IMPORTED_TYPE,
-            ):
-                continue
-
-            # Check unclosed delimiters
+            # Check unclosed delimiters on ALL slices (including partial caller / type windows)
             if self.slicer._has_unclosed_delimiters(cleaned_code):
                 has_error = True
                 err_msg = "Unclosed syntax delimiters in code slice"
 
-            # Check parentheses nesting depth (> 10 levels)
+            # Check parentheses nesting depth (> 10 levels) on ALL slices
             depth = 0
             max_depth = 0
             for ch in cleaned_code:
@@ -2127,25 +2118,34 @@ class PreFlightValidator:
                 has_error = True
                 err_msg = f"Nesting depth ({max_depth}) exceeds maximum limit (10)"
 
-            # Parse with tree-sitter based on file extension
-            ext = Path(s.file_path).suffix.lower()
-            code_b = cleaned_code.encode("utf-8")
-            if ext in (".py",) and py_parser is not None:
-                tree = py_parser.parse(code_b)
-                if tree.root_node.has_error:
-                    has_error = True
-                    err_msg = "Tree-sitter Python parser reported syntax error"
-            elif ext in (".ts", ".js") and ts_parser is not None:
-                tree = ts_parser.parse(code_b)
-                if tree.root_node.has_error:
-                    has_error = True
-                    err_msg = "Tree-sitter TypeScript parser reported syntax error"
-            elif ext in (".tsx", ".jsx") and tsx_parser is not None:
-                tree = tsx_parser.parse(code_b)
-                if tree.root_node.has_error:
-                    has_error = True
-                    err_msg = "Tree-sitter TSX parser reported syntax error"
+            # Direct caller slices and imported types are partial excerpts/windows;
+            # verify unclosed delimiters and nesting depth (performed above), but do not treat
+            # excerpt boundaries as whole-module parse syntax errors if delimiters are balanced.
+            is_partial_window = s.modification_intent in (
+                ModificationIntent.DIRECT_CALLER,
+                ModificationIntent.IMPORTED_TYPE,
+            )
 
+            # Whole-module tree-sitter parsing is only performed on full slices
+            # when no delimiter/nesting error exists
+            if not has_error and not is_partial_window:
+                ext = Path(s.file_path).suffix.lower()
+                code_b = cleaned_code.encode("utf-8")
+                if ext in (".py",) and py_parser is not None:
+                    tree = py_parser.parse(code_b)
+                    if tree.root_node.has_error:
+                        has_error = True
+                        err_msg = "Tree-sitter Python parser reported syntax error"
+                elif ext in (".ts", ".js") and ts_parser is not None:
+                    tree = ts_parser.parse(code_b)
+                    if tree.root_node.has_error:
+                        has_error = True
+                        err_msg = "Tree-sitter TypeScript parser reported syntax error"
+                elif ext in (".tsx", ".jsx") and tsx_parser is not None:
+                    tree = tsx_parser.parse(code_b)
+                    if tree.root_node.has_error:
+                        has_error = True
+                        err_msg = "Tree-sitter TSX parser reported syntax error"
             if has_error:
                 ident = s.qualified_symbol or s.file_path
                 diag_msg = f"MALFORMED_SYNTAX in {s.file_path} ({ident}): {err_msg}"

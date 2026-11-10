@@ -793,3 +793,128 @@ class TestPreFlightValidator:
         assert res_fail.passed is False
         assert res_fail.diagnostic.paid_tokens_spent == 0
         assert "Check 3 (Normalized RRF Score" in res_fail.diagnostic.reason
+
+    @pytest.mark.parametrize(
+        "intent",
+        [ModificationIntent.DIRECT_CALLER, ModificationIntent.IMPORTED_TYPE],
+    )
+    def test_check_1_fails_on_unclosed_delimiters_in_partial_windows(
+        self,
+        test_repo: InMemoryRLSRepository,
+        principal: PrincipalContext,
+        slicer: DeterministicSlicer,
+        intent: ModificationIntent,
+    ) -> None:
+        """Check 1: DIRECT_CALLER and IMPORTED_TYPE slices fail when delimiters are unclosed."""
+        validator = PreFlightValidator(
+            repo=test_repo,
+            slicer=slicer,
+            principal=principal,
+            domain_id=DOMAIN_ID,
+        )
+        bad_slice = VerbatimCodeSlice(
+            repo_name=REPO_NAME,
+            file_path="src/trading_strategies/order_flow_imbalance.py",
+            start_line=1,
+            end_line=2,
+            qualified_symbol=f"trading_strategies.test.{intent.value}",
+            selection_reason="Partial slice with unclosed delimiter",
+            modification_intent=intent,
+            git_commit_sha="commit_ofi_123",
+            git_blob_sha="blob_ofi_456",
+            verbatim_code_with_lines="1 | def snippet():\n2 |     data = (1 + 2",
+            auto_expanded_by_ast=False,
+        )
+        # 1. Direct check_ast_syntax call
+        passed, errors, missing = validator.check_ast_syntax([bad_slice])
+        assert passed is False
+        assert len(errors) == 1
+        assert "Unclosed syntax delimiters in code slice" in errors[0]
+        assert any(m.kind == "syntax" for m in missing)
+
+        # 2. End-to-end validate() call
+        report = validator.validate(
+            code_slices=[bad_slice],
+            user_prompt=f"Refactor {bad_slice.qualified_symbol}",
+            normalized_rrf_score=0.90,
+        )
+        assert report.passed is False
+        assert report.check_results["check_1_syntax"] is False
+        assert any("Unclosed syntax delimiters" in e for e in report.syntax_errors)
+
+    @pytest.mark.parametrize(
+        "intent",
+        [ModificationIntent.DIRECT_CALLER, ModificationIntent.IMPORTED_TYPE],
+    )
+    def test_check_1_passes_balanced_partial_windows_without_module_parse_errors(
+        self,
+        test_repo: InMemoryRLSRepository,
+        principal: PrincipalContext,
+        slicer: DeterministicSlicer,
+        intent: ModificationIntent,
+    ) -> None:
+        """Check 1: DIRECT_CALLER and IMPORTED_TYPE pass when delimiters are balanced,
+        even if the partial window is not a valid whole-module AST.
+        """
+        validator = PreFlightValidator(
+            repo=test_repo,
+            slicer=slicer,
+            principal=principal,
+            domain_id=DOMAIN_ID,
+        )
+        # In TypeScript, a lone interface property `readonly x: (number | string);` fails
+        # whole-module TS parser, but is balanced and must pass Check 1 partial window exemption.
+        balanced_slice = VerbatimCodeSlice(
+            repo_name=REPO_NAME,
+            file_path="src/trading_strategies/types.ts",
+            start_line=5,
+            end_line=7,
+            qualified_symbol=f"trading_strategies.types.{intent.value}",
+            selection_reason="Balanced partial window",
+            modification_intent=intent,
+            git_commit_sha="commit_ofi_123",
+            git_blob_sha="blob_ofi_456",
+            verbatim_code_with_lines=(
+                "5 |   readonly x: (number | string);\n6 |   readonly y: boolean;"
+            ),
+            auto_expanded_by_ast=True,
+        )
+        passed, errors, missing = validator.check_ast_syntax([balanced_slice])
+        assert passed is True
+        assert len(errors) == 0
+        assert len(missing) == 0
+
+    def test_check_1_fails_on_nesting_depth_exceeded_in_partial_window(
+        self,
+        test_repo: InMemoryRLSRepository,
+        principal: PrincipalContext,
+        slicer: DeterministicSlicer,
+    ) -> None:
+        """Check 1: DIRECT_CALLER fails when parentheses nesting depth exceeds 10 levels."""
+        validator = PreFlightValidator(
+            repo=test_repo,
+            slicer=slicer,
+            principal=principal,
+            domain_id=DOMAIN_ID,
+        )
+        deep_slice = VerbatimCodeSlice(
+            repo_name=REPO_NAME,
+            file_path="src/trading_strategies/order_flow_imbalance.py",
+            start_line=1,
+            end_line=2,
+            qualified_symbol="trading_strategies.deep.DeepCaller",
+            selection_reason="Deep nesting caller",
+            modification_intent=ModificationIntent.DIRECT_CALLER,
+            git_commit_sha="commit_ofi_123",
+            git_blob_sha="blob_ofi_456",
+            verbatim_code_with_lines=(
+                "1 | def deep_caller():\n2 |     return ((((((((((((42))))))))))))"
+            ),
+            auto_expanded_by_ast=False,
+        )
+        passed, errors, missing = validator.check_ast_syntax([deep_slice])
+        assert passed is False
+        assert len(errors) == 1
+        assert "Nesting depth (12) exceeds maximum limit (10)" in errors[0]
+        assert any(m.kind == "syntax" for m in missing)
+
