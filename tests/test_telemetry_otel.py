@@ -593,4 +593,3 @@ def test_standardized_and_legacy_attribute_dual_emission() -> None:
     assert attrs[ATTR_NORMALIZED_RRF_SCORE] == 0.95
     assert attrs[ATTR_CITATIONS_VERIFIED] is True
     assert attrs[ATTR_AUTO_ATTACHED_AST_COUNT] == 5
-

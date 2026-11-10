@@ -191,9 +191,7 @@ class TestFourPhaseSpanHierarchyAndNesting:
         assert root_span.attributes[ATTR_SCOUT_PHASE] == PHASE_WORKFLOW
         assert root_span.status.status_code == trace.StatusCode.OK
 
-    def test_multi_tier_dag_subspan_hierarchy(
-        self, isolated_tracer: ScoutTelemetryTracer
-    ) -> None:
+    def test_multi_tier_dag_subspan_hierarchy(self, isolated_tracer: ScoutTelemetryTracer) -> None:
         tracer = isolated_tracer
 
         with (
@@ -500,16 +498,14 @@ class TestStructuredJsonSpanExporterStressing:
         exporter = StructuredJsonSpanExporter(stream=stream)
 
         processor_module = pytest.importorskip("opentelemetry.sdk.trace.export")
-        isolated_tracer.provider.add_span_processor(
-            processor_module.SimpleSpanProcessor(exporter)
-        )
+        isolated_tracer.provider.add_span_processor(processor_module.SimpleSpanProcessor(exporter))
 
         test_payloads = [
-            'multiline\ntext\r\nwith\nbreaks\tand\ttabs',
+            "multiline\ntext\r\nwith\nbreaks\tand\ttabs",
             '{"injected_json": true, "payload": ["item1", 123]}',
-            'quotes: "double" and \'single\' and `backtick`',
-            'unicode: \u2603 \u2705 \u03c0 \u222b, homoglyphs: \u0430 (cyrillic) vs a (latin)',
-            'special_chars: & < > / \\ \b \f \0 (null byte)',
+            "quotes: \"double\" and 'single' and `backtick`",
+            "unicode: \u2603 \u2705 \u03c0 \u222b, homoglyphs: \u0430 (cyrillic) vs a (latin)",
+            "special_chars: & < > / \\ \b \f \0 (null byte)",
         ]
 
         with isolated_tracer.trace_workflow(span_name="scout.workflow.json_stress") as wf:
@@ -541,9 +537,7 @@ class TestStructuredJsonSpanExporterStressing:
         exporter = StructuredJsonSpanExporter(stream=stream)
 
         processor_module = pytest.importorskip("opentelemetry.sdk.trace.export")
-        isolated_tracer.provider.add_span_processor(
-            processor_module.SimpleSpanProcessor(exporter)
-        )
+        isolated_tracer.provider.add_span_processor(processor_module.SimpleSpanProcessor(exporter))
 
         with (
             isolated_tracer.trace_workflow(span_name="scout.workflow") as wf,
@@ -608,9 +602,7 @@ class TestStructuredJsonSpanExporterStressing:
         exporter = StructuredJsonSpanExporter(stream=stream)
 
         processor_module = pytest.importorskip("opentelemetry.sdk.trace.export")
-        isolated_tracer.provider.add_span_processor(
-            processor_module.SimpleSpanProcessor(exporter)
-        )
+        isolated_tracer.provider.add_span_processor(processor_module.SimpleSpanProcessor(exporter))
 
         with isolated_tracer.trace_workflow(span_name="span_batch_1"):
             pass
@@ -662,9 +654,7 @@ class TestW3CContextPropagationBoundaryStressing:
         assert trace.format_trace_id(child_spans[0].context.trace_id) == expected_trace_hex
         assert trace.format_span_id(child_spans[0].parent.span_id) == expected_span_hex
 
-    def test_carrier_injection_edge_cases(
-        self, isolated_tracer: ScoutTelemetryTracer
-    ) -> None:
+    def test_carrier_injection_edge_cases(self, isolated_tracer: ScoutTelemetryTracer) -> None:
         tracer = isolated_tracer
 
         with tracer.tracer.start_as_current_span("test_carrier_span") as span:
@@ -713,18 +703,14 @@ class TestW3CContextPropagationBoundaryStressing:
         extracted_ctx = extract_trace_context(carrier)
 
         # Must gracefully fall back to a fresh root span
-        with tracer.tracer.start_as_current_span(
-            "fallback_span", context=extracted_ctx
-        ) as s:
+        with tracer.tracer.start_as_current_span("fallback_span", context=extracted_ctx) as s:
             assert s.parent is None, f"Expected None parent for '{corrupted_header}'"
             assert s.context.trace_id != 0, f"Expected non-zero trace ID for '{corrupted_header}'"
             trace_id_hex = trace.format_trace_id(s.context.trace_id)
             assert len(trace_id_hex) == 32
             int(trace_id_hex, 16)
 
-    def test_empty_carrier_graceful_fallback(
-        self, isolated_tracer: ScoutTelemetryTracer
-    ) -> None:
+    def test_empty_carrier_graceful_fallback(self, isolated_tracer: ScoutTelemetryTracer) -> None:
         tracer = isolated_tracer
         carrier: dict[str, str] = {}
         extracted_ctx = extract_trace_context(carrier)

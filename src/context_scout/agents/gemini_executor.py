@@ -560,9 +560,8 @@ class GeminiImplementationExecutor:
         elif repo is not None and conn is not None:
             consumed = repo.get_principal_paid_tokens_consumed(conn, principal.user_id)
 
-        budget_cap = (
-            getattr(principal, "session_budget_tokens", None)
-            or getattr(principal, "max_session_paid_tokens", 16_000)
+        budget_cap = getattr(principal, "session_budget_tokens", None) or getattr(
+            principal, "max_session_paid_tokens", 16_000
         )
         projected = consumed + pack.pack_token_count + max_output_tokens
         if projected > budget_cap:

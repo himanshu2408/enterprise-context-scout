@@ -156,9 +156,7 @@ class StructuredJsonSpanExporter(SpanExporter):
         for span in spans:
             trace_id_hex = trace.format_trace_id(span.context.trace_id)
             span_id_hex = trace.format_span_id(span.context.span_id)
-            parent_id_hex = (
-                trace.format_span_id(span.parent.span_id) if span.parent else None
-            )
+            parent_id_hex = trace.format_span_id(span.parent.span_id) if span.parent else None
 
             # Convert nanoseconds to milliseconds
             start_ms = (span.start_time or 0) / 1_000_000.0
@@ -215,9 +213,7 @@ class BaseScoutSpanContext:
     def set_attribute(self, key: str, value: Any) -> None:
         self.span.set_attribute(key, value)
 
-    def set_status(
-        self, status_code: trace.StatusCode, description: str | None = None
-    ) -> None:
+    def set_status(self, status_code: trace.StatusCode, description: str | None = None) -> None:
         self.span.set_status(status_code, description=description)
 
     def record_abstention(self, diagnostic: Any) -> None:
@@ -292,9 +288,7 @@ class SlicingSpanContext(BaseScoutSpanContext):
         self.span.set_attribute("scout.slicing.file_path", file_path)
         self.span.set_attribute("scout.slicing.lines_count", lines_sliced)
         self.span.set_attribute("scout.slicing.syntax_valid", syntax_valid)
-        self.span.set_status(
-            trace.StatusCode.OK if syntax_valid else trace.StatusCode.ERROR
-        )
+        self.span.set_status(trace.StatusCode.OK if syntax_valid else trace.StatusCode.ERROR)
 
 
 class GatingSpanContext(BaseScoutSpanContext):
@@ -460,18 +454,14 @@ class ScoutTelemetryTracer:
         self.tracer: trace.Tracer = self.provider.get_tracer(service_name)
 
     @classmethod
-    def get_instance(
-        cls, service_name: str = "enterprise-context-scout"
-    ) -> ScoutTelemetryTracer:
+    def get_instance(cls, service_name: str = "enterprise-context-scout") -> ScoutTelemetryTracer:
         """Retrieves or initializes the global singleton tracer."""
         if cls._instance is None:
             cls._instance = cls(service_name=service_name)
         return cls._instance
 
     @classmethod
-    def reset_instance(
-        cls, service_name: str = "enterprise-context-scout"
-    ) -> ScoutTelemetryTracer:
+    def reset_instance(cls, service_name: str = "enterprise-context-scout") -> ScoutTelemetryTracer:
         """Resets the singleton tracer instance for isolated test execution."""
         cls._instance = cls(service_name=service_name)
         return cls._instance

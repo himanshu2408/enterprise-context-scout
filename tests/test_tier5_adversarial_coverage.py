@@ -122,11 +122,7 @@ def in_memory_repo(base_principal: PrincipalContext) -> InMemoryRLSRepository:
     """Populated InMemoryRLSRepository for preflight gate tests."""
     repo = InMemoryRLSRepository()
     file_id = uuid.uuid4()
-    code_content = (
-        "class OrderBook:\n"
-        "    def get_spread(self) -> float:\n"
-        "        return 0.5\n"
-    )
+    code_content = "class OrderBook:\n    def get_spread(self) -> float:\n        return 0.5\n"
     repo.insert_code_file(
         base_principal,
         CodeFileRecord(
@@ -926,9 +922,7 @@ class TestCostGovernanceAdversarial:
         tracker.record_consumption(principal, input_tokens=10_000, output_tokens=0, cost_usd=24.90)
 
         # Additional $0.20 brings projected spend to $25.10 > $25.00 ceiling
-        with pytest.raises(
-            KillSwitchTriggeredException, match=r"Automated kill-switch triggered"
-        ):
+        with pytest.raises(KillSwitchTriggeredException, match=r"Automated kill-switch triggered"):
             tracker.check_and_reserve(principal, projected_tokens=1_000, estimated_cost_usd=0.20)
 
     def test_thread_safe_token_reservation_concurrency(self) -> None:

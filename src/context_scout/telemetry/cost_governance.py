@@ -262,20 +262,26 @@ class PaidComputeCostEstimator:
         out_expected = min(out_high, min(1500, max(out_low, max_output_tokens // 2)))
 
         cost_low = round(
-            (estimated_input_tokens * pricing.input_usd_per_1m_low
-             + out_low * pricing.output_usd_per_1m_low)
+            (
+                estimated_input_tokens * pricing.input_usd_per_1m_low
+                + out_low * pricing.output_usd_per_1m_low
+            )
             / 1_000_000.0,
             6,
         )
         cost_expected = round(
-            (estimated_input_tokens * pricing.input_usd_per_1m_expected
-             + out_expected * pricing.output_usd_per_1m_expected)
+            (
+                estimated_input_tokens * pricing.input_usd_per_1m_expected
+                + out_expected * pricing.output_usd_per_1m_expected
+            )
             / 1_000_000.0,
             6,
         )
         cost_high = round(
-            (estimated_input_tokens * pricing.input_usd_per_1m_high
-             + out_high * pricing.output_usd_per_1m_high)
+            (
+                estimated_input_tokens * pricing.input_usd_per_1m_high
+                + out_high * pricing.output_usd_per_1m_high
+            )
             / 1_000_000.0,
             6,
         )
@@ -401,9 +407,8 @@ class SessionBudgetTracker:
             BudgetExceededException: if projected tokens exceed session budget cap.
             KillSwitchTriggeredException: if projected cost exceeds safety ceiling.
         """
-        budget_cap = (
-            getattr(principal, "session_budget_tokens", None)
-            or getattr(principal, "max_session_paid_tokens", 16_000)
+        budget_cap = getattr(principal, "session_budget_tokens", None) or getattr(
+            principal, "max_session_paid_tokens", 16_000
         )
 
         with self._lock:

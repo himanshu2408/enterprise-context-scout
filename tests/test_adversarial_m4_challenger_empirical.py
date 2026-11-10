@@ -1020,7 +1020,11 @@ class TestMutationProofs:
         assert baseline_res.passed is False
 
         # Mutate: bypass syntax check
-        monkeypatch.setattr(validator, "check_ast_syntax", lambda slices: (True, [], []))
+        monkeypatch.setattr(
+            validator,
+            "check_ast_syntax",
+            lambda slices, *args, **kwargs: (True, [], []),
+        )
         mutated_res = validator.evaluate_gate(
             code_slices=[broken_slice],
             user_prompt="Fix broken",

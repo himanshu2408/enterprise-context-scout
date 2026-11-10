@@ -265,9 +265,7 @@ def test_automated_kill_switch_on_session_spend(
 
     # Projected cost adds $6.00 -> $26.00 > $25.00 -> MUST RAISE
     with pytest.raises(KillSwitchTriggeredException, match="projected spend"):
-        budget_tracker.check_and_reserve(
-            principal_a, projected_tokens=100, estimated_cost_usd=6.00
-        )
+        budget_tracker.check_and_reserve(principal_a, projected_tokens=100, estimated_cost_usd=6.00)
 
 
 def test_multi_principal_budget_and_tracker_isolation(
@@ -337,4 +335,3 @@ def test_cost_estimator_boundary_condition_prevents_output_token_inversion(
     )
     assert report_1.estimated_output_tokens == 1
     assert report_1.max_output_tokens == 1
-

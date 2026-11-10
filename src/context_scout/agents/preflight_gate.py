@@ -9,6 +9,7 @@ Enforces four deterministic gates before calling paid Gemini execution models:
 
 from __future__ import annotations
 
+import builtins
 import datetime
 import json
 import keyword
@@ -54,6 +55,10 @@ logger = logging.getLogger(__name__)
 
 # Standard language keywords and prompt instruction stopwords to prevent false-positive identifiers
 PYTHON_KEYWORDS: Final[set[str]] = set(keyword.kwlist)
+PYTHON_BUILTINS: Final[set[str]] = set(dir(builtins)) | {
+    "WinError",
+    "WindowsError",
+}
 
 TYPESCRIPT_KEYWORDS: Final[set[str]] = {
     "abstract",
@@ -1428,8 +1433,17 @@ class PreFlightValidator:
         if not user_prompt:
             return set(), set()
 
+        # Strip URLs before extracting paths or backticks to avoid treating
+        # URL schemes/domains as file paths
+        prompt_clean = re.sub(r"(?:https?|ftp|git|file)://[^\s`'\"]+", " ", user_prompt)
+        prompt_clean = re.sub(
+            r"(?:\b|//)[a-zA-Z0-9_\-\.]+\.(?:org|com|net|io|edu|gov|spec)\b[^\s`'\"]*",
+            " ",
+            prompt_clean,
+        )
+
         # 1. Backticked tokens (`symbol_or_path`), ignoring multi-line fenced code blocks
-        prompt_without_fences = re.sub(r"```.*?```", " ", user_prompt, flags=re.DOTALL)
+        prompt_without_fences = re.sub(r"```.*?```", " ", prompt_clean, flags=re.DOTALL)
         backtick_tokens = set(re.findall(r"`([^`\n]+)`", prompt_without_fences))
 
         # 2. File paths (e.g., src/strategies/order_flow.py or models.py)
@@ -1441,17 +1455,40 @@ class PreFlightValidator:
 
         explicit_tokens: set[str] = set()
         for tok in backtick_tokens | path_tokens:
-            cleaned = tok.strip(" `'\";:(),")
+            cleaned = tok.strip(" `'\";:(),[]{}")
             if cleaned.endswith("()"):
                 cleaned = cleaned[:-2].strip()
             if not cleaned or len(cleaned) < 2:
                 continue
             if any(ch.isspace() for ch in cleaned):
                 continue
+            # Filter out tokens with no alphanumeric characters
+            # (pure operators/punctuation like <=, ==, !=, ->, ...)
+            if not any(ch.isalnum() for ch in cleaned):
+                continue
+            # Filter out URL artifact prefixes
+            if cleaned.startswith(("//", "http:", "https:", "ftp:")) or "://" in cleaned:
+                continue
+            # Filter out comparison / assignment / arrow operators embedded without spaces
+            if re.match(
+                r"^(?:<=|>=|==|!=|<=>|===|!==|->|=>|::|\+\+|--|\+=|-=|\*=|/=|&&|\|\|)$",
+                cleaned,
+            ):
+                continue
+            # Filter out percent-encoded artifacts (e.g., %3A, %40)
+            if cleaned.startswith("%") or re.match(r"^%[0-9a-fA-F]{2}$", cleaned):
+                continue
+            # Strip trailing = from keyword argument expressions like safe=
+            if cleaned.endswith("="):
+                cleaned = cleaned.rstrip("=").strip()
+            if not cleaned or len(cleaned) < 2:
+                continue
+            if cleaned.lower() in PROMPT_STOPWORDS or cleaned.lower() in {"safe", "kwargs", "args"}:
+                continue
             explicit_tokens.add(cleaned)
 
         # 3. Candidate identifiers from prompt body
-        raw_words = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", user_prompt)
+        raw_words = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", prompt_clean)
         unquoted_candidates: set[str] = set()
         for word in raw_words:
             cleaned = word.strip()
@@ -1465,6 +1502,21 @@ class PreFlightValidator:
             if lower_val in PROMPT_STOPWORDS:
                 continue
             if cleaned.isdigit():
+                continue
+            # Filter out common URL components and web protocols
+            if lower_val in {
+                "http",
+                "https",
+                "github",
+                "gitlab",
+                "whatwg",
+                "spec",
+                "org",
+                "com",
+                "net",
+                "io",
+                "www",
+            }:
                 continue
             unquoted_candidates.add(cleaned)
 
@@ -1538,6 +1590,16 @@ class PreFlightValidator:
         )
 
         for candidate in sorted(all_candidates):
+            # Ignore tokens with no alphanumeric characters or URL fragments
+            if not any(ch.isalnum() for ch in candidate):
+                continue
+            if candidate.startswith(("//", "http:", "https:")):
+                continue
+            if (candidate in PYTHON_BUILTINS or candidate.startswith("WinError")) and (
+                candidate not in known_symbols_by_name and candidate not in known_symbols_by_short
+            ):
+                continue
+
             is_explicit = candidate in explicit_candidates
             is_camel_or_pascal = any(c.isupper() for c in candidate[1:]) and any(
                 c.islower() for c in candidate
@@ -1561,8 +1623,11 @@ class PreFlightValidator:
             is_existing_file = (
                 candidate in known_files_by_path
                 or candidate in known_files_by_name
-                or candidate in known_files_by_stem
-                or candidate in known_dirs
+                or (
+                    candidate in known_files_by_stem
+                    and (is_explicit or is_code_shaped or "." in candidate or "/" in candidate)
+                )
+                or (candidate in known_dirs and (is_explicit or is_code_shaped or "/" in candidate))
                 or any(f.endswith("/" + candidate) for f in known_files_by_path)
             )
 
@@ -1686,10 +1751,25 @@ class PreFlightValidator:
                         )
                     )
                 )
+                has_modification_context = bool(
+                    re.search(
+                        r"\b(?:refactor|modify|modifying|update|updating|inspect|inspecting|debug|debugging|fix|fixing|patch|patching|trace|tracing|delete|deleting|remove|removing)\b",
+                        user_prompt,
+                        re.IGNORECASE,
+                    )
+                )
                 is_modification_inspection = bool(
                     re.search(
                         r"\b(?:refactor|modify|update|inspect|debug|fix|patch|trace|delete|remove|call|import|export|from|into|in|within)\s+"
                         r"(?:class|struct|function|def|fn|method|interface|type|file|module|symbol|component|service|handler|manager|controller|repo|repository|domain)?\s*"
+                        r"[`'\"]?" + re.escape(candidate) + r"[`'\"]?\b",
+                        user_prompt,
+                        re.IGNORECASE,
+                    )
+                    or re.search(
+                        r"\b(?:to|with|using|via|against|from|into|and|call|calling|dispatch|dispatching|send|sending|emit|emitting|delegate|delegating|forward|forwarding|consume|consuming|subscribe|subscribing|publish|publishing|notify|notifying)\s+"
+                        r"(?:events?\s+to\s+|messages?\s+to\s+|calls?\s+to\s+|requests?\s+to\s+|data\s+to\s+)?"
+                        r"(?:class|struct|function|def|fn|method|interface|type|file|module|symbol|component|service|handler|manager|controller|repo|repository|domain|sink|source|queue|channel|listener)?\s*"
                         r"[`'\"]?" + re.escape(candidate) + r"[`'\"]?\b",
                         user_prompt,
                         re.IGNORECASE,
@@ -1701,6 +1781,7 @@ class PreFlightValidator:
                         user_prompt,
                         re.IGNORECASE,
                     )
+                    or (has_modification_context and is_camel_or_pascal)
                     or (
                         "/" in candidate
                         or candidate.endswith(
@@ -1726,7 +1807,7 @@ class PreFlightValidator:
                 )
                 if (
                     (is_explicit or is_code_shaped)
-                    and (is_modification_inspection or not is_novel_creation)
+                    and is_modification_inspection
                     and not is_novel_creation
                 ):
                     missing_reference_identifiers.append(candidate)
@@ -2034,14 +2115,7 @@ class PreFlightValidator:
 
         missing_ids = [str(cit.chunk_id) for cit in citations if str(cit.chunk_id) not in known_ids]
         if missing_ids and bound_repo._repo is not None:
-            candidate_domains = [domain_id]
-            if isinstance(doc_chunks, list):
-                for c in doc_chunks:
-                    c_dom = getattr(c, "domain_id", None)
-                    if c_dom and c_dom not in candidate_domains:
-                        candidate_domains.append(c_dom)
-            if "quant_research_scout" not in candidate_domains:
-                candidate_domains.append("quant_research_scout")
+            candidate_domains = [domain_id] if domain_id else []
             for scope in principal.allowed_scopes:
                 if scope.startswith("domain:"):
                     target_dom = scope.split(":", 1)[1].strip()
@@ -2110,8 +2184,10 @@ class PreFlightValidator:
             try:
                 b_repo = self._resolve_graph_repo(repo_target)
                 p_ctx = self._resolve_principal(principal or self.principal)
-                domain = domain_id or self.domain_id or (
-                    self.domain_config.domain_id if self.domain_config else ""
+                domain = (
+                    domain_id
+                    or self.domain_id
+                    or (self.domain_config.domain_id if self.domain_config else "")
                 )
 
                 candidate_domains = [domain] if domain else []
@@ -2202,10 +2278,7 @@ class PreFlightValidator:
                 cleaned_code, file_path=s.file_path
             )
 
-            if unclosed_quote:
-                has_error = True
-                err_msg = "Unclosed syntax delimiters in code slice"
-            elif has_delim_error:
+            if unclosed_quote or has_delim_error:
                 if is_partial_window:
                     if not self._is_valid_partial_window_truncation(
                         cleaned_code,
@@ -2336,14 +2409,7 @@ class PreFlightValidator:
             if c.chunk_id and str(c.chunk_id) not in chunk_scopes_map
         ]
         if citation_ids and bound_repo._repo is not None:
-            candidate_domains = [domain_id]
-            if isinstance(doc_chunks, list):
-                for c in doc_chunks:
-                    c_dom = getattr(c, "domain_id", None)
-                    if c_dom and c_dom not in candidate_domains:
-                        candidate_domains.append(c_dom)
-            if "quant_research_scout" not in candidate_domains:
-                candidate_domains.append("quant_research_scout")
+            candidate_domains = [domain_id] if domain_id else []
             for scope in principal.allowed_scopes:
                 if scope.startswith("domain:"):
                     target_dom = scope.split(":", 1)[1].strip()
@@ -2479,7 +2545,16 @@ class PreFlightValidator:
                     )
                 )
                 continue
-            if f_rec.git_blob_sha and f_rec.git_blob_sha != s.git_blob_sha:
+            expected_blob_sha = (
+                f_rec.git_blob_sha.ljust(7, "0")
+                if len(f_rec.git_blob_sha) < 7
+                else f_rec.git_blob_sha
+            )
+            if (
+                f_rec.git_blob_sha
+                and s.git_blob_sha != f_rec.git_blob_sha
+                and s.git_blob_sha != expected_blob_sha
+            ):
                 unanchored.append(
                     f"Blob SHA mismatch in {s.file_path}: {s.git_blob_sha} vs {f_rec.git_blob_sha}"
                 )

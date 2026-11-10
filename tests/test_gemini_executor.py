@@ -465,9 +465,7 @@ def test_worst_case_output_projection_prevents_mid_stream_budget_breach(
 
     # 1. check_principal_budget directly raises BudgetExceededError
     with pytest.raises(BudgetExceededError) as exc_info:
-        executor.check_principal_budget(
-            principal, pack, max_output_tokens=4096, repo=repo
-        )
+        executor.check_principal_budget(principal, pack, max_output_tokens=4096, repo=repo)
     assert "exceeded session token budget" in str(exc_info.value)
     assert "projected 4896 (prompt: 800, max_output: 4096) > cap 1000" in str(exc_info.value)
 
@@ -482,4 +480,3 @@ def test_worst_case_output_projection_prevents_mid_stream_budget_breach(
         )
     assert "exceeded session token budget" in str(exc_info_exec.value)
     assert "projected 4896 (prompt: 800, max_output: 4096) > cap 1000" in str(exc_info_exec.value)
-

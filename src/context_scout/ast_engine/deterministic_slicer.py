@@ -85,16 +85,13 @@ class DeterministicSlicer:
             start_line=pointer.start_line,
             end_line=pointer.end_line,
         )
-        if (
-            query_text is not None
-            and (pointer.end_line - pointer.start_line) > 150
-            and file_record.language == "python"
-        ):
+        active_query = f"{query_text or ''} {pointer.selection_reason or ''}".strip()
+        if (pointer.end_line - pointer.start_line) > 150 and file_record.language == "python":
             verbatim_code = self._skeletonize_large_python_class(
                 raw_content=file_record.raw_content,
                 start_line=pointer.start_line,
                 end_line=pointer.end_line,
-                query_text=f"{query_text} {pointer.selection_reason}",
+                query_text=active_query,
             )
         commit_sha = file_record.git_commit_sha or "0000000"
         if len(commit_sha) < 7:
@@ -174,7 +171,10 @@ class DeterministicSlicer:
             scored_methods.append((score, m_name))
 
         scored_methods.sort(key=lambda item: (-item[0], item[1]))
-        keep_names = {"__init__"} | {name for _, name in scored_methods[:3]}
+        keep_names = {name for _, name in scored_methods[:3]}
+        init_span = next((m for m in method_spans if m[0] == "__init__"), None)
+        if init_span is not None and (init_span[2] - init_span[1]) <= 40:
+            keep_names.add("__init__")
 
         output_lines: list[str] = []
         first_method_idx = method_spans[0][1]
@@ -183,19 +183,56 @@ class DeterministicSlicer:
             output_lines.append(f"{line_no:{line_number_width}d} | {selected[idx]}")
 
         for m_name, m_start, m_end in method_spans:
-            if m_name in keep_names or (m_end - m_start) <= 3:
+            if m_name in keep_names or (m_end - m_start) <= 1:
                 for idx in range(m_start, m_end + 1):
                     line_no = start_line + idx
                     output_lines.append(f"{line_no:{line_number_width}d} | {selected[idx]}")
             else:
-                sig_line_no = start_line + m_start
-                elided_start = start_line + m_start + 1
-                elided_end = start_line + m_end
-                sig_text = selected[m_start].rstrip()
-                output_lines.append(
-                    f"{sig_line_no:{line_number_width}d} | {sig_text} "
-                    f"...  # [lines {elided_start}-{elided_end} elided]"
-                )
+                # Find the end line of the signature (delimiters balanced and line contains :)
+                sig_end = m_start
+                open_delims = 0
+                for idx in range(m_start, m_end + 1):
+                    ln = selected[idx]
+                    cleaned_ln, _ = self._strip_comments_and_strings(ln, file_path="a.py")
+                    for ch in cleaned_ln:
+                        if ch in "([{":
+                            open_delims += 1
+                        elif ch in ")]}":
+                            open_delims = max(0, open_delims - 1)
+                    sig_end = idx
+                    if open_delims == 0 and ":" in cleaned_ln:
+                        break
+
+                for idx in range(m_start, sig_end):
+                    line_no = start_line + idx
+                    output_lines.append(f"{line_no:{line_number_width}d} | {selected[idx]}")
+
+                sig_line_no = start_line + sig_end
+                sig_text = selected[sig_end].rstrip()
+                if sig_end < m_end:
+                    elided_start = start_line + sig_end + 1
+                    elided_end = start_line + m_end
+                    colon_idx = sig_text.rfind(":")
+                    if colon_idx != -1:
+                        before_colon = sig_text[: colon_idx + 1]
+                        after_colon = sig_text[colon_idx + 1 :].strip()
+                        if after_colon.startswith("#"):
+                            comment_extra = f" {after_colon}"
+                        elif after_colon:
+                            comment_extra = f" # {after_colon}"
+                        else:
+                            comment_extra = ""
+                        output_lines.append(
+                            f"{sig_line_no:{line_number_width}d} | {before_colon} "
+                            f"...  # [lines {elided_start}-{elided_end} elided]{comment_extra}"
+                        )
+                    else:
+                        output_lines.append(
+                            f"{sig_line_no:{line_number_width}d} | {sig_text} "
+                            f"...  # [lines {elided_start}-{elided_end} elided]"
+                        )
+                else:
+                    output_lines.append(f"{sig_line_no:{line_number_width}d} | {sig_text}")
 
         return "\n".join(output_lines)
 
@@ -245,7 +282,7 @@ class DeterministicSlicer:
                 chars.append(" ")
                 continue
             # C# / TS / C block comments /* ... */
-            if code[i : i + 2] == "/*":
+            if not is_hash_comment_lang and code[i : i + 2] == "/*":
                 end = code.find("*/", i + 2)
                 if end == -1:
                     has_unclosed_quote = True
@@ -253,8 +290,8 @@ class DeterministicSlicer:
                 i = end + 2
                 chars.append(" ")
                 continue
-            # Single-line comment //
-            if code[i : i + 2] == "//":
+            # Single-line comment // (TS, JS, C#, Java, C, C++)
+            if not is_hash_comment_lang and code[i : i + 2] == "//":
                 end = code.find("\n", i + 2)
                 if end == -1:
                     break

@@ -11,9 +11,11 @@ import math
 import subprocess
 import tempfile
 import time
+from collections.abc import Generator
 from pathlib import Path
 from uuid import uuid4
 
+import psycopg
 import pytest
 
 from context_scout.ast_engine.extractor import ASTExtractor, match_symbol_identifier
@@ -28,6 +30,36 @@ from context_scout.db.repositories import (
 from context_scout.db.session import RLSConnectionManager
 from context_scout.ingestion.git_merkle_indexer import GitMerkleIndexer, MerkleBlobDiff
 from context_scout.schemas.contracts import PrincipalContext, RoleType
+
+
+@pytest.fixture(autouse=True)
+def clean_empirical_m2_test_repos() -> Generator[None, None, None]:
+    yield
+    settings = ScoutSettings()
+    with psycopg.connect(settings.db_admin_url) as conn, conn.cursor() as cur:
+        cur.execute("""
+            DELETE FROM ast_edges WHERE domain_id = 'trading_code_scout' AND (
+                source_symbol_id IN (
+                    SELECT symbol_id FROM ast_symbols
+                    WHERE file_id IN (
+                        SELECT file_id FROM code_files
+                        WHERE repo_name != 'enterprise-context-scout'
+                    )
+                )
+                OR target_symbol_id IN (
+                    SELECT symbol_id FROM ast_symbols
+                    WHERE file_id IN (
+                        SELECT file_id FROM code_files
+                        WHERE repo_name != 'enterprise-context-scout'
+                    )
+                )
+            );
+            DELETE FROM ast_symbols WHERE file_id IN (
+                SELECT file_id FROM code_files
+                WHERE repo_name != 'enterprise-context-scout'
+            );
+            DELETE FROM code_files WHERE repo_name != 'enterprise-context-scout';
+        """)
 
 
 @pytest.fixture

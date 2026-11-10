@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import datetime
 import hashlib
@@ -480,27 +481,50 @@ def _populate_in_memory_repository(repo_root: Path) -> InMemoryRLSRepository:
             module_parts = py_file.relative_to(repo_root / "src").with_suffix("").parts
             mod_dotted = ".".join(module_parts)
 
-            for idx, line in enumerate(lines, start=1):
-                cls_match = re.match(r"^class\s+([A-Za-z0-9_]+)", line)
-                if cls_match:
-                    cls_name = cls_match.group(1)
-                    q_name = f"{mod_dotted}.{cls_name}"
-                    repo.insert_ast_symbol(
-                        admin_principal,
-                        ASTSymbolRecord(
-                            symbol_id=uuid.uuid4(),
-                            file_id=f_id,
-                            domain_id="trading_code_scout",
-                            qualified_name=q_name,
-                            symbol_kind="class",
-                            start_line=idx,
-                            end_line=min(idx + 50, len(lines)),
-                            signature_skeleton=f"class {cls_name}:",
-                            contextual_summary=f"Class definition for {cls_name}",
-                            allowed_scopes=["public_eng"],
-                            embedding=[0.05] * 768,
-                        ),
-                    )
+            try:
+                tree = ast.parse(content)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ClassDef):
+                        cls_name = node.name
+                        q_name = f"{mod_dotted}.{cls_name}"
+                        repo.insert_ast_symbol(
+                            admin_principal,
+                            ASTSymbolRecord(
+                                symbol_id=uuid.uuid4(),
+                                file_id=f_id,
+                                domain_id="trading_code_scout",
+                                qualified_name=q_name,
+                                symbol_kind="class",
+                                start_line=node.lineno,
+                                end_line=node.end_lineno or min(node.lineno + 50, len(lines)),
+                                signature_skeleton=f"class {cls_name}:",
+                                contextual_summary=f"Class definition for {cls_name}",
+                                allowed_scopes=["public_eng"],
+                                embedding=[0.05] * 768,
+                            ),
+                        )
+            except Exception:
+                for idx, line in enumerate(lines, start=1):
+                    cls_match = re.match(r"^class\s+([A-Za-z0-9_]+)", line)
+                    if cls_match:
+                        cls_name = cls_match.group(1)
+                        q_name = f"{mod_dotted}.{cls_name}"
+                        repo.insert_ast_symbol(
+                            admin_principal,
+                            ASTSymbolRecord(
+                                symbol_id=uuid.uuid4(),
+                                file_id=f_id,
+                                domain_id="trading_code_scout",
+                                qualified_name=q_name,
+                                symbol_kind="class",
+                                start_line=idx,
+                                end_line=min(idx + 50, len(lines)),
+                                signature_skeleton=f"class {cls_name}:",
+                                contextual_summary=f"Class definition for {cls_name}",
+                                allowed_scopes=["public_eng"],
+                                embedding=[0.05] * 768,
+                            ),
+                        )
 
     # Seed research doc chunks for quant_research_scout
     repo.insert_doc_chunk(

@@ -345,9 +345,7 @@ class TestUpfrontConfirmationGateEmpirical:
         ConfirmationDeclinedException and strictly prevent paid model dispatch ($0 spend).
         """
         # 1. Direct estimator check
-        report = estimator.calculate_cost_estimate(
-            "gemini-3.8-flash", 5000, max_output_tokens=2048
-        )
+        report = estimator.calculate_cost_estimate("gemini-3.8-flash", 5000, max_output_tokens=2048)
         assert report.is_paid_model is True
 
         match_str = "declined by confirmation callback"
@@ -398,6 +396,7 @@ class TestUpfrontConfirmationGateEmpirical:
         (e.g. network timeout in webhook or malformed UI response) propagates cleanly
         and immediately aborts execution prior to calling paid models ($0 spend).
         """
+
         def faulty_callback(rep: CostEstimateReport) -> bool:
             raise ConnectionError("UI Confirmation Webhook unreachable (503 Service Unavailable)")
 
@@ -762,9 +761,7 @@ class TestExplorationTokenKillSwitchEmpirical:
         tracker = SessionBudgetTracker(spend_ceiling_usd=10.0)
 
         # Spend $9.99
-        tracker.record_consumption(
-            principal_a, input_tokens=1000, output_tokens=500, cost_usd=9.99
-        )
+        tracker.record_consumption(principal_a, input_tokens=1000, output_tokens=500, cost_usd=9.99)
 
         # Projecting an additional $0.01 reaches exactly $10.00 -> PASS
         tracker.check_and_reserve(principal_a, projected_tokens=100, estimated_cost_usd=0.01)

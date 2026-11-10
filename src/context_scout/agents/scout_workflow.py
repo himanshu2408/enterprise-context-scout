@@ -2111,10 +2111,6 @@ class ScoutWorkflow:
 
         hydrated_slices: list[VerbatimCodeSlice] = []
         for ptr in candidate_pointers:
-            if (ptr.end_line - ptr.start_line) > 250:
-                ptr = ptr.model_copy(
-                    update={"end_line": min(ptr.end_line, ptr.start_line + 50)}
-                )
             file_rec = files_by_path.get(ptr.file_path)
             if file_rec is not None:
                 try:
@@ -2347,12 +2343,50 @@ class ScoutWorkflow:
         if supporting_doc_citations:
             total_slice_chars += sum(len(c.verbatim_quote) for c in supporting_doc_citations)
         est_pack_tokens = max(1, int(total_slice_chars / 3.8))
-        total_code_tokens_explored = sum(
-            max(1, int(len(f.raw_content) / 3.8)) for f in visible_files
+        # Measure tokens actually explored/traversed in the AST window
+        # rather than the static corpus.
+        # This comprises:
+        # 1. Hydrated code slices and traversed candidate file contents in the active AST window
+        # 2. Candidate AST symbol definitions evaluated during candidate identification
+        #    and 1-hop expansion
+        # 3. Retrieved document chunk tokens examined during research/citation validation
+        explored_file_paths = {p.file_path for p in candidate_pointers} | {
+            s.file_path for s in hydrated_slices
+        }
+        explored_files = [files_by_path[p] for p in explored_file_paths if p in files_by_path]
+        explored_file_tokens = sum(max(1, int(len(f.raw_content) / 3.8)) for f in explored_files)
+
+        prompt_ident_words = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", user_prompt))
+        matched_ast_symbols = [
+            s
+            for s in visible_symbols
+            if any(w.lower() in s.qualified_name.lower() for w in prompt_ident_words if len(w) >= 3)
+        ]
+        candidate_symbol_tokens = sum(
+            max(1, int(len(s.signature_skeleton + " " + s.contextual_summary) / 3.8))
+            for s in matched_ast_symbols
         )
-        if not visible_files and supporting_doc_citations:
-            total_code_tokens_explored = max(est_pack_tokens, 15000)
-        local_tokens_consumed = max(est_pack_tokens, total_code_tokens_explored)
+
+        retrieved_doc_tokens = 0
+        if supporting_doc_citations:
+            retrieved_doc_tokens += sum(
+                max(1, int(len(c.verbatim_quote) / 3.8)) for c in supporting_doc_citations
+            )
+        if doc_chunks:
+            if isinstance(doc_chunks, list):
+                retrieved_doc_tokens += sum(
+                    max(1, int(len(c.verbatim_content) / 3.8)) for c in doc_chunks
+                )
+            elif isinstance(doc_chunks, dict):
+                retrieved_doc_tokens += sum(max(1, int(len(v) / 3.8)) for v in doc_chunks.values())
+
+        total_tokens_explored = (
+            est_pack_tokens + explored_file_tokens + candidate_symbol_tokens + retrieved_doc_tokens
+        )
+        if not explored_files and not matched_ast_symbols and supporting_doc_citations:
+            total_tokens_explored = max(est_pack_tokens, 15000)
+
+        local_tokens_consumed = max(est_pack_tokens, total_tokens_explored)
 
         if local_tokens_consumed > DEFAULT_EXPLORATION_TOKEN_KILL_SWITCH:
             logger.warning(
@@ -2446,14 +2480,23 @@ class ScoutWorkflow:
                 )
         elif len(same_file_slices) >= 2:
             # 2. For larger files, merge same-file slices separated by <= 15 lines
+            raw_lines = file_rec.raw_content.splitlines()
             min_l = primary.start_line
             max_l = primary.end_line
             for sf in sorted(same_file_slices[1:], key=lambda x: x.start_line):
-                if sf.end_line >= min_l - 15 and sf.start_line <= max_l + 15:
+                if (
+                    sf.modification_intent == primary.modification_intent
+                    and sf.end_line >= min_l - 15
+                    and sf.start_line <= max_l + 15
+                ):
                     new_min = min(min_l, sf.start_line)
                     new_max = max(max_l, sf.end_line)
                     if (new_max - new_min + 1) <= 85:
-                        min_l, max_l = new_min, new_max
+                        cand_code = "\n".join(raw_lines[new_min - 1 : new_max])
+                        if not self.slicer._has_unclosed_delimiters(
+                            cand_code, file_path=primary.file_path
+                        ):
+                            min_l, max_l = new_min, new_max
             if min_l != primary.start_line or max_l != primary.end_line:
                 with contextlib.suppress(Exception):
                     coalesced_ptr = CodeSlicePointer(
@@ -2490,6 +2533,11 @@ class ScoutWorkflow:
                     )
                     if const_m and re.search(rf"\b{re.escape(const_m.group(1))}\b", target_text):
                         last_header_line = idx + 1
+            if last_header_line > 0:
+                while last_header_line > 0 and self.slicer._has_unclosed_delimiters(
+                    "\n".join(raw_lines[:last_header_line]), file_path=primary.file_path
+                ):
+                    last_header_line -= 1
             if last_header_line > 0:
                 with contextlib.suppress(Exception):
                     hdr_ptr = CodeSlicePointer(
@@ -2531,13 +2579,42 @@ class ScoutWorkflow:
                         enclosing_cls_line + 24,
                         len(raw_lines),
                     )
+                    max_scan = min(
+                        filtered[0].start_line - 1,
+                        enclosing_cls_line + 80,
+                        len(raw_lines),
+                    )
+                    candidate_end = cls_end_cap
+                    delim_ok = False
+                    while candidate_end <= max_scan:
+                        code_cand = "\n".join(raw_lines[enclosing_cls_line - 1 : candidate_end])
+                        if not self.slicer._has_unclosed_delimiters(
+                            code_cand, file_path=primary.file_path
+                        ):
+                            cls_end_cap = candidate_end
+                            delim_ok = True
+                            break
+                        candidate_end += 1
+
+                    if not delim_ok:
+                        candidate_end = cls_end_cap - 1
+                        while candidate_end >= enclosing_cls_line:
+                            code_cand = "\n".join(raw_lines[enclosing_cls_line - 1 : candidate_end])
+                            if not self.slicer._has_unclosed_delimiters(
+                                code_cand, file_path=primary.file_path
+                            ):
+                                cls_end_cap = candidate_end
+                                delim_ok = True
+                                break
+                            candidate_end -= 1
+
                     already_covers_cls = any(
                         s.file_path == primary.file_path
                         and s.start_line <= enclosing_cls_line
                         and s.end_line >= min(enclosing_cls_line + 3, cls_end_cap)
                         for s in filtered
                     )
-                    if not already_covers_cls and cls_end_cap >= enclosing_cls_line:
+                    if delim_ok and not already_covers_cls and cls_end_cap >= enclosing_cls_line:
                         with contextlib.suppress(Exception):
                             cls_ptr = CodeSlicePointer(
                                 repo_name=primary.repo_name,
@@ -2673,6 +2750,19 @@ class FederatedScoutCoordinator:
                 paid_tokens_spent=0,
             )
 
+        quant_scopes = {"public_quant", "corpus:quant_papers", "quant_restricted"}
+        active_principal = principal
+        if any(s in principal.allowed_scopes for s in quant_scopes) and (
+            "domain:quant_research_scout" not in principal.allowed_scopes
+        ):
+            active_principal = PrincipalContext(
+                user_id=principal.user_id,
+                role=principal.role,
+                allowed_scopes=[*principal.allowed_scopes, "domain:quant_research_scout"],
+                session_budget_tokens=principal.session_budget_tokens,
+                max_session_paid_tokens=principal.max_session_paid_tokens,
+            )
+
         # ---------------------------------------------------------------------
         # Stage 1: Model 2 (quant_research_scout) Research Extraction
         # ---------------------------------------------------------------------
@@ -2681,7 +2771,7 @@ class FederatedScoutCoordinator:
             user_prompt=user_prompt,
             domain_id="quant_research_scout",
             repo=self.repo,
-            principal=principal,
+            principal=active_principal,
             bounce_back_feedback=None,
         )
 
@@ -2709,7 +2799,7 @@ class FederatedScoutCoordinator:
             user_prompt=code_prompt,
             domain_id="trading_code_scout",
             repo=self.repo,
-            principal=principal,
+            principal=active_principal,
             bounce_back_feedback=None,
         )
 
@@ -2725,7 +2815,7 @@ class FederatedScoutCoordinator:
             )
 
         bound_repo = BoundGraphRepository(self.repo)
-        visible_files = bound_repo.list_visible_code_files(principal, "trading_code_scout")
+        visible_files = bound_repo.list_visible_code_files(active_principal, "trading_code_scout")
         files_by_path: dict[str, CodeFileRecord] = {f.file_path: f for f in visible_files}
 
         hydrated_slices: list[VerbatimCodeSlice] = []
@@ -2760,7 +2850,9 @@ class FederatedScoutCoordinator:
                     )
                 )
 
-        visible_symbols = bound_repo.list_visible_ast_symbols(principal, "trading_code_scout")
+        visible_symbols = bound_repo.list_visible_ast_symbols(
+            active_principal, "trading_code_scout"
+        )
         for s in list(hydrated_slices):
             if s.modification_intent == ModificationIntent.MODIFY_TARGET:
                 sym_rec = next(
@@ -2771,7 +2863,7 @@ class FederatedScoutCoordinator:
                     exp_res = self.expander.expand_1hop(
                         focus_symbol=sym_rec,
                         repo=bound_repo,
-                        principal=principal,
+                        principal=active_principal,
                         domain_id="trading_code_scout",
                     )
                     for auto_ptr in (
@@ -2802,7 +2894,7 @@ class FederatedScoutCoordinator:
         active_chunks = (
             doc_chunks
             if doc_chunks is not None
-            else bound_repo.list_visible_doc_chunks(principal, "quant_research_scout")
+            else bound_repo.list_visible_doc_chunks(active_principal, "quant_research_scout")
         )
 
         report = self.validator.validate(
@@ -2812,7 +2904,7 @@ class FederatedScoutCoordinator:
             quant_strategy_spec=quant_brief,
             normalized_rrf_score=normalized_rrf_score,
             repo=self.repo,
-            principal=principal,
+            principal=active_principal,
             domain_id="trading_code_scout",
             doc_chunks=active_chunks,
         )
@@ -2845,7 +2937,7 @@ class FederatedScoutCoordinator:
                 user_prompt=code_prompt,
                 domain_id="trading_code_scout",
                 repo=self.repo,
-                principal=principal,
+                principal=active_principal,
                 bounce_back_feedback=active_feedback,
             )
             for ptr in remed_ptrs:
@@ -2871,7 +2963,7 @@ class FederatedScoutCoordinator:
                 quant_strategy_spec=quant_brief,
                 normalized_rrf_score=normalized_rrf_score,
                 repo=self.repo,
-                principal=principal,
+                principal=active_principal,
                 domain_id="trading_code_scout",
                 doc_chunks=active_chunks,
             )
@@ -2919,7 +3011,11 @@ class FederatedScoutCoordinator:
         else:
             total_doc_tokens = 0
 
-        total_code_tokens = sum(max(1, int(len(f.raw_content) / 3.8)) for f in visible_files)
+        explored_file_paths = {p.file_path for p in code_pointers} | {
+            s.file_path for s in hydrated_slices
+        }
+        explored_files = [files_by_path[p] for p in explored_file_paths if p in files_by_path]
+        total_code_tokens = sum(max(1, int(len(f.raw_content) / 3.8)) for f in explored_files)
         total_tokens_explored = max(est_tokens, total_doc_tokens + total_code_tokens)
 
         pack = ImplementationContextPack(
