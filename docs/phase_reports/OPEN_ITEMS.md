@@ -13,7 +13,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
 | **A2** | Verification Integrity | Repo-wide sweep for broad/swallowed exceptions (narrow or log+re-raise with tests) | OPEN | PENDING |
 | **A3** | Verification Integrity | Repo-wide sweep for weak assertions (`>=1`, truthiness) & mutation proof on 340-test E2E suite | OPEN | PENDING |
 | **A4** | Verification Integrity | Parity audit: Real PostgreSQL vs In-Memory test execution; dual-run tests for all fixes; scoping leak grep | OPEN | PENDING |
-| **A5** | Verification Integrity | Comprehensive defect history recorded in Phase Log & Architecture Story with before/after diffs | RESOLVED (M1–M5 + Story) | Verified by M5 Worker |
+| **A5** | Verification Integrity | Comprehensive defect history recorded in Phase Log & Architecture Story with before/after diffs | RESOLVED (M1–M5 + Story) | Certified by teamwork_auditor_m5_1 & Reviewers |
 | **B6** | Security / Correctness | `ContextVar` principal concurrency test with simultaneous requests proving zero leakage | OPEN | PENDING |
 | **B7** | Security / Correctness | SEC-VULN-01 review, webhook HMAC verification tests, queue concurrency tests, Merkle & CTE benchmarks | OPEN | PENDING |
 | **B8** | Security / Correctness | Citation Gate: Zero-tolerance exact normalized substring match, word substitution/negation tests, persisted versions | IMPLEMENTED | PENDING AUDITOR |
@@ -23,7 +23,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
 | **C12** | Parsers / Generalization | Real public repository evaluation (eShop, OrchardCore, public React/Redux/Terraform) with hand-checked N | OPEN | PENDING |
 | **C13** | Parsers / Generalization | Status verification of GitLab raw-blob ingestion, Terraform/GCP plugin, and Storybook MDX | OPEN | PENDING |
 | **D14** | Evaluation Hygiene | Dataset provenance documentation (sources, public vs synthetic, disjoint proof) & R1 gaps report | OPEN | PENDING |
-| **D15** | Cost Governance | Live model pricing verification, pre-run cost estimation gate, subagent token accounting, Vertex EU region | RESOLVED (F22–F23) | Verified by M5 Worker |
+| **D15** | Cost Governance | Live model pricing verification, pre-run cost estimation gate, subagent token accounting, Vertex EU region | RESOLVED (F22–F23) | Certified by teamwork_auditor_m5_1 & Reviewers |
 | **E16** | Modularity / No Coupling | Elimination of company-specific names/workflows; modular plugins/configuration with neutral defaults | IMPLEMENTED (M4 Config) | PENDING AUDITOR |
 | **E17** | Modularity / Connectors | Support for Atlassian Cloud vs Server/Data Center and GitLab SaaS vs Self-Managed behind adapters | RESOLVED (Cloud Prioritized) | Confirmed by User |
 | **E18** | Modularity / Proof | Extensibility proof: "Build your own plugin/connector" guide, toy plugin test, multi-company config test | OPEN | PENDING |
@@ -97,7 +97,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
   [Command]: uv run pytest tests/test_cost_governance.py tests/test_telemetry_otel.py tests/test_m5_adk_workflow.py tests/test_empirical_m5_challenger.py
   [Output]: 72 passed in 10.02s
   ```
-- **Auditor**: teamwork_worker_m5_1 (Clean verification)
+- **Auditor**: teamwork_auditor_m5_1 (Independent forensic certification)
 
 ---
 
@@ -218,7 +218,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
   [Command]: cd enterprise-context-scout && uv run pytest tests/test_cost_governance.py -v
   [Output]: 10 passed in 0.02s
   ```
-- **Auditor**: teamwork_worker_m5_1 (Clean verification)
+- **Auditor**: teamwork_auditor_m5_1 (Independent forensic certification)
 
 #### M4-OI-03. Real-Corpus Benchmark Evaluation Harness
 - **Requirement**: Manifest with pinned commit SHAs + public repo URLs, real files indexed through tree-sitter/polyglot parsers into PostgreSQL store, mechanically derived queries, replacing synthetic-fixture assertions once real-corpus run is available. Outbound cloning requires explicit user approval of proposed URLs, pinned SHAs, and disk size.

@@ -257,9 +257,9 @@ class PaidComputeCostEstimator:
             )
 
         # Output completion token heuristics
-        out_low = min(512, max(64, max_output_tokens // 4))
-        out_expected = min(1500, max(out_low, max_output_tokens // 2))
         out_high = max_output_tokens
+        out_low = min(out_high, min(512, max(1, max_output_tokens // 4)))
+        out_expected = min(out_high, min(1500, max(out_low, max_output_tokens // 2)))
 
         cost_low = round(
             (estimated_input_tokens * pricing.input_usd_per_1m_low
@@ -427,8 +427,8 @@ class SessionBudgetTracker:
         self,
         principal: PrincipalContext,
         input_tokens: int,
-        output_tokens: int,
-        cost_usd: float,
+        output_tokens: int = 0,
+        cost_usd: float = 0.0,
     ) -> None:
         """Records finalized token consumption and dollar spend."""
         with self._lock:

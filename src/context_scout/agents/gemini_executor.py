@@ -545,6 +545,7 @@ class GeminiImplementationExecutor:
         self,
         principal: PrincipalContext,
         pack: ImplementationContextPack,
+        max_output_tokens: int = 4096,
         conn: Connection[tuple[object, ...]] | None = None,
         repo: PostgresRLSRepository | InMemoryRLSRepository | None = None,
     ) -> None:
@@ -563,11 +564,12 @@ class GeminiImplementationExecutor:
             getattr(principal, "session_budget_tokens", None)
             or getattr(principal, "max_session_paid_tokens", 16_000)
         )
-        projected = consumed + pack.pack_token_count
+        projected = consumed + pack.pack_token_count + max_output_tokens
         if projected > budget_cap:
             raise BudgetExceededError(
                 f"Principal '{principal.user_id}' exceeded session token budget: "
-                f"consumed {consumed} + requested {pack.pack_token_count} > cap "
+                f"consumed {consumed} + projected {pack.pack_token_count + max_output_tokens} "
+                f"(prompt: {pack.pack_token_count}, max_output: {max_output_tokens}) > cap "
                 f"{budget_cap}"
             )
 
@@ -601,7 +603,9 @@ class GeminiImplementationExecutor:
             start_time = time.perf_counter()
 
             # 1. Enforce Budget Check
-            self.check_principal_budget(principal, pack, conn=conn, repo=repo)
+            self.check_principal_budget(
+                principal, pack, max_output_tokens=max_output_tokens, conn=conn, repo=repo
+            )
 
             # 2. Process Missing Context Requests if any
             miss_events: list[dict[str, Any]] = []
@@ -625,6 +629,13 @@ class GeminiImplementationExecutor:
                     confirmation_callback=confirmation_callback,
                     auto_approve=user_confirmed or auto_confirm,
                 )
+
+            # Wire SessionBudgetTracker reservation before paid generation
+            self.budget_tracker.check_and_reserve(
+                principal,
+                projected_tokens=pack.pack_token_count + max_output_tokens,
+                estimated_cost_usd=cost_report.cost_expected_usd,
+            )
 
             # 4. Patch Synthesis (Live API or Deterministic Fallback)
             patch_diff: str
@@ -1018,6 +1029,14 @@ class GeminiImplementationExecutor:
         estimated_usd_saved = round(max(0.0, frontier_cost - paid_cost), 6)
         paid_tokens_saved = max(0, local_read - pack_sent)
         zero_touch = len(miss_events) == 0
+
+        # Wire active consumption recording into SessionBudgetTracker
+        self.budget_tracker.record_consumption(
+            principal,
+            input_tokens=pack_sent,
+            output_tokens=0,
+            cost_usd=round(paid_cost, 6),
+        )
 
         try:
             trace_uuid = UUID(str(pack.trace_id))

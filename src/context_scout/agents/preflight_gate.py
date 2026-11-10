@@ -1988,7 +1988,7 @@ class PreFlightValidator:
         normalized_rrf_score: float | None,
         cross_encoder_score: float | None = None,
     ) -> tuple[bool, float]:
-        """Verifies top Normalized RRF score >= 0.55 (BLK-01) or cross-encoder score >= 0.60."""
+        """Verifies top Normalized RRF score >= 0.65 or cross-encoder score >= 0.60."""
         if normalized_rrf_score is not None:
             score = round(min(max(normalized_rrf_score, 0.0), 1.0), 6)
             passed = (score >= self.min_rrf_score) or (

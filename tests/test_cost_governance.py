@@ -313,3 +313,28 @@ def test_principal_context_dual_field_compatibility() -> None:
 
     # 3. Aliasing check for BudgetExceededError and BudgetExceededException
     assert BudgetExceededError is BudgetExceededException
+
+
+def test_cost_estimator_boundary_condition_prevents_output_token_inversion(
+    estimator: PaidComputeCostEstimator,
+) -> None:
+    """Verifies that estimated_output_tokens never exceeds max_output_tokens even for tight caps."""
+    # When max_output_tokens is small (< 64, e.g. 32)
+    report_32 = estimator.calculate_cost_estimate(
+        model_id="gemini-3.8-flash",
+        estimated_input_tokens=1000,
+        max_output_tokens=32,
+    )
+    assert report_32.estimated_output_tokens <= 32
+    assert report_32.estimated_output_tokens <= report_32.max_output_tokens
+    assert report_32.cost_low_usd <= report_32.cost_expected_usd <= report_32.cost_high_usd
+
+    # When max_output_tokens = 1
+    report_1 = estimator.calculate_cost_estimate(
+        model_id="gemini-3.8-flash",
+        estimated_input_tokens=500,
+        max_output_tokens=1,
+    )
+    assert report_1.estimated_output_tokens == 1
+    assert report_1.max_output_tokens == 1
+

@@ -1,14 +1,14 @@
 # Milestone 5 Phase Report: Cost Governance, OpenTelemetry Distributed Tracing & Continuous Documentation
 
 **Milestone:** M5 (Features F22, F23, F24, F25: Upfront Cost Estimation, Blocking Confirmation Gate, Automated Kill-Switches, OpenTelemetry 4-Phase Semantic Tracing, and Ledger Reconciliation)  
-**Status:** COMPLETE (88/88 M5 Unit & Integration Tests PASS, 340/340 E2E Tests PASS, 0 Ruff Violations)  
-**Verification Record:** 10 Cost Governance Tests, 13 OpenTelemetry Semantic Tracing Tests, 26 Gemini Executor & Adversarial Sandbox Tests, 39 Workflow & Challenger Tests, 340 E2E Tests (428 Total Empirical Tests Passed), 0 Ruff Violations across entire codebase  
+**Status:** COMPLETE (143/143 M5 Tests PASS, 340/340 E2E Tests PASS, 0 Ruff Violations)  
+**Verification Record:** 11 Cost Governance Tests, 13 OpenTelemetry Semantic Tracing Tests, 27 Gemini Executor & Adversarial Sandbox Tests, 39 Workflow & Challenger Tests, 53 Adversarial Challenger Empirical Tests (143 M5 Tests), 340 E2E Tests (483 Total Empirical Tests Passed), 0 Ruff Violations across entire codebase  
 **Repository:** `enterprise-context-scout`  
 **Infrastructure & Frontier Standards:** October 2026 Verified Pricing (Gemini 4 Argon, Claude Opus 5.5, GPT-5.6 Sol, Gemini 3.8 Flash, Gemma 4 26B MoE), OpenTelemetry 1.30+ GenAI Semantic Conventions, W3C TraceContext (`traceparent`), PostgreSQL 17 Forced RLS  
 
 ---
 
-## 1. Executive Summary & Architectural Scope
+## 1. Phase Overview & Objectives
 
 In enterprise production deployments, autonomous GenAI multi-agent developer workflows present significant financial and operational governance risks:
 1. **Unbounded Exploration Token Burn:** Uncontrolled autonomous agent traversal loops can burn hundreds of thousands of tokens exploring irrelevant directories before deciding if context even exists.
@@ -74,16 +74,40 @@ During Milestone 5 qualification and regression testing, three significant defec
 ### 3.1 Miss 9: Unbounded Output Projection in Preflight Budget Checks (`gemini_executor.py`)
 - **Symptom:** A principal with a remaining session budget of 1,200 tokens passed the upfront budget check for a 1,000-token prompt, but generating a 500-token patch breached the budget mid-stream, raising `BudgetExceededError` after burning paid API calls.
 - **Root Cause:** `check_principal_budget` in `gemini_executor.py` only evaluated `prompt_tokens + current_consumed <= budget`. It ignored worst-case generated output tokens (`max_output_tokens`), allowing paid API execution to begin when the full completion would exceed the principal's quota.
-- **Surgical Fix:** Enforced worst-case output token projection during preflight budget reservation: `projected_tokens = prompt_tokens + max_output_tokens`. If `current_consumed + projected_tokens > session_budget`, the request is rejected upfront before paid API invocation.
+- **Surgical Fix:** Enforced worst-case output token projection during preflight budget reservation: `projected = consumed + pack.pack_token_count + max_output_tokens`. If `projected > budget_cap`, the request is rejected upfront before paid API invocation. Also wired `SessionBudgetTracker.check_and_reserve` and `record_consumption` into the execution pipeline.
 - **Before/After Diff:**
   ```diff
-  - if current_consumed + prompt_tokens > session_budget:
-  -     raise BudgetExceededError(...)
-  + projected_worst_case = prompt_tokens + max_output_tokens
-  + if current_consumed + projected_worst_case > session_budget:
-  +     raise BudgetExceededError(
-  +         f"Projected tokens ({projected_worst_case}) exceeds remaining session budget"
-  +     )
+  -     def check_principal_budget(
+  -         self,
+  -         principal: PrincipalContext,
+  -         pack: ImplementationContextPack,
+  -         conn: Connection[tuple[object, ...]] | None = None,
+  -         repo: PostgresRLSRepository | InMemoryRLSRepository | None = None,
+  -     ) -> None:
+  +     def check_principal_budget(
+  +         self,
+  +         principal: PrincipalContext,
+  +         pack: ImplementationContextPack,
+  +         max_output_tokens: int = 4096,
+  +         conn: Connection[tuple[object, ...]] | None = None,
+  +         repo: PostgresRLSRepository | InMemoryRLSRepository | None = None,
+  +     ) -> None:
+  ...
+  -         projected = consumed + pack.pack_token_count
+  -         if projected > budget_cap:
+  -             raise BudgetExceededError(
+  -                 f"Principal '{principal.user_id}' exceeded session token budget: "
+  -                 f"consumed {consumed} + requested {pack.pack_token_count} > cap "
+  -                 f"{budget_cap}"
+  -             )
+  +         projected = consumed + pack.pack_token_count + max_output_tokens
+  +         if projected > budget_cap:
+  +             raise BudgetExceededError(
+  +                 f"Principal '{principal.user_id}' exceeded session token budget: "
+  +                 f"consumed {consumed} + projected {pack.pack_token_count + max_output_tokens} "
+  +                 f"(prompt: {pack.pack_token_count}, max_output: {max_output_tokens}) > cap "
+  +                 f"{budget_cap}"
+  +             )
   ```
 
 ### 3.2 Miss 10: Check 3 RRF Threshold Drift Between Gate Hardening and Legacy Tests (`test_m5_adk_workflow.py` & `test_empirical_m5_challenger.py`)
@@ -154,9 +178,27 @@ All test commands were executed directly against the codebase in the Python 3.12
   10. W3C TraceContext propagation (`traceparent` injection and extraction)
   11. Standardized `scout.*` and legacy `context_scout.*` dual-emission
 
-### 4.3 Combined Milestone 5 Test Suites
-- **Command:** `uv run pytest tests/test_cost_governance.py tests/test_telemetry_otel.py tests/test_gemini_executor.py tests/test_adversarial_m5_sandbox_telemetry.py tests/test_m5_adk_workflow.py tests/test_empirical_m5_challenger.py -v`
-- **Output:** `88 passed in 14.89s`
+### 4.3 Combined Milestone 5 Test Suites & Granular Metrics
+
+The complete Milestone 5 test suite comprises 8 specialized test suites covering 143 passed tests (including Challenger 1: 14 tests, Challenger 2: 39 tests; 141 baseline + 2 dedicated regression tests):
+
+| Test Suite File | Focus Area | Pass Count | Status |
+| :--- | :--- | :---: | :---: |
+| `tests/test_cost_governance.py` | Live October 2026 pricing, cost estimation, boundary limits, kill-switches | 11 passed | PASS |
+| `tests/test_telemetry_otel.py` | 4-phase OpenTelemetry spans, standardized attributes, W3C context | 13 passed | PASS |
+| `tests/test_gemini_executor.py` | Sandbox execution, worktree patches, Miss 9 worst-case projection | 11 passed | PASS |
+| `tests/test_adversarial_m5_sandbox_telemetry.py` | Budget isolation, multi-principal limits, QLoRA flywheel events | 16 passed | PASS |
+| `tests/test_m5_adk_workflow.py` | ADK Workflow, token kill-switch, federated coordinator, PostgreSQL | 18 passed | PASS |
+| `tests/test_empirical_m5_challenger.py` | Check 3 RRF threshold hardening (0.65), prompt candidate partitioning | 21 passed | PASS |
+| `tests/test_adversarial_m5_challenger1_empirical.py` | Adversarial boundary testing, parameter tampering, scope validation | 14 passed | PASS |
+| `tests/test_adversarial_m5_challenger2_empirical.py` | Multi-tenant stress, session rollover, concurrent telemetry emission | 39 passed | PASS |
+| **Total M5 Suites** | **All 8 M5 Test Suites Combined** | **143 passed** | **100% PASS** |
+
+- **Verification Command:**
+  ```bash
+  uv run pytest tests/test_cost_governance.py tests/test_telemetry_otel.py tests/test_gemini_executor.py tests/test_adversarial_m5_sandbox_telemetry.py tests/test_m5_adk_workflow.py tests/test_empirical_m5_challenger.py tests/test_adversarial_m5_challenger1_empirical.py tests/test_adversarial_m5_challenger2_empirical.py -v
+  ```
+- **Output:** `143 passed in 14.96s`
 
 ### 4.4 End-to-End Suite Regression Check
 - **Command:** `uv run pytest tests/e2e/`
@@ -178,6 +220,8 @@ In compliance with Staff-grade transparency, the following technical trade-offs 
    Git worktree testing runs in local OS child processes (`subprocess.run`). In multi-tenant cloud deployments, untrusted code execution requires containerized isolation environments (e.g., gVisor, Cloud Run Sandbox).
 3. **OTLP Distributed Tracing Network Fallback:**  
    When OpenTelemetry OTLP exporters cannot reach an external collector daemon, telemetry seamlessly defaults to `StructuredJsonSpanExporter` emitting single-line JSON logs to stdout without blocking task execution.
+4. **Synthetic Multi-Stack Evaluation Notice:**  
+   All current benchmark metrics and pass rates are derived from deterministic synthetic multi-stack fixtures (.NET/C#, TS/React/Redux, Python, Terraform, and documentation corpora). In accordance with directive `M4-OI-03`, real public repository evaluation against pinned commit SHAs indexed into persistent PostgreSQL 17 is being staged under Milestone 6.
 
 ---
 
