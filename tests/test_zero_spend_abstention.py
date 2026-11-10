@@ -28,6 +28,13 @@ Guarantees and mechanically proves:
      are weakened.
 7. Storage Parity & Live PostgreSQL Verification:
    - Verifies parity between InMemoryRLSRepository and live PostgresRLSRepository.
+
+DATABASE ISOLATION RATIONALE:
+Tests execute against the live PostgreSQL 17 database (`context_scout`) because all 7
+production tables, RLS security policies, triggers, and full-text/vector indices are
+pre-migrated via `sql/001_init_schema.sql` and `sql/002_production_enterprise_schema.sql`.
+Domain isolation is strictly enforced via per-session `eval_synthetic_<uuid>` partitioning,
+and verified by the canary non-interference regression test.
 """
 
 from __future__ import annotations
@@ -172,9 +179,8 @@ def domain_registry() -> DomainRegistry:
     return reg
 
 
-@pytest.fixture(scope="module")
-def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
-    """Populates repository with synthetic multi-stack codebases and Atlassian fixtures."""
+def build_synthetic_fixture_dataset(domain_id: str) -> InMemoryRLSRepository:
+    """Populates an in-memory repository with synthetic multi-stack and Atlassian fixtures."""
     repo = InMemoryRLSRepository()
     admin = PrincipalContext(
         user_id="benchmark_admin",
@@ -195,24 +201,13 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
         ],
     )
 
-    domain_id = f"eval_synthetic_{uuid.uuid4().hex[:12]}"
-    try:
-        base_manifest = domain_registry.get("polyglot_unseen_v2")
-    except KeyError:
-        base_manifest = domain_registry.get("trading_code_scout")
-    synthetic_manifest = base_manifest.model_copy(
-        update={
-            "domain_id": domain_id,
-            "display_name": f"Synthetic Polyglot Evaluation Benchmark ({domain_id})",
-        }
-    )
-    domain_registry.register(synthetic_manifest)
+    domain_ns = uuid.uuid5(uuid.NAMESPACE_DNS, domain_id)
 
     # -------------------------------------------------------------------------
     # 1. Synthetic C# / .NET E-Commerce Ordering API Fixtures (75 Tasks)
     # -------------------------------------------------------------------------
     for i in range(75):
-        f_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"eshop_file_{i}")
+        f_id = uuid.uuid5(domain_ns, f"eshop_file_{i}")
         f_path = (
             f"src/Services/Ordering/Ordering.API/Application/"
             f"Commands/OrderCheckoutHandler_{i:02d}.cs"
@@ -243,7 +238,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
                 line_count=10,
             ),
         )
-        sym_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"eshop_sym_{i}")
+        sym_id = uuid.uuid5(domain_ns, f"eshop_sym_{i}")
         repo.insert_ast_symbol(
             admin,
             ASTSymbolRecord(
@@ -265,7 +260,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
     # 2. Synthetic TS / React / Redux Web Storefront State Fixtures (75 Tasks)
     # -------------------------------------------------------------------------
     for i in range(75):
-        f_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"redux_file_{i}")
+        f_id = uuid.uuid5(domain_ns, f"redux_file_{i}")
         f_path = f"src/features/cart/cartSlice_{i:02d}.ts"
         content = (
             f"import {{ createSlice, PayloadAction }} from '@reduxjs/toolkit';\n\n"
@@ -296,7 +291,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
                 line_count=13,
             ),
         )
-        sym_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"redux_sym_{i}")
+        sym_id = uuid.uuid5(domain_ns, f"redux_sym_{i}")
         repo.insert_ast_symbol(
             admin,
             ASTSymbolRecord(
@@ -318,7 +313,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
     # 3. Synthetic Python Backend Gateway Service Fixtures (75 Tasks)
     # -------------------------------------------------------------------------
     for i in range(75):
-        f_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"gateway_file_{i}")
+        f_id = uuid.uuid5(domain_ns, f"gateway_file_{i}")
         f_path = f"src/gateway/proxy_{i:02d}.py"
         content = (
             f"class TokenBucketLimiter:\n"
@@ -347,7 +342,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
                 line_count=12,
             ),
         )
-        sym_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"gateway_sym_{i}")
+        sym_id = uuid.uuid5(domain_ns, f"gateway_sym_{i}")
         repo.insert_ast_symbol(
             admin,
             ASTSymbolRecord(
@@ -369,7 +364,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
     # 4. Synthetic Terraform GCP Infrastructure Fixtures (75 Tasks)
     # -------------------------------------------------------------------------
     for i in range(75):
-        f_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"tf_file_{i}")
+        f_id = uuid.uuid5(domain_ns, f"tf_file_{i}")
         f_path = f"modules/storage/cloud_sql_{i:02d}.tf"
         content = (
             f'resource "google_sql_database_instance" "postgres_{i:02d}" {{\n'
@@ -394,7 +389,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
                 line_count=6,
             ),
         )
-        sym_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"tf_sym_{i}")
+        sym_id = uuid.uuid5(domain_ns, f"tf_sym_{i}")
         repo.insert_ast_symbol(
             admin,
             ASTSymbolRecord(
@@ -417,7 +412,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
     # -------------------------------------------------------------------------
     # 5. Synthetic Enterprise Services for EVAL-01 (Billing, Core API, Vault)
     # -------------------------------------------------------------------------
-    b_fid = uuid.uuid5(uuid.NAMESPACE_DNS, "billing_base")
+    b_fid = uuid.uuid5(domain_ns, "billing_base")
     repo.insert_code_file(
         admin,
         CodeFileRecord(
@@ -436,7 +431,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
     repo.insert_ast_symbol(
         admin,
         ASTSymbolRecord(
-            symbol_id=uuid.uuid5(uuid.NAMESPACE_DNS, "billing_sym"),
+            symbol_id=uuid.uuid5(domain_ns, "billing_sym"),
             file_id=b_fid,
             domain_id=domain_id,
             qualified_name="enterprise/billing-service::src/billing/service.py::BillingManager",
@@ -451,7 +446,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
     )
 
     # Restricted Vault Service (Requires vault_restricted scope)
-    v_fid = uuid.uuid5(uuid.NAMESPACE_DNS, "vault_file")
+    v_fid = uuid.uuid5(domain_ns, "vault_file")
     repo.insert_code_file(
         admin,
         CodeFileRecord(
@@ -476,7 +471,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
         repo.insert_doc_chunk(
             admin,
             DocChunkRecord(
-                chunk_id=uuid.uuid5(uuid.NAMESPACE_DNS, chk_id),
+                chunk_id=uuid.uuid5(domain_ns, chk_id),
                 domain_id=domain_id,
                 doc_id=chk_id,
                 doc_title="eShop Ordering Architecture",
@@ -502,7 +497,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
         repo.insert_doc_chunk(
             admin,
             DocChunkRecord(
-                chunk_id=uuid.uuid5(uuid.NAMESPACE_DNS, chk_id),
+                chunk_id=uuid.uuid5(domain_ns, chk_id),
                 domain_id=domain_id,
                 doc_id=chk_id,
                 doc_title="Storefront State Management Spec",
@@ -528,7 +523,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
         repo.insert_doc_chunk(
             admin,
             DocChunkRecord(
-                chunk_id=uuid.uuid5(uuid.NAMESPACE_DNS, chk_id),
+                chunk_id=uuid.uuid5(domain_ns, chk_id),
                 domain_id=domain_id,
                 doc_id=chk_id,
                 doc_title=f"Jira Ticket GATEWAY-{100 + i}",
@@ -548,28 +543,77 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
             ),
         )
 
+    return repo
+
+
+def seed_synthetic_benchmark_repo(
+    conn: psycopg.Connection,
+    domain_id: str,
+    repo: InMemoryRLSRepository | None = None,
+) -> InMemoryRLSRepository:
+    """Inserts domain pack and all synthetic records into live PostgreSQL under domain_id."""
+    if repo is None:
+        repo = build_synthetic_fixture_dataset(domain_id)
+
+    conn.execute(
+        """
+        INSERT INTO domain_packs (
+            domain_id, display_name, lora_adapter_id,
+            primary_truth_source, freshness_half_life_days, config_json
+        )
+        VALUES (%s, 'Synthetic Fixture Benchmark Domain', 'none', 'code', 30, '{}')
+        ON CONFLICT (domain_id) DO NOTHING;
+        """,
+        (domain_id,),
+    )
+    pg_repo = PostgresRLSRepository()
+    for cf in repo._files.values():
+        pg_repo.insert_code_file(conn, cf)
+    for sym in repo._symbols.values():
+        pg_repo.insert_ast_symbol(conn, sym)
+    for chk in repo._docs.values():
+        pg_repo.insert_doc_chunk(conn, chk)
+    conn.commit()
+    return repo
+
+
+def teardown_synthetic_benchmark_repo(conn: psycopg.Connection, domain_id: str) -> None:
+    """Strictly deletes all records belonging to domain_id and verifies 0 rows remain."""
+    conn.execute("DELETE FROM doc_chunks WHERE domain_id = %s;", (domain_id,))
+    conn.execute("DELETE FROM ast_symbols WHERE domain_id = %s;", (domain_id,))
+    conn.execute("DELETE FROM code_files WHERE domain_id = %s;", (domain_id,))
+    conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (domain_id,))
+    conn.commit()
+
+    with conn.cursor() as cur:
+        for tbl in ("doc_chunks", "ast_symbols", "code_files", "domain_packs"):
+            cur.execute(f"SELECT COUNT(*) FROM {tbl} WHERE domain_id = %s;", (domain_id,))
+            cnt = cur.fetchone()[0]
+            assert cnt == 0, f"Teardown failure: {tbl} still contains {cnt} rows for {domain_id}!"
+
+
+@pytest.fixture(scope="module")
+def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
+    """Populates repository with synthetic multi-stack codebases and Atlassian fixtures."""
+    domain_id = f"eval_synthetic_{uuid.uuid4().hex[:12]}"
+    try:
+        base_manifest = domain_registry.get("trading_code_scout")
+    except KeyError:
+        base_manifest = next(iter(domain_registry._manifests.values()))
+    synthetic_manifest = base_manifest.model_copy(
+        update={
+            "domain_id": domain_id,
+            "display_name": f"Synthetic Polyglot Evaluation Benchmark ({domain_id})",
+        }
+    )
+    domain_registry.register(synthetic_manifest)
+
+    in_mem_repo = build_synthetic_fixture_dataset(domain_id)
+
     if is_postgres_reachable():
         st = ScoutSettings()
         with psycopg.connect(st.db_admin_url) as conn:
-            conn.execute(
-                """
-                INSERT INTO domain_packs (
-                    domain_id, display_name, lora_adapter_id,
-                    primary_truth_source, freshness_half_life_days, config_json
-                )
-                VALUES (%s, 'Synthetic Fixture Benchmark Domain', 'none', 'code', 30, '{}')
-                ON CONFLICT (domain_id) DO NOTHING;
-                """,
-                (domain_id,),
-            )
-            pg_repo = PostgresRLSRepository()
-            for cf in repo._files.values():
-                pg_repo.insert_code_file(conn, cf)
-            for sym in repo._symbols.values():
-                pg_repo.insert_ast_symbol(conn, sym)
-            for chk in repo._docs.values():
-                pg_repo.insert_doc_chunk(conn, chk)
-            conn.commit()
+            seed_synthetic_benchmark_repo(conn, domain_id, repo=in_mem_repo)
 
         conn_mgr = RLSConnectionManager(st.db_app_url)
         adapter = PostgresScoutGraphAdapter(conn_mgr, st)
@@ -578,15 +622,12 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
             yield adapter
         finally:
             with psycopg.connect(st.db_admin_url) as cleanup_conn:
-                cleanup_conn.execute("DELETE FROM doc_chunks WHERE domain_id = %s;", (domain_id,))
-                cleanup_conn.execute("DELETE FROM code_files WHERE domain_id = %s;", (domain_id,))
-                cleanup_conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (domain_id,))
-                cleanup_conn.commit()
+                teardown_synthetic_benchmark_repo(cleanup_conn, domain_id)
         return
 
     if os.environ.get("SCOUT_EVAL_IN_MEMORY_ONLY") == "1":
-        repo.benchmark_domain_id = domain_id
-        yield repo
+        in_mem_repo.benchmark_domain_id = domain_id
+        yield in_mem_repo
         return
 
     pytest.fail(
@@ -629,9 +670,7 @@ def eval_01_results(
             allowed_scopes=task.requested_scopes or ["public_eng"],
         )
 
-        bench_domain = getattr(
-            populated_benchmark_repo, "benchmark_domain_id", "polyglot_unseen_v2"
-        )
+        bench_domain = populated_benchmark_repo.benchmark_domain_id
         res = workflow.run(
             user_prompt=task.prompt,
             principal=principal,
@@ -778,9 +817,7 @@ class TestSyntheticFixtureAnswerableQueryDiscrimination:
                 allowed_scopes=["public_eng", f"repo:{task.target_repo}"],
             )
 
-            bench_domain = getattr(
-                populated_benchmark_repo, "benchmark_domain_id", "polyglot_unseen_v2"
-            )
+            bench_domain = populated_benchmark_repo.benchmark_domain_id
             result = workflow.run(
                 user_prompt=task.prompt,
                 principal=principal,
@@ -810,9 +847,7 @@ class TestPreFlightGateMutationProof:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Mutates Check 2 (closure) to return True; proves unanswerable task fails to abstain."""
-        bench_domain = getattr(
-            populated_benchmark_repo, "benchmark_domain_id", "polyglot_unseen_v2"
-        )
+        bench_domain = populated_benchmark_repo.benchmark_domain_id
         validator = PreFlightValidator(repo=populated_benchmark_repo, domain_id=bench_domain)
 
         monkeypatch.setattr(
@@ -892,9 +927,7 @@ class TestPreFlightGateMutationProof:
             verbatim_code_with_lines="1 | class VaultAuditLogger:\n2 |     pass\n",
             auto_expanded_by_ast=False,
         )
-        bench_domain = getattr(
-            populated_benchmark_repo, "benchmark_domain_id", "polyglot_unseen_v2"
-        )
+        bench_domain = populated_benchmark_repo.benchmark_domain_id
         validator = PreFlightValidator(repo=populated_benchmark_repo, domain_id=bench_domain)
         passed_guest, _permitted_guest, _, excised_guest, _ = validator.check_principal_scopes(
             [vault_slice],
@@ -937,9 +970,7 @@ class TestPreFlightGateMutationProof:
             verbatim_code_with_lines="1 | class PhantomClass {}\n",
             auto_expanded_by_ast=False,
         )
-        bench_domain = getattr(
-            populated_benchmark_repo, "benchmark_domain_id", "polyglot_unseen_v2"
-        )
+        bench_domain = populated_benchmark_repo.benchmark_domain_id
         validator = PreFlightValidator(repo=populated_benchmark_repo, domain_id=bench_domain)
         passed, unanchored, _ = validator.check_cryptographic_provenance(
             [phantom_slice],
@@ -978,9 +1009,7 @@ class TestStorageParityAndNeutralScopes:
             verbatim_code_with_lines="1 | class VaultAuditLogger:\n2 |     pass\n",
             auto_expanded_by_ast=False,
         )
-        bench_domain = getattr(
-            populated_benchmark_repo, "benchmark_domain_id", "polyglot_unseen_v2"
-        )
+        bench_domain = populated_benchmark_repo.benchmark_domain_id
         validator = PreFlightValidator(repo=populated_benchmark_repo, domain_id=bench_domain)
         passed, permitted, _, excised, missing = validator.check_principal_scopes(
             [vault_slice],
@@ -1003,7 +1032,11 @@ class TestStorageParityAndNeutralScopes:
     ) -> None:
         """Verifies RLS scope intersections strictly mirror database permissions."""
         if not is_postgres_reachable():
-            pytest.skip("PostgreSQL 17 is not reachable at configured db_admin_url")
+            if os.environ.get("SCOUT_EVAL_IN_MEMORY_ONLY") == "1":
+                pytest.skip("Skipping PostgreSQL parity test under SCOUT_EVAL_IN_MEMORY_ONLY=1")
+            pytest.fail(
+                "Live PostgreSQL 17 is required for store parity verification but is unreachable!"
+            )
 
         import psycopg
 
@@ -1023,9 +1056,7 @@ class TestStorageParityAndNeutralScopes:
             user_id="guest", role=RoleType.ENGINEER, allowed_scopes=["guest_only"]
         )
 
-        bench_domain = getattr(
-            populated_benchmark_repo, "benchmark_domain_id", "polyglot_unseen_v2"
-        )
+        bench_domain = populated_benchmark_repo.benchmark_domain_id
         visible_eng = populated_benchmark_repo.list_visible_code_files(eng_p, bench_domain)
         visible_guest = populated_benchmark_repo.list_visible_code_files(guest_p, bench_domain)
 
@@ -1035,7 +1066,10 @@ class TestStorageParityAndNeutralScopes:
     def test_fixture_cannot_touch_rows_of_another_domain(self) -> None:
         """Proves benchmark teardown isolates by domain_id and cannot touch other domains."""
         if not is_postgres_reachable():
-            pytest.skip("PostgreSQL not reachable for store parity test")
+            if os.environ.get("SCOUT_EVAL_IN_MEMORY_ONLY") == "1":
+                pytest.skip("Skipping canary test under explicit SCOUT_EVAL_IN_MEMORY_ONLY=1")
+            pytest.fail("Live PostgreSQL 17 is required for canary test but is unreachable!")
+
         import psycopg
 
         from context_scout.config import ScoutSettings
@@ -1043,8 +1077,10 @@ class TestStorageParityAndNeutralScopes:
         st = ScoutSettings()
         canary_domain = f"canary_verification_domain_{uuid.uuid4().hex[:8]}"
         canary_fid = uuid.uuid4()
+        session_domain = f"eval_synthetic_{uuid.uuid4().hex[:12]}"
 
         with psycopg.connect(st.db_admin_url) as conn:
+            # 1. Seed external canary row
             conn.execute(
                 """
                 INSERT INTO domain_packs (
@@ -1074,24 +1110,52 @@ class TestStorageParityAndNeutralScopes:
             )
             conn.commit()
 
-        try:
-            # Simulate fixture cleanup logic on an evaluation domain
-            eval_domain = f"eval_synthetic_{uuid.uuid4().hex[:12]}"
-            with psycopg.connect(st.db_admin_url) as conn:
-                conn.execute("DELETE FROM doc_chunks WHERE domain_id = %s;", (eval_domain,))
-                conn.execute("DELETE FROM code_files WHERE domain_id = %s;", (eval_domain,))
-                conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (eval_domain,))
-                conn.commit()
+            try:
+                # 2. Invoke REAL seed followed by REAL teardown on session_domain
+                seed_synthetic_benchmark_repo(conn, session_domain)
+                teardown_synthetic_benchmark_repo(conn, session_domain)
 
-            # Assert canary row remains completely intact
-            with psycopg.connect(st.db_admin_url) as conn, conn.cursor() as cur:
-                cur.execute(
-                    "SELECT COUNT(*) FROM code_files WHERE domain_id = %s;", (canary_domain,)
+                # 3. Assert canary row is completely intact and session_domain is 100% purged
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM code_files WHERE domain_id = %s;",
+                        (canary_domain,),
+                    )
+                    row_count = cur.fetchone()[0]
+                    assert row_count == 1, (
+                        f"Canary row in {canary_domain} was deleted or touched!"
+                    )
+
+                    for tbl in ("code_files", "ast_symbols", "doc_chunks", "domain_packs"):
+                        cur.execute(
+                            f"SELECT COUNT(*) FROM {tbl} WHERE domain_id = %s;",
+                            (session_domain,),
+                        )
+                        cnt = cur.fetchone()[0]
+                        assert cnt == 0, (
+                            f"Session domain {session_domain} still has {cnt} rows in {tbl}!"
+                        )
+
+                # 4. Mutation proof: verify that breaking teardown predicate deletes canary
+                def flawed_teardown(c: psycopg.Connection) -> None:
+                    # Flawed predicate deletes by repo without domain_id isolation
+                    c.execute("DELETE FROM code_files WHERE repo_name = 'canary/repo';")
+
+                flawed_teardown(conn)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM code_files WHERE domain_id = %s;",
+                        (canary_domain,),
+                    )
+                    mutated_count = cur.fetchone()[0]
+                    assert mutated_count == 0, (
+                        "Flawed teardown mutation did not delete canary row as expected!"
+                    )
+            finally:
+                conn.execute(
+                    "DELETE FROM code_files WHERE domain_id = %s;", (canary_domain,)
                 )
-                row_count = cur.fetchone()[0]
-                assert row_count == 1, f"Canary row in {canary_domain} was deleted or touched!"
-        finally:
-            with psycopg.connect(st.db_admin_url) as conn:
-                conn.execute("DELETE FROM code_files WHERE domain_id = %s;", (canary_domain,))
-                conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (canary_domain,))
+                conn.execute(
+                    "DELETE FROM domain_packs WHERE domain_id = %s;", (canary_domain,)
+                )
                 conn.commit()
