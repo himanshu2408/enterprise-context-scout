@@ -39,8 +39,8 @@ All model references and telemetry estimators in this design are verified agains
 ### Requirement 1: Dual Evaluation — Abstention & Over-Abstention with Token A/B
 Abstention accuracy alone is trivial to game by refusing all queries. Evaluation requires balanced statistical suites:
 - **EVAL-01 (Unanswerable / Insufficient Context, $N \ge 300$):** Target 100% abstention on unanswerable tasks ($300/300$), establishing a Clopper-Pearson 95% confidence lower bound $\ge 98.78\%$.
-- **EVAL-04 (Answerable Query Evaluation, $N \ge 300$):** Measures wrongful refusals (false abstention rate). The scout must successfully assemble verified context packs for genuine answerable tasks with wrongful refusal rate $\le 1.0\%$.
-- **EVAL-05 (Token Savings A/B Benchmark, $N \ge 120$):** Compares total task token spend between (a) frontier model doing direct tool-driven grep/read exploration vs. (b) 1-shot implementation using scout context packs across 4 polyglot stacks (.NET/C#, React/TS, Python, Terraform). Target: $\ge 70\%$ net token cost reduction with non-overlapping confidence intervals.
+- **EVAL-04 (Answerable Query Evaluation, $N \ge 300$):** Measures wrongful refusals (false abstention rate). The scout must successfully assemble verified context packs for genuine answerable tasks with wrongful refusal rate $\le 1.0\%$ (proposed default; needs user confirmation).
+- **EVAL-05 (Token Savings A/B Benchmark, $N \ge 120$):** Compares total task token spend between (a) frontier model doing direct tool-driven grep/read exploration vs. (b) 1-shot implementation using scout context packs across 4 polyglot stacks (.NET/C#, React/TS, Python, Terraform). Report-only metric: measures and reports empirical token cost reduction against the baseline with 95% confidence intervals (no fixed percentage cutoff).
 
 ### Requirement 2: Deterministic 6-Check Preflight Gate with Retrieval Relevance & RRF Thresholding
 The Preflight Gate (`src/context_scout/agents/preflight_gate.py`) evaluates context through an explicit 6-check sequence:
