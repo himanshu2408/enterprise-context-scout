@@ -306,7 +306,7 @@ def test_local_gemma_client_quant_brief_generation(
 
     assert brief.strategy_name != ""
     assert MarketRegime.GERMANY_XETRA_DAX in brief.target_markets
-    assert r"\text{OFI}" in brief.mathematical_signal_latex
+    assert r"E[Y \mid X]" in brief.mathematical_signal_latex
     assert len(brief.verified_citations) >= 1
     # Check citation is verbatim from doc chunk
     first_cit = brief.verified_citations[0]

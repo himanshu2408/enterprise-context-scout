@@ -2168,6 +2168,7 @@ class PreFlightValidator:
         bound_repo: BoundGraphRepository,
         principal: PrincipalContext,
         domain_id: str,
+        doc_chunks: dict[str, str] | list[DocChunkRecord] | None = None,
     ) -> tuple[
         bool,
         list[VerbatimCodeSlice],
@@ -2216,11 +2217,36 @@ class PreFlightValidator:
 
         visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
         chunk_scopes_map = {str(c.chunk_id): set(c.allowed_scopes) for c in visible_chunks}
-        citation_ids = [str(c.chunk_id) for c in citations if c.chunk_id]
-        if citation_ids:
-            specific_chunks = bound_repo.get_doc_chunks_by_ids(principal, domain_id, citation_ids)
-            for sc in specific_chunks:
-                chunk_scopes_map[str(sc.chunk_id)] = set(sc.allowed_scopes)
+        if isinstance(doc_chunks, list):
+            for c in doc_chunks:
+                if isinstance(c, DocChunkRecord) and hasattr(c, "allowed_scopes"):
+                    chunk_scopes_map[str(c.chunk_id)] = set(c.allowed_scopes)
+
+        citation_ids = [
+            str(c.chunk_id)
+            for c in citations
+            if c.chunk_id and str(c.chunk_id) not in chunk_scopes_map
+        ]
+        if citation_ids and bound_repo._repo is not None:
+            candidate_domains = [domain_id]
+            for scope in principal.allowed_scopes:
+                if scope.startswith("domain:"):
+                    candidate_domains.append(scope.split(":", 1)[1])
+            if "default" not in candidate_domains:
+                candidate_domains.append("default")
+            if "quant_research_scout" not in candidate_domains:
+                candidate_domains.append("quant_research_scout")
+            for lookup_domain in dict.fromkeys(candidate_domains):
+                specific_chunks = bound_repo.get_doc_chunks_by_ids(
+                    principal=principal,
+                    domain_id=lookup_domain,
+                    chunk_ids=citation_ids,
+                )
+                for sc in specific_chunks:
+                    chunk_scopes_map[str(sc.chunk_id)] = set(sc.allowed_scopes)
+                citation_ids = [cid for cid in citation_ids if cid not in chunk_scopes_map]
+                if not citation_ids:
+                    break
 
         permitted_citations: list[DocCitationSpan] = []
         for c in citations:
@@ -2540,6 +2566,7 @@ class PreFlightValidator:
                 bound_repo=bound_repo,
                 principal=active_principal,
                 domain_id=active_domain,
+                doc_chunks=doc_chunks,
             )
             active_slices = permitted_slices
             all_citations = permitted_citations
