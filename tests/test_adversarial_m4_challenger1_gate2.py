@@ -67,9 +67,7 @@ class TestLivePostgresBenchmarkIsolationAndTeardown:
             dp_count = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM code_files WHERE domain_id = %s;", (session_domain,))
             cf_count = cur.fetchone()[0]
-            cur.execute(
-                "SELECT COUNT(*) FROM ast_symbols WHERE domain_id = %s;", (session_domain,)
-            )
+            cur.execute("SELECT COUNT(*) FROM ast_symbols WHERE domain_id = %s;", (session_domain,))
             sym_count = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM doc_chunks WHERE domain_id = %s;", (session_domain,))
             doc_count = cur.fetchone()[0]
@@ -214,8 +212,7 @@ class TestLivePostgresBenchmarkIsolationAndTeardown:
                     )
                     cnt = cur.fetchone()[0]
                     assert cnt == 0, (
-                        f"Teardown failure: {tbl} still contains {cnt} rows "
-                        f"for {session_domain}!"
+                        f"Teardown failure: {tbl} still contains {cnt} rows for {session_domain}!"
                     )
 
         finally:

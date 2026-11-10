@@ -1,4 +1,4 @@
-# ruff: noqa: RUF001, E501
+# ruff: noqa: RUF001
 """Empirical Challenger 2 Suite — Milestone 4 Iteration 2 Gate 2.
 
 Comprehensive adversarial verification covering:
@@ -130,6 +130,7 @@ def populated_repo() -> InMemoryRLSRepository:
 # 1. Populated Repository Discrimination on Absent Symbols
 # =============================================================================
 
+
 class TestPopulatedRepoDiscrimination:
     """Stress-test unanswerable queries targeting absent symbols in populated repo."""
 
@@ -187,6 +188,7 @@ class TestPopulatedRepoDiscrimination:
 # 2. Exact Unicode NFKC Substring Matching & Tampering Rejection
 # =============================================================================
 
+
 class TestExactUnicodeNFKCSubstrings:
     """Adversarially challenge zero-tolerance exact substring matching."""
 
@@ -228,7 +230,9 @@ class TestExactUnicodeNFKCSubstrings:
 
     def test_negation_tamper_rejected_zero_tolerance(self, verifier: ClaimVerifier) -> None:
         # 'must not' instead of 'must'
-        tampered = "Enterprise cluster nodes must not enforce strict TLS 1.3 encryption on port 8443."
+        tampered = (
+            "Enterprise cluster nodes must not enforce strict TLS 1.3 encryption on port 8443."
+        )
         res = verifier.verify_single_claim(tampered, [self.SOURCE_TEXT])
         assert res.is_verified is False
         assert res.failure_code == ClaimFailureCode.NOT_IN_SOURCE
@@ -245,6 +249,7 @@ class TestExactUnicodeNFKCSubstrings:
 # =============================================================================
 # 3. Bidirectional Homoglyph Detection & Authentic International Unicode
 # =============================================================================
+
 
 class TestBidirectionalHomoglyphs:
     """Stress-test bidirectional homoglyph rejection and international Unicode acceptance."""
@@ -282,8 +287,8 @@ class TestBidirectionalHomoglyphs:
         "spoofed_word,clean_word",
         [
             ("шлюзa", "шлюза"),  # Latin 'a' at end
-            ("парольo", "пароль"), # Latin 'o' at end
-            ("пoдпись", "подпись"), # Latin 'o' in middle
+            ("парольo", "пароль"),  # Latin 'o' at end
+            ("пoдпись", "подпись"),  # Latin 'o' in middle
         ],
     )
     def test_latin_in_cyrillic_rejected_bidirectional(
@@ -301,9 +306,7 @@ class TestBidirectionalHomoglyphs:
         assert res.is_homoglyph_attack is True
 
     # Direction C: Pure lookalike token in Latin context
-    def test_pure_lookalike_token_in_latin_context_rejected(
-        self, verifier: ClaimVerifier
-    ) -> None:
+    def test_pure_lookalike_token_in_latin_context_rejected(self, verifier: ClaimVerifier) -> None:
         # Cyrillic small letter a (\u0430) as a standalone variable name in Latin sentence
         claim = "Set variable \u0430 to zero on initialization."
         is_hg, reason = detect_homoglyph_spoofing(claim)
@@ -345,6 +348,7 @@ class TestBidirectionalHomoglyphs:
 # 4. Marginal RRF Threshold Score (0.6499 vs 0.6500)
 # =============================================================================
 
+
 class TestMarginalRRFThreshold:
     """Stress-test boundary conditions for marginal RRF score around 0.65."""
 
@@ -377,9 +381,7 @@ class TestMarginalRRFThreshold:
         assert passed is True
         assert score == 0.6501
 
-    def test_end_to_end_preflight_gate_abstains_on_0_6499(
-        self, gate: PreFlightValidator
-    ) -> None:
+    def test_end_to_end_preflight_gate_abstains_on_0_6499(self, gate: PreFlightValidator) -> None:
         principal = PrincipalContext(
             user_id="auditor",
             role=RoleType.ENGINEER,
@@ -411,7 +413,6 @@ class TestMarginalRRFThreshold:
         assert res.diagnostic.paid_tokens_spent == 0
         assert "0.6499 is below threshold 0.65" in res.report.bounce_back_feedback
 
-
     def test_rrf_marginal_with_cross_encoder_rescue(self, gate: PreFlightValidator) -> None:
         # 0.6499 RRF alone fails
         passed, _ = gate.check_rrf_threshold(normalized_rrf_score=0.6499, cross_encoder_score=0.59)
@@ -439,7 +440,7 @@ class TestDeepStressHomoglyphsAndMultiRepo:
             ("JWT_T\u039fKEN", "Greek capital omicron in JWT_TOKEN"),
             ("\u0410DMIN_GATEWAY", "Cyrillic capital A in ADMIN_GATEWAY"),
             ("S\u0415RVER_PORT", "Cyrillic capital E in SERVER_PORT"),
-            ("R\u041e\u041ET_DIR", "Cyrillic capital O in ROOT_DIR"),
+            ("R\u041e\u041eT_DIR", "Cyrillic capital O in ROOT_DIR"),
             ("AU\u0422H_HEADER", "Cyrillic capital T in AUTH_HEADER"),
         ],
     )
@@ -455,9 +456,7 @@ class TestDeepStressHomoglyphsAndMultiRepo:
         assert res.is_verified is False
         assert res.failure_code == ClaimFailureCode.HOMOGLYPH_SPOOFING
 
-    def test_greek_prose_with_latin_lookalike_rejected(
-        self, verifier: ClaimVerifier
-    ) -> None:
+    def test_greek_prose_with_latin_lookalike_rejected(self, verifier: ClaimVerifier) -> None:
         # Greek word 'βάση' with Latin 'a' substituted
         spoofed_greek = "Σφάλμα στη βaση δεδομένων."
         clean_greek = "Σφάλμα στη βάση δεδομένων."
@@ -473,9 +472,7 @@ class TestDeepStressHomoglyphsAndMultiRepo:
         self, domain_registry: DomainRegistry, populated_repo: InMemoryRLSRepository
     ) -> None:
         # ExistingBillingManager exists, but MissingAuditSink does not!
-        prompt = (
-            "Refactor ExistingBillingManager to dispatch events to MissingAuditSink."
-        )
+        prompt = "Refactor ExistingBillingManager to dispatch events to MissingAuditSink."
         workflow = ScoutWorkflow(registry=domain_registry, repo=populated_repo)
         principal = PrincipalContext(
             user_id="auditor",

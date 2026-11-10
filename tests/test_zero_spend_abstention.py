@@ -1123,9 +1123,7 @@ class TestStorageParityAndNeutralScopes:
                         (canary_domain,),
                     )
                     row_count = cur.fetchone()[0]
-                    assert row_count == 1, (
-                        f"Canary row in {canary_domain} was deleted or touched!"
-                    )
+                    assert row_count == 1, f"Canary row in {canary_domain} was deleted or touched!"
 
                     for tbl in ("code_files", "ast_symbols", "doc_chunks", "domain_packs"):
                         cur.execute(
@@ -1155,10 +1153,6 @@ class TestStorageParityAndNeutralScopes:
             finally:
                 with contextlib.suppress(Exception):
                     conn.rollback()
-                conn.execute(
-                    "DELETE FROM code_files WHERE domain_id = %s;", (canary_domain,)
-                )
-                conn.execute(
-                    "DELETE FROM domain_packs WHERE domain_id = %s;", (canary_domain,)
-                )
+                conn.execute("DELETE FROM code_files WHERE domain_id = %s;", (canary_domain,))
+                conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (canary_domain,))
                 conn.commit()

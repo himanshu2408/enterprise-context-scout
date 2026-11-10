@@ -917,4 +917,3 @@ class TestPreFlightValidator:
         assert len(errors) == 1
         assert "Nesting depth (12) exceeds maximum limit (10)" in errors[0]
         assert any(m.kind == "syntax" for m in missing)
-
