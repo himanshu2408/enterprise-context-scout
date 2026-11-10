@@ -5,10 +5,11 @@ import platform
 import re
 import subprocess
 import sys
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ALLOWED_GOOGLE_MODEL_PREFIXES: Final[tuple[str, ...]] = (
@@ -73,6 +74,58 @@ def validate_google_model_id(model_id: str) -> str:
     return cleaned
 
 
+class ClaimVerificationPolicy(StrEnum):
+    """Configurable policy governing claim verification in compiled gates (M4 Requirement 6)."""
+
+    STRICT_ABSTAIN_ON_ANY_UNVERIFIED = "strict_abstain"
+    PRUNE_AND_MARK_LOW_TRUST = "prune_and_warn"
+    MIN_VERIFIED_COUNT = "min_verified_count"
+
+
+class ClaimVerifierConfig(BaseModel):
+    """Configuration for ClaimVerifier policy and thresholds."""
+
+    policy: ClaimVerificationPolicy = ClaimVerificationPolicy.STRICT_ABSTAIN_ON_ANY_UNVERIFIED
+    min_verified_claims: int = Field(default=1, ge=1)
+    record_pruned_audit_trail: bool = True
+    reject_homoglyphs: bool = True
+
+
+class DomainConfig(BaseModel):
+    """Multi-tenant domain configuration with neutral defaults and zero hardcoded workflows."""
+
+    domain_id: str = "default"
+    min_retrieval_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
+    cross_encoder_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
+    jira_terminal_statuses: list[str] = Field(
+        default_factory=lambda: ["Closed", "Resolved", "Archived"]
+    )
+    jira_negative_resolutions: list[str] = Field(
+        default_factory=lambda: [
+            "Won't Fix",
+            "Duplicate",
+            "Cannot Reproduce",
+            "Abandoned",
+            "Won't Do",
+            "Rejected",
+            "Cancelled",
+        ]
+    )
+    confluence_strict_freshness: bool = True
+    claim_policy: ClaimVerificationPolicy = ClaimVerificationPolicy.STRICT_ABSTAIN_ON_ANY_UNVERIFIED
+    claim_config: ClaimVerifierConfig = Field(default_factory=ClaimVerifierConfig)
+
+
+class ScoutConfig(BaseModel):
+    """Global scout configuration integrating multi-tenant domain overrides."""
+
+    default_domain_config: DomainConfig = Field(default_factory=DomainConfig)
+    domain_configs: dict[str, DomainConfig] = Field(default_factory=dict)
+
+    def get_domain_config(self, domain_id: str) -> DomainConfig:
+        return self.domain_configs.get(domain_id, self.default_domain_config)
+
+
 class ScoutSettings(BaseSettings):
     """Application settings loaded from environment variables or .env."""
 
@@ -97,6 +150,7 @@ class ScoutSettings(BaseSettings):
     shield_model_id: str = Field(default="google/shieldgemma-2-2b-it")
     frontier_model_id: str = Field(default="gemini-3.8-flash")
 
+    min_retrieval_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
     embedding_dimensions: int = Field(default=768, ge=128, le=3072)
     local_max_kv_tokens: int = Field(default=32_768, ge=4_096, le=131_072)
     local_mlx_endpoint: str = Field(default="http://127.0.0.1:8000/v1")

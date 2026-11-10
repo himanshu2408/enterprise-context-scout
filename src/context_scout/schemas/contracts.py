@@ -7,7 +7,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from context_scout.config import validate_google_model_id
+from context_scout.config import (
+    ClaimVerificationPolicy,
+    ClaimVerifierConfig,
+    DomainConfig,
+    ScoutConfig,
+    validate_google_model_id,
+)
 
 
 class RoleType(StrEnum):
@@ -283,6 +289,103 @@ class QuantStrategyBrief(BaseModel):
         return self
 
 
+class MissingItemRecord(BaseModel):
+    """Structured record of a missing or invalid dependency/provenance/permission item."""
+
+    kind: Literal[
+        "code_symbol",
+        "file",
+        "document",
+        "citation",
+        "scope",
+        "provenance",
+        "freshness",
+        "syntax",
+    ]
+    identifier: str = Field(min_length=1)
+    reason: str = ""
+    suggested_action: str = ""
+
+
+class CodeSpanPointer(BaseModel):
+    """Extractive code span pointer emitted by local Gemma 4 Scout (M4 Requirement 4).
+
+    Zero re-typed code from LLM memory. Line bounds are 1-indexed, inclusive, and
+    line_end >= line_start. Cryptographically anchored to commit_sha and blob_sha.
+    """
+
+    repo_name: str = Field(min_length=1, description="Repository identifier")
+    file_path: str = Field(min_length=1, description="Relative file path within repository")
+    commit_sha: str = Field(min_length=7, description="Full or abbreviated Git commit SHA")
+    blob_sha: str = Field(min_length=7, description="Git blob SHA of the target file")
+    line_start: int = Field(ge=1, description="1-indexed starting line number")
+    line_end: int = Field(ge=1, description="1-indexed ending line number")
+    symbol_id: str | None = Field(default=None, description="Optional qualified AST symbol name")
+    modification_intent: ModificationIntent | None = Field(
+        default=None, description="Intended edit or context role"
+    )
+
+    @model_validator(mode="after")
+    def _validate_line_bounds(self) -> "CodeSpanPointer":
+        if self.line_end < self.line_start:
+            raise ValueError(
+                f"line_end ({self.line_end}) must be >= line_start ({self.line_start})"
+            )
+        return self
+
+
+class DocSpanPointer(BaseModel):
+    """Extractive document span pointer with enterprise provenance and verbatim quote."""
+
+    source_type: Literal[
+        "confluence", "jira", "git_doc", "local_doc", "spec", "general"
+    ] = Field(default="confluence", description="Source enterprise repository type")
+    item_id: str = Field(min_length=1, description="Confluence page ID, Jira issue key, or doc ID")
+    version_or_status: str = Field(
+        min_length=1, description="Confluence page version or Jira issue status"
+    )
+    verbatim_quote: str = Field(
+        min_length=1, description="Exact verbatim quote from the source document"
+    )
+    section_heading: str | None = Field(default=None, description="Section heading or title")
+    chunk_id: str | None = Field(default=None, description="Internal chunk identifier")
+
+
+class RawQuoteItem(BaseModel):
+    """Verbatim text snippet extracted from source context."""
+
+    quote: str = Field(min_length=1, description="Verbatim text snippet")
+    source_id: str = Field(min_length=1, description="Identifier of source document or file")
+    source_type: Literal["code", "document"] = Field(
+        default="document", description="'code' or 'document'"
+    )
+    line_number: int | None = Field(default=None, ge=1, description="Line number if from code")
+
+
+class ExtractiveDiscoveryPack(BaseModel):
+    """Strictly extractive discovery output emitted by local Gemma 4 Scout (M4 Requirement 4).
+
+    Contains ONLY pointers and verbatim quotes.
+    `non_evidence_scratchpad` is strictly for local chain-of-thought and MUST NEVER be passed
+    to paid frontier models.
+    """
+
+    query_id: str = Field(min_length=1, description="Unique query identifier")
+    code_pointers: list[CodeSpanPointer] = Field(
+        default_factory=list, description="Extractive code span pointers"
+    )
+    doc_pointers: list[DocSpanPointer] = Field(
+        default_factory=list, description="Extractive document span pointers"
+    )
+    raw_quotes: list[RawQuoteItem] = Field(
+        default_factory=list, description="Verbatim quotes extracted from source corpus"
+    )
+    non_evidence_scratchpad: str = Field(
+        default="",
+        description="Local reasoning scratchpad. NEVER passed to paid frontier models.",
+    )
+
+
 class PreFlightValidationReport(BaseModel):
     passed: bool
     unresolved_symbols: list[str] = Field(default_factory=list)
@@ -292,6 +395,12 @@ class PreFlightValidationReport(BaseModel):
     citations_verified_100_pct: bool
     auto_attached_ast_slices_count: int = Field(default=0, ge=0)
     bounce_back_feedback: str | None = None
+    syntax_errors: list[str] = Field(default_factory=list)
+    excised_unauthorized_items: list[str] = Field(default_factory=list)
+    unanchored_provenance_items: list[str] = Field(default_factory=list)
+    stale_invalidated_items: list[str] = Field(default_factory=list)
+    missing_items: list[MissingItemRecord] = Field(default_factory=list)
+    check_results: dict[str, bool] = Field(default_factory=dict)
 
 
 class InsufficientContextDiagnostic(BaseModel):
@@ -300,9 +409,49 @@ class InsufficientContextDiagnostic(BaseModel):
     trace_id: str
     domain_id: str
     reason: str
-    missing_symbols: list[str]
-    partial_candidate_files: list[str]
+    missing_symbols: list[str] = Field(default_factory=list)
+    partial_candidate_files: list[str] = Field(default_factory=list)
+    missing_items: list[MissingItemRecord | str] = Field(default_factory=list)
+    failure_check: str | None = None
     paid_tokens_spent: Literal[0] = 0
+
+    @model_validator(mode="after")
+    def _sync_missing_items_and_symbols(self) -> "InsufficientContextDiagnostic":
+        if self.missing_items and not self.missing_symbols:
+            syms: list[str] = []
+            for item in self.missing_items:
+                if isinstance(item, MissingItemRecord):
+                    syms.append(item.identifier)
+                else:
+                    syms.append(str(item))
+            object.__setattr__(self, "missing_symbols", syms)
+        elif self.missing_symbols and not self.missing_items:
+            items: list[MissingItemRecord | str] = [
+                MissingItemRecord(
+                    kind="code_symbol",
+                    identifier=s,
+                    reason=f"Missing symbol {s}",
+                )
+                for s in self.missing_symbols
+            ]
+            object.__setattr__(self, "missing_items", items)
+        return self
+
+
+class GatePassResult(BaseModel):
+    """Deterministic result when context passes all 6 preflight checks."""
+
+    passed: Literal[True] = True
+    report: PreFlightValidationReport
+    pack: Any | None = None
+
+
+class GateAbstentionResult(BaseModel):
+    """Deterministic result when context fails preflight check and triggers abstention."""
+
+    passed: Literal[False] = False
+    diagnostic: InsufficientContextDiagnostic
+    report: PreFlightValidationReport
 
 
 class ImplementationContextPack(BaseModel):
@@ -406,4 +555,40 @@ class PatchExecutionResult(BaseModel):
     requires_human_confirmation: bool
     confirmed: bool = False
     details: str = ""
+
+
+__all__ = [
+    "MARKET_MIN_FRICTION_BPS",
+    "ClaimVerificationPolicy",
+    "ClaimVerifierConfig",
+    "CodeSlicePointer",
+    "CodeSpanPointer",
+    "ContextMissEvent",
+    "DocCitationSpan",
+    "DocSpanPointer",
+    "DomainConfig",
+    "DomainKnowledgeBrief",
+    "ExecutionMode",
+    "ExecutionTelemetryRecord",
+    "ExtractiveDiscoveryPack",
+    "FrictionVerdict",
+    "GateAbstentionResult",
+    "GatePassResult",
+    "ImplementationContextPack",
+    "InsufficientContextDiagnostic",
+    "MarketRegime",
+    "MissingContextRequest",
+    "MissingItemRecord",
+    "ModificationIntent",
+    "PatchExecutionResult",
+    "PreFlightValidationReport",
+    "PrincipalContext",
+    "QuantStrategyBrief",
+    "RawQuoteItem",
+    "RoleType",
+    "ScoutConfig",
+    "VerbatimCodeSlice",
+    "compute_normalized_rrf",
+    "evaluate_market_friction_floor",
+]
 

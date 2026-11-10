@@ -34,9 +34,13 @@ from context_scout.db.repositories import (
 from context_scout.schemas.contracts import (
     CodeSlicePointer,
     DocCitationSpan,
+    DomainConfig,
+    GateAbstentionResult,
+    GatePassResult,
     ImplementationContextPack,
     InsufficientContextDiagnostic,
     MarketRegime,
+    MissingItemRecord,
     ModificationIntent,
     PreFlightValidationReport,
     PrincipalContext,
@@ -1292,6 +1296,9 @@ def create_insufficient_context_diagnostic(
     for sym in report.missing_reference_identifiers:
         if sym not in missing:
             missing.append(sym)
+    for item in report.missing_items:
+        if item.identifier not in missing:
+            missing.append(item.identifier)
 
     reason = (
         custom_reason
@@ -1300,12 +1307,20 @@ def create_insufficient_context_diagnostic(
     )
     files = partial_candidate_files or []
 
+    failure_check: str | None = None
+    for k, v in report.check_results.items():
+        if not v:
+            failure_check = k
+            break
+
     return InsufficientContextDiagnostic(
         trace_id=trace_id,
         domain_id=domain_id,
         reason=reason,
         missing_symbols=missing,
         partial_candidate_files=files,
+        missing_items=list(report.missing_items),
+        failure_check=failure_check,
         paid_tokens_spent=0,
     )
 
@@ -1317,33 +1332,40 @@ class PreFlightValidator:
     normalized retrieval score, and verbatim document citations before paid frontier handoff.
     """
 
-    DEFAULT_MIN_RRF_SCORE: Final[float] = 0.55
+    DEFAULT_MIN_RRF_SCORE: Final[float] = 0.65
     DEFAULT_CROSS_ENCODER_SCORE_THRESHOLD: Final[float] = 0.60
-    DEFAULT_MIN_CITATION_OVERLAP: Final[float] = 0.98
+    DEFAULT_MIN_CITATION_OVERLAP: Final[float] = 1.0
 
     def __init__(
         self,
         repo: Any = None,
         slicer: DeterministicSlicer | None = None,
         expander: ASTDependencyExpander | None = None,
-        min_rrf_score: float = DEFAULT_MIN_RRF_SCORE,
+        min_rrf_score: float | None = None,
         cross_encoder_threshold: float = DEFAULT_CROSS_ENCODER_SCORE_THRESHOLD,
         min_citation_overlap: float = DEFAULT_MIN_CITATION_OVERLAP,
         principal: PrincipalContext | None = None,
         domain_id: str | None = None,
+        domain_config: DomainConfig | None = None,
         citation_gate: DocumentCitationGate | None = None,
     ) -> None:
         self.repo = repo
         self.slicer = slicer or DeterministicSlicer()
+        self.domain_config = domain_config or DomainConfig(domain_id=domain_id or "default")
         self.citation_gate = citation_gate or DocumentCitationGate(
             min_overlap_ratio=min_citation_overlap,
             require_citations_default=False,
+            strict_freshness=self.domain_config.confluence_strict_freshness,
         )
         self.expander = expander or ASTDependencyExpander(
             max_direct_callers=3,
             max_expansion_token_budget=1500,
         )
-        self.min_rrf_score = min_rrf_score
+        self.min_rrf_score = (
+            min_rrf_score
+            if min_rrf_score is not None
+            else self.domain_config.min_retrieval_confidence
+        )
         self.cross_encoder_threshold = cross_encoder_threshold
         self.min_citation_overlap = min_citation_overlap
         self.principal = principal
@@ -1889,6 +1911,273 @@ class PreFlightValidator:
                 failed_reasons.append(r)
         return res.passed, failed_reasons
 
+    def check_ast_syntax(
+        self, code_slices: list[VerbatimCodeSlice]
+    ) -> tuple[bool, list[str], list[MissingItemRecord]]:
+        """Check 1: Verifies all code slices parse cleanly under language parser."""
+        import textwrap
+
+        syntax_errors: list[str] = []
+        missing_items: list[MissingItemRecord] = []
+
+        py_parser = None
+        ts_parser = None
+        tsx_parser = None
+        try:
+            import tree_sitter_python as tspython
+            import tree_sitter_typescript as tstypescript
+            from tree_sitter import Language, Parser
+
+            py_parser = Parser(Language(tspython.language()))
+            ts_parser = Parser(Language(tstypescript.language_typescript()))
+            tsx_parser = Parser(Language(tstypescript.language_tsx()))
+        except Exception as e:
+            logger.debug("Tree-sitter parser initialization: %s", e)
+
+        for s in code_slices:
+            raw_lines: list[str] = []
+            for line in s.verbatim_code_with_lines.splitlines():
+                m = re.match(r"^\s*\d+\s*\|\s?(.*)$", line)
+                raw_lines.append(m.group(1) if m else line)
+            cleaned_code = textwrap.dedent("\n".join(raw_lines)).strip()
+            if not cleaned_code:
+                continue
+
+            has_error = False
+            err_msg = ""
+
+            # Check unclosed delimiters
+            if self.slicer._has_unclosed_delimiters(cleaned_code):
+                has_error = True
+                err_msg = "Unclosed syntax delimiters in code slice"
+
+            # Check parentheses nesting depth (> 10 levels)
+            depth = 0
+            max_depth = 0
+            for ch in cleaned_code:
+                if ch in "([{":
+                    depth += 1
+                    max_depth = max(max_depth, depth)
+                elif ch in ")]}":
+                    depth = max(0, depth - 1)
+            if max_depth > 10:
+                has_error = True
+                err_msg = f"Nesting depth ({max_depth}) exceeds maximum limit (10)"
+
+            # Parse with tree-sitter based on file extension
+            ext = Path(s.file_path).suffix.lower()
+            code_b = cleaned_code.encode("utf-8")
+            if ext in (".py",) and py_parser is not None:
+                tree = py_parser.parse(code_b)
+                if tree.root_node.has_error:
+                    has_error = True
+                    err_msg = "Tree-sitter Python parser reported syntax error"
+            elif ext in (".ts", ".js") and ts_parser is not None:
+                tree = ts_parser.parse(code_b)
+                if tree.root_node.has_error:
+                    has_error = True
+                    err_msg = "Tree-sitter TypeScript parser reported syntax error"
+            elif ext in (".tsx", ".jsx") and tsx_parser is not None:
+                tree = tsx_parser.parse(code_b)
+                if tree.root_node.has_error:
+                    has_error = True
+                    err_msg = "Tree-sitter TSX parser reported syntax error"
+
+            if has_error:
+                ident = s.qualified_symbol or s.file_path
+                diag_msg = f"MALFORMED_SYNTAX in {s.file_path} ({ident}): {err_msg}"
+                syntax_errors.append(diag_msg)
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="syntax",
+                        identifier=ident,
+                        reason=diag_msg,
+                        suggested_action="Fix syntax or adjust slice bounds to parse cleanly",
+                    )
+                )
+
+        return len(syntax_errors) == 0, syntax_errors, missing_items
+
+    def check_principal_scopes(
+        self,
+        code_slices: list[VerbatimCodeSlice],
+        citations: list[DocCitationSpan],
+        bound_repo: BoundGraphRepository,
+        principal: PrincipalContext,
+        domain_id: str,
+    ) -> tuple[
+        bool,
+        list[VerbatimCodeSlice],
+        list[DocCitationSpan],
+        list[str],
+        list[MissingItemRecord],
+    ]:
+        """Check 4: Principal scope mirroring. Excises unauthorized items."""
+        excised_items: list[str] = []
+        missing_items: list[MissingItemRecord] = []
+        allowed_set = set(principal.allowed_scopes)
+
+        visible_files = bound_repo.list_visible_code_files(principal, domain_id)
+        file_scopes_map = {f.file_path: set(f.allowed_scopes) for f in visible_files}
+
+        permitted_slices: list[VerbatimCodeSlice] = []
+        for s in code_slices:
+            f_scopes = file_scopes_map.get(s.file_path, {"public_eng", f"repo:{s.repo_name}"})
+            repo_scope = f"repo:{s.repo_name}"
+            repo_read_scope = f"repo:{s.repo_name}:read"
+            if (
+                bool(allowed_set & f_scopes)
+                or repo_scope in allowed_set
+                or repo_read_scope in allowed_set
+                or "public_eng" in allowed_set
+                or "*" in allowed_set
+                or "admin" in allowed_set
+            ):
+                permitted_slices.append(s)
+            else:
+                excised_items.append(f"code:{s.repo_name}/{s.file_path}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="scope",
+                        identifier=f"{s.repo_name}/{s.file_path}",
+                        reason=f"Principal '{principal.user_id}' lacks required scopes {f_scopes}",
+                    )
+                )
+
+        permitted_citations: list[DocCitationSpan] = []
+        for c in citations:
+            permitted_citations.append(c)
+
+        passed = True
+        if len(code_slices) > 0 and len(permitted_slices) == 0:
+            passed = False
+        if len(excised_items) > 0 and len(permitted_slices) == 0 and len(permitted_citations) == 0:
+            passed = False
+
+        return passed, permitted_slices, permitted_citations, excised_items, missing_items
+
+    def check_cryptographic_provenance(
+        self,
+        code_slices: list[VerbatimCodeSlice],
+        bound_repo: BoundGraphRepository,
+        principal: PrincipalContext,
+        domain_id: str,
+    ) -> tuple[bool, list[str], list[MissingItemRecord]]:
+        """Check 5: Cryptographic provenance anchor verification."""
+        unanchored: list[str] = []
+        missing_items: list[MissingItemRecord] = []
+
+        visible_files = bound_repo.list_visible_code_files(principal, domain_id)
+        files_by_path = {f.file_path: f for f in visible_files}
+
+        for s in code_slices:
+            if (
+                not s.git_commit_sha
+                or len(s.git_commit_sha) < 7
+                or s.git_commit_sha == "placeholder_sha"
+            ):
+                unanchored.append(f"Invalid commit SHA in {s.file_path}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="provenance",
+                        identifier=s.file_path,
+                        reason="Missing or placeholder git_commit_sha",
+                    )
+                )
+                continue
+            if (
+                not s.git_blob_sha
+                or len(s.git_blob_sha) < 7
+                or s.git_blob_sha == "placeholder_blob"
+            ):
+                unanchored.append(f"Invalid blob SHA in {s.file_path}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="provenance",
+                        identifier=s.file_path,
+                        reason="Missing or placeholder git_blob_sha",
+                    )
+                )
+                continue
+            if s.start_line < 1 or s.end_line < s.start_line:
+                unanchored.append(
+                    f"Invalid line bounds {s.start_line}-{s.end_line} in {s.file_path}"
+                )
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="provenance",
+                        identifier=s.file_path,
+                        reason=f"Invalid line bounds {s.start_line}-{s.end_line}",
+                    )
+                )
+                continue
+
+            f_rec = files_by_path.get(s.file_path)
+            if (
+                f_rec is not None
+                and f_rec.git_blob_sha
+                and f_rec.git_blob_sha != s.git_blob_sha
+            ):
+                unanchored.append(
+                    f"Blob SHA mismatch in {s.file_path}: {s.git_blob_sha} vs {f_rec.git_blob_sha}"
+                )
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="provenance",
+                        identifier=s.file_path,
+                        reason=f"Blob SHA mismatch: {s.git_blob_sha} vs {f_rec.git_blob_sha}",
+                    )
+                )
+
+        return len(unanchored) == 0, unanchored, missing_items
+
+    def check_document_freshness(
+        self,
+        citations: list[DocCitationSpan],
+        doc_chunks: dict[str, str] | list[DocChunkRecord] | None,
+        bound_repo: BoundGraphRepository,
+        principal: PrincipalContext,
+        domain_id: str,
+    ) -> tuple[bool, list[str], list[MissingItemRecord]]:
+        """Check 6: Document freshness and staleness invalidation."""
+        stale_items: list[str] = []
+        missing_items: list[MissingItemRecord] = []
+
+        if not citations:
+            return True, [], []
+
+        visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
+        chunks_by_id = {c.chunk_id: c for c in visible_chunks}
+
+        neg_resolutions = set(
+            r.lower() for r in self.domain_config.jira_negative_resolutions
+        )
+
+        for cit in citations:
+            chunk = chunks_by_id.get(cit.chunk_id)
+            if chunk is not None:
+                if chunk.is_stale:
+                    stale_items.append(f"stale_chunk:{cit.chunk_id}")
+                    missing_items.append(
+                        MissingItemRecord(
+                            kind="freshness",
+                            identifier=cit.chunk_id,
+                            reason=f"Chunk {cit.chunk_id} marked stale/superseded",
+                        )
+                    )
+                res_val = str(chunk.metadata.get("resolution", "")).strip().lower()
+                if res_val and res_val in neg_resolutions:
+                    stale_items.append(f"negative_resolution:{cit.chunk_id}:{res_val}")
+                    missing_items.append(
+                        MissingItemRecord(
+                            kind="freshness",
+                            identifier=cit.chunk_id,
+                            reason=f"Ticket has negative resolution '{res_val}'",
+                        )
+                    )
+
+        return len(stale_items) == 0, stale_items, missing_items
+
     def validate(
         self,
         pack: ImplementationContextPack | None = None,
@@ -1905,7 +2194,7 @@ class PreFlightValidator:
         conn: Connection[tuple[object, ...]] | None = None,
         doc_chunks: dict[str, str] | list[DocChunkRecord] | None = None,
     ) -> PreFlightValidationReport:
-        """Executes all 4 deterministic checks, returning a PreFlightValidationReport."""
+        """Executes all 6 deterministic preflight checks, returning a PreFlightValidationReport."""
         # Unpack parameters from pack if provided
         active_slices = (
             code_slices
@@ -1947,7 +2236,12 @@ class PreFlightValidator:
                         all_citations.append(c)
 
             # ---------------------------------------------------------------------
-            # Check 1: Internal Symbol Resolution & 1-Hop AST Auto-Closure
+            # Check 1: AST Syntax & Structural Well-Formedness
+            # ---------------------------------------------------------------------
+            check_1_passed, syntax_errors, syntax_missing = self.check_ast_syntax(active_slices)
+
+            # ---------------------------------------------------------------------
+            # Check 2: 1-Hop AST Dependency Closure & Prompt Reference Coverage
             # ---------------------------------------------------------------------
             unresolved_symbols, auto_attached_count = self.check_symbol_resolution(
                 code_slices=active_slices,
@@ -1955,11 +2249,6 @@ class PreFlightValidator:
                 principal=active_principal,
                 domain_id=active_domain,
             )
-            check_1_passed = len(unresolved_symbols) == 0
-
-            # ---------------------------------------------------------------------
-            # Check 2: Prompt Identifier Partitioning (VAL-01)
-            # ---------------------------------------------------------------------
             visible_symbols = bound_repo.list_visible_ast_symbols(active_principal, active_domain)
             visible_files = bound_repo.list_visible_code_files(active_principal, active_domain)
 
@@ -1971,18 +2260,78 @@ class PreFlightValidator:
                     code_slices=active_slices,
                 )
             )
-            check_2_passed = len(missing_reference_identifiers) == 0
+            check_2_passed = (
+                len(unresolved_symbols) == 0 and len(missing_reference_identifiers) == 0
+            )
+            closure_missing: list[MissingItemRecord] = [
+                MissingItemRecord(
+                    kind="code_symbol",
+                    identifier=sym,
+                    reason=f"Unresolved internal symbol: {sym}",
+                )
+                for sym in unresolved_symbols
+            ] + [
+                MissingItemRecord(
+                    kind="file" if "." in sym else "code_symbol",
+                    identifier=sym,
+                    reason=f"Referenced existing symbol/file missing from context: {sym}",
+                )
+                for sym in missing_reference_identifiers
+            ]
 
             # ---------------------------------------------------------------------
-            # Check 3: Normalized RRF Threshold (BLK-01, >= 0.55)
+            # Check 3: Retrieval Confidence & Relevance Thresholding
             # ---------------------------------------------------------------------
             check_3_passed, final_rrf_score = self.check_rrf_threshold(
                 normalized_rrf_score=normalized_rrf_score,
                 cross_encoder_score=cross_encoder_score,
             )
+            rrf_missing: list[MissingItemRecord] = []
+            if not check_3_passed:
+                rrf_missing.append(
+                    MissingItemRecord(
+                        kind="citation",
+                        identifier=f"rrf_score_{final_rrf_score}",
+                        reason=(
+                            f"Top retrieval score {final_rrf_score:.4f} is below "
+                            f"threshold {self.min_rrf_score:.2f}"
+                        ),
+                    )
+                )
 
             # ---------------------------------------------------------------------
-            # Check 4: Verbatim Citation Verification (VAL-02, >= 0.98 overlap)
+            # Check 4: Principal Scope & Tenant Permission Mirroring
+            # ---------------------------------------------------------------------
+            (
+                check_4_passed,
+                permitted_slices,
+                permitted_citations,
+                excised_items,
+                scope_missing,
+            ) = self.check_principal_scopes(
+                code_slices=active_slices,
+                citations=all_citations,
+                bound_repo=bound_repo,
+                principal=active_principal,
+                domain_id=active_domain,
+            )
+            active_slices = permitted_slices
+            all_citations = permitted_citations
+
+            # ---------------------------------------------------------------------
+            # Check 5: Cryptographic Provenance Anchoring
+            # ---------------------------------------------------------------------
+            check_5_passed, unanchored_items, provenance_missing = (
+                self.check_cryptographic_provenance(
+                    code_slices=active_slices,
+                    bound_repo=bound_repo,
+                    principal=active_principal,
+                    domain_id=active_domain,
+                )
+            )
+
+            # ---------------------------------------------------------------------
+            # Check 6: Document Freshness & Staleness Invalidation + Citation Grounding
             # ---------------------------------------------------------------------
             citations_verified_100_pct, failed_citation_reasons = self.check_citations(
                 citations=all_citations,
@@ -1991,12 +2340,43 @@ class PreFlightValidator:
                 principal=active_principal,
                 domain_id=active_domain,
             )
-            check_4_passed = citations_verified_100_pct
+            freshness_passed, stale_items, freshness_missing = self.check_document_freshness(
+                citations=all_citations,
+                doc_chunks=doc_chunks,
+                bound_repo=bound_repo,
+                principal=active_principal,
+                domain_id=active_domain,
+            )
+            check_6_passed = citations_verified_100_pct and freshness_passed
+            citation_missing: list[MissingItemRecord] = [
+                MissingItemRecord(
+                    kind="citation",
+                    identifier=r[:40],
+                    reason=r,
+                )
+                for r in failed_citation_reasons
+            ]
 
-            # ---------------------------------------------------------------------
-            # Composite Gate Evaluation & Bounce-Back Feedback Synthesis
-            # ---------------------------------------------------------------------
-            all_passed = check_1_passed and check_2_passed and check_3_passed and check_4_passed
+            # Aggregate all missing items
+            all_missing_items = (
+                syntax_missing
+                + closure_missing
+                + rrf_missing
+                + scope_missing
+                + provenance_missing
+                + freshness_missing
+                + citation_missing
+            )
+
+            check_results = {
+                "check_1_syntax": check_1_passed,
+                "check_2_closure": check_2_passed,
+                "check_3_rrf": check_3_passed,
+                "check_4_scope": check_4_passed,
+                "check_5_provenance": check_5_passed,
+                "check_6_freshness": check_6_passed,
+            }
+            all_passed = all(check_results.values())
 
             bounce_back_feedback: str | None = None
             if not all_passed:
@@ -2005,31 +2385,46 @@ class PreFlightValidator:
                 ]
                 if not check_1_passed:
                     feedback_parts.append(
-                        f"- Check 1 (Internal Symbol Resolution): Missing internal dependencies: "
-                        f"{unresolved_symbols}. Please retrieve or auto-expand these symbols "
-                        "before invoking paid execution."
+                        f"- Check 1 (AST Syntax Well-Formedness): Syntax errors detected: "
+                        f"{syntax_errors}."
                     )
                 if not check_2_passed:
-                    feedback_parts.append(
-                        "- Check 2 (Prompt Identifier Partitioning, VAL-01): "
-                        "User prompt referenced existing repository symbols/files that are "
-                        f"missing from the context pack: {missing_reference_identifiers}. "
-                        "Please attach code slices covering these existing items."
-                    )
+                    if unresolved_symbols:
+                        feedback_parts.append(
+                            "- Check 2 (Internal Symbol Resolution): Missing dependencies: "
+                            f"{unresolved_symbols}."
+                        )
+                    if missing_reference_identifiers:
+                        feedback_parts.append(
+                            "- Check 2 (Prompt Identifier Partitioning, VAL-01): "
+                            f"Missing reference items: {missing_reference_identifiers}."
+                        )
                 if not check_3_passed:
                     feedback_parts.append(
                         f"- Check 3 (Normalized RRF Score, BLK-01): Top Normalized RRF score "
-                        f"{final_rrf_score:.4f} is below threshold {self.min_rrf_score:.2f} "
-                        f"(and cross-encoder score < {self.cross_encoder_threshold:.2f}). "
-                        "Please broaden search queries or inspect retrieval ranking."
+                        f"{final_rrf_score:.4f} is below threshold {self.min_rrf_score:.2f}."
                     )
                 if not check_4_passed:
-                    reasons_str = "; ".join(failed_citation_reasons)
                     feedback_parts.append(
-                        "- Check 4 (Verbatim Citation Verification, VAL-02): Citations failed "
-                        f"verbatim verification: {reasons_str}. "
-                        "Ensure quotes match source documents verbatim with >=0.98 token overlap."
+                        f"- Check 4 (Principal Scope Mirroring): Unauthorized items excised: "
+                        f"{excised_items}."
                     )
+                if not check_5_passed:
+                    feedback_parts.append(
+                        f"- Check 5 (Cryptographic Provenance): Unanchored items: "
+                        f"{unanchored_items}."
+                    )
+                if not check_6_passed:
+                    if failed_citation_reasons:
+                        feedback_parts.append(
+                            f"- Check 6 (Citation Verification): Citations failed: "
+                            f"{'; '.join(failed_citation_reasons)}."
+                        )
+                    if stale_items:
+                        feedback_parts.append(
+                            f"- Check 6 (Document Freshness): Stale/superseded items: "
+                            f"{stale_items}."
+                        )
                 bounce_back_feedback = "\n".join(feedback_parts)
 
             report = PreFlightValidationReport(
@@ -2041,6 +2436,12 @@ class PreFlightValidator:
                 citations_verified_100_pct=citations_verified_100_pct,
                 auto_attached_ast_slices_count=auto_attached_count,
                 bounce_back_feedback=bounce_back_feedback,
+                syntax_errors=syntax_errors,
+                excised_unauthorized_items=excised_items,
+                unanchored_provenance_items=unanchored_items,
+                stale_invalidated_items=stale_items,
+                missing_items=all_missing_items,
+                check_results=check_results,
             )
 
             # Mutate pack in-place if provided
@@ -2050,6 +2451,50 @@ class PreFlightValidator:
 
             pf_span.record_report(report)
             return report
+
+    def evaluate_gate(
+        self,
+        pack: ImplementationContextPack | None = None,
+        *,
+        code_slices: list[VerbatimCodeSlice] | None = None,
+        user_prompt: str | None = None,
+        supporting_doc_citations: list[DocCitationSpan] | None = None,
+        quant_strategy_spec: QuantStrategyBrief | None = None,
+        normalized_rrf_score: float | None = None,
+        cross_encoder_score: float | None = None,
+        repo: Any = None,
+        principal: PrincipalContext | None = None,
+        domain_id: str | None = None,
+        conn: Connection[tuple[object, ...]] | None = None,
+        doc_chunks: dict[str, str] | list[DocChunkRecord] | None = None,
+        trace_id: str | None = None,
+    ) -> GatePassResult | GateAbstentionResult:
+        """Executes all 6 preflight checks and emits GatePassResult or GateAbstentionResult."""
+        report = self.validate(
+            pack=pack,
+            code_slices=code_slices,
+            user_prompt=user_prompt,
+            supporting_doc_citations=supporting_doc_citations,
+            quant_strategy_spec=quant_strategy_spec,
+            normalized_rrf_score=normalized_rrf_score,
+            cross_encoder_score=cross_encoder_score,
+            repo=repo,
+            principal=principal,
+            domain_id=domain_id,
+            conn=conn,
+            doc_chunks=doc_chunks,
+        )
+        if report.passed:
+            return GatePassResult(passed=True, report=report, pack=pack)
+
+        slices = code_slices if code_slices is not None else (pack.code_slices if pack else [])
+        diag = self.create_diagnostic(
+            trace_id=trace_id or (pack.trace_id if pack else "trace_preflight_gate"),
+            domain_id=domain_id or (pack.domain_id if pack else (self.domain_id or "default")),
+            report=report,
+            partial_candidate_files=list({s.file_path for s in slices}),
+        )
+        return GateAbstentionResult(passed=False, diagnostic=diag, report=report)
 
     def create_diagnostic(
         self,
@@ -2075,6 +2520,8 @@ ContextPackValidator = PreFlightValidator
 __all__ = [
     "BoundGraphRepository",
     "ContextPackValidator",
+    "GateAbstentionResult",
+    "GatePassResult",
     "PreFlightValidator",
     "create_insufficient_context_diagnostic",
 ]

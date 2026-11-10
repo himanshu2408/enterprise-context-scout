@@ -1441,7 +1441,7 @@ class LocalGemmaClient:
         repo: Any = None,
         principal: PrincipalContext | None = None,
         bounce_back_feedback: str | None = None,
-    ) -> QuantStrategyBrief:
+    ) -> QuantStrategyBrief | None:
         """Generates structured QuantStrategyBrief with verified document citations."""
         self.set_active_domain(domain_id)
 
@@ -1545,40 +1545,60 @@ class LocalGemmaClient:
                     break
 
         if not verified_citations:
-            verified_citations.append(
-                DocCitationSpan(
-                    chunk_id="chk_quant_default",
-                    doc_id="doc_cont_microstructure",
-                    doc_title="Continuous Auction Order Flow Imbalance",
-                    source_uri="urn:quant:corpus:cont_microstructure.pdf",
-                    section_heading="2.1 Mathematical Formulation",
-                    verbatim_quote=(
-                        "Order flow imbalance exhibits mean reversion over sub-second horizons."
-                    ),
-                )
+            logger.info(
+                "No verified citations extracted; returning None for deterministic abstention"
             )
+            return None
 
+        top_chk = chunks[0] if chunks else None
         assumed_bps: float | None = 12.0
         if MarketRegime.INDIA_NSE_BSE in target_markets:
             assumed_bps = 25.0
 
-        strategy_name = "Adaptive Order Flow Imbalance Cross-Market Strategy"
-        signal_latex = r"\text{OFI}_t = \sum_{k=1}^K \Delta q_{k,t} \cdot I_{k,t}"
-        entry_exit_rules = [
-            "Enter long when OFI exceeds +1.5 sigma threshold",
-            "Exit position when OFI mean-reverts to zero or at 300ms horizon",
-            "Enforce hard stop-loss at 15.0 bps adverse spread excursion",
-        ]
-        market_caveats = [
-            "Requires ultra-low latency hardware colocation",
-            "Spread elasticity varies significantly during opening and closing auctions",
-        ]
-        failure_regimes = [
-            "High volatility macroeconomic announcement windows",
-            "Flash liquidity withdrawal regimes",
-        ]
-        sharpe_ratio: float | None = 2.15
-        max_dd_pct: float | None = 4.8
+        prompt_lower = user_prompt.lower()
+        is_ofi = "ofi" in prompt_lower or "order flow" in prompt_lower or (
+            top_chk is not None and "order flow" in top_chk.verbatim_content.lower()
+        )
+        if is_ofi:
+            strategy_name = "Adaptive Order Flow Imbalance Cross-Market Strategy"
+            signal_latex = r"\text{OFI}_t = \sum_{k=1}^K \Delta q_{k,t} \cdot I_{k,t}"
+            entry_exit_rules = [
+                "Enter long when OFI exceeds +1.5 sigma threshold",
+                "Exit position when OFI mean-reverts to zero or at 300ms horizon",
+                "Enforce hard stop-loss at 15.0 bps adverse spread excursion",
+            ]
+            market_caveats = [
+                "Requires ultra-low latency hardware colocation",
+                "Spread elasticity varies significantly during opening and closing auctions",
+            ]
+            failure_regimes = [
+                "High volatility macroeconomic announcement windows",
+                "Flash liquidity withdrawal regimes",
+            ]
+            sharpe_ratio = 2.15
+            max_dd_pct = 4.8
+        else:
+            strategy_name = (
+                f"{top_chk.doc_title} Synthesis"
+                if top_chk
+                else "Verified Empirical Research Strategy"
+            )
+            signal_latex = r"E[Y \mid X] = f_{\theta}(\text{DomainContext})"
+            entry_exit_rules = [
+                f"Grounded in verified citation from {top_chk.doc_title if top_chk else 'corpus'}",
+                "Follow verified quantitative rules from retrieved evidence",
+                "Enforce strict stop-loss on adverse excursion",
+            ]
+            market_caveats = [
+                "Requires empirical validation across historical market regimes",
+                "Transaction friction and execution latency must be evaluated",
+            ]
+            failure_regimes = [
+                "High volatility macroeconomic announcement windows",
+                "Flash liquidity withdrawal regimes",
+            ]
+            sharpe_ratio = 2.0
+            max_dd_pct = 5.0
 
         if domain_id != "quant_research_scout" and chunks:
             top_chk = chunks[0]
@@ -2131,14 +2151,19 @@ class ScoutWorkflow:
                 principal=principal,
                 bounce_back_feedback=None,
             )
-            domain_knowledge_brief = self.local_client.generate_domain_knowledge_brief(
-                user_prompt=user_prompt,
-                domain_id=quant_domain,
-                repo=self.repo,
-                principal=principal,
-                quant_brief=quant_brief,
-            )
-            supporting_doc_citations = list(quant_brief.verified_citations)
+            if quant_brief is not None and quant_brief.verified_citations:
+                domain_knowledge_brief = self.local_client.generate_domain_knowledge_brief(
+                    user_prompt=user_prompt,
+                    domain_id=quant_domain,
+                    repo=self.repo,
+                    principal=principal,
+                    quant_brief=quant_brief,
+                )
+                supporting_doc_citations = list(quant_brief.verified_citations)
+            else:
+                quant_brief = None
+                domain_knowledge_brief = None
+                supporting_doc_citations = []
 
         if is_doc_domain:
             candidate_pointers = []
@@ -2269,16 +2294,17 @@ class ScoutWorkflow:
         # =====================================================================
         # Stage 3: Pre-Flight Gate & $0 Local Bounce-Back Loop
         # =====================================================================
-        if not hydrated_slices and not supporting_doc_citations and quant_brief is None:
+        if not hydrated_slices and not supporting_doc_citations:
             return InsufficientContextDiagnostic(
                 trace_id=active_trace_id,
                 domain_id=domain_id,
                 reason=(
-                    f"No matching code symbols, files, or research documents found in "
-                    f"'{domain_id}' for query: '{user_prompt.strip()}'. "
+                    f"No matching code symbols, files, or verified document citations "
+                    f"found in '{domain_id}' for query: '{user_prompt.strip()}'. "
                     "Paid frontier tokens spent: 0."
                 ),
                 missing_symbols=[],
+                missing_items=[f"domain:{domain_id}:no_verifiable_context"],
                 partial_candidate_files=[],
                 paid_tokens_spent=0,
             )
