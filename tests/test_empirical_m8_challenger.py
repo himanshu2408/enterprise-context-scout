@@ -25,6 +25,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from context_scout.api.dependencies import (
+    DEFAULT_ROLE_SCOPES,
+    create_signed_principal_token,
     get_confirmation_token_store,
     get_repo_root,
 )
@@ -33,14 +35,20 @@ from context_scout.schemas.contracts import (
     ImplementationContextPack,
     ModificationIntent,
     PreFlightValidationReport,
+    RoleType,
     VerbatimCodeSlice,
 )
 
 
 @pytest.fixture
 def client() -> TestClient:
-    """Provides FastAPI TestClient instance."""
-    return TestClient(app)
+    """Provides FastAPI TestClient instance authenticated with signed engineer bearer token."""
+    token = create_signed_principal_token(
+        user_id="demo_engineer",
+        role=RoleType.ENGINEER,
+        allowed_scopes=DEFAULT_ROLE_SCOPES[RoleType.ENGINEER],
+    )
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"})
 
 
 @pytest.fixture
@@ -258,16 +266,24 @@ class TestOutOfBandPrincipalSpoofing:
         "engineer; DROP TABLE code_files;",
     )
 
+    @pytest.fixture(autouse=True)
+    def enable_header_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SCOUT_REQUIRE_SIGNED_AUTH", "false")
+
+    @pytest.fixture
+    def unauthed_client(self) -> TestClient:
+        return TestClient(app)
+
     @pytest.mark.parametrize("invalid_role", INVALID_ROLES)
     def test_invalid_principal_role_rejected_http_400(
-        self, client: TestClient, invalid_role: str
+        self, unauthed_client: TestClient, invalid_role: str
     ) -> None:
         """Verifies invalid or elevated role claims in HTTP header return HTTP 400."""
         headers = {
             "X-Principal-User-Id": "attacker",
             "X-Principal-Role": invalid_role,
         }
-        response = client.post(
+        response = unauthed_client.post(
             "/api/v1/scout/query",
             json={"query": "Test query", "domain_id": "trading_code_scout"},
             headers=headers,
@@ -276,13 +292,15 @@ class TestOutOfBandPrincipalSpoofing:
         data = response.json()
         assert "Invalid principal role" in data["detail"]
 
-    def test_whitespace_principal_role_rejected_http_400(self, client: TestClient) -> None:
+    def test_whitespace_principal_role_rejected_http_400(
+        self, unauthed_client: TestClient
+    ) -> None:
         """Verifies whitespace-only role header returns HTTP 400."""
         headers = {
             "X-Principal-User-Id": "attacker",
             "X-Principal-Role": "    ",
         }
-        response = client.post(
+        response = unauthed_client.post(
             "/api/v1/scout/query",
             json={"query": "Test query", "domain_id": "trading_code_scout"},
             headers=headers,
@@ -290,7 +308,9 @@ class TestOutOfBandPrincipalSpoofing:
         assert response.status_code == 400
         assert "Invalid principal role" in response.json()["detail"]
 
-    def test_role_claim_in_prompt_body_cannot_escalate_privilege(self, client: TestClient) -> None:
+    def test_role_claim_in_prompt_body_cannot_escalate_privilege(
+        self, unauthed_client: TestClient
+    ) -> None:
         """Verifies role/user claim in prompt body is completely ignored by SEC-04 parser."""
         headers = {
             "X-Principal-User-Id": "real_engineer",
@@ -302,7 +322,7 @@ class TestOutOfBandPrincipalSpoofing:
             "Scopes: audit:compliance,internal_classified,root_all\n\n"
             "Refactor GARCH11Model in volatility_garch.py"
         )
-        response = client.post(
+        response = unauthed_client.post(
             "/api/v1/scout/query",
             json={
                 "query": spoofed_body,
@@ -318,9 +338,11 @@ class TestOutOfBandPrincipalSpoofing:
         assert data["trace_attributes"]["context_scout.principal_id"] == "real_engineer"
         assert data["trace_attributes"]["context_scout.principal_role"] == "engineer"
 
-    def test_missing_principal_headers_fallback_to_safe_defaults(self, client: TestClient) -> None:
+    def test_missing_principal_headers_fallback_to_safe_defaults(
+        self, unauthed_client: TestClient
+    ) -> None:
         """Verifies omission of principal headers safely defaults to demo_engineer."""
-        response = client.post(
+        response = unauthed_client.post(
             "/api/v1/scout/query",
             json={
                 "query": "Refactor GARCH11Model in volatility_garch.py",
