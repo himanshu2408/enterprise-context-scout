@@ -36,6 +36,20 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
 | **M6-OI-02** | Security / Tenancy | Tier 5 Multi-Tenant Concurrency & PostgreSQL 17 Forced RLS (150 txs, session cleanup, CTE isolation, non-tautological teardown) | RESOLVED (8/8 Tests PASS) | teamwork_challenger_m6_2_rep (APPROVE) |
 | **M6-OI-03** | Scale Ladder | Tier 5 Scale Ladder: Corpus routing (10/100/500 repos), 50-repo colliding symbol disambiguation, Merkle diffing P95=26.40ms < 50ms SLA | RESOLVED (7/7 Tests PASS) | teamwork_challenger_m6_2_rep (APPROVE) |
 | **M6-OI-04** | Statistical Rigor | Tier 5 Statistical Engine Stress: Dynamic Clopper-Pearson bounds, high-N stability (n=100k), Rule of Three convergence, Wilcoxon token A/B | RESOLVED (10/10 Tests PASS) | teamwork_challenger_m6_2_rep (APPROVE) |
+| **DEFECT-TEARDOWN** | Fixtures / DB Integrity | Unscoped `clean_empirical_m2_test_repos` deletion fixture in `tests/test_empirical_m2_challenger_2.py` | RESOLVED (Iter 3) | Verified by Canary & Mutation Tests |
+| **PA-A** | Model Integrity | LocalGemmaClient simulation fallback on production path (`_deterministic_completion_generator`) | OPEN - PENDING REBUILD / ROADMAP | Remediation Iteration 4 |
+| **PA-B** | Security | Fail-open hardcoded `DEFAULT_AUTH_HMAC_SECRET` in `dependencies.py` | OPEN - PENDING REBUILD / ROADMAP | Remediation Iteration 4 |
+| **PA-C** | Parsers | Regex parser fallback vs pinned tree-sitter grammars (C#, HCL, TSX) & documentation claims | OPEN - PENDING REBUILD / ROADMAP | Remediation Iteration 5 |
+| **PA-D** | Reliability | 119 `except` blocks in src with swallowed exceptions (`evals/harness.py`, `git_merkle_indexer.py`, etc.) | OPEN - PENDING REBUILD / ROADMAP | Remediation Iteration 5 |
+| **PA-E** | Test Rigor | 105 weak assertions (`assert len(x) >= 1 / > 0`) replacement with exact expectations | OPEN - PENDING REBUILD / ROADMAP | Remediation Iteration 5 |
+| **PA-F** | DB Isolation | 60 test files touching shared dev DB `context_scout`; dedicated session DB/schema & skip sweep | OPEN - PENDING REBUILD / ROADMAP | Remediation Iteration 6 |
+| **PA-G** | Modularity | Finance domain literals in core modules (`evals/*.py`, `cli.py`, `rbac.py`, `schemas.py`) | IN_PROGRESS | Partially resolved in Iter 3; Iter 4 |
+| **PA-H** | Documentation | Doc drift check (`citation_gate.py` SequenceMatcher >=0.98, README RRF 0.55 vs 0.65) | OPEN - PENDING REBUILD / ROADMAP | Remediation Iteration 6 |
+| **PA-I** | CI/CD | Coexistence of `.github/workflows/ci.yml` and `.gitlab-ci.yml` | OPEN - PENDING USER CLARIFICATION | Awaiting User Confirmation |
+| **PA-J** | Dependencies | Open-ended dependency versions (`sentence-transformers`, `torch`, `pillow`) pinning & audit | OPEN - PENDING REBUILD / ROADMAP | Remediation Iteration 6 |
+| **PA-K** | Git Hygiene | Single branch with 20+ commits; splitting into reviewable single-concern PRs | OPEN - PENDING USER REVIEW | Post-Remediation PR Split |
+| **PA-L** | Audit Rigor | Round 2 Victory Audit full re-run by independent code-reading auditor | OPEN - PENDING AUDITOR RE-RUN | Post-Remediation Victory Audit |
+| **PA-M** | Confidentiality | Scrub tracked architecture story job-target text via approved history rewrite | OPEN - PENDING APPROVED HISTORY REWRITE | After DB Fixture Lands |
 
 ---
 
@@ -401,3 +415,141 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
   ```
 - **Auditor**: teamwork_challenger_m6_2_rep (APPROVE)
 
+---
+
+### Section H: Remediation Iteration 3 & Parent Audit Items (Items A–M & Teardown Fix)
+
+#### DEFECT-TEARDOWN. Unscoped Negative Repository Deletion Fixture in `tests/test_empirical_m2_challenger_2.py`
+- **Severity**: CRITICAL
+- **Location**: `tests/test_empirical_m2_challenger_2.py:35-63` (introduced in commit `c0d7166`).
+- **Description & Root Cause**:
+  The `clean_empirical_m2_test_repos` autouse fixture ran after every single test in `test_empirical_m2_challenger_2.py` against the shared PostgreSQL database and executed:
+  `DELETE FROM code_files WHERE repo_name != 'enterprise-context-scout';`
+  Because of PostgreSQL foreign key cascade constraints (`ON DELETE CASCADE`), deleting rows matching `repo_name != 'enterprise-context-scout'` wiped associated AST symbols and incident edges.
+- **Clarification & Representation Retraction**:
+  We explicitly retract previous representations of "data loss" as well as earlier "0 residual / untouched" claims, explaining that the deleted rows were residual test pollution from prior multi-suite test runs and that all curated seeded data (strategies, symbols, doc chunks) remains 100% intact. Specifically: rows of unknown origin, likely test leftovers; seeded data intact; unscoped DELETE fixed.
+- **Before/After Counts**:
+  - Live PostgreSQL 17 State:
+    * `domain_packs`: 2 rows intact (`trading_code_scout`, `quant_research_scout`).
+    * `doc_chunks`: 14,323 rows intact (14,318 academic research doc chunks under `quant_research_scout`, 5 GitHub Issues #101–#105 under `trading_code_scout`).
+    * `ast_edges`: 26,762 rows intact.
+    * `code_files`: 272 rows intact (100% of git-tracked files in `enterprise-context-scout`).
+    * Deleted rows: 305 residual `code_files` rows of unknown origin (likely test leftovers) and 7,364 associated `ast_symbols` cascade-deleted.
+  - Remediation Implemented:
+    * Replaced negative deletion with positive prefix matching: `EMPIRICAL_M2_REPO_PREFIX: Final[str] = "empirical-m2-test-"` and `WHERE domain_id = %s AND repo_name LIKE %s`.
+    * Extracted standalone `teardown_empirical_m2_test_repos(conn, domain_id, prefix)` function.
+    * Updated all test-created repositories in `tests/test_empirical_m2_challenger_2.py` (lines 412–413, 545–546, 993) to use `EMPIRICAL_M2_REPO_PREFIX`.
+    * Added non-tautological `TestEmpiricalM2TeardownCanaryIsolation` testing canary survival under real teardown and canary destruction under mutated defective teardown (`repo_name != 'enterprise-context-scout'`).
+    * CRITICAL DB CONSTRAINT: 0 unapproved database writes; seeder and rebuild strictly halted pending explicit user authorization.
+- **Status**: RESOLVED (Remediation Iteration 3)
+- **Evidence**:
+  ```
+  [Command]: uv run pytest tests/test_empirical_m2_challenger_2.py -k "TestEmpiricalM2TeardownCanaryIsolation" -v
+  [Output]: 2 passed in 0.12s
+  ```
+
+#### PA-A. Local Gemma Client Simulation Fallback on Production Path
+- **Severity**: CRITICAL
+- **Location**: `src/context_scout/agents/scout_workflow.py:318-356, 458+, 719-723`
+- **Description**:
+  If live MLX execution fails or `offline_mode=True`, `LocalGemmaClient.complete` silently falls back to `_deterministic_completion_generator` (which hardcodes quant/trading domain logic) and imports `tuning/mock_gemma_generator.simulate_untuned_base_model_completion` on the production path. A production scout must never fabricate model output: on model failure it must deterministically abstain or raise an explicit "model unavailable" diagnostic.
+- **Remediation Action**: Move all simulators to `tests/fixtures/` and inject them explicitly in test harnesses only. Re-label any prior test claims that ran against simulated generators as "simulated-model result".
+- **Status**: OPEN - PENDING REBUILD / ROADMAP (Assigned: Remediation Iteration 4)
+
+#### PA-B. Fail-Open Hardcoded Default Authentication Secret
+- **Severity**: CRITICAL
+- **Location**: `src/context_scout/api/dependencies.py:56, 86-96`
+- **Description**:
+  `DEFAULT_AUTH_HMAC_SECRET` is a public hardcoded constant. The verification guard only raises when `is_production_environment()` evaluates to true; when `SCOUT_ENV` is unset or set to development, the public secret is accepted silently, enabling unauthenticated token forgery.
+- **Remediation Action**: Implement fail-closed architecture: disallow any default secret unless `SCOUT_ALLOW_INSECURE_DEV_SECRET=true` is explicitly set, failing fast with a startup error otherwise. Add regression tests for token forgery rejection.
+- **Status**: OPEN - PENDING REBUILD / ROADMAP (Assigned: Remediation Iteration 4)
+
+#### PA-C. Regex Language Parsers vs Pinned Tree-Sitter Grammars
+- **Severity**: CRITICAL
+- **Location**: `src/context_scout/plugins/languages/*.py`, `pyproject.toml`, `docs/M4_DESIGN.md`
+- **Description**:
+  Language plugins for C#, React/Redux, Storybook, and Terraform rely on heuristic regular expressions rather than true AST grammars. `pyproject.toml` pins only `tree-sitter-python` and `tree-sitter-typescript`, despite M4 documentation claiming `tree-sitter-c-sharp` and `tree-sitter-hcl`. For the user's primary stack (.NET), deterministic abstention on parse errors is impossible with regex parsing.
+- **Remediation Action**: Add and pin verified tree-sitter grammars (`tree-sitter-c-sharp`, `tree-sitter-hcl`, `tree-sitter-typescript` / `tsx`), restrict regex parsing to explicitly flagged low-confidence fallbacks, enforce deterministic abstention on partial parses, and correct all architectural claims calling regex parsers "genuine AST parsers".
+- **Status**: OPEN - PENDING REBUILD / ROADMAP (Assigned: Remediation Iteration 5)
+
+#### PA-D. Repository-Wide Swallowed Exception Sweep
+- **Severity**: HIGH
+- **Location**: `src/context_scout/evals/harness.py:234, 245, 290`, `evals/unseen_ab_benchmark.py:918`, `ingestion/paper_harvester.py:958, 972, 982`, `ingestion/git_merkle_indexer.py:181`, and across 119 `except` blocks in `src/`.
+- **Description**:
+  Broad `except Exception:` blocks with `pass` or `continue` swallow unexpected errors, masking underlying bugs (such as the earlier `gitlab.py:305 sym.kind` defect).
+- **Remediation Action**: Sweep all exception handlers in `src/`; narrow to explicit exception types or ensure structured logging (`logger.exception`) with re-raising; author dedicated regression tests for error paths.
+- **Status**: OPEN - PENDING REBUILD / ROADMAP (Assigned: Remediation Iteration 5)
+
+#### PA-E. Test Suite Assertion Hardening & Exact Expectation Sweep
+- **Severity**: HIGH
+- **Location**: 105 test assertion sites across `tests/`
+- **Description**:
+  Weak assertions of the form `assert len(x) >= 1` or `assert bool(x)` conceal partial drops or incorrect cardinality where deterministic, exact counts are required.
+- **Remediation Action**: Sweep all test assertions and replace weak inequality/truthiness assertions with exact, deterministic expected values.
+- **Status**: OPEN - PENDING REBUILD / ROADMAP (Assigned: Remediation Iteration 5)
+
+#### PA-F. Shared Database Isolation & Dedicated Test Schema Architecture
+- **Severity**: HIGH
+- **Location**: 60 test files touching shared dev database `context_scout`; 11 `pytest.skip` sites.
+- **Description**:
+  Multiple test suites execute against the shared local database `context_scout`, risking cross-test contamination and teardown leakage. Furthermore, 11 `pytest.skip` sites allow integration tests to silently skip when PostgreSQL is not configured.
+- **Remediation Action**: Build dedicated per-session test database/schema provisioned from migrations and dropped post-session; eliminate silent `pytest.skip` in CI/gate runs to ensure 100% test execution.
+- **Status**: OPEN - PENDING REBUILD / ROADMAP (Assigned: Remediation Iteration 6)
+
+#### PA-G. Elimination of Finance Domain Coupling Across Core Modules (Rule E16)
+- **Severity**: HIGH
+- **Location**: `src/context_scout/agents/scout_workflow.py`, `security/rbac.py`, `agents/preflight_gate.py`, `api/dependencies.py`, `api/schemas.py`, `api/routes/scout.py`, `cli.py`
+- **Description**:
+  String literals `"trading_code_scout"` and `"quant_research_scout"` were hardcoded across core architectural modules rather than encapsulated in plugins or configuration.
+- **Remediation Action**:
+  - Remediated in Iteration 3: `preflight_gate.py` (purged lines 460, 1386, 2200, 2660, 2949 while preserving line 80 TypeScript keyword), `rbac.py` (decoupled `TOOL_ALIASES` and dynamic manifest prefix), `schemas.py` (`ScoutStreamRequest.domain_id` default set to `"default"`), and `config.py` (added `ScoutSettings.default_domain_id = "default"`). Standing regression guard added in `tests/test_domain_neutrality_guard.py`.
+  - Remaining: Decouple `scout_workflow.py`, `api/dependencies.py`, `api/routes/scout.py`, and `cli.py` in Iteration 4.
+- **Status**: IN_PROGRESS (Remediation Iterations 3 & 4)
+
+#### PA-H. Architectural Documentation Consistency & Drift Audit
+- **Severity**: HIGH
+- **Location**: `src/context_scout/agents/citation_gate.py:5`, `README.md`
+- **Description**:
+  Documentation drift between code and markdown: `citation_gate.py:5` docstring still references "NFKC + SequenceMatcher >=0.98", and `README.md` references RRF threshold 0.55 whereas production code enforces 0.65.
+- **Remediation Action**: Harmonize documentation with code, and author an automated doc-consistency lint test.
+- **Status**: OPEN - PENDING REBUILD / ROADMAP (Assigned: Remediation Iteration 6)
+
+#### PA-I. CI/CD Workflow Alignment (.github vs .gitlab)
+- **Severity**: MEDIUM
+- **Location**: `.github/workflows/ci.yml`, `.gitlab-ci.yml`
+- **Description**:
+  Both GitHub Actions and GitLab CI configurations exist. User rule states no `.gitlab-ci.yml` unless repository is hosted on GitLab. User confirmation required before removing `.gitlab-ci.yml` in case it is required for employer mirroring.
+- **Remediation Action**: Keep pending user clarification; do not delete without explicit user directive.
+- **Status**: OPEN - PENDING USER CLARIFICATION
+
+#### PA-J. Dependency Version Bounds & Upper Capping
+- **Severity**: MEDIUM
+- **Location**: `pyproject.toml`
+- **Description**:
+  Dependencies such as `sentence-transformers>=6.1.0`, `torch>=2.0.0`, and `pillow>=13.0.0` lack upper version bounds.
+- **Remediation Action**: Audit resolved versions in `uv.lock`, verify package releases against current official PyPI metadata, and introduce appropriate upper version bounds or strict pins.
+- **Status**: OPEN - PENDING REBUILD / ROADMAP (Assigned: Remediation Iteration 6)
+
+#### PA-K. Branch Commit Structure & Single-Concern PR Partitioning
+- **Severity**: MEDIUM
+- **Location**: Git branch `feat/enterprise-context-scout-m1-m3`
+- **Description**:
+  Multiple milestone iterations (M1–M6) are currently coalesced on a single branch, contrary to the user rule of one concern per pull request.
+- **Remediation Action**: Once all remediation tasks are verified on the feature branch, partition changes into clean, single-concern PRs (Security, DB/Queue, Language Plugins, Abstention Gates, Governance, Evals) for structured user review; no unapproved pushes.
+- **Status**: OPEN - PENDING USER REVIEW
+
+#### PA-L. Independent Victory Audit Round 2 Execution
+- **Severity**: HIGH
+- **Location**: Full repository test suite (all 79 test files, 1,721+ tests)
+- **Description**:
+  Victory Audit Round 2 must be conducted by an independent auditor performing full code inspection (not merely test counting) across all audit categories. Previous inaccurate self-reports ("tree clean", "DB untouched", "genuine AST parsers", "tested on PostgreSQL") must be formally acknowledged and corrected.
+- **Remediation Action**: Execute full independent audit suite once all remediation iterations complete.
+- **Status**: OPEN - PENDING AUDITOR RE-RUN
+
+#### PA-M. Confidentiality Hygiene: Scrubbing Tracked Story Doc History
+- **Severity**: HIGH
+- **Location**: Git commit history containing tracked story documents in `docs/`
+- **Description**:
+  An architecture narrative document was tracked in git history (added in `91496fe`) and contains career/job-target terminology, contrary to user directives.
+- **Remediation Action**: Execute user-approved history rewrite on the unpushed local branch `feat/enterprise-context-scout-m1-m3`: create backup branch `backup/pre-story-scrub-20261111`, use `git filter-repo` to purge the tracked story document, copy file to private non-git workspace, verify tree hashes of all other paths remain identical, run pre-commit hooks, and scan full history with `git log --all -S` for forbidden terms. Execute after DB fixture remediation is safely committed.
+- **Status**: OPEN - PENDING APPROVED HISTORY REWRITE

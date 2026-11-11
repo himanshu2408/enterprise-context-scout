@@ -109,5 +109,6 @@ addopts = "-q --strict-markers"
 markers = [
     "postgres: Live PostgreSQL 17 database integration tests",
     "live: Live external API / service integration tests",
+    "benchmark: Performance benchmark tests measuring latencies and SLAs",
 ]
 

@@ -25,6 +25,7 @@ from context_scout.agents.citation_gate import DocumentCitationGate
 from context_scout.ast_engine.dependency_expander import ASTDependencyExpander
 from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
 from context_scout.ast_engine.extractor import match_symbol_identifier
+from context_scout.config import ScoutSettings
 from context_scout.db.repositories import (
     ASTEdgeRecord,
     ASTNeighborhoodRecord,
@@ -457,7 +458,8 @@ def _resolve_custom_corpus_index_path(domain_id: str) -> Path | None:
     candidates: list[Path] = []
     if domain_id in CUSTOM_CORPUS_INDEX_PATHS:
         candidates.append(CUSTOM_CORPUS_INDEX_PATHS[domain_id])
-    elif domain_id not in ("trading_code_scout", "quant_research_scout", "federated_coordinator"):
+    else:
+        candidates.append(ScoutSettings().domains_dir / domain_id / "corpus_index.json")
         candidates.append(Path("domains") / domain_id / "corpus_index.json")
         repo_domains = Path(__file__).resolve().parents[3] / "domains"
         candidates.append(repo_domains / domain_id / "corpus_index.json")
@@ -1383,7 +1385,9 @@ class PreFlightValidator:
     ) -> None:
         self.repo = repo
         self.slicer = slicer or DeterministicSlicer()
-        self.domain_config = domain_config or DomainConfig(domain_id=domain_id or "default")
+        self.domain_config = domain_config or DomainConfig(
+            domain_id=domain_id or ScoutSettings().default_domain_id
+        )
         self.citation_gate = citation_gate or DocumentCitationGate(
             min_overlap_ratio=min_citation_overlap,
             require_citations_default=False,
@@ -2187,7 +2191,11 @@ class PreFlightValidator:
                 domain = (
                     domain_id
                     or self.domain_id
-                    or (self.domain_config.domain_id if self.domain_config else "")
+                    or (
+                        self.domain_config.domain_id
+                        if self.domain_config
+                        else ScoutSettings().default_domain_id
+                    )
                 )
 
                 candidate_domains = [domain] if domain else []
@@ -2197,7 +2205,11 @@ class PreFlightValidator:
                         if d and d not in candidate_domains:
                             candidate_domains.append(d)
                 if not candidate_domains:
-                    candidate_domains = ["default"]
+                    candidate_domains = [
+                        self.domain_config.domain_id
+                        if self.domain_config
+                        else ScoutSettings().default_domain_id
+                    ]
 
                 for dom in candidate_domains:
                     files = b_repo.list_visible_code_files(p_ctx, dom)
@@ -2657,7 +2669,15 @@ class PreFlightValidator:
         active_domain = (
             domain_id
             if domain_id is not None
-            else (pack.domain_id if pack is not None else (self.domain_id or "trading_code_scout"))
+            else (
+                pack.domain_id
+                if pack is not None
+                else (
+                    self.domain_id
+                    or (self.domain_config.domain_id if self.domain_config else None)
+                    or ScoutSettings().default_domain_id
+                )
+            )
         )
         active_principal = self._resolve_principal(principal)
         bound_repo = self._resolve_graph_repo(repo, conn=conn)
@@ -2946,7 +2966,16 @@ class PreFlightValidator:
         slices = code_slices if code_slices is not None else (pack.code_slices if pack else [])
         diag = self.create_diagnostic(
             trace_id=trace_id or (pack.trace_id if pack else "trace_preflight_gate"),
-            domain_id=domain_id or (pack.domain_id if pack else (self.domain_id or "default")),
+            domain_id=domain_id
+            or (
+                pack.domain_id
+                if pack
+                else (
+                    self.domain_id
+                    or (self.domain_config.domain_id if self.domain_config else None)
+                    or ScoutSettings().default_domain_id
+                )
+            ),
             report=report,
             partial_candidate_files=list({s.file_path for s in slices}),
         )

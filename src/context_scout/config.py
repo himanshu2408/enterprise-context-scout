@@ -161,6 +161,10 @@ class ScoutSettings(BaseSettings):
     domains_dir: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parents[2] / "domains"
     )
+    default_domain_id: str = Field(
+        default="default",
+        description="Neutral default domain identifier for multi-tenant context scout operations.",
+    )
 
     auth_hmac_secret: str | None = Field(
         default=None,

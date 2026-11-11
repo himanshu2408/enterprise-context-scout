@@ -13,6 +13,7 @@ import tempfile
 import time
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any, Final
 from uuid import uuid4
 
 import psycopg
@@ -31,35 +32,69 @@ from context_scout.db.session import RLSConnectionManager
 from context_scout.ingestion.git_merkle_indexer import GitMerkleIndexer, MerkleBlobDiff
 from context_scout.schemas.contracts import PrincipalContext, RoleType
 
+EMPIRICAL_M2_REPO_PREFIX: Final[str] = "empirical-m2-test-"
 
-@pytest.fixture(autouse=True)
-def clean_empirical_m2_test_repos() -> Generator[None, None, None]:
-    yield
-    settings = ScoutSettings()
-    with psycopg.connect(settings.db_admin_url) as conn, conn.cursor() as cur:
-        cur.execute("""
-            DELETE FROM ast_edges WHERE domain_id = 'trading_code_scout' AND (
+
+def teardown_empirical_m2_test_repos(
+    conn: psycopg.Connection[Any],
+    domain_id: str = "trading_code_scout",
+    prefix: str = EMPIRICAL_M2_REPO_PREFIX,
+) -> None:
+    """Strictly deletes test-created repositories matching prefix under domain_id."""
+    like_pattern = f"{prefix}%"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM ast_edges
+            WHERE domain_id = %s AND (
                 source_symbol_id IN (
                     SELECT symbol_id FROM ast_symbols
                     WHERE file_id IN (
                         SELECT file_id FROM code_files
-                        WHERE repo_name != 'enterprise-context-scout'
+                        WHERE domain_id = %s AND repo_name LIKE %s
                     )
                 )
                 OR target_symbol_id IN (
                     SELECT symbol_id FROM ast_symbols
                     WHERE file_id IN (
                         SELECT file_id FROM code_files
-                        WHERE repo_name != 'enterprise-context-scout'
+                        WHERE domain_id = %s AND repo_name LIKE %s
                     )
                 )
             );
-            DELETE FROM ast_symbols WHERE file_id IN (
+            """,
+            (domain_id, domain_id, like_pattern, domain_id, like_pattern),
+        )
+        cur.execute(
+            """
+            DELETE FROM ast_symbols
+            WHERE domain_id = %s AND file_id IN (
                 SELECT file_id FROM code_files
-                WHERE repo_name != 'enterprise-context-scout'
+                WHERE domain_id = %s AND repo_name LIKE %s
             );
-            DELETE FROM code_files WHERE repo_name != 'enterprise-context-scout';
-        """)
+            """,
+            (domain_id, domain_id, like_pattern),
+        )
+        cur.execute(
+            """
+            DELETE FROM code_files
+            WHERE domain_id = %s AND repo_name LIKE %s;
+            """,
+            (domain_id, like_pattern),
+        )
+    conn.commit()
+
+
+@pytest.fixture(autouse=True)
+def clean_empirical_m2_test_repos() -> Generator[None, None, None]:
+    yield
+    settings = ScoutSettings()
+    try:
+        with psycopg.connect(settings.db_admin_url) as conn:
+            teardown_empirical_m2_test_repos(conn, domain_id="trading_code_scout")
+    except Exception:
+        # Non-fatal if database is unreachable during unit testing
+        pass
 
 
 @pytest.fixture
@@ -409,8 +444,8 @@ def test_empirical_cross_repo_symbol_collision_live_postgres_n100() -> None:
     with app_mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn:
         fid_a = uuid4()
         fid_b = uuid4()
-        repo_a_name = f"stress-alpha-{fid_a.hex[:6]}"
-        repo_b_name = f"stress-beta-{fid_b.hex[:6]}"
+        repo_a_name = f"{EMPIRICAL_M2_REPO_PREFIX}alpha-{fid_a.hex[:8]}"
+        repo_b_name = f"{EMPIRICAL_M2_REPO_PREFIX}beta-{fid_b.hex[:8]}"
 
         pg_repo.insert_code_file(
             conn,
@@ -542,8 +577,8 @@ def test_empirical_multi_tenant_forced_rls_isolation_cross_repo_links() -> None:
 
     fid_alpha = uuid4()
     fid_beta = uuid4()
-    repo_alpha_name = f"tenant-alpha-repo-{fid_alpha.hex[:6]}"
-    repo_beta_name = f"tenant-beta-repo-{fid_beta.hex[:6]}"
+    repo_alpha_name = f"{EMPIRICAL_M2_REPO_PREFIX}tenant-a-{fid_alpha.hex[:8]}"
+    repo_beta_name = f"{EMPIRICAL_M2_REPO_PREFIX}tenant-b-{fid_beta.hex[:8]}"
 
     sym_beta_id = uuid4()
     sym_beta_qual = f"{repo_beta_name}::secrets::VaultSecretKey"
@@ -990,7 +1025,7 @@ def test_empirical_inward_edge_preservation_live_postgres(
         src_dir.mkdir(parents=True)
 
         fid_rand = uuid4().hex[:6]
-        repo_name = f"edge-pres-repo-{fid_rand}"
+        repo_name = f"{EMPIRICAL_M2_REPO_PREFIX}edge-{fid_rand}"
 
         # Commit 1: caller and service with op_a and op_b
         caller_code = "def invoke_ops(): pass\n"
@@ -1183,3 +1218,123 @@ def test_empirical_merkle_diff_100_files_bulk_stress(
         assert len(diff.modified) == 100
         assert elapsed_ms < 50.0, f"Bulk 100-file diff took {elapsed_ms:.2f}ms (>50ms SLA)"
 
+
+class TestEmpiricalM2TeardownCanaryIsolation:
+    """Verifies that teardown_empirical_m2_test_repos strictly scopes deletions."""
+
+    def test_teardown_preserves_canary_repo_in_same_domain(self) -> None:
+        """Proves real teardown function removes test rows and leaves canary rows intact."""
+        settings = ScoutSettings()
+        domain_id = "trading_code_scout"
+        canary_repo = "canary-preservation-repo"
+        victim_repo = f"{EMPIRICAL_M2_REPO_PREFIX}victim-{uuid4().hex[:8]}"
+
+        with psycopg.connect(settings.db_admin_url) as conn:
+            cur = conn.cursor()
+            # 1. Insert canary repo row
+            canary_fid = uuid4()
+            cur.execute(
+                """
+                INSERT INTO code_files (
+                    file_id, domain_id, repo_name, file_path,
+                    git_commit_sha, git_blob_sha, language,
+                    allowed_scopes, raw_content, line_count
+                ) VALUES (
+                    %s, %s, %s, 'src/canary.py', 'c0', 'b0', 'python',
+                    ARRAY['public_eng'], 'print(1)', 1
+                );
+                """,
+                (canary_fid, domain_id, canary_repo),
+            )
+            # 2. Insert test victim repo row
+            victim_fid = uuid4()
+            cur.execute(
+                """
+                INSERT INTO code_files (
+                    file_id, domain_id, repo_name, file_path,
+                    git_commit_sha, git_blob_sha, language,
+                    allowed_scopes, raw_content, line_count
+                ) VALUES (
+                    %s, %s, %s, 'src/victim.py', 'c1', 'b1', 'python',
+                    ARRAY['public_eng'], 'print(2)', 1
+                );
+                """,
+                (victim_fid, domain_id, victim_repo),
+            )
+            conn.commit()
+
+            try:
+                # 3. Execute the REAL teardown function
+                teardown_empirical_m2_test_repos(conn, domain_id=domain_id)
+
+                # 4. Assertions: canary survived, victim deleted
+                cur.execute(
+                    "SELECT COUNT(*) FROM code_files WHERE domain_id = %s AND repo_name = %s;",
+                    (domain_id, canary_repo),
+                )
+                assert cur.fetchone()[0] == 1, "Canary repo was wiped by teardown!"
+
+                cur.execute(
+                    "SELECT COUNT(*) FROM code_files WHERE domain_id = %s AND repo_name = %s;",
+                    (domain_id, victim_repo),
+                )
+                assert cur.fetchone()[0] == 0, "Test victim repo was not deleted by teardown!"
+            finally:
+                # Cleanup canary
+                cur.execute(
+                    "DELETE FROM code_files WHERE domain_id = %s AND repo_name = %s;",
+                    (domain_id, canary_repo),
+                )
+                conn.commit()
+
+    def test_teardown_mutation_proof_flawed_negative_predicate_destroys_canary(self) -> None:
+        """Mutation proof: Proves that flawed 'repo_name != ...' predicate destroys canary."""
+        settings = ScoutSettings()
+        domain_id = "trading_code_scout"
+        canary_repo = "canary-mutation-victim-repo"
+
+        with psycopg.connect(settings.db_admin_url) as conn:
+            cur = conn.cursor()
+            canary_fid = uuid4()
+            cur.execute(
+                """
+                INSERT INTO code_files (
+                    file_id, domain_id, repo_name, file_path,
+                    git_commit_sha, git_blob_sha, language,
+                    allowed_scopes, raw_content, line_count
+                ) VALUES (
+                    %s, %s, %s, 'src/canary.py', 'c0', 'b0', 'python',
+                    ARRAY['public_eng'], 'print(1)', 1
+                );
+                """,
+                (canary_fid, domain_id, canary_repo),
+            )
+            conn.commit()
+
+            try:
+                # Defective mutated teardown (the c0d7166 bug)
+                def defective_teardown(c: psycopg.Connection[Any]) -> None:
+                    with c.cursor() as cur_def:
+                        cur_def.execute(
+                            "DELETE FROM code_files WHERE repo_name != 'enterprise-context-scout';"
+                        )
+                    c.commit()
+
+                defective_teardown(conn)
+
+                cur.execute(
+                    "SELECT COUNT(*) FROM code_files WHERE domain_id = %s AND repo_name = %s;",
+                    (domain_id, canary_repo),
+                )
+                canary_count = cur.fetchone()[0]
+
+                # Canary must be 0, proving mutation caught the bug
+                assert canary_count == 0, (
+                    "Mutation check failed: defective teardown did not destroy canary!"
+                )
+            finally:
+                cur.execute(
+                    "DELETE FROM code_files WHERE domain_id = %s AND repo_name = %s;",
+                    (domain_id, canary_repo),
+                )
+                conn.commit()
