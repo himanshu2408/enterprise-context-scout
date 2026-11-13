@@ -680,7 +680,6 @@ enterprise-context-scout/
 ├── pyproject.toml                      # Pinned Python >=3.11, google-adk, google-genai, mcp, pydantic, etc.
 ├── uv.lock
 ├── docker-compose.yml                  # PostgreSQL 17 + pgvector + OpenTelemetry collector
-├── .gitlab-ci.yml                      # Enterprise staged pipeline (lint, pytest, eval gate, WIF deploy)
 ├── sql/
 │   └── 001_init_schema.sql             # Full DDL + HNSW + FTS + pg_trgm + RLS policies
 ├── domains/
