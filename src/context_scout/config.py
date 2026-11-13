@@ -108,6 +108,18 @@ class ScoutSettings(BaseSettings):
         default_factory=lambda: Path(__file__).resolve().parents[2] / "domains"
     )
 
+    auth_hmac_secret: str | None = Field(
+        default=None,
+        description=(
+            "HMAC-SHA256 secret key for signing principal attestation tokens "
+            "(minimum 32 characters)."
+        ),
+    )
+    allow_insecure_dev_secret: bool = Field(
+        default=False,
+        description="Explicitly allow insecure default HMAC secret for local development.",
+    )
+
     # GCP Vertex AI Data Residency & Secret Hygiene Settings
     gcp_project: str | None = Field(
         default=None,

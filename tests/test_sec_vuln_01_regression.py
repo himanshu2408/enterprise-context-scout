@@ -28,11 +28,15 @@ from context_scout.schemas.contracts import RoleType
 
 @pytest.fixture
 def clean_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensures SCOUT_REQUIRE_SIGNED_AUTH is unset by default."""
+    """Ensures SCOUT_REQUIRE_SIGNED_AUTH is unset by default with valid test secret."""
     monkeypatch.delenv("SCOUT_REQUIRE_SIGNED_AUTH", raising=False)
     monkeypatch.delenv("SCOUT_ENV", raising=False)
     monkeypatch.delenv("ENVIRONMENT", raising=False)
     monkeypatch.delenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", raising=False)
+    monkeypatch.setenv(
+        "SCOUT_AUTH_HMAC_SECRET",
+        "scout-test-suite-hmac-secret-32-chars-long-sec04!!",
+    )
 
 
 @pytest.fixture
@@ -197,14 +201,18 @@ def test_production_hmac_secret_enforcement(monkeypatch: pytest.MonkeyPatch) -> 
     assert resolved == strong_secret.encode("utf-8")
 
 
-def test_production_hmac_secret_dev_override_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """SEC-VULN-01: Explicit dev override allows default secret even in production mode."""
+def test_production_hmac_secret_dev_override_flag_strictly_forbidden_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SEC-VULN-01: Absolute ban - dev override is forbidden in production (raises RuntimeError)."""
     monkeypatch.setenv("SCOUT_ENV", "production")
     monkeypatch.setenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", "true")
     monkeypatch.setenv("SCOUT_AUTH_HMAC_SECRET", DEFAULT_AUTH_HMAC_SECRET)
 
-    resolved = _resolve_auth_secret()
-    assert resolved == DEFAULT_AUTH_HMAC_SECRET.encode("utf-8")
+    with pytest.raises(
+        RuntimeError, match="Insecure default or weak HMAC secret detected in production"
+    ):
+        _resolve_auth_secret()
 
 
 def test_explicit_opt_out_signed_auth_permits_header_fallback(
@@ -224,3 +232,49 @@ def test_explicit_opt_out_signed_auth_permits_header_fallback(
         json={"query": "Fallback test query", "domain_id": "trading_code_scout"},
     )
     assert res.status_code == 200
+
+
+def test_fail_closed_when_secret_unset_without_dev_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Critical B: When secret is unset and dev override false, resolve fails closed."""
+    monkeypatch.delenv("SCOUT_AUTH_HMAC_SECRET", raising=False)
+    monkeypatch.delenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", raising=False)
+    monkeypatch.delenv("SCOUT_ENV", raising=False)
+    with pytest.raises(RuntimeError, match="SCOUT_AUTH_HMAC_SECRET is unset or empty"):
+        _resolve_auth_secret()
+
+
+def test_fail_closed_blocks_api_token_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Critical B: When secret unset and dev override false, API fails closed on verification."""
+    forged_token = create_signed_principal_token(
+        user_id="adversary_attacker",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng"],
+        secret_key=DEFAULT_AUTH_HMAC_SECRET,
+    )
+    monkeypatch.delenv("SCOUT_AUTH_HMAC_SECRET", raising=False)
+    monkeypatch.delenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", raising=False)
+    monkeypatch.delenv("SCOUT_ENV", raising=False)
+    app = create_app()
+    client = TestClient(app, raise_server_exceptions=False)
+    res = client.post(
+        "/api/v1/scout/query",
+        headers={"Authorization": f"Bearer {forged_token}"},
+        json={"query": "Test fail closed", "domain_id": "trading_code_scout"},
+    )
+    assert res.status_code == 500
+    assert res.status_code != 200
+
+
+def test_allow_insecure_dev_secret_permits_default_secret_in_development(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Critical B: Explicit dev override permits default secret in development mode."""
+    monkeypatch.delenv("SCOUT_AUTH_HMAC_SECRET", raising=False)
+    monkeypatch.setenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", "true")
+    monkeypatch.delenv("SCOUT_ENV", raising=False)
+    resolved = _resolve_auth_secret()
+    assert resolved == DEFAULT_AUTH_HMAC_SECRET.encode("utf-8")

@@ -43,13 +43,16 @@ from context_scout.security.permission_mirror import (
 
 @pytest.fixture
 def clean_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensures a clean testing environment for auth testing."""
+    """Ensures clean baseline auth environment while providing valid test secret for client."""
     monkeypatch.delenv("SCOUT_REQUIRE_SIGNED_AUTH", raising=False)
     monkeypatch.delenv("SCOUT_ENV", raising=False)
     monkeypatch.delenv("ENVIRONMENT", raising=False)
     monkeypatch.delenv("ENV", raising=False)
     monkeypatch.delenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", raising=False)
-    monkeypatch.delenv("SCOUT_AUTH_HMAC_SECRET", raising=False)
+    monkeypatch.setenv(
+        "SCOUT_AUTH_HMAC_SECRET",
+        "scout-test-suite-hmac-secret-32-chars-long-sec04!!",
+    )
 
 
 @pytest.fixture
@@ -683,16 +686,18 @@ class TestProductionSecretKeyEnforcement:
         resolved = _resolve_auth_secret()
         assert resolved == strong_secret.encode("utf-8")
 
-    def test_attack_40_dev_override_flag_in_production(
+    def test_attack_40_dev_override_flag_strictly_forbidden_in_production(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """SCOUT_ALLOW_INSECURE_DEV_SECRET=true permits default secret even in production."""
+        """Production ban: SCOUT_ALLOW_INSECURE_DEV_SECRET=true is rejected in production."""
         monkeypatch.setenv("SCOUT_ENV", "production")
         monkeypatch.setenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", "true")
         monkeypatch.setenv("SCOUT_AUTH_HMAC_SECRET", DEFAULT_AUTH_HMAC_SECRET)
 
-        resolved = _resolve_auth_secret()
-        assert resolved == DEFAULT_AUTH_HMAC_SECRET.encode("utf-8")
+        with pytest.raises(
+            RuntimeError, match="Insecure default or weak HMAC secret detected in production"
+        ):
+            _resolve_auth_secret()
 
     def test_attack_41_production_env_raises_runtime_error_when_request_arrives(
         self, monkeypatch: pytest.MonkeyPatch

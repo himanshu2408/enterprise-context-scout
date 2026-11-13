@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from context_scout.api.dependencies import validate_auth_secret
 from context_scout.api.routes import api_router
 from context_scout.security.rbac import _CURRENT_PRINCIPAL
 from context_scout.telemetry import ScoutTelemetryTracer
@@ -19,6 +21,13 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
     """Creates and configures the production Enterprise Context Scout FastAPI application."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Upfront fail-closed validation: abort server startup if secret is insecure or unconfigured
+        validate_auth_secret()
+        yield
+
     app = FastAPI(
         title="Enterprise Context Scout API",
         description=(
@@ -28,6 +37,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=lifespan,
     )
 
     # 1. CORS Middleware for enterprise web UI (restricted to explicit frontend origins)
