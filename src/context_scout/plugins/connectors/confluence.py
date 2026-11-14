@@ -117,7 +117,8 @@ class ConfluenceConnectorPlugin(SourceConnectorPlugin):
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        return resp.json()
+        data: Any = resp.json()
+        return data if isinstance(data, dict) else None
 
     def fetch_space_pages(self, space_key: str) -> list[ConfluencePageDTO]:
         """Paginates all pages in a given space via REST API v2."""

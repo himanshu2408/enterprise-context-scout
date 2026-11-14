@@ -85,7 +85,8 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        return resp.json()
+        data: Any = resp.json()
+        return data if isinstance(data, dict) else None
 
     def compare_commits(
         self,
@@ -182,7 +183,9 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
             updated_at=datetime.now(UTC),
         )
         if is_postgres:
-            repository.upsert_repository(conn, repo_rec)
+            upsert_fn = getattr(repository, "upsert_repository", None)
+            if callable(upsert_fn):
+                upsert_fn(conn, repo_rec)
         elif hasattr(repository, "_repos"):
             # Purge existing record to prevent duplicate repository records
             for old_id, r in list(repository._repos.items()):
@@ -284,8 +287,10 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
                             """,
                             (domain_id, project_path, clean_path, file_path),
                         )
-                elif hasattr(repository, "delete_code_file_and_symbols"):
-                    repository.delete_code_file_and_symbols(domain_id, project_path, file_path)
+                elif (
+                    del_fn := getattr(repository, "delete_code_file_and_symbols", None)
+                ) is not None and callable(del_fn):
+                    del_fn(domain_id, project_path, file_path)
                 elif hasattr(repository, "_files"):
                     del_ids = [
                         fid
@@ -353,8 +358,10 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
                             """,
                             (domain_id, project_path, clean_path, file_path),
                         )
-                elif hasattr(repository, "delete_code_file_and_symbols"):
-                    repository.delete_code_file_and_symbols(domain_id, project_path, file_path)
+                elif (
+                    del_fn := getattr(repository, "delete_code_file_and_symbols", None)
+                ) is not None and callable(del_fn):
+                    del_fn(domain_id, project_path, file_path)
                 elif hasattr(repository, "_files"):
                     existing_del_ids = [
                         fid

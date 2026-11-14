@@ -304,7 +304,7 @@ def create_code_repo_mcp_server(
                 file_id=UUID(str(row[1])),
                 domain_id=str(row[2]),
                 qualified_name=str(row[3]),
-                symbol_kind=str(row[4]),  # type: ignore[arg-type]
+                symbol_kind=str(row[4]),
                 start_line=int(str(row[5])),
                 end_line=int(str(row[6])),
                 signature_skeleton=str(row[7]),

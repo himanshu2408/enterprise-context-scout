@@ -153,7 +153,12 @@ class DomainPlugin(Protocol):
         """Returns True if domain_id represents a document/research synthesis domain."""
         ...
 
-    def should_auto_route_research(self, prompt: str, domain_id: str) -> bool:
+    def should_auto_route_research(
+        self,
+        prompt: str,
+        domain_id: str,
+        allowed_scopes: list[str] | None = None,
+    ) -> bool:
         """Returns True if a code-domain prompt should auto-route through research synthesis."""
         ...
 

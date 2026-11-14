@@ -48,7 +48,9 @@ from context_scout.schemas.contracts import (
 )
 from context_scout.telemetry import ScoutTelemetryTracer
 from context_scout.telemetry.cost_governance import (
-    BudgetExceededError,
+    BudgetExceededError as BudgetExceededError,
+)
+from context_scout.telemetry.cost_governance import (
     CostEstimateReport,
     PaidComputeCostEstimator,
     SessionBudgetTracker,
@@ -492,7 +494,8 @@ class GeminiImplementationExecutor:
             try:
                 from google.oauth2 import credentials as oauth2_creds
 
-                self.credentials = oauth2_creds.Credentials(token=self.service_token)
+                creds_factory: Any = oauth2_creds.Credentials
+                self.credentials = creds_factory(token=self.service_token)
             except ImportError as exc:
                 logger.debug(
                     "google.oauth2.credentials unavailable (%s); continuing without ADC wrapper",
@@ -563,9 +566,10 @@ class GeminiImplementationExecutor:
         elif repo is not None and conn is not None:
             consumed = repo.get_principal_paid_tokens_consumed(conn, principal.user_id)
 
-        budget_cap = getattr(principal, "session_budget_tokens", None) or getattr(
+        raw_cap = getattr(principal, "session_budget_tokens", None) or getattr(
             principal, "max_session_paid_tokens", 16_000
         )
+        budget_cap = int(raw_cap) if raw_cap is not None else 16_000
         projected = consumed + pack.pack_token_count + max_output_tokens
         if projected > budget_cap:
             raise BudgetExceededError(

@@ -326,7 +326,7 @@ class FinanceDomainPlugin:
         sharpe_ratio: float | None = 2.0
         max_dd_pct: float | None = 5.0
 
-        if domain_id != DOMAIN_ID_FINANCE and chunks:
+        if domain_id != DOMAIN_ID_FINANCE and top_chk is not None:
             strategy_name = (
                 f"{top_chk.doc_title} — {top_chk.section_heading}"
                 if top_chk.section_heading

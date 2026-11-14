@@ -3,7 +3,7 @@
 import logging
 import re
 from collections import defaultdict
-from typing import Final, Literal, Protocol
+from typing import Final, Protocol
 from uuid import UUID
 
 from context_scout.ast_engine.models import ASTExpansionCandidate, ASTExpansionResult
@@ -156,7 +156,7 @@ class ASTDependencyExpander:
 
         def _append_type_candidate(
             target_sym: ASTSymbolRecord,
-            edge_kind: Literal["CALLS", "IMPORTS", "USES_TYPE", "INHERITS", "TESTED_BY"],
+            edge_kind: str,
         ) -> None:
             if target_sym.symbol_id in seen_type_sym_ids:
                 return
@@ -432,7 +432,7 @@ class ASTDependencyExpander:
                 type_candidates.append(
                     ASTExpansionCandidate(
                         symbol=rec.symbol,
-                        edge_kind=rec.edge_kind,  # type: ignore[arg-type]
+                        edge_kind=rec.edge_kind,
                         intent=ModificationIntent.IMPORTED_TYPE,
                         start_line=rec.symbol.start_line,
                         end_line=end_l,

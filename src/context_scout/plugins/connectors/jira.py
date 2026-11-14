@@ -142,7 +142,8 @@ class JiraConnectorPlugin(SourceConnectorPlugin):
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        return resp.json()
+        data: Any = resp.json()
+        return data if isinstance(data, dict) else None
 
     def search_issues_incremental(
         self,

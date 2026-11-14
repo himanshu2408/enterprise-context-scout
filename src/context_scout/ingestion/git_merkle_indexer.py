@@ -8,7 +8,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final
 from uuid import UUID, uuid4
 
 from psycopg import Connection
@@ -583,15 +583,12 @@ class GitMerkleIndexer:
 
             for parsed_sym, emb in zip(symbols, symbol_embeddings, strict=True):
                 sym_id = uuid4()
-                kind: Literal["function", "class", "method", "interface", "type_alias"] = (
-                    parsed_sym.symbol_kind
-                )
                 sym_rec = ASTSymbolRecord(
                     symbol_id=sym_id,
                     file_id=file_id,
                     domain_id=domain_id,
                     qualified_name=parsed_sym.qualified_name,
-                    symbol_kind=kind,
+                    symbol_kind=parsed_sym.symbol_kind,
                     start_line=parsed_sym.start_line,
                     end_line=parsed_sym.end_line,
                     signature_skeleton=parsed_sym.signature_skeleton,
@@ -770,15 +767,12 @@ class GitMerkleIndexer:
 
             for parsed_sym, emb in zip(symbols, symbol_embeddings, strict=True):
                 sym_id = uuid4()
-                kind: Literal["function", "class", "method", "interface", "type_alias"] = (
-                    parsed_sym.symbol_kind
-                )
                 sym_rec = ASTSymbolRecord(
                     symbol_id=sym_id,
                     file_id=file_id,
                     domain_id=domain_id,
                     qualified_name=parsed_sym.qualified_name,
-                    symbol_kind=kind,
+                    symbol_kind=parsed_sym.symbol_kind,
                     start_line=parsed_sym.start_line,
                     end_line=parsed_sym.end_line,
                     signature_skeleton=parsed_sym.signature_skeleton,
@@ -969,7 +963,7 @@ class GitMerkleIndexer:
                     file_id=actual_file_id,
                     domain_id=domain_id,
                     qualified_name=parsed_sym.qualified_name,
-                    symbol_kind=parsed_sym.symbol_kind,  # type: ignore[arg-type]
+                    symbol_kind=parsed_sym.symbol_kind,
                     start_line=parsed_sym.start_line,
                     end_line=parsed_sym.end_line,
                     signature_skeleton=parsed_sym.signature_skeleton,
@@ -986,17 +980,17 @@ class GitMerkleIndexer:
 
         # 4. Insert outward edges
         for _actual_file_id, file_scopes, edges, file_symbol_map in parsed_files_data:
-            for edge in edges:
-                src_id = file_symbol_map.get(edge.source_qualified_name) or repo_symbol_map.get(
-                    edge.source_qualified_name
-                )
+            for parsed_edge in edges:
+                src_id = file_symbol_map.get(
+                    parsed_edge.source_qualified_name
+                ) or repo_symbol_map.get(parsed_edge.source_qualified_name)
                 if not src_id:
                     continue
 
-                target_id = repo_symbol_map.get(edge.target_qualified_name)
-                target_qual = edge.target_qualified_name
+                target_id = repo_symbol_map.get(parsed_edge.target_qualified_name)
+                target_qual = parsed_edge.target_qualified_name
                 if not target_id:
-                    target_qual = f"UNRESOLVED::{edge.target_qualified_name}"
+                    target_qual = f"UNRESOLVED::{parsed_edge.target_qualified_name}"
 
                 edge_rec = ASTEdgeRecord(
                     edge_id=uuid4(),
@@ -1004,10 +998,10 @@ class GitMerkleIndexer:
                     source_symbol_id=src_id,
                     target_qualified_name=target_qual,
                     target_symbol_id=target_id,
-                    edge_kind=edge.edge_kind,
+                    edge_kind=parsed_edge.edge_kind,
                     allowed_scopes=file_scopes,
-                    target_repo_qualified_id=edge.target_repo_qualified_id,
-                    is_cross_repo=edge.is_cross_repo or target_id is None,
+                    target_repo_qualified_id=parsed_edge.target_repo_qualified_id,
+                    is_cross_repo=parsed_edge.is_cross_repo or target_id is None,
                 )
                 repo.insert_ast_edge(conn, edge_rec)
                 total_edges += 1
@@ -1231,7 +1225,7 @@ class GitMerkleIndexer:
                     file_id=actual_file_id,
                     domain_id=domain_id,
                     qualified_name=parsed_sym.qualified_name,
-                    symbol_kind=parsed_sym.symbol_kind,  # type: ignore[arg-type]
+                    symbol_kind=parsed_sym.symbol_kind,
                     start_line=parsed_sym.start_line,
                     end_line=parsed_sym.end_line,
                     signature_skeleton=parsed_sym.signature_skeleton,
@@ -1248,17 +1242,17 @@ class GitMerkleIndexer:
 
         # 4. Insert outward edges
         for _actual_file_id, file_scopes, edges, file_symbol_map in parsed_files_data:
-            for edge in edges:
-                src_id = file_symbol_map.get(edge.source_qualified_name) or repo_symbol_map.get(
-                    edge.source_qualified_name
-                )
+            for parsed_edge in edges:
+                src_id = file_symbol_map.get(
+                    parsed_edge.source_qualified_name
+                ) or repo_symbol_map.get(parsed_edge.source_qualified_name)
                 if not src_id:
                     continue
 
-                target_id = repo_symbol_map.get(edge.target_qualified_name)
-                target_qual = edge.target_qualified_name
+                target_id = repo_symbol_map.get(parsed_edge.target_qualified_name)
+                target_qual = parsed_edge.target_qualified_name
                 if not target_id:
-                    target_qual = f"UNRESOLVED::{edge.target_qualified_name}"
+                    target_qual = f"UNRESOLVED::{parsed_edge.target_qualified_name}"
 
                 edge_rec = ASTEdgeRecord(
                     edge_id=uuid4(),
@@ -1266,10 +1260,10 @@ class GitMerkleIndexer:
                     source_symbol_id=src_id,
                     target_qualified_name=target_qual,
                     target_symbol_id=target_id,
-                    edge_kind=edge.edge_kind,
+                    edge_kind=parsed_edge.edge_kind,
                     allowed_scopes=file_scopes,
-                    target_repo_qualified_id=edge.target_repo_qualified_id,
-                    is_cross_repo=edge.is_cross_repo or target_id is None,
+                    target_repo_qualified_id=parsed_edge.target_repo_qualified_id,
+                    is_cross_repo=parsed_edge.is_cross_repo or target_id is None,
                 )
                 repo.insert_ast_edge(principal, edge_rec)
                 total_edges += 1

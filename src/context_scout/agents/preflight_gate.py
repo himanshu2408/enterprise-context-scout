@@ -977,6 +977,10 @@ class BoundGraphRepository:
     ) -> None:
         self._repo = repo
         self._conn = conn
+        self._files_cache: dict[tuple[tuple[str, ...], str], list[CodeFileRecord]] = {}
+        self._symbols_cache: dict[tuple[tuple[str, ...], str], list[ASTSymbolRecord]] = {}
+        self._edges_cache: dict[tuple[tuple[str, ...], str], list[ASTEdgeRecord]] = {}
+        self._chunks_cache: dict[tuple[tuple[str, ...], str, str | None], list[DocChunkRecord]] = {}
 
     def traverse_1hop_neighborhood(
         self,
@@ -988,12 +992,14 @@ class BoundGraphRepository:
         if hasattr(self._repo, "traverse_1hop_neighborhood"):
             try:
                 if self._conn is not None:
-                    return self._repo.traverse_1hop_neighborhood(
+                    res: list[ASTNeighborhoodRecord] = self._repo.traverse_1hop_neighborhood(
                         self._conn, domain_id, focus_symbol_id, max_direct_callers
                     )
-                return self._repo.traverse_1hop_neighborhood(
+                    return res
+                res2: list[ASTNeighborhoodRecord] = self._repo.traverse_1hop_neighborhood(
                     principal, domain_id, focus_symbol_id, max_direct_callers
                 )
+                return res2
             except Exception as exc:
                 logger.debug(
                     "traverse_1hop_neighborhood fallback (%s): %s",
@@ -1005,11 +1011,16 @@ class BoundGraphRepository:
     def list_visible_code_files(
         self, principal: PrincipalContext, domain_id: str
     ) -> list[CodeFileRecord]:
+        inst_cache_key = (tuple(sorted(set(principal.allowed_scopes))), domain_id)
+        if inst_cache_key in self._files_cache:
+            return list(self._files_cache[inst_cache_key])
         if hasattr(self._repo, "list_visible_code_files"):
             try:
                 result = self._repo.list_visible_code_files(principal, domain_id)
                 if isinstance(result, list) and result:
-                    return result
+                    typed_res = list(result)
+                    self._files_cache[inst_cache_key] = typed_res
+                    return list(typed_res)
             except TypeError as exc:
                 logger.debug(
                     "Falling back to conn signature in BoundGraphRepository (%s): %s",
@@ -1019,7 +1030,9 @@ class BoundGraphRepository:
                 if self._conn is not None:
                     result = self._repo.list_visible_code_files(self._conn, domain_id)
                     if isinstance(result, list) and result:
-                        return result
+                        typed_res = list(result)
+                        self._files_cache[inst_cache_key] = typed_res
+                        return list(typed_res)
         corpus = _load_custom_domain_corpus(domain_id)
         if corpus and isinstance(corpus.get("code_files"), list):
             mem_entry = _CUSTOM_CORPUS_MEM_CACHE.get(domain_id)
@@ -1056,11 +1069,16 @@ class BoundGraphRepository:
     def list_visible_ast_symbols(
         self, principal: PrincipalContext, domain_id: str
     ) -> list[ASTSymbolRecord]:
+        inst_cache_key = (tuple(sorted(set(principal.allowed_scopes))), domain_id)
+        if inst_cache_key in self._symbols_cache:
+            return list(self._symbols_cache[inst_cache_key])
         if hasattr(self._repo, "list_visible_ast_symbols"):
             try:
                 result = self._repo.list_visible_ast_symbols(principal, domain_id)
                 if isinstance(result, list) and result:
-                    return result
+                    typed_res = list(result)
+                    self._symbols_cache[inst_cache_key] = typed_res
+                    return list(typed_res)
             except TypeError as exc:
                 logger.debug(
                     "Falling back to conn signature in BoundGraphRepository (%s): %s",
@@ -1070,7 +1088,9 @@ class BoundGraphRepository:
                 if self._conn is not None:
                     result = self._repo.list_visible_ast_symbols(self._conn, domain_id)
                     if isinstance(result, list) and result:
-                        return result
+                        typed_res = list(result)
+                        self._symbols_cache[inst_cache_key] = typed_res
+                        return list(typed_res)
         corpus = _load_custom_domain_corpus(domain_id)
         if corpus and isinstance(corpus.get("ast_symbols"), list):
             mem_entry = _CUSTOM_CORPUS_MEM_CACHE.get(domain_id)
@@ -1120,11 +1140,16 @@ class BoundGraphRepository:
     def list_visible_ast_edges(
         self, principal: PrincipalContext, domain_id: str
     ) -> list[ASTEdgeRecord]:
+        inst_cache_key = (tuple(sorted(set(principal.allowed_scopes))), domain_id)
+        if inst_cache_key in self._edges_cache:
+            return list(self._edges_cache[inst_cache_key])
         if hasattr(self._repo, "list_visible_ast_edges"):
             try:
                 result = self._repo.list_visible_ast_edges(principal, domain_id)
                 if isinstance(result, list) and result:
-                    return result
+                    typed_res = list(result)
+                    self._edges_cache[inst_cache_key] = typed_res
+                    return list(typed_res)
             except TypeError as exc:
                 logger.debug(
                     "Falling back to conn signature in BoundGraphRepository (%s): %s",
@@ -1134,7 +1159,9 @@ class BoundGraphRepository:
                 if self._conn is not None:
                     result = self._repo.list_visible_ast_edges(self._conn, domain_id)
                     if isinstance(result, list) and result:
-                        return result
+                        typed_res = list(result)
+                        self._edges_cache[inst_cache_key] = typed_res
+                        return list(typed_res)
         corpus = _load_custom_domain_corpus(domain_id)
         if corpus and isinstance(corpus.get("ast_edges"), list):
             mem_entry = _CUSTOM_CORPUS_MEM_CACHE.get(domain_id)
@@ -1185,11 +1212,17 @@ class BoundGraphRepository:
         domain_id: str,
         market_scope: MarketRegime | None = None,
     ) -> list[DocChunkRecord]:
+        mkt_key = market_scope.value if market_scope is not None else None
+        cache_key = (tuple(sorted(set(principal.allowed_scopes))), domain_id, mkt_key)
+        if cache_key in self._chunks_cache:
+            return list(self._chunks_cache[cache_key])
         if hasattr(self._repo, "list_visible_doc_chunks"):
             try:
                 result = self._repo.list_visible_doc_chunks(principal, domain_id, market_scope)
                 if isinstance(result, list) and result:
-                    return result
+                    typed_res = list(result)
+                    self._chunks_cache[cache_key] = typed_res
+                    return list(typed_res)
             except TypeError as exc:
                 logger.debug(
                     "Falling back to conn signature in BoundGraphRepository (%s): %s",
@@ -1199,7 +1232,9 @@ class BoundGraphRepository:
                 if self._conn is not None:
                     result = self._repo.list_visible_doc_chunks(self._conn, domain_id, market_scope)
                     if isinstance(result, list) and result:
-                        return result
+                        typed_res = list(result)
+                        self._chunks_cache[cache_key] = typed_res
+                        return list(typed_res)
         corpus = _load_custom_domain_corpus(domain_id)
         if corpus and isinstance(corpus.get("doc_chunks"), list):
             out_chunks: list[DocChunkRecord] = []
@@ -1489,6 +1524,8 @@ class PreFlightValidator:
         conn: Connection[tuple[object, ...]] | None = None,
     ) -> BoundGraphRepository:
         active_repo = repo if repo is not None else self.repo
+        if isinstance(active_repo, BoundGraphRepository) and conn is None:
+            return active_repo
         return BoundGraphRepository(active_repo, conn=conn)
 
     def _resolve_principal(
@@ -2524,28 +2561,28 @@ class PreFlightValidator:
                     break
 
         permitted_citations: list[DocCitationSpan] = []
-        for c in citations:
-            c_scopes = chunk_scopes_map.get(str(c.chunk_id))
+        for cit in citations:
+            c_scopes = chunk_scopes_map.get(str(cit.chunk_id))
             if c_scopes is None:
-                excised_items.append(f"doc:{c.doc_id}:{c.chunk_id}")
+                excised_items.append(f"doc:{cit.doc_id}:{cit.chunk_id}")
                 missing_items.append(
                     MissingItemRecord(
                         kind="scope",
-                        identifier=f"{c.doc_id}:{c.chunk_id}",
+                        identifier=f"{cit.doc_id}:{cit.chunk_id}",
                         reason=(
                             f"Principal '{principal.user_id}' lacks visibility "
-                            f"into document chunk '{c.chunk_id}'"
+                            f"into document chunk '{cit.chunk_id}'"
                         ),
                     )
                 )
             elif bool(allowed_set & c_scopes) or "*" in allowed_set or "admin" in allowed_set:
-                permitted_citations.append(c)
+                permitted_citations.append(cit)
             else:
-                excised_items.append(f"doc:{c.doc_id}:{c.chunk_id}")
+                excised_items.append(f"doc:{cit.doc_id}:{cit.chunk_id}")
                 missing_items.append(
                     MissingItemRecord(
                         kind="scope",
-                        identifier=f"{c.doc_id}:{c.chunk_id}",
+                        identifier=f"{cit.doc_id}:{cit.chunk_id}",
                         reason=(
                             f"Principal '{principal.user_id}' lacks required "
                             f"scopes {sorted(c_scopes)}"

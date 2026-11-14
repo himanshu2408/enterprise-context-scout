@@ -15,6 +15,7 @@ Implements Requirement R3:
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -61,6 +62,52 @@ from context_scout.telemetry import ScoutTelemetryTracer
 from context_scout.telemetry.cost_governance import DEFAULT_EXPLORATION_TOKEN_KILL_SWITCH
 
 logger = logging.getLogger(__name__)
+
+
+def _snap_python_ast_pointer_bounds(
+    ptr: CodeSlicePointer,
+    file_rec: CodeFileRecord,
+) -> CodeSlicePointer:
+    """Extends stale Python AST symbol bounds to the enclosing AST node when truncated."""
+    if file_rec.language != "python" or not ptr.qualified_symbol or not file_rec.raw_content:
+        return ptr
+    target_name = ptr.qualified_symbol.rsplit(".", 1)[-1]
+    if not target_name:
+        return ptr
+    try:
+        tree = ast.parse(file_rec.raw_content)
+    except SyntaxError as exc:
+        logger.debug(
+            "Skipping AST pointer bound snap for %s (%s): %s",
+            ptr.file_path,
+            type(exc).__name__,
+            exc,
+        )
+        return ptr
+
+    best_node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    best_dist = 1_000_000
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == target_name
+            and node.end_lineno is not None
+        ):
+            dist = abs(node.lineno - ptr.start_line)
+            if dist <= 15 and dist < best_dist:
+                best_dist = dist
+                best_node = node
+
+    if (
+        best_node is not None
+        and best_node.end_lineno is not None
+        and (best_node.end_lineno > ptr.end_line or best_node.lineno != ptr.start_line)
+    ):
+        return ptr.model_copy(
+            update={"start_line": best_node.lineno, "end_line": best_node.end_lineno}
+        )
+    return ptr
+
 
 # Google ADK 2.x Workflow integration
 try:
@@ -1801,10 +1848,11 @@ class ScoutWorkflow:
                 exc,
             )
 
+        run_bound_repo = BoundGraphRepository(self.repo)
         relevance_rejection = _evaluate_query_domain_relevance(
             user_prompt=user_prompt,
             domain_id=domain_id,
-            bound_repo=BoundGraphRepository(self.repo),
+            bound_repo=run_bound_repo,
             principal=principal,
         )
         if relevance_rejection is not None:
@@ -1894,7 +1942,7 @@ class ScoutWorkflow:
             quant_brief = self.local_client.generate_quant_brief(
                 user_prompt=user_prompt,
                 domain_id=quant_domain,
-                repo=self.repo,
+                repo=run_bound_repo,
                 principal=principal,
                 bounce_back_feedback=None,
             )
@@ -1902,7 +1950,7 @@ class ScoutWorkflow:
                 domain_knowledge_brief = self.local_client.generate_domain_knowledge_brief(
                     user_prompt=user_prompt,
                     domain_id=quant_domain,
-                    repo=self.repo,
+                    repo=run_bound_repo,
                     principal=principal,
                     quant_brief=quant_brief,
                 )
@@ -1918,7 +1966,7 @@ class ScoutWorkflow:
             candidate_pointers = self.local_client.generate_code_pointers(
                 user_prompt=user_prompt,
                 domain_id=domain_id,
-                repo=self.repo,
+                repo=run_bound_repo,
                 principal=principal,
                 bounce_back_feedback=None,
             )
@@ -1934,7 +1982,7 @@ class ScoutWorkflow:
                 }
             )
 
-        bound_repo = BoundGraphRepository(self.repo)
+        bound_repo = run_bound_repo
         pointer_paths = list({p.file_path for p in candidate_pointers})
         targeted_files = bound_repo.get_code_files_by_paths(principal, domain_id, pointer_paths)
         visible_files = bound_repo.list_visible_code_files(principal, domain_id)
@@ -1947,8 +1995,9 @@ class ScoutWorkflow:
             file_rec = files_by_path.get(ptr.file_path)
             if file_rec is not None:
                 try:
+                    snapped_ptr = _snap_python_ast_pointer_bounds(ptr, file_rec)
                     slice_item = self.slicer.slice_pointer(
-                        pointer=ptr,
+                        pointer=snapped_ptr,
                         file_record=file_rec,
                         auto_expanded_by_ast=False,
                     )
@@ -2065,7 +2114,7 @@ class ScoutWorkflow:
             user_prompt=user_prompt,
             supporting_doc_citations=supporting_doc_citations,
             normalized_rrf_score=normalized_rrf_score,
-            repo=self.repo,
+            repo=run_bound_repo,
             principal=principal,
             domain_id=val_domain,
             doc_chunks=doc_chunks,
@@ -2100,7 +2149,7 @@ class ScoutWorkflow:
             remediated_pointers = self.local_client.generate_code_pointers(
                 user_prompt=user_prompt,
                 domain_id=domain_id,
-                repo=self.repo,
+                repo=run_bound_repo,
                 principal=principal,
                 bounce_back_feedback=active_feedback,
             )
@@ -2112,8 +2161,9 @@ class ScoutWorkflow:
                     file_rec = files_by_path.get(ptr.file_path)
                     if file_rec is not None:
                         try:
+                            snapped_ptr = _snap_python_ast_pointer_bounds(ptr, file_rec)
                             remed_slice = self.slicer.slice_pointer(
-                                pointer=ptr,
+                                pointer=snapped_ptr,
                                 file_record=file_rec,
                                 auto_expanded_by_ast=False,
                             )
@@ -2131,7 +2181,7 @@ class ScoutWorkflow:
                 user_prompt=user_prompt,
                 supporting_doc_citations=supporting_doc_citations,
                 normalized_rrf_score=normalized_rrf_score,
-                repo=self.repo,
+                repo=run_bound_repo,
                 principal=principal,
                 domain_id=val_domain,
                 doc_chunks=doc_chunks,
@@ -2618,10 +2668,11 @@ class FederatedScoutCoordinator:
                 paid_tokens_spent=0,
             )
 
+        fed_bound_repo = BoundGraphRepository(self.repo)
         relevance_rejection = _evaluate_query_domain_relevance(
             user_prompt=user_prompt,
             domain_id=fed_domain,
-            bound_repo=BoundGraphRepository(self.repo),
+            bound_repo=fed_bound_repo,
             principal=principal,
         )
         if relevance_rejection is not None:
@@ -2647,7 +2698,7 @@ class FederatedScoutCoordinator:
         quant_brief = self.local_client.generate_quant_brief(
             user_prompt=user_prompt,
             domain_id=research_domain,
-            repo=self.repo,
+            repo=fed_bound_repo,
             principal=active_principal,
             bounce_back_feedback=None,
         )
@@ -2685,7 +2736,7 @@ class FederatedScoutCoordinator:
         code_pointers = self.local_client.generate_code_pointers(
             user_prompt=code_prompt,
             domain_id=code_domain,
-            repo=self.repo,
+            repo=fed_bound_repo,
             principal=active_principal,
             bounce_back_feedback=None,
         )
@@ -2701,7 +2752,7 @@ class FederatedScoutCoordinator:
                 }
             )
 
-        bound_repo = BoundGraphRepository(self.repo)
+        bound_repo = fed_bound_repo
         visible_files = bound_repo.list_visible_code_files(active_principal, code_domain)
         files_by_path: dict[str, CodeFileRecord] = {f.file_path: f for f in visible_files}
 
@@ -2710,8 +2761,9 @@ class FederatedScoutCoordinator:
             f_rec = files_by_path.get(ptr.file_path)
             if f_rec is not None:
                 try:
+                    snapped_ptr = _snap_python_ast_pointer_bounds(ptr, f_rec)
                     slice_item = self.slicer.slice_pointer(
-                        pointer=ptr,
+                        pointer=snapped_ptr,
                         file_record=f_rec,
                         auto_expanded_by_ast=False,
                     )
@@ -2799,7 +2851,7 @@ class FederatedScoutCoordinator:
             supporting_doc_citations=citations,
             quant_strategy_spec=quant_brief,
             normalized_rrf_score=normalized_rrf_score,
-            repo=self.repo,
+            repo=fed_bound_repo,
             principal=active_principal,
             domain_id=code_domain,
             doc_chunks=active_chunks,
@@ -2832,7 +2884,7 @@ class FederatedScoutCoordinator:
             remed_ptrs = self.local_client.generate_code_pointers(
                 user_prompt=code_prompt,
                 domain_id=code_domain,
-                repo=self.repo,
+                repo=fed_bound_repo,
                 principal=active_principal,
                 bounce_back_feedback=active_feedback,
             )
@@ -2844,9 +2896,10 @@ class FederatedScoutCoordinator:
                     f_rec = files_by_path.get(ptr.file_path)
                     if f_rec is not None:
                         try:
+                            snapped_ptr = _snap_python_ast_pointer_bounds(ptr, f_rec)
                             hydrated_slices.append(
                                 self.slicer.slice_pointer(
-                                    pointer=ptr,
+                                    pointer=snapped_ptr,
                                     file_record=f_rec,
                                     auto_expanded_by_ast=False,
                                 )
@@ -2865,7 +2918,7 @@ class FederatedScoutCoordinator:
                 supporting_doc_citations=citations,
                 quant_strategy_spec=quant_brief,
                 normalized_rrf_score=normalized_rrf_score,
-                repo=self.repo,
+                repo=fed_bound_repo,
                 principal=active_principal,
                 domain_id=code_domain,
                 doc_chunks=active_chunks,
