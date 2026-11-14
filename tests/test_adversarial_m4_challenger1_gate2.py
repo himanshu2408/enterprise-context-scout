@@ -12,6 +12,7 @@ Empirical verification and stress testing of:
 from __future__ import annotations
 
 import uuid
+from collections.abc import Generator
 
 import psycopg
 import pytest
@@ -30,7 +31,7 @@ from context_scout.schemas.contracts import PrincipalContext, RoleType
 
 
 @pytest.fixture(scope="module")
-def postgres_admin_conn():
+def postgres_admin_conn() -> Generator[psycopg.Connection, None, None]:
     """Provides a live PostgreSQL 17 admin connection for test verification."""
     if not is_postgres_reachable():
         pytest.fail("Live PostgreSQL 17 instance is unreachable at db_admin_url!")
@@ -61,13 +62,21 @@ class TestLivePostgresBenchmarkIsolationAndTeardown:
             cur.execute(
                 "SELECT COUNT(*) FROM domain_packs WHERE domain_id = %s;", (session_domain,)
             )
-            dp_count = cur.fetchone()[0]
+            dp_row = cur.fetchone()
+            assert dp_row is not None
+            dp_count = dp_row[0]
             cur.execute("SELECT COUNT(*) FROM code_files WHERE domain_id = %s;", (session_domain,))
-            cf_count = cur.fetchone()[0]
+            cf_row = cur.fetchone()
+            assert cf_row is not None
+            cf_count = cf_row[0]
             cur.execute("SELECT COUNT(*) FROM ast_symbols WHERE domain_id = %s;", (session_domain,))
-            sym_count = cur.fetchone()[0]
+            sym_row = cur.fetchone()
+            assert sym_row is not None
+            sym_count = sym_row[0]
             cur.execute("SELECT COUNT(*) FROM doc_chunks WHERE domain_id = %s;", (session_domain,))
-            doc_count = cur.fetchone()[0]
+            doc_row = cur.fetchone()
+            assert doc_row is not None
+            doc_count = doc_row[0]
 
         assert dp_count == 1, f"Expected 1 domain_pack, got {dp_count}"
         assert cf_count >= 300, f"Expected >= 300 code_files, got {cf_count}"
@@ -81,7 +90,9 @@ class TestLivePostgresBenchmarkIsolationAndTeardown:
         with conn.cursor() as cur:
             for tbl in ("doc_chunks", "ast_symbols", "code_files", "domain_packs"):
                 cur.execute(f"SELECT COUNT(*) FROM {tbl} WHERE domain_id = %s;", (session_domain,))
-                cnt = cur.fetchone()[0]
+                row = cur.fetchone()
+                assert row is not None
+                cnt = row[0]
                 assert cnt == 0, (
                     f"Teardown failure: table '{tbl}' still contains {cnt} rows "
                     f"for domain {session_domain}!"
@@ -207,7 +218,9 @@ class TestLivePostgresBenchmarkIsolationAndTeardown:
                     cur.execute(
                         f"SELECT COUNT(*) FROM {tbl} WHERE domain_id = %s;", (session_domain,)
                     )
-                    cnt = cur.fetchone()[0]
+                    row = cur.fetchone()
+                    assert row is not None
+                    cnt = row[0]
                     assert cnt == 0, (
                         f"Teardown failure: {tbl} still contains {cnt} rows for {session_domain}!"
                     )
@@ -273,7 +286,9 @@ class TestLivePostgresBenchmarkIsolationAndTeardown:
                 cur.execute(
                     "SELECT COUNT(*) FROM code_files WHERE domain_id = %s;", (canary_domain,)
                 )
-                canary_count = cur.fetchone()[0]
+                row = cur.fetchone()
+                assert row is not None
+                canary_count = row[0]
                 assert canary_count == 0, "Flawed teardown failed to delete canary row as expected!"
 
         finally:

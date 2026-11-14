@@ -512,7 +512,7 @@ class TestF08IncrementalMerklePushIndexing:
 
     def test_f08_02_deleted_files_remove_ast_records(self) -> None:
         blobs_a = {"file_del": "hash_del"}
-        blobs_b = {}
+        blobs_b: dict[str, str] = {}
         deleted = set(blobs_a) - set(blobs_b)
         assert "file_del" in deleted
 
@@ -523,7 +523,7 @@ class TestF08IncrementalMerklePushIndexing:
         assert "file_keep" in unmodified
 
     def test_f08_04_new_files_trigger_incremental_ast_extraction(self) -> None:
-        blobs_a = {}
+        blobs_a: dict[str, str] = {}
         blobs_b = {"file_new": "hash_new"}
         added = set(blobs_b) - set(blobs_a)
         assert "file_new" in added
@@ -848,7 +848,7 @@ class TestF17GitLabConnector:
     """F17: Remote GitLab REST API client, push/MR webhook handler."""
 
     def test_f17_01_gitlab_push_webhook_commit_diff_processing(self) -> None:
-        payload = {
+        payload: dict[str, Any] = {
             "object_kind": "push",
             "before": "95790bf891e76fee5e1747ab5899de4a1e64ff83",
             "after": "da1560886d4f094c3e6c9ef40349f7d38b5d27d7",
@@ -864,7 +864,7 @@ class TestF17GitLabConnector:
         assert "src/main.py" in payload["commits"][0]["modified"]
 
     def test_f17_02_gitlab_mr_webhook_branch_changes_isolation(self) -> None:
-        payload = {
+        payload: dict[str, Any] = {
             "object_kind": "merge_request",
             "object_attributes": {"source_branch": "feature/auth"},
         }

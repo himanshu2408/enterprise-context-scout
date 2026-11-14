@@ -395,11 +395,9 @@ class TestMarginalRRFThreshold:
             start_line=1,
             end_line=2,
             verbatim_code_with_lines="1: x = 1\n2: y = 2\n",
-            language="python",
             modification_intent=ModificationIntent.MODIFY_TARGET,
             qualified_symbol="app.main",
             selection_reason="direct_hit",
-            allowed_scopes=["repo:test"],
         )
         res = gate.evaluate_gate(
             code_slices=[slice_item],
@@ -411,6 +409,7 @@ class TestMarginalRRFThreshold:
         assert isinstance(res, GateAbstentionResult)
         assert res.passed is False
         assert res.diagnostic.paid_tokens_spent == 0
+        assert res.report.bounce_back_feedback is not None
         assert "0.6499 is below threshold 0.65" in res.report.bounce_back_feedback
 
     def test_rrf_marginal_with_cross_encoder_rescue(self, gate: PreFlightValidator) -> None:

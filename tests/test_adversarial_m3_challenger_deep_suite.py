@@ -20,10 +20,8 @@ from context_scout.agents.citation_gate import (
     DocumentCitationGate,
 )
 from context_scout.agents.preflight_gate import PreFlightValidator
-from context_scout.ast_engine.deterministic_slicer import (
-    DeterministicSlicer,
-    SlicerErrorCode,
-)
+from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
+from context_scout.ast_engine.models import SlicerErrorCode
 from context_scout.db.repositories import (
     ASTEdgeRecord,
     ASTSymbolRecord,

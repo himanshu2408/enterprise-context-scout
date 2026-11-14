@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import urllib.request
 import uuid
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 from evals.datasets.unanswerable_dataset import (
@@ -54,6 +56,7 @@ from context_scout.db.repositories import (
 from context_scout.schemas.contracts import (
     DocCitationSpan,
     InsufficientContextDiagnostic,
+    MissingItemRecord,
     ModificationIntent,
     PrincipalContext,
     RoleType,
@@ -380,7 +383,10 @@ class TestPreflightGateAdversarialStress:
         assert res.report.check_results["check_1_syntax"] is False
         assert any("Nesting depth" in err for err in res.report.syntax_errors)
         assert res.diagnostic.paid_tokens_spent == 0
-        assert any(item.kind == "syntax" for item in res.diagnostic.missing_items)
+        assert any(
+            isinstance(item, MissingItemRecord) and item.kind == "syntax"
+            for item in res.diagnostic.missing_items
+        )
 
     def test_check_1_unclosed_delimiters_rejected(
         self,
@@ -715,7 +721,6 @@ class TestPreflightGateAdversarialStress:
             source_uri="jira:ENG-404",
             section_heading=wontfix_chunk.section_heading,
             verbatim_quote=wontfix_chunk.verbatim_content,
-            token_count=10,
         )
 
         # Remediation verified: check_document_freshness creates chunks_by_id
@@ -785,15 +790,14 @@ class TestPopulatedRepoDiscrimination:
         spy = PaidExecutionSpy()
 
         # Wrap GeminiImplementationExecutor to record calls
-        orig_exec = GeminiImplementationExecutor.execute_implementation
-        GeminiImplementationExecutor.execute_implementation = lambda self, *a, **kw: (
-            spy.record_call("execute_implementation", *a, **kw)
-        )
-
         successful_abstentions = 0
         total_tasks = len(suite)
 
-        try:
+        with patch.object(
+            GeminiImplementationExecutor,
+            "execute_implementation",
+            lambda self, *a, **kw: spy.record_call("execute_implementation", *a, **kw),
+        ):
             for task in suite:
                 spy.reset()
 
@@ -833,9 +837,6 @@ class TestPopulatedRepoDiscrimination:
             assert p_lower_twosided >= 0.9877, (
                 f"Empirical lower bound {p_lower_twosided:.6f} < 0.9878"
             )
-
-        finally:
-            GeminiImplementationExecutor.execute_implementation = orig_exec
 
     def test_discrimination_answerable_query_passes_on_populated_repo(
         self,
@@ -906,24 +907,22 @@ class TestPaidExecutionSpyStress:
         spy = PaidExecutionSpy()
         orig_urlopen = urllib.request.urlopen
 
-        def spy_urlopen(url_or_req, *args, **kwargs):
+        def spy_urlopen(url_or_req: Any, *args: Any, **kwargs: Any) -> Any:
             target_url = str(getattr(url_or_req, "full_url", url_or_req))
             cloud_hosts = ("googleapis.com", "anthropic.com", "openai.com")
             if any(cloud in target_url for cloud in cloud_hosts):
                 spy.record_call(f"urllib.request.urlopen({target_url})")
             return orig_urlopen(url_or_req, *args, **kwargs)
 
-        urllib.request.urlopen = spy_urlopen
-
-        try:
-            with pytest.raises(ZeroSpendViolationError, match=r"googleapis\.com"):
-                cloud_ep = (
-                    "https://generativelanguage.googleapis.com/v1beta/"
-                    "models/gemini-4-argon:generateContent"
-                )
-                urllib.request.urlopen(cloud_ep)
-        finally:
-            urllib.request.urlopen = orig_urlopen
+        with (
+            patch.object(urllib.request, "urlopen", spy_urlopen),
+            pytest.raises(ZeroSpendViolationError, match=r"googleapis\.com"),
+        ):
+            cloud_ep = (
+                "https://generativelanguage.googleapis.com/v1beta/"
+                "models/gemini-4-argon:generateContent"
+            )
+            urllib.request.urlopen(cloud_ep)
 
 
 # ============================================================================

@@ -48,7 +48,7 @@ def _make_chunk(
     title: str,
     content: str,
     source_uri: str,
-    metadata: dict | None = None,
+    metadata: dict[str, object] | None = None,
     is_stale: bool = False,
 ) -> DocumentChunk:
     meta = dict(metadata or {})

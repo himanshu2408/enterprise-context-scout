@@ -237,8 +237,8 @@ class TestHeaderForgingAlongsideValidToken:
             x_principal_role="compliance_officer",
             authorization=f"Bearer {valid_token}",
         )
-        assert principal.role == RoleType.ENGINEER
         assert principal.role != RoleType.COMPLIANCE_OFFICER
+        assert principal.role == RoleType.ENGINEER
 
     def test_attack_13_scopes_header_override_ignored(self) -> None:
         """Attacker provides valid token for public_eng but scopes: audit:compliance."""

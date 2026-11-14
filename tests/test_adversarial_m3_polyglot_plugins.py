@@ -6,7 +6,11 @@ scope leaks, and AST extraction correctness across C#, React/Redux, Storybook, a
 
 from __future__ import annotations
 
+from typing import Any
+
 from context_scout.ast_engine.extractor import ASTExtractor
+from context_scout.ast_engine.models import ParsedEdge, ParsedSymbol
+from context_scout.plugins.base import DependencyEdge
 from context_scout.plugins.languages.csharp import CSharpPlugin
 from context_scout.plugins.languages.react_redux import ReactReduxPlugin
 from context_scout.plugins.languages.storybook import StorybookPlugin
@@ -728,10 +732,12 @@ def test_adversarial_registry_dynamic_reregistration_and_priority_override() -> 
         def can_handle(self, file_path: str) -> bool:
             return file_path.endswith(".cs")
 
-        def extract_ast(self, *args, **kwargs):
+        def extract_ast(
+            self, *args: Any, **kwargs: Any
+        ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
             return [], []
 
-        def extract_manifest_dependencies(self, *args, **kwargs):
+        def extract_manifest_dependencies(self, *args: Any, **kwargs: Any) -> list[DependencyEdge]:
             return []
 
     PluginRegistry.reset()

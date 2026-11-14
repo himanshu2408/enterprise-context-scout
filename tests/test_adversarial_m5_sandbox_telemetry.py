@@ -23,7 +23,6 @@ import psycopg.errors
 import pytest
 
 from context_scout.agents.gemini_executor import (
-    BudgetExceededError,
     GeminiImplementationExecutor,
     GitWorktreeSandbox,
 )
@@ -44,6 +43,7 @@ from context_scout.schemas.contracts import (
     RoleType,
     VerbatimCodeSlice,
 )
+from context_scout.telemetry.cost_governance import BudgetExceededError
 
 DOMAIN_CODE: Final[str] = "trading_code_scout"
 REPO_NAME: Final[str] = "trading-execution"

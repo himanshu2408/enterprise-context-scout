@@ -729,13 +729,15 @@ class TestF19AbstentionDiagnosticBoundaries:
 
     def test_b19_02_paid_tokens_spent_strictly_zero(self) -> None:
         with pytest.raises(ValidationError):
-            InsufficientContextDiagnostic(
-                trace_id="tr",
-                domain_id="dom",
-                reason="reason",
-                missing_symbols=[],
-                partial_candidate_files=[],
-                paid_tokens_spent=100,  # Must be 0
+            InsufficientContextDiagnostic.model_validate(
+                {
+                    "trace_id": "tr",
+                    "domain_id": "dom",
+                    "reason": "reason",
+                    "missing_symbols": [],
+                    "partial_candidate_files": [],
+                    "paid_tokens_spent": 100,  # Must be 0
+                }
             )
 
     def test_b19_03_empty_missing_and_candidate_lists(self) -> None:
