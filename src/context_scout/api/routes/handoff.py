@@ -28,7 +28,7 @@ from context_scout.api.schemas import (
     HandoffPreviewResponse,
 )
 from context_scout.config import validate_google_model_id
-from context_scout.schemas.contracts import PrincipalContext
+from context_scout.schemas.contracts import PrincipalContext, RoleType
 from context_scout.telemetry.cost_governance import PaidComputeCostEstimator
 
 logger = logging.getLogger(__name__)
@@ -65,6 +65,11 @@ def preview_handoff(
     token_store: Annotated[ConfirmationTokenStore, Depends(get_confirmation_token_store)],
 ) -> HandoffPreviewResponse:
     """Generates patch preview and confirmation token without mutating repository files."""
+    if principal.role != RoleType.ENGINEER:
+        raise HTTPException(
+            status_code=403,
+            detail="Sandboxed patch handoff is restricted to Engineer principals (SEC-04).",
+        )
     repo_root = get_repo_root()
 
     # 1. Validate model ID (e.g. gemini-3.8-flash or gemini-4-argon)
@@ -138,6 +143,11 @@ def apply_handoff(
     token_store: Annotated[ConfirmationTokenStore, Depends(get_confirmation_token_store)],
 ) -> HandoffApplyResponse:
     """Applies and verifies patch in worktree sandbox after explicit human confirmation."""
+    if principal.role != RoleType.ENGINEER:
+        raise HTTPException(
+            status_code=403,
+            detail="Sandboxed patch handoff is restricted to Engineer principals (SEC-04).",
+        )
     repo_root = get_repo_root()
 
     # 1. Enforce explicit human confirmation

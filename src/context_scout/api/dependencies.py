@@ -15,9 +15,12 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Final
+from typing import TYPE_CHECKING, Annotated, Any, Final
 
 from fastapi import Header, HTTPException
+
+if TYPE_CHECKING:
+    from context_scout.agents.scout_workflow import LocalGemmaClient
 
 from context_scout.agents.domain_registry import DomainRegistry
 from context_scout.config import ScoutSettings
@@ -587,3 +590,20 @@ def get_repository() -> Any:
 def get_telemetry_tracer() -> ScoutTelemetryTracer:
     """Provides ScoutTelemetryTracer singleton."""
     return ScoutTelemetryTracer.get_instance()
+
+
+_local_gemma_client: LocalGemmaClient | None = None
+_local_gemma_lock = threading.Lock()
+
+
+def get_local_gemma_client() -> LocalGemmaClient:
+    """Provides a shared LocalGemmaClient so loaded MLX weights stay warm across requests."""
+    global _local_gemma_client
+    if _local_gemma_client is None:
+        with _local_gemma_lock:
+            if _local_gemma_client is None:
+                from context_scout.agents.scout_workflow import LocalGemmaClient
+
+                registry = get_domain_registry()
+                _local_gemma_client = LocalGemmaClient(adapter_pool=registry.adapter_pool)
+    return _local_gemma_client

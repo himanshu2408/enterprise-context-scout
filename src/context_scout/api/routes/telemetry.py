@@ -104,22 +104,38 @@ def get_roi_metrics(
                 exc,
             )
 
-    # Baseline defaults from evaluation benchmarks
-    base_queries = 7
-    base_local_tokens = 58940
-    base_pack_tokens = 1386
-    base_saved_tokens = base_local_tokens - base_pack_tokens
-    base_usd_saved = round((base_saved_tokens / 1_000_000.0) * 4.00, 4)
+    # Report exact live PostgreSQL telemetry when available; otherwise use in-memory
+    # session records or M6 offline evaluation baseline without fabricating live DB totals.
+    telemetry_source: str
+    if pg_queries > 0:
+        total_queries = pg_queries
+        total_local = pg_local_tokens
+        total_pack = pg_pack_tokens
+        total_saved = pg_saved_tokens
+        total_usd = pg_usd_saved
+        telemetry_source = "postgresql_live"
+    elif len(records) >= 7:
+        total_queries = len(records)
+        total_local = sum(r.local_tokens_read for r in records)
+        total_pack = sum(r.context_pack_tokens_sent for r in records)
+        total_saved = sum(r.paid_tokens_saved for r in records)
+        total_usd = sum(r.estimated_usd_saved for r in records)
+        telemetry_source = "in_memory_session"
+    else:
+        base_queries = 7
+        base_local_tokens = 58940
+        base_pack_tokens = 1386
+        base_saved_tokens = base_local_tokens - base_pack_tokens
+        base_usd_saved = round((base_saved_tokens / 1_000_000.0) * 4.00, 4)
 
-    total_queries = base_queries + pg_queries + len(records)
-    total_local = base_local_tokens + pg_local_tokens + sum(r.local_tokens_read for r in records)
-    total_pack = (
-        base_pack_tokens + pg_pack_tokens + sum(r.context_pack_tokens_sent for r in records)
-    )
-    total_saved = base_saved_tokens + pg_saved_tokens + sum(r.paid_tokens_saved for r in records)
-    total_usd = base_usd_saved + pg_usd_saved + sum(r.estimated_usd_saved for r in records)
+        total_queries = base_queries + len(records)
+        total_local = base_local_tokens + sum(r.local_tokens_read for r in records)
+        total_pack = base_pack_tokens + sum(r.context_pack_tokens_sent for r in records)
+        total_saved = base_saved_tokens + sum(r.paid_tokens_saved for r in records)
+        total_usd = base_usd_saved + sum(r.estimated_usd_saved for r in records)
+        telemetry_source = "m6_eval_baseline"
 
-    ratio_pct = round((total_saved / max(1, total_local)) * 100.0, 2) if total_local > 0 else 97.65
+    ratio_pct = round((total_saved / max(1, total_local)) * 100.0, 2) if total_local > 0 else 0.0
     qlora_eliminated_total = float(total_queries * 1634.0)
 
     summary = AggregateROISummary(
@@ -131,6 +147,7 @@ def get_roi_metrics(
         frontier_savings_ratio_pct=ratio_pct,
         qlora_overhead_eliminated_per_query=1634.0,
         total_qlora_overhead_eliminated=qlora_eliminated_total,
+        telemetry_source=telemetry_source,  # type: ignore[arg-type]
     )
 
     return ROIMetricsResponse(
