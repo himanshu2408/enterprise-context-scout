@@ -43,10 +43,10 @@ namespace Enterprise.Data;
 
 public class RawStringStressService
 {
-    private string template1 = """
+    private string template1 = """"
         { unmatched open brace in field raw string
         nested """quotes"""
-    """;
+    """";
 
     public void QueryDatabase()
     {
@@ -93,6 +93,23 @@ public class SubsequentService
         f"Finalize qualified name incorrect: {finalize_sym.qualified_name}"
     )
 
+    malformed = '''
+namespace Enterprise.Data;
+
+public class RawStringInvalidDelimiter
+{
+    private string bad = """
+        nested """quotes""" inside 3-quote delimiter
+    """;
+}
+'''
+    bad_syms, bad_edges = plugin.extract_ast(malformed, "RawStringInvalidDelimiter.cs")
+    assert bad_syms == []
+    assert bad_edges == []
+    assert plugin.last_parse_diagnostics is not None
+    assert plugin.last_parse_diagnostics.has_parse_error is True
+    assert plugin.last_parse_diagnostics.abstained is True
+
 
 def test_adversarial_csharp_deeply_nested_tuples_and_generics_in_primary_constructors() -> None:
     """Stress-tests primary constructors with 8-level nested tuples, generics, and default values.
@@ -114,7 +131,9 @@ public class DeepTupleService(
     public void Run() {}
 }
 
-public record DeepRecord((int, (int, (int, (int, (int, (int, (int, int)))))))) : IRecordMarker;
+public record DeepRecord(
+    (int, (int, (int, (int, (int, (int, (int, int))))))) payload
+) : IRecordMarker;
 
 public struct DeepStruct((double, (double, double)) coords) : IStructMarker
 {
@@ -138,6 +157,18 @@ public struct DeepStruct((double, (double, double)) coords) : IStructMarker
     assert "IDisposable" in edge_targets, f"IDisposable missing: {edge_targets}"
     assert "IRecordMarker" in edge_targets, f"IRecordMarker missing: {edge_targets}"
     assert "IStructMarker" in edge_targets, f"IStructMarker missing: {edge_targets}"
+
+    malformed = """
+namespace Enterprise.Complex;
+
+public record DeepRecordMissingParam((int, (int, (int, int)))) : IRecordMarker;
+"""
+    bad_syms, bad_edges = plugin.extract_ast(malformed, "DeepRecordMissingParam.cs")
+    assert bad_syms == []
+    assert bad_edges == []
+    assert plugin.last_parse_diagnostics is not None
+    assert plugin.last_parse_diagnostics.has_parse_error is True
+    assert plugin.last_parse_diagnostics.abstained is True
 
 
 # ==============================================================================

@@ -56,9 +56,7 @@ public class MetricsReporter
     # Empirical check:
     # Under current code, MetricsReporter is falsely qualified as:
     # 'Enterprise.Data.RawStringConfigService.MetricsReporter'
-    assert not metrics_sym.qualified_name.endswith(
-        ".RawStringConfigService.MetricsReporter"
-    ), (
+    assert not metrics_sym.qualified_name.endswith(".RawStringConfigService.MetricsReporter"), (
         "DEFECT CONFIRMED: MetricsReporter falsely nested inside RawStringConfigService: "
         f"{metrics_sym.qualified_name}"
     )
@@ -171,15 +169,14 @@ export const InputField = forwardRef<HTMLInputElement, InputProps>((props, ref) 
 def test_adversarial_csharp_primary_constructor_5_level_nested_parentheses() -> None:
     """Challenge: C# 12 primary constructor with 5 levels of nested parentheses.
 
-    Failure Mode: `paren_rec` in `csharp.py:156` hardcodes 4 levels of nested parentheses.
-    At 5 levels of nesting, `type_pat` regex fails to match, completely dropping the class,
-    its methods, and all inheritance edges.
+    Valid C# 12 syntax with a parameter name extracts cleanly; malformed primary
+    constructors omitting the parameter identifier fail closed with abstained=True.
     """
     plugin = CSharpPlugin()
     code = """
 namespace Enterprise.Services;
 
-public class DeepNestingService((int, (int, (int, (int, (int, int)))))) : IDeepService
+public class DeepNestingService((int, (int, (int, (int, (int, int))))) payload) : IDeepService
 {
     public void Execute() {}
 }
@@ -188,14 +185,23 @@ public class DeepNestingService((int, (int, (int, (int, (int, int)))))) : IDeepS
     sym_names = [s.name for s in symbols]
     edge_targets = [e.target_qualified_name for e in edges]
 
-    # Empirical check:
-    # Under current code, DeepNestingService is completely dropped.
     assert "DeepNestingService" in sym_names, (
-        f"DEFECT CONFIRMED: DeepNestingService dropped by 5-level nested parens: {sym_names}"
+        f"DeepNestingService dropped by 5-level nested parens: {sym_names}"
     )
-    assert "Execute" in sym_names, (
-        f"DEFECT CONFIRMED: Execute method dropped: {sym_names}"
-    )
-    assert "IDeepService" in edge_targets, (
-        f"DEFECT CONFIRMED: IDeepService edge dropped: {edge_targets}"
-    )
+    assert "Execute" in sym_names, f"Execute method dropped: {sym_names}"
+    assert "IDeepService" in edge_targets, f"IDeepService edge dropped: {edge_targets}"
+
+    malformed = """
+namespace Enterprise.Services;
+
+public class DeepNestingService((int, (int, (int, (int, (int, int)))))) : IDeepService
+{
+    public void Execute() {}
+}
+"""
+    bad_syms, bad_edges = plugin.extract_ast(malformed, "DeepNestingServiceBroken.cs")
+    assert bad_syms == []
+    assert bad_edges == []
+    assert plugin.last_parse_diagnostics is not None
+    assert plugin.last_parse_diagnostics.has_parse_error is True
+    assert plugin.last_parse_diagnostics.abstained is True
