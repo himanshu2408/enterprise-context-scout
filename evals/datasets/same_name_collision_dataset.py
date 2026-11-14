@@ -54,9 +54,16 @@ def get_same_name_collision_set(
 
     # 1. Identical Class Names Across Repos (40 items)
     class_names = [
-        "UserRepository", "PaymentService", "AccountManager", "AuditLogger",
-        "ConfigLoader", "EventDispatcher", "TokenValidator", "OrderProcessor",
-        "NotificationClient", "CacheManager",
+        "UserRepository",
+        "PaymentService",
+        "AccountManager",
+        "AuditLogger",
+        "ConfigLoader",
+        "EventDispatcher",
+        "TokenValidator",
+        "OrderProcessor",
+        "NotificationClient",
+        "CacheManager",
     ]
     for i in range(40):
         cls_name = class_names[i % len(class_names)] + f"_{i // len(class_names)}"
@@ -79,8 +86,12 @@ def get_same_name_collision_set(
 
     # 2. Identical Config File Paths (30 items)
     config_paths = [
-        "src/config/settings.py", "appsettings.json", "config.yaml",
-        "src/constants.ts", "terraform.tfvars", "src/env.py",
+        "src/config/settings.py",
+        "appsettings.json",
+        "config.yaml",
+        "src/constants.ts",
+        "terraform.tfvars",
+        "src/env.py",
     ]
     for i in range(30):
         cfg_path = config_paths[i % len(config_paths)]
@@ -103,8 +114,12 @@ def get_same_name_collision_set(
 
     # 3. Identical Function Names Across Repos (30 items)
     fn_names = [
-        "initialize_client", "format_error_response", "process_incoming_event",
-        "build_auth_headers", "calculate_tax_rate", "sanitize_input_string",
+        "initialize_client",
+        "format_error_response",
+        "process_incoming_event",
+        "build_auth_headers",
+        "calculate_tax_rate",
+        "sanitize_input_string",
     ]
     for i in range(30):
         fn_name = fn_names[i % len(fn_names)] + f"_{i // len(fn_names)}"

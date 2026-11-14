@@ -463,10 +463,9 @@ class GeminiImplementationExecutor:
     ) -> None:
         self.model_id = validate_google_model_id(model_id)
         self.vertexai = vertexai
-        self.allow_non_eu_regions = (
-            allow_non_eu_regions
-            or os.environ.get("SCOUT_ALLOW_NON_EU_REGIONS", "").strip().lower() in ("true", "1")
-        )
+        self.allow_non_eu_regions = allow_non_eu_regions or os.environ.get(
+            "SCOUT_ALLOW_NON_EU_REGIONS", ""
+        ).strip().lower() in ("true", "1")
 
         # Resolve GCP Project
         self.project = (
@@ -786,9 +785,7 @@ class GeminiImplementationExecutor:
             if doc_rel_path is None:
                 for ext_pat in ("*.md", "*.txt", "*.tex", "*.py"):
                     found_files = sorted(
-                        p
-                        for p in repo_root.rglob(ext_pat)
-                        if p.is_file() and ".git" not in p.parts
+                        p for p in repo_root.rglob(ext_pat) if p.is_file() and ".git" not in p.parts
                     )
                     if found_files:
                         doc_rel_path = str(found_files[0].relative_to(repo_root))

@@ -63,11 +63,9 @@ def get_token_ab_benchmark_set(
     """Generates N >= 120 paired Token A/B benchmark tasks across 4 stacks."""
     if tasks_per_stack < MIN_TOKEN_AB_TASKS_PER_STACK:
         msg = (
-            f"tasks_per_stack {tasks_per_stack} violates threshold "
-            f"({MIN_TOKEN_AB_TASKS_PER_STACK})"
+            f"tasks_per_stack {tasks_per_stack} violates threshold ({MIN_TOKEN_AB_TASKS_PER_STACK})"
         )
         raise ValueError(msg)
-
 
     tasks: list[TokenABTask] = []
 

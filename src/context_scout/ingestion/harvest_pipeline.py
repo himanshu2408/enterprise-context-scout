@@ -159,10 +159,7 @@ class CorpusHarvestPipeline:
                         final_title = extracted_title or raw_id.replace("_", " ")
 
                     saved_abs = str(saved.get("abstract", "")).strip()
-                    if (
-                        saved_abs
-                        and saved_abs != "Verified quantitative finance research paper"
-                    ):
+                    if saved_abs and saved_abs != "Verified quantitative finance research paper":
                         final_abstract = saved_abs
                     else:
                         final_abstract = (

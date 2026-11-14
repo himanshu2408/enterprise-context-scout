@@ -51,9 +51,7 @@ class KellyRiskManager:
         if max_gross_leverage <= 0.0:
             raise ValueError(f"Max leverage must be positive, got {max_gross_leverage}")
         if max_single_position <= 0.0 or max_single_position > 1.0:
-            raise ValueError(
-                f"Max single position must be in (0, 1], got {max_single_position}"
-            )
+            raise ValueError(f"Max single position must be in (0, 1], got {max_single_position}")
 
         self.fractional_multiplier = fractional_multiplier
         self.max_gross_leverage = max_gross_leverage

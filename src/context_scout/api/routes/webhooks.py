@@ -76,9 +76,7 @@ async def gitlab_webhook(
     _verify_secret_token(x_gitlab_token, "SCOUT_WEBHOOK_GITLAB_SECRET", "GitLab")
 
     payload: dict[str, Any] = await request.json()
-    domain_id = str(
-        payload.get("domain_id") or payload.get("project", {}).get("name") or "default"
-    )
+    domain_id = str(payload.get("domain_id") or payload.get("project", {}).get("name") or "default")
 
     task_id = queue.enqueue_task(
         domain_id=domain_id,
@@ -111,9 +109,7 @@ async def github_webhook(
             )
         expected_sig = (
             "sha256="
-            + hmac.new(
-                expected_secret.encode("utf-8"), body_bytes, hashlib.sha256
-            ).hexdigest()
+            + hmac.new(expected_secret.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
         )
         if not hmac.compare_digest(x_hub_signature_256, expected_sig):
             raise HTTPException(

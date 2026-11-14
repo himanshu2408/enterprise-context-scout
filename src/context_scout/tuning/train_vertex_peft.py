@@ -246,8 +246,7 @@ class VertexPEFTTrainer:
         scaling = self.config.lora_alpha / self.config.r
         if abs(scaling - 2.0) > 0.01:
             issues.append(
-                f"Non-standard LoRA scaling alpha/r = {scaling:.2f}. "
-                "Expected 2.0 (alpha=32, r=16)."
+                f"Non-standard LoRA scaling alpha/r = {scaling:.2f}. Expected 2.0 (alpha=32, r=16)."
             )
 
         # 2. Router gate freezing validation
@@ -340,9 +339,7 @@ class VertexPEFTTrainer:
         if not validation.is_valid:
             raise ValueError(f"Vertex AI PEFT job validation failed: {validation.issues}")
 
-        output_uri = (
-            validation.vertex_job_spec["jobSpec"]["baseOutputDirectory"]["outputUriPrefix"]
-        )
+        output_uri = validation.vertex_job_spec["jobSpec"]["baseOutputDirectory"]["outputUriPrefix"]
 
         if dry_run:
             logger.info(

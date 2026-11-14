@@ -216,9 +216,7 @@ def cmd_distill_custom_domain(
         "code"
         if is_code
         else (
-            "knowledge"
-            if manifest.get("output_contract") == "DomainKnowledgeBrief"
-            else "research"
+            "knowledge" if manifest.get("output_contract") == "DomainKnowledgeBrief" else "research"
         )
     )
 
@@ -253,9 +251,10 @@ def cmd_distill_custom_domain(
             ".mypy_cache",
             ".ruff_cache",
         }
-        has_sub_git = any(
-            d.is_dir() and (d / ".git").exists() for d in source_dir.iterdir()
-        ) and not (source_dir / ".git").exists()
+        has_sub_git = (
+            any(d.is_dir() and (d / ".git").exists() for d in source_dir.iterdir())
+            and not (source_dir / ".git").exists()
+        )
 
         def _ignore_path(p_cand: Path) -> bool:
             r_parts = p_cand.relative_to(source_dir).parts
@@ -273,9 +272,7 @@ def cmd_distill_custom_domain(
         code_files = sorted(
             p
             for p in source_dir.rglob("*")
-            if p.is_file()
-            and p.suffix.lower() in CODE_EXTENSIONS
-            and not _ignore_path(p)
+            if p.is_file() and p.suffix.lower() in CODE_EXTENSIONS and not _ignore_path(p)
         )
         if not code_files:
             raise ValueError(f"No code files found in {source_dir}")
@@ -310,9 +307,7 @@ def cmd_distill_custom_domain(
             file_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{domain_id}:file:{rel}"))
             lang = LANG_MAP.get(cf.suffix.lower(), cf.suffix.lstrip("."))
             blob_sha = compute_git_blob_sha(raw_bytes)
-            commit_sha = hashlib.sha1(
-                f"{domain_id}:{rel}:{blob_sha}".encode()
-            ).hexdigest()
+            commit_sha = hashlib.sha1(f"{domain_id}:{rel}:{blob_sha}".encode()).hexdigest()
 
             corpus_index_data["code_files"].append(
                 {
@@ -417,9 +412,7 @@ def cmd_distill_custom_domain(
                             uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:sym:{rel}:{q_sym}:{s_ln}")
                         )
                         sym_name_to_id[q_sym] = sym_uuid
-                        fallback_kind = (
-                            "class" if "class" in ln or "struct" in ln else "function"
-                        )
+                        fallback_kind = "class" if "class" in ln or "struct" in ln else "function"
                         corpus_index_data["ast_symbols"].append(
                             {
                                 "symbol_id": sym_uuid,
@@ -549,9 +542,7 @@ def cmd_distill_custom_domain(
         doc_files = sorted(
             p
             for p in source_dir.rglob("*")
-            if p.is_file()
-            and p.suffix.lower() in CUSTOM_DOC_EXTENSIONS
-            and ".git" not in p.parts
+            if p.is_file() and p.suffix.lower() in CUSTOM_DOC_EXTENSIONS and ".git" not in p.parts
         )
         if not doc_files:
             raise ValueError(
@@ -576,9 +567,7 @@ def cmd_distill_custom_domain(
             if not text.strip():
                 continue
 
-            rel_doc = (
-                str(df.relative_to(source_dir)) if df.is_relative_to(source_dir) else df.name
-            )
+            rel_doc = str(df.relative_to(source_dir)) if df.is_relative_to(source_dir) else df.name
             doc_title = df.stem.replace("_", " ").replace("-", " ").title()
             for ln in text.splitlines():
                 stripped_ln = ln.strip()
@@ -674,9 +663,7 @@ def cmd_distill_custom_domain(
                     formal_expression_or_rule=None,
                     core_findings_and_rules=[quote],
                     domain_constraints_and_caveats=[f"Grounded in {doc_id} ({sec_head})"],
-                    known_risks_and_failure_modes=[
-                        "Out-of-distribution domain regime shift"
-                    ],
+                    known_risks_and_failure_modes=["Out-of-distribution domain regime shift"],
                     structured_metadata={
                         "domain_id": domain_id,
                         "verified_citations_count": 1,
@@ -883,9 +870,7 @@ def cmd_query_domain(
                     adjusted_slices.append(sl.model_copy(update={"file_path": adj_path}))
                 pack_for_exec = result.model_copy(update={"code_slices": adjusted_slices})
             primary_file = (
-                pack_for_exec.code_slices[0].file_path
-                if pack_for_exec.code_slices
-                else ""
+                pack_for_exec.code_slices[0].file_path if pack_for_exec.code_slices else ""
             )
             lint_cmd = (
                 ["python3", "-m", "py_compile", primary_file]
@@ -1131,9 +1116,7 @@ def cmd_benchmark_domain(
                 (verbatim_exact_quotes / max(1, total_quotes_checked)) * 100.0, 2
             ),
             "mean_token_savings_pct": (
-                round(sum(doc_savings_pcts) / len(doc_savings_pcts), 2)
-                if doc_savings_pcts
-                else 0.0
+                round(sum(doc_savings_pcts) / len(doc_savings_pcts), 2) if doc_savings_pcts else 0.0
             ),
             "median_latency_ms": round(s_lat[len(s_lat) // 2], 2),
             "out_of_scope_zero_cost_abstention": oos_ok,
@@ -1153,46 +1136,51 @@ def cmd_benchmark_domain(
     estimated_full_repo_tokens = max(1, total_corpus_chars // 4)
 
     # Build diverse evaluation tasks across 4 categories + 2 adversarial/OOS probes
-    prod_syms = [
-        s
-        for s in ast_symbols
-        if str(s.get("file_id")) in file_by_id
-        and not any(
-            seg
-            in (
-                "tests",
-                "test",
-                "examples",
-                "_examples",
-                "docs",
-                "docs_src",
-                "benchmarks",
-                "benchmark",
-                "benchmarking",
-                "fuzz",
-                "scripts",
-                "dummyserver",
-                ".github",
-                ".claude",
-                "pnpm-lock.yaml",
-                "noxfile.py",
-                "conftest.py",
-                "setup.py",
-                "show_off.py",
-                "mkdocs.yml",
+    prod_syms = (
+        [
+            s
+            for s in ast_symbols
+            if str(s.get("file_id")) in file_by_id
+            and not any(
+                seg
+                in (
+                    "tests",
+                    "test",
+                    "examples",
+                    "_examples",
+                    "docs",
+                    "docs_src",
+                    "benchmarks",
+                    "benchmark",
+                    "benchmarking",
+                    "fuzz",
+                    "scripts",
+                    "dummyserver",
+                    ".github",
+                    ".claude",
+                    "pnpm-lock.yaml",
+                    "noxfile.py",
+                    "conftest.py",
+                    "setup.py",
+                    "show_off.py",
+                    "mkdocs.yml",
+                )
+                for seg in str(file_by_id[str(s["file_id"])]["file_path"]).split("/")
             )
-            for seg in str(file_by_id[str(s["file_id"])]["file_path"]).split("/")
-        )
-        and ".test_" not in str(s.get("qualified_name", ""))
-        and not str(s.get("qualified_name", "")).split(".")[-1].startswith("__")
-        and len(str(s.get("qualified_name", "")).split(".")[-1]) >= 4
-        and str(s.get("symbol_kind", "function")) in ("function", "class", "method", "interface")
-    ] or [
-        s
-        for s in ast_symbols
-        if str(s.get("file_id")) in file_by_id
-        and not str(s.get("qualified_name", "")).split(".")[-1].startswith("__")
-    ] or list(ast_symbols)
+            and ".test_" not in str(s.get("qualified_name", ""))
+            and not str(s.get("qualified_name", "")).split(".")[-1].startswith("__")
+            and len(str(s.get("qualified_name", "")).split(".")[-1]) >= 4
+            and str(s.get("symbol_kind", "function"))
+            in ("function", "class", "method", "interface")
+        ]
+        or [
+            s
+            for s in ast_symbols
+            if str(s.get("file_id")) in file_by_id
+            and not str(s.get("qualified_name", "")).split(".")[-1].startswith("__")
+        ]
+        or list(ast_symbols)
+    )
 
     # Identify symbols with outgoing edges for 1-hop closure verification
     edges_by_src: dict[str, list[dict[str, Any]]] = {}
@@ -1551,9 +1539,7 @@ def cmd_benchmark_domain(
     sorted_lat = sorted(latencies_ms) if latencies_ms else [0.0]
     median_lat_ms = round(sorted_lat[len(sorted_lat) // 2], 2)
     mean_savings = (
-        round(sum(token_savings_pcts) / len(token_savings_pcts), 2)
-        if token_savings_pcts
-        else 0.0
+        round(sum(token_savings_pcts) / len(token_savings_pcts), 2) if token_savings_pcts else 0.0
     )
 
     repos_present = sorted({str(cf.get("repo_name", domain_id)) for cf in code_files})

@@ -435,7 +435,7 @@ def resolve_latex_includes(
 
     def replace_directive(match: re.Match[str]) -> str:
         target = match.group(1).strip()
-        target = target.strip('"\'{} ')
+        target = target.strip("\"'{} ")
         candidates = [
             target,
             f"{target}.tex",
@@ -559,9 +559,7 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
     return resolve_latex_includes(root_candidate, tex_files)
 
 
-def extract_tex_title_and_abstract(
-    tex_content: str, fallback_title: str
-) -> tuple[str, str]:
+def extract_tex_title_and_abstract(tex_content: str, fallback_title: str) -> tuple[str, str]:
     """Extracts clean academic title and abstract from raw LaTeX manuscript source."""
     clean = re.sub(r"(?<!\\)%.*", "", tex_content)
     title = ""
@@ -732,9 +730,7 @@ def parse_openalex_response(
         abstract = ""
         if isinstance(raw_inv, dict):
             typed_inv: dict[str, list[int]] = {
-                str(k): [int(p) for p in v]
-                for k, v in raw_inv.items()
-                if isinstance(v, list)
+                str(k): [int(p) for p in v] for k, v in raw_inv.items() if isinstance(v, list)
             }
             abstract = _reconstruct_openalex_abstract(typed_inv)
 
@@ -1047,8 +1043,7 @@ FIXTURE_PAPERS: Final[dict[MarketRegime, list[HarvestedPaper]]] = {
             doc_id="arxiv:2403.01182",
             source=HarvesterSource.ARXIV,
             title=(
-                "Momentum and Reversal Dynamics in Indian Equities with "
-                "Securities Transaction Tax"
+                "Momentum and Reversal Dynamics in Indian Equities with Securities Transaction Tax"
             ),
             authors=["Arjun Sharma", "Priya Venkatesh"],
             published_date=date(2024, 3, 15),
@@ -1151,8 +1146,7 @@ Total round-trip rebalancing friction on DAX constituents averages 10 bps.
             doc_id="arxiv:2401.05432",
             source=HarvesterSource.ARXIV,
             title=(
-                "High-Frequency Limit Order Book Imbalance and Optimal Execution "
-                "in US Equities"
+                "High-Frequency Limit Order Book Imbalance and Optimal Execution in US Equities"
             ),
             authors=["David Chen", "Sarah Jenkins"],
             published_date=date(2024, 1, 10),
@@ -1187,7 +1181,6 @@ C_{\text{US}} = \text{HalfSpread} + \tau_{\text{SEC}} + \tau_{\text{FINRA}} \ge 
         )
     ],
 }
-
 
 
 class MockPaperHarvesterClient:

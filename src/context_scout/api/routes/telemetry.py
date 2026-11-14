@@ -119,9 +119,7 @@ def get_roi_metrics(
     total_saved = base_saved_tokens + pg_saved_tokens + sum(r.paid_tokens_saved for r in records)
     total_usd = base_usd_saved + pg_usd_saved + sum(r.estimated_usd_saved for r in records)
 
-    ratio_pct = (
-        round((total_saved / max(1, total_local)) * 100.0, 2) if total_local > 0 else 97.65
-    )
+    ratio_pct = round((total_saved / max(1, total_local)) * 100.0, 2) if total_local > 0 else 97.65
     qlora_eliminated_total = float(total_queries * 1634.0)
 
     summary = AggregateROISummary(

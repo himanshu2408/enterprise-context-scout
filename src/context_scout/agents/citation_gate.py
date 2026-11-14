@@ -226,9 +226,7 @@ class DocumentCitationGate:
         chunk_doc_id: str | None = None,
     ) -> tuple[bool, CitationFailureCode | None, str | None]:
         """Validates exact Jira ticket key pattern and active status."""
-        ticket_key = citation.ticket_key or (
-            citation.doc_id if "-" in citation.doc_id else None
-        )
+        ticket_key = citation.ticket_key or (citation.doc_id if "-" in citation.doc_id else None)
         if not ticket_key or not JIRA_KEY_REGEX.match(ticket_key):
             return (
                 False,
@@ -270,23 +268,46 @@ class DocumentCitationGate:
                 )
 
         if chunk_metadata and self.strict_freshness:
-            raw_status = str(
-                chunk_metadata.get("status") or chunk_metadata.get("ticket_status") or ""
-            ).strip().lower()
+            raw_status = (
+                str(chunk_metadata.get("status") or chunk_metadata.get("ticket_status") or "")
+                .strip()
+                .lower()
+            )
             norm_status = raw_status.replace(" ", "").replace("'", "").replace("-", "")
 
             raw_resolution = str(chunk_metadata.get("resolution") or "").strip().lower()
             norm_resolution = raw_resolution.replace(" ", "").replace("'", "").replace("-", "")
 
             jira_stale_statuses = {
-                "closed", "archived", "resolved (obsolete)", "obsolete",
-                "rejected", "cancelled", "won't fix", "wont fix", "wontfix",
-                "won't do", "wont do", "wontdo", "abandoned",
+                "closed",
+                "archived",
+                "resolved (obsolete)",
+                "obsolete",
+                "rejected",
+                "cancelled",
+                "won't fix",
+                "wont fix",
+                "wontfix",
+                "won't do",
+                "wont do",
+                "wontdo",
+                "abandoned",
             }
             jira_stale_resolutions = {
-                "won't fix", "wont fix", "wontfix", "duplicate", "incomplete", "cannot reproduce",
-                "rejected", "cancelled", "declined", "obsolete",
-                "won't do", "wont do", "wontdo", "abandoned",
+                "won't fix",
+                "wont fix",
+                "wontfix",
+                "duplicate",
+                "incomplete",
+                "cannot reproduce",
+                "rejected",
+                "cancelled",
+                "declined",
+                "obsolete",
+                "won't do",
+                "wont do",
+                "wontdo",
+                "abandoned",
             }
 
             is_stale_status = (
@@ -344,9 +365,7 @@ class DocumentCitationGate:
     ) -> DocumentCitationGateResult:
         """Verifies 100% of document citations across any enterprise domain."""
         must_require = (
-            require_citations
-            if require_citations is not None
-            else self.require_citations_default
+            require_citations if require_citations is not None else self.require_citations_default
         )
 
         # 1. Citation Presence Check
@@ -429,13 +448,15 @@ class DocumentCitationGate:
             candidates: list[tuple[str, str, str, dict[str, Any], bool]] = []
             exact_match = chunk_by_id.get(str(cit.chunk_id))
             if exact_match:
-                candidates.append((
-                    str(cit.chunk_id),
-                    exact_match[0],
-                    exact_match[1],
-                    exact_match[2],
-                    exact_match[3],
-                ))
+                candidates.append(
+                    (
+                        str(cit.chunk_id),
+                        exact_match[0],
+                        exact_match[1],
+                        exact_match[2],
+                        exact_match[3],
+                    )
+                )
 
             for cand in chunks_by_doc_id.get(cit.doc_id, []):
                 if cand[0] != str(cit.chunk_id):
@@ -600,9 +621,7 @@ class DocumentCitationGate:
         diagnostic = None
         reasons_list: list[str] = []
         if not passed:
-            missing_items = [
-                f"{cit.chunk_id}:{reason}" for cit, reason in failed_citations
-            ]
+            missing_items = [f"{cit.chunk_id}:{reason}" for cit, reason in failed_citations]
             reasons_list.append(
                 f"{len(failed_citations)} of {len(citations)} citations failed verification"
             )

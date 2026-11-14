@@ -9,9 +9,7 @@ from collections import Counter
 from typing import Final
 
 _TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"\w+", re.UNICODE)
-_CAMEL_BOUNDARY: Final[re.Pattern[str]] = re.compile(
-    r"([a-z0-9])([A-Z])|([A-Z]+)([A-Z][a-z])"
-)
+_CAMEL_BOUNDARY: Final[re.Pattern[str]] = re.compile(r"([a-z0-9])([A-Z])|([A-Z]+)([A-Z][a-z])")
 
 
 def tokenize_bm25(text: str) -> list[str]:

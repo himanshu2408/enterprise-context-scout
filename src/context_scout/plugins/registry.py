@@ -246,18 +246,14 @@ class PluginRegistry:
         try:
             from context_scout.plugins.connectors.jira import JiraConnectorPlugin
 
-            cls.register_connector(
-                JiraConnectorPlugin(base_url="https://jira.example.com")
-            )
+            cls.register_connector(JiraConnectorPlugin(base_url="https://jira.example.com"))
         except ImportError as err:
             logger.debug("JiraConnectorPlugin not loaded: %s", err)
 
         try:
             from context_scout.plugins.connectors.gitlab import GitLabConnectorPlugin
 
-            cls.register_connector(
-                GitLabConnectorPlugin(base_url="https://gitlab.example.com")
-            )
+            cls.register_connector(GitLabConnectorPlugin(base_url="https://gitlab.example.com"))
         except ImportError as err:
             logger.debug("GitLabConnectorPlugin not loaded: %s", err)
 

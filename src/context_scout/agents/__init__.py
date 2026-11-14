@@ -43,4 +43,3 @@ __all__ = [
     "ScoutWorkflow",
     "create_insufficient_context_diagnostic",
 ]
-

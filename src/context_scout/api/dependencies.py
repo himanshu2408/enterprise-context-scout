@@ -68,11 +68,15 @@ INSECURE_DEFAULT_SECRETS: Final[frozenset[str]] = frozenset(
 def is_production_environment() -> bool:
     """Detects whether context-scout is operating in a production or staging environment."""
     env = (
-        os.environ.get("SCOUT_ENV")
-        or os.environ.get("ENVIRONMENT")
-        or os.environ.get("ENV")
-        or ""
-    ).strip().lower()
+        (
+            os.environ.get("SCOUT_ENV")
+            or os.environ.get("ENVIRONMENT")
+            or os.environ.get("ENV")
+            or ""
+        )
+        .strip()
+        .lower()
+    )
     return env in {"production", "prod", "staging"}
 
 

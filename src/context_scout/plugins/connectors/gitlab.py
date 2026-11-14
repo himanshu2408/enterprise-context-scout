@@ -115,9 +115,7 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
             )
         return diffs
 
-    def fetch_raw_blob(
-        self, project_id_or_path: str | int, file_path: str, ref_sha: str
-    ) -> bytes:
+    def fetch_raw_blob(self, project_id_or_path: str | int, file_path: str, ref_sha: str) -> bytes:
         """Fetches raw blob bytes directly from GitLab."""
         import urllib.parse
 
@@ -259,9 +257,7 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
                     elif hasattr(repository, "get_code_files_by_paths") and hasattr(
                         repository, "delete_code_file"
                     ):
-                        del_files = repository.get_code_files_by_paths(
-                            conn, domain_id, [file_path]
-                        )
+                        del_files = repository.get_code_files_by_paths(conn, domain_id, [file_path])
                         deleted_any = False
                         for f in del_files:
                             if f.repo_name in (project_path, clean_path):

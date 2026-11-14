@@ -84,9 +84,7 @@ LANG_MAP: Final[dict[str, str]] = {
 }
 
 _SYMBOL_EMBEDDING_CACHE: dict[tuple[str, str], list[float]] = {}
-_TRACKED_IN_MEMORY_REPOS: dict[
-    tuple[int, str, str], tuple[Path, list[str] | None, str]
-] = {}
+_TRACKED_IN_MEMORY_REPOS: dict[tuple[int, str, str], tuple[Path, list[str] | None, str]] = {}
 
 SKIP_BINARY_EXTENSIONS: Final[set[str]] = {
     ".png",
@@ -487,9 +485,7 @@ class GitMerkleIndexer:
             and ref == "HEAD"
             and not isolate_by_commit
         )
-        commit_sha, current_tree = self.get_git_tree(
-            repo_dir, ref, include_working_tree=use_wt
-        )
+        commit_sha, current_tree = self.get_git_tree(repo_dir, ref, include_working_tree=use_wt)
         effective_repo_name = f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
         if ref == "HEAD" and not isolate_by_commit:
             _TRACKED_IN_MEMORY_REPOS[(id(repo), domain_id, effective_repo_name)] = (
@@ -672,9 +668,7 @@ class GitMerkleIndexer:
             and ref == "HEAD"
             and not isolate_by_commit
         )
-        commit_sha, current_tree = self.get_git_tree(
-            repo_dir, ref, include_working_tree=use_wt
-        )
+        commit_sha, current_tree = self.get_git_tree(repo_dir, ref, include_working_tree=use_wt)
         effective_repo_name = f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
         existing_hashes = repo.get_file_blob_hashes(conn, domain_id, effective_repo_name)
         existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
@@ -1131,7 +1125,8 @@ class GitMerkleIndexer:
 
                 # Outward edges
                 outward_edge_ids = {
-                    e_id for e_id, edge in repo._edges.items()
+                    e_id
+                    for e_id, edge in repo._edges.items()
                     if edge.source_symbol_id in sym_ids_to_del
                 }
                 for e_id in outward_edge_ids:

@@ -192,7 +192,6 @@ class AdapterPool:
         return results
 
 
-
 class DomainRegistry:
     """Loads and validates declarative DomainPack YAML plugins without core code changes."""
 

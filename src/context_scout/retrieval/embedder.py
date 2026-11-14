@@ -61,11 +61,7 @@ class LocalSemanticEmbedder:
             from sentence_transformers import SentenceTransformer
 
             # Use bfloat16 on MPS/CUDA if supported, otherwise float32
-            torch_dtype = (
-                torch.bfloat16
-                if self.device in ("mps", "cuda")
-                else torch.float32
-            )
+            torch_dtype = torch.bfloat16 if self.device in ("mps", "cuda") else torch.float32
             logger.info(
                 "Loading semantic embedding model '%s' on device '%s'...",
                 self.model_id,

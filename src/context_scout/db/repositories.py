@@ -1776,9 +1776,7 @@ class InMemoryRLSRepository:
         ]
         for fid in del_ids:
             self._files.pop(fid, None)
-            sym_del_ids = [
-                s_id for s_id, sym in self._symbols.items() if sym.file_id == fid
-            ]
+            sym_del_ids = [s_id for s_id, sym in self._symbols.items() if sym.file_id == fid]
             for s_id in sym_del_ids:
                 self._symbols.pop(s_id, None)
             sym_del_set = set(sym_del_ids)
@@ -1909,8 +1907,7 @@ class InMemoryRLSRepository:
                         and _scopes_intersect(src_file.allowed_scopes, principal_scopes)
                         and (
                             src_file.file_id not in callers_by_file
-                            or src_sym.start_line
-                            < callers_by_file[src_file.file_id][0].start_line
+                            or src_sym.start_line < callers_by_file[src_file.file_id][0].start_line
                         )
                     ):
                         callers_by_file[src_file.file_id] = (src_sym, src_file)
@@ -1947,11 +1944,7 @@ class InMemoryRLSRepository:
                 )
                 if not test_sym_id and (e.target_qualified_name == focus_sym.qualified_name):
                     test_sym_id = e.source_symbol_id
-                if (
-                    test_sym_id
-                    and test_sym_id in self._symbols
-                    and test_sym_id not in seen_syms
-                ):
+                if test_sym_id and test_sym_id in self._symbols and test_sym_id not in seen_syms:
                     t_sym = self._symbols[test_sym_id]
                     t_file = self._files.get(t_sym.file_id)
                     if t_file and _scopes_intersect(t_file.allowed_scopes, principal_scopes):
