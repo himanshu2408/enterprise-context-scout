@@ -25,7 +25,6 @@ from context_scout.agents.domain_registry import DomainRegistry
 from context_scout.agents.gemini_executor import (
     DEFAULT_FAST_MODEL_ID,
     FRONTIER_REASONING_MODEL_ID,
-    BudgetExceededError,
     GeminiImplementationExecutor,
     GitWorktreeSandbox,
 )
@@ -64,6 +63,7 @@ from context_scout.schemas.contracts import (
     RoleType,
     VerbatimCodeSlice,
 )
+from context_scout.telemetry.cost_governance import BudgetExceededError
 
 DOMAINS_DIR = Path(__file__).resolve().parent.parent / "domains"
 

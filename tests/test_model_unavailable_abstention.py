@@ -129,6 +129,7 @@ class TestModelUnavailableAbstentionOnModelPathFailure:
         spans = tracer.exporter.get_finished_spans()
         assert len(spans) >= 1
         wf_span = spans[-1]
+        assert wf_span.attributes is not None
         assert wf_span.attributes.get(ATTR_SCOUT_IS_ABSTENTION) is True
         assert wf_span.attributes.get(ATTR_SCOUT_PAID_TOKENS_SPENT) == 0
         assert wf_span.attributes.get(ATTR_SCOUT_COST_USD) == 0.0

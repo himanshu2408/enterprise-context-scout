@@ -24,7 +24,6 @@ from context_scout.agents.gemini_executor import (
     FAST_EXEC_COST_PER_MILLION_INPUT,
     FRONTIER_COST_PER_MILLION_INPUT,
     FRONTIER_REASONING_MODEL_ID,
-    BudgetExceededError,
     GeminiImplementationExecutor,
     GitWorktreeSandbox,
 )
@@ -42,6 +41,7 @@ from context_scout.schemas.contracts import (
     RoleType,
     VerbatimCodeSlice,
 )
+from context_scout.telemetry.cost_governance import BudgetExceededError
 
 DOMAIN_ID: Final[str] = "trading_code_scout"
 REPO_NAME: Final[str] = "trading-engine"

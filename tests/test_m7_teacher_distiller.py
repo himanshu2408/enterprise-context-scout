@@ -228,7 +228,7 @@ class TestTeacherDistillerPipeline:
         """
         f_id = uuid4()
         f_rec = CodeFileRecord(
-            file_id=str(f_id),
+            file_id=f_id,
             domain_id="trading_code_scout",
             repo_name="repo",
             file_path="empty.py",

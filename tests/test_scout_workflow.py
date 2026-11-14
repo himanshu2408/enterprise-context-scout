@@ -321,6 +321,7 @@ def test_local_gemma_client_quant_brief_generation(
         repo=test_repo,
         principal=principal,
     )
+    assert brief is not None
 
     assert brief.strategy_name != ""
     assert MarketRegime.GERMANY_XETRA_DAX in brief.target_markets

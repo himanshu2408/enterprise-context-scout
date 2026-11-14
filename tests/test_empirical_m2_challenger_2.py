@@ -14,7 +14,7 @@ import time
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any, Final
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -1056,6 +1056,7 @@ def test_empirical_inward_edge_preservation_live_postgres(
                 (domain_id, f"{repo_name}::caller::invoke_ops"),
             ).fetchone()
             assert sym_caller is not None
+            assert isinstance(sym_caller[0], UUID)
             caller_sym_id = sym_caller[0]
 
             sym_a_v1 = conn.execute(
@@ -1066,6 +1067,7 @@ def test_empirical_inward_edge_preservation_live_postgres(
                 (domain_id, f"{repo_name}::service::op_a"),
             ).fetchone()
             assert sym_a_v1 is not None
+            assert isinstance(sym_a_v1[0], UUID)
             sym_a_v1_id = sym_a_v1[0]
 
             sym_b_v1 = conn.execute(
@@ -1076,6 +1078,7 @@ def test_empirical_inward_edge_preservation_live_postgres(
                 (domain_id, f"{repo_name}::service::op_b"),
             ).fetchone()
             assert sym_b_v1 is not None
+            assert isinstance(sym_b_v1[0], UUID)
             sym_b_v1_id = sym_b_v1[0]
 
             # Insert inward edges from caller to op_a and op_b
@@ -1274,13 +1277,17 @@ class TestEmpiricalM2TeardownCanaryIsolation:
                     "SELECT COUNT(*) FROM code_files WHERE domain_id = %s AND repo_name = %s;",
                     (domain_id, canary_repo),
                 )
-                assert cur.fetchone()[0] == 1, "Canary repo was wiped by teardown!"
+                canary_row = cur.fetchone()
+                assert canary_row is not None
+                assert canary_row[0] == 1, "Canary repo was wiped by teardown!"
 
                 cur.execute(
                     "SELECT COUNT(*) FROM code_files WHERE domain_id = %s AND repo_name = %s;",
                     (domain_id, victim_repo),
                 )
-                assert cur.fetchone()[0] == 0, "Test victim repo was not deleted by teardown!"
+                victim_row = cur.fetchone()
+                assert victim_row is not None
+                assert victim_row[0] == 0, "Test victim repo was not deleted by teardown!"
             finally:
                 # Cleanup canary
                 cur.execute(
@@ -1333,7 +1340,9 @@ class TestEmpiricalM2TeardownCanaryIsolation:
                     "SELECT COUNT(*) FROM code_files WHERE domain_id = %s AND repo_name = %s;",
                     (domain_id, canary_repo),
                 )
-                canary_count = cur.fetchone()[0]
+                canary_count_row = cur.fetchone()
+                assert canary_count_row is not None
+                canary_count = canary_count_row[0]
 
                 # Canary must be 0, proving mutation caught the bug
                 assert canary_count == 0, (

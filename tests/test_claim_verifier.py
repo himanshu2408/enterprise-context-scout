@@ -18,13 +18,13 @@ from context_scout.agents.claim_verifier import (
 from context_scout.config import ClaimVerificationPolicy, ClaimVerifierConfig
 
 
-def test_normalize_claim_text_collapses_whitespace():
+def test_normalize_claim_text_collapses_whitespace() -> None:
     raw = "The  authentication\n    timeout\tis  set\t\tto  500 ms."
     norm = normalize_claim_text(raw)
     assert norm == "The authentication timeout is set to 500 ms."
 
 
-def test_exact_substring_match_success():
+def test_exact_substring_match_success() -> None:
     source = (
         "Under NO circumstances should the gateway allow unauthenticated fallback mode. "
         "The authentication timeout is set to 500 ms. "
@@ -37,7 +37,7 @@ def test_exact_substring_match_success():
     assert rec.matched_segment == "The authentication timeout is set to 500 ms."
 
 
-def test_whitespace_variation_passes_under_nfkc():
+def test_whitespace_variation_passes_under_nfkc() -> None:
     source = "The authentication timeout is set to 500 ms."
     verifier = ClaimVerifier()
     rec = verifier.verify_single_claim(
@@ -47,7 +47,7 @@ def test_whitespace_variation_passes_under_nfkc():
     assert rec.failure_code == ClaimFailureCode.EXACT_MATCH_PASSED
 
 
-def test_single_word_substitution_rejected():
+def test_single_word_substitution_rejected() -> None:
     source = "Under NO circumstances should the gateway allow unauthenticated fallback mode."
     verifier = ClaimVerifier()
     # 'allow' -> 'deny'
@@ -59,7 +59,7 @@ def test_single_word_substitution_rejected():
     assert rec.failure_code == ClaimFailureCode.NOT_IN_SOURCE
 
 
-def test_negation_insertion_rejected():
+def test_negation_insertion_rejected() -> None:
     source = "Under NO circumstances should the gateway allow unauthenticated fallback mode."
     verifier = ClaimVerifier()
     # 'allow' -> 'not allow'
@@ -71,7 +71,7 @@ def test_negation_insertion_rejected():
     assert rec.failure_code == ClaimFailureCode.NOT_IN_SOURCE
 
 
-def test_critical_token_omission_rejected():
+def test_critical_token_omission_rejected() -> None:
     source = "Under NO circumstances should the gateway allow unauthenticated fallback mode."
     verifier = ClaimVerifier()
     # 'NO' dropped
@@ -83,7 +83,7 @@ def test_critical_token_omission_rejected():
     assert rec.failure_code == ClaimFailureCode.NOT_IN_SOURCE
 
 
-def test_numeric_alteration_rejected():
+def test_numeric_alteration_rejected() -> None:
     source = "The authentication timeout is set to 500 ms."
     verifier = ClaimVerifier()
     # '500' -> '5000'
@@ -95,7 +95,7 @@ def test_numeric_alteration_rejected():
     assert rec.failure_code == ClaimFailureCode.NOT_IN_SOURCE
 
 
-def test_homoglyph_spoofing_detection():
+def test_homoglyph_spoofing_detection() -> None:
     # Cyrillic small letter a (\u0430) injected into 'allow'
     spoofed = "Under NO circumstances should the gateway \u0430llow fallback."
     is_hg, reason = detect_homoglyph_spoofing(spoofed)
@@ -110,7 +110,7 @@ def test_homoglyph_spoofing_detection():
     assert rec.is_homoglyph_attack is True
 
 
-def test_authentic_international_unicode_accepted():
+def test_authentic_international_unicode_accepted() -> None:
     verifier = ClaimVerifier()
 
     # Authentic Russian
@@ -140,7 +140,7 @@ def test_authentic_international_unicode_accepted():
     assert rec_ger.is_verified is True
 
 
-def test_strict_abstain_policy():
+def test_strict_abstain_policy() -> None:
     source = (
         "Under NO circumstances should the gateway allow unauthenticated fallback mode. "
         "The authentication timeout is set to 500 ms."
@@ -161,7 +161,7 @@ def test_strict_abstain_policy():
     assert "Claim Verification Abstention" in (result.diagnostic_reason or "")
 
 
-def test_prune_and_mark_policy():
+def test_prune_and_mark_policy() -> None:
     source = (
         "Under NO circumstances should the gateway allow unauthenticated fallback mode. "
         "The authentication timeout is set to 500 ms."
@@ -183,7 +183,7 @@ def test_prune_and_mark_policy():
     assert result.verified_claims[0] == "The authentication timeout is set to 500 ms."
 
 
-def test_min_verified_count_policy():
+def test_min_verified_count_policy() -> None:
     source = "The authentication timeout is set to 500 ms."
     verifier = ClaimVerifier(ClaimVerifierConfig(
         policy=ClaimVerificationPolicy.MIN_VERIFIED_COUNT,
@@ -200,7 +200,7 @@ def test_min_verified_count_policy():
     assert result.paid_tokens_spent == 0
 
 
-def test_empty_claim_and_empty_source():
+def test_empty_claim_and_empty_source() -> None:
     verifier = ClaimVerifier()
     rec_empty_claim = verifier.verify_single_claim("   ", ["source"])
     assert rec_empty_claim.is_verified is False

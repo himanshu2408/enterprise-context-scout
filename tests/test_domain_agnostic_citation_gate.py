@@ -11,6 +11,7 @@ Verifies citation gating across:
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from context_scout.agents.citation_gate import (
     CitationFailureCode,
@@ -34,7 +35,7 @@ def _make_chunk(
     content: str,
     source_uri: str,
     section: str = "Overview",
-    metadata: dict | None = None,
+    metadata: dict[str, Any] | None = None,
     is_stale: bool = False,
 ) -> DocumentChunk:
     meta = dict(metadata or {})

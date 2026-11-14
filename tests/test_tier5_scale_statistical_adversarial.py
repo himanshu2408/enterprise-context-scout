@@ -537,16 +537,16 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
 
         # 1. Privileged transaction sets config
         with conn_mgr.scoped_transaction(p_privileged) as conn1:
-            val1 = conn1.execute("SELECT current_setting('app.principal_scopes', true)").fetchone()[
-                0
-            ]
+            row1 = conn1.execute("SELECT current_setting('app.principal_scopes', true)").fetchone()
+            assert row1 is not None
+            val1 = row1[0]
             assert val1 == "scope:secret_vault_99"
 
         # 2. Immediately checkout connection for unprivileged transaction
         with conn_mgr.scoped_transaction(p_unprivileged) as conn2:
-            val2 = conn2.execute("SELECT current_setting('app.principal_scopes', true)").fetchone()[
-                0
-            ]
+            row2 = conn2.execute("SELECT current_setting('app.principal_scopes', true)").fetchone()
+            assert row2 is not None
+            val2 = row2[0]
             assert val2 == "scope:public_view", (
                 f"Scope leakage! Expected 'scope:public_view', got '{val2}'"
             )
@@ -587,12 +587,16 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                 allowed_scopes=[safe_adversarial],
             )
             with conn_mgr.scoped_transaction(p) as conn:
-                res = conn.execute(
+                res_row = conn.execute(
                     "SELECT current_setting('app.principal_scopes', true)"
-                ).fetchone()[0]
+                ).fetchone()
+                assert res_row is not None
+                res = res_row[0]
                 assert res == safe_adversarial
                 # Verify that querying code_files executes safely without SQL syntax error
-                count = conn.execute("SELECT count(*) FROM code_files").fetchone()[0]
+                count_row = conn.execute("SELECT count(*) FROM code_files").fetchone()
+                assert count_row is not None
+                count = count_row[0]
                 assert isinstance(count, int)
 
     def test_aborted_transaction_rollback_and_state_cleanliness(self) -> None:

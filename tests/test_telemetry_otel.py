@@ -561,7 +561,7 @@ def test_w3c_trace_context_propagation() -> None:
     # Verify child has parent context matching root span ID
     assert child_spans[0].parent is not None
     assert trace.format_span_id(child_spans[0].parent.span_id) == trace.format_span_id(
-        root_span.context.span_id
+        root_span.get_span_context().span_id
     )
 
 
