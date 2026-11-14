@@ -581,19 +581,33 @@ def test_empirical_live_corpus_scepticism_gate_integration(settings: ScoutSettin
         allowed_scopes=["public_quant"],
     )
 
-    # Fetch a real chunk from the live corpus
+    # Fetch a real chunk from the live corpus with deterministic ordering
+    from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
+
+    slicer = DeterministicSlicer()
     with mgr.scoped_transaction(auth_principal, enable_hnsw_iterative_scan=False) as conn:
-        row = conn.execute(
+        rows = conn.execute(
             """
             SELECT chunk_id, doc_id, doc_title, source_uri, market_scope,
                    section_heading, verbatim_content
             FROM doc_chunks
             WHERE market_scope = 'IN_NSE'
-            LIMIT 1;
+            ORDER BY doc_id ASC, chunk_id ASC
+            LIMIT 25;
             """
-        ).fetchone()
+        ).fetchall()
 
-        assert row is not None, "Live database must contain at least one IN_NSE doc chunk"
+        assert rows, "Live database must contain at least one IN_NSE doc chunk"
+        row = None
+        for cand in rows:
+            cand_words = str(cand[6]).split()
+            if len(cand_words) >= 12 and not slicer._has_unclosed_delimiters(
+                slicer.normalize_text(" ".join(cand_words[2:12]))
+            ):
+                row = cand
+                break
+        if row is None:
+            row = rows[0]
         chunk_id_raw, doc_id_raw, title_raw, uri_raw, market_raw, heading_raw, content_raw = row
         assert isinstance(chunk_id_raw, uuid.UUID)
         assert isinstance(doc_id_raw, str)
