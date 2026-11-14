@@ -1,0 +1,87 @@
+{
+  "suite": "Suite 3.2: Polyglot Cross-Boundary Contracts & 40-Way Concurrent SSE Qualification",
+  "generated_at_utc": "2026-11-14T14:08:47.544472+00:00",
+  "head_commit": "56c9d5e",
+  "baseline_commit": "5d85e3e",
+  "corpus_stats": {
+    "files_indexed": 110,
+    "symbols_indexed": 1673,
+    "edges_indexed": 13981,
+    "cross_boundary_edges": 3,
+    "doc_chunks_indexed": 9,
+    "languages": {
+      "python": 49,
+      "tsx": 13,
+      "typescript": 31,
+      "sql": 3,
+      "terraform": 1,
+      "go": 13
+    },
+    "repos": {
+      "scout-api": 12,
+      "scout-agents": 9,
+      "scout-ui": 15,
+      "scout-sql": 2,
+      "gitlab-ops": 4,
+      "flask": 14,
+      "structlog": 14,
+      "zod": 14,
+      "ky": 14,
+      "chi": 12
+    }
+  },
+  "head_metrics": {
+    "contract_expansion_passed": 2,
+    "contract_expansion_total": 3,
+    "contract_expansion_ci95": [
+      0.2077,
+      0.9385
+    ],
+    "drift_detection_passed": 5,
+    "drift_detection_total": 5,
+    "drift_detection_ci95": [
+      0.5655,
+      1.0
+    ],
+    "colliding_symbol_false_leaks": 0,
+    "colliding_symbol_total": 3,
+    "collision_clean_ci95": [
+      0.4385,
+      1.0
+    ]
+  },
+  "baseline_5d85e3e": {
+    "baseline_commit": "5d85e3e",
+    "has_contract_linker": false,
+    "has_conflict_detector": false,
+    "contract_expansion_passed": 0,
+    "contract_expansion_total": 3,
+    "drift_detection_passed": 0,
+    "drift_detection_total": 5,
+    "colliding_symbol_false_leaks": 0,
+    "colliding_symbol_total": 3
+  },
+  "concurrent_sse_40": {
+    "concurrent_users": 40,
+    "http_200_sse_completed": 40,
+    "stage_telemetry_valid": 40,
+    "zero_cross_principal_leaks": 40,
+    "sse_completion_ci95": [
+      0.9124,
+      1.0
+    ],
+    "zero_leak_ci95": [
+      0.9124,
+      1.0
+    ],
+    "latency_p50_ms": 1201.6,
+    "latency_p95_ms": 1203.21,
+    "per_role_counts": {
+      "engineer": 10,
+      "quant_researcher": 10,
+      "product_manager": 10,
+      "compliance_officer": 10
+    }
+  },
+  "shared_pg17_canary_verified": true
+}

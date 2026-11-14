@@ -1,0 +1,333 @@
+{
+  "suite": "Suite 3.1: 10,000-Page Enterprise Wiki Scale & Lifecycle Qualification",
+  "generated_at_utc": "2026-11-14T14:12:59.738476+00:00",
+  "head_commit": "56c9d5e",
+  "baseline_commit": "5d85e3e",
+  "embedding_model": "google/embeddinggemma-2",
+  "embedding_elapsed_seconds": 105.76,
+  "provenance": {
+    "total_pages_constructed": 10000,
+    "unique_source_files_used": 463,
+    "total_real_tables_harvested": 76,
+    "total_real_sections_harvested": 67097,
+    "collections_breakdown": {
+      "data/unseen_repos_v2": 10073
+    },
+    "top_20_source_files": [
+      {
+        "source_file": "data/unseen_repos_v2/markdown-it-py/benchmarking/samples/spec.md",
+        "pages_grounded": 920
+      },
+      {
+        "source_file": "data/unseen_repos_v2/ky/readme.md",
+        "pages_grounded": 262
+      },
+      {
+        "source_file": "data/unseen_repos_v2/jinja/docs/templates.rst",
+        "pages_grounded": 253
+      },
+      {
+        "source_file": "data/unseen_repos_v2/attrs/CHANGELOG.md",
+        "pages_grounded": 228
+      },
+      {
+        "source_file": "data/unseen_repos_v2/loguru/docs/resources/recipes.rst",
+        "pages_grounded": 186
+      },
+      {
+        "source_file": "data/unseen_repos_v2/click/CHANGES.md",
+        "pages_grounded": 177
+      },
+      {
+        "source_file": "data/unseen_repos_v2/httpx/CHANGELOG.md",
+        "pages_grounded": 144
+      },
+      {
+        "source_file": "data/unseen_repos_v2/h11/docs/source/api.rst",
+        "pages_grounded": 138
+      },
+      {
+        "source_file": "data/unseen_repos_v2/anyio/docs/versionhistory.rst",
+        "pages_grounded": 137
+      },
+      {
+        "source_file": "data/unseen_repos_v2/loguru/docs/resources/troubleshooting.rst",
+        "pages_grounded": 117
+      },
+      {
+        "source_file": "data/unseen_repos_v2/flask/docs/config.rst",
+        "pages_grounded": 106
+      },
+      {
+        "source_file": "data/unseen_repos_v2/flask/docs/quickstart.rst",
+        "pages_grounded": 105
+      },
+      {
+        "source_file": "data/unseen_repos_v2/h2/docs/source/basic-usage.rst",
+        "pages_grounded": 105
+      },
+      {
+        "source_file": "data/unseen_repos_v2/jinja/docs/api.rst",
+        "pages_grounded": 104
+      },
+      {
+        "source_file": "data/unseen_repos_v2/click/docs/options.md",
+        "pages_grounded": 95
+      },
+      {
+        "source_file": "data/unseen_repos_v2/flask/CHANGES.rst",
+        "pages_grounded": 95
+      },
+      {
+        "source_file": "data/unseen_repos_v2/attrs/docs/examples.md",
+        "pages_grounded": 88
+      },
+      {
+        "source_file": "data/unseen_repos_v2/chardet/docs/changelog.rst",
+        "pages_grounded": 82
+      },
+      {
+        "source_file": "data/unseen_repos_v2/chi/README.md",
+        "pages_grounded": 77
+      },
+      {
+        "source_file": "data/unseen_repos_v2/attrs/docs/init.md",
+        "pages_grounded": 77
+      }
+    ],
+    "table_sources": [
+      "data/unseen_repos_v2/anyio/AGENTS.md",
+      "data/unseen_repos_v2/chardet/README.md",
+      "data/unseen_repos_v2/chardet/docs/plans/large-input-performance.md",
+      "data/unseen_repos_v2/chardet/docs/rewrite_performance.md",
+      "data/unseen_repos_v2/chi/README.md",
+      "data/unseen_repos_v2/click/docs/command-line-reference.md",
+      "data/unseen_repos_v2/click/docs/options.md"
+    ],
+    "category_counts": {
+      "version_chain": 12,
+      "tombstone_delete": 6,
+      "tombstone_archive": 6,
+      "noise_meeting": 709,
+      "noise_retro": 1,
+      "noise_standup": 1,
+      "noise_deprecated": 1558,
+      "noise_placeholder": 1,
+      "noise_personal": 1,
+      "noise_draft": 425,
+      "table_page": 16,
+      "conflict_2026": 12,
+      "conflict_2023": 12,
+      "canonical": 7240
+    },
+    "space_counts": {
+      "ENG_RUNBOOKS": 1295,
+      "SRE_INCIDENTS": 1276,
+      "ARCH_ADR": 1296,
+      "PRODUCT_SPECS": 1296,
+      "COMPLIANCE_POLICY": 2145,
+      "~personal_notes": 1415,
+      "EXEC_RESTRICTED": 1277
+    },
+    "manifest_sha256": "cbf278aad71b2c8b85fb42849e9e8e6ea31347844f6299672c67ba536095e53e"
+  },
+  "tier_insert_stats": {
+    "1000": {
+      "pages_processed": 1000,
+      "active_chunks": 772,
+      "excluded_noise": 216,
+      "lifecycle_synced": 24
+    },
+    "5000": {
+      "pages_processed": 4000,
+      "active_chunks": 3084,
+      "excluded_noise": 926,
+      "lifecycle_synced": 0
+    },
+    "10000": {
+      "pages_processed": 5000,
+      "active_chunks": 3852,
+      "excluded_noise": 1173,
+      "lifecycle_synced": 0
+    }
+  },
+  "head_checkpoints": [
+    {
+      "checkpoint_pages": 1000,
+      "total_queries": 71,
+      "latency_p50_ms": 106.76,
+      "latency_p95_ms": 121.41,
+      "noise_rejection_clean": 12,
+      "noise_rejection_total": 12,
+      "noise_rejection_ci95": [
+        0.7575,
+        1.0
+      ],
+      "freshness_v3_passed": 26,
+      "freshness_v3_total": 27,
+      "freshness_v3_ci95": [
+        0.8172,
+        0.9934
+      ],
+      "conflict_disambig_passed": 3,
+      "conflict_disambig_total": 10,
+      "conflict_disambig_ci95": [
+        0.1078,
+        0.6032
+      ],
+      "table_lookup_passed": 5,
+      "table_lookup_total": 10,
+      "table_lookup_ci95": [
+        0.2366,
+        0.7634
+      ],
+      "rbac_zero_leak_passed": 12,
+      "rbac_total": 12,
+      "rbac_ci95": [
+        0.7575,
+        1.0
+      ],
+      "in_scope_refused": 0,
+      "in_scope_total": 51,
+      "in_scope_refusal_pct": 0.0,
+      "eng_puredoc_zero_code": 10,
+      "eng_puredoc_total": 10,
+      "eng_puredoc_ci95": [
+        0.7225,
+        1.0
+      ]
+    },
+    {
+      "checkpoint_pages": 5000,
+      "total_queries": 71,
+      "latency_p50_ms": 258.95,
+      "latency_p95_ms": 364.78,
+      "noise_rejection_clean": 12,
+      "noise_rejection_total": 12,
+      "noise_rejection_ci95": [
+        0.7575,
+        1.0
+      ],
+      "freshness_v3_passed": 27,
+      "freshness_v3_total": 27,
+      "freshness_v3_ci95": [
+        0.8754,
+        1.0
+      ],
+      "conflict_disambig_passed": 3,
+      "conflict_disambig_total": 10,
+      "conflict_disambig_ci95": [
+        0.1078,
+        0.6032
+      ],
+      "table_lookup_passed": 7,
+      "table_lookup_total": 10,
+      "table_lookup_ci95": [
+        0.3968,
+        0.8922
+      ],
+      "rbac_zero_leak_passed": 12,
+      "rbac_total": 12,
+      "rbac_ci95": [
+        0.7575,
+        1.0
+      ],
+      "in_scope_refused": 0,
+      "in_scope_total": 51,
+      "in_scope_refusal_pct": 0.0,
+      "eng_puredoc_zero_code": 10,
+      "eng_puredoc_total": 10,
+      "eng_puredoc_ci95": [
+        0.7225,
+        1.0
+      ]
+    },
+    {
+      "checkpoint_pages": 10000,
+      "total_queries": 71,
+      "latency_p50_ms": 418.99,
+      "latency_p95_ms": 533.2,
+      "noise_rejection_clean": 12,
+      "noise_rejection_total": 12,
+      "noise_rejection_ci95": [
+        0.7575,
+        1.0
+      ],
+      "freshness_v3_passed": 25,
+      "freshness_v3_total": 27,
+      "freshness_v3_ci95": [
+        0.7663,
+        0.9794
+      ],
+      "conflict_disambig_passed": 2,
+      "conflict_disambig_total": 10,
+      "conflict_disambig_ci95": [
+        0.0567,
+        0.5098
+      ],
+      "table_lookup_passed": 7,
+      "table_lookup_total": 10,
+      "table_lookup_ci95": [
+        0.3968,
+        0.8922
+      ],
+      "rbac_zero_leak_passed": 12,
+      "rbac_total": 12,
+      "rbac_ci95": [
+        0.7575,
+        1.0
+      ],
+      "in_scope_refused": 0,
+      "in_scope_total": 51,
+      "in_scope_refusal_pct": 0.0,
+      "eng_puredoc_zero_code": 10,
+      "eng_puredoc_total": 10,
+      "eng_puredoc_ci95": [
+        0.7225,
+        1.0
+      ]
+    }
+  ],
+  "baseline_5d85e3e": {
+    "baseline_commit": "5d85e3e",
+    "confluence_market_scope_error": "ValueError: 'CONFLUENCE' is not a valid MarketRegime",
+    "federated_custom_domain_abstained": false,
+    "federated_custom_domain_reason": "",
+    "checkpoints": [
+      {
+        "checkpoint_pages": 1000,
+        "latency_p50_ms": 46.7,
+        "latency_p95_ms": 49.28,
+        "noise_rejection_clean": 1,
+        "noise_rejection_total": 12,
+        "conflict_disambig_passed": 0,
+        "conflict_disambig_total": 10,
+        "rbac_zero_leak_passed": 12,
+        "rbac_total": 12
+      },
+      {
+        "checkpoint_pages": 5000,
+        "latency_p50_ms": 182.47,
+        "latency_p95_ms": 203.45,
+        "noise_rejection_clean": 5,
+        "noise_rejection_total": 12,
+        "conflict_disambig_passed": 0,
+        "conflict_disambig_total": 10,
+        "rbac_zero_leak_passed": 12,
+        "rbac_total": 12
+      },
+      {
+        "checkpoint_pages": 10000,
+        "latency_p50_ms": 322.28,
+        "latency_p95_ms": 355.36,
+        "noise_rejection_clean": 0,
+        "noise_rejection_total": 12,
+        "conflict_disambig_passed": 0,
+        "conflict_disambig_total": 10,
+        "rbac_zero_leak_passed": 12,
+        "rbac_total": 12
+      }
+    ]
+  },
+  "shared_pg17_canary_verified": true
+}
