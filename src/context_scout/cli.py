@@ -12,6 +12,7 @@ Allows any developer cloning the repository to:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import logging
 import re
@@ -27,15 +28,32 @@ from context_scout.agents.gemini_executor import GeminiImplementationExecutor
 from context_scout.agents.preflight_gate import (
     CUSTOM_DOC_EXTENSIONS,
     BoundGraphRepository,
+    derive_custom_repo_name,
     extract_document_text,
+    is_multi_repo_source_dir,
+    persist_custom_domain_to_pg,
     register_custom_corpus_index,
     sync_custom_domain_corpus_if_needed,
+    write_custom_sync_manifest,
 )
 from context_scout.agents.scout_workflow import ScoutWorkflow
+from context_scout.ast_engine.contract_linker import CrossBoundaryContractLinker
 from context_scout.ast_engine.extractor import ASTExtractor
 from context_scout.ast_engine.models import ParsedEdge, ParsedSymbol
 from context_scout.config import ScoutSettings, detect_hardware_profile
-from context_scout.db.repositories import InMemoryRLSRepository
+from context_scout.db.repositories import (
+    ASTEdgeRecord,
+    ASTSymbolRecord,
+    CodeFileRecord,
+    DocChunkRecord,
+    PostgresRLSRepository,
+)
+from context_scout.ingestion.git_merkle_indexer import (
+    CODE_EXTENSIONS,
+    LANG_MAP,
+    compute_git_blob_sha,
+    generate_deterministic_embedding,
+)
 from context_scout.plugins.registry import PluginRegistry
 from context_scout.schemas.contracts import (
     CodeSlicePointer,
@@ -147,6 +165,17 @@ def cmd_init_domain(
             encoding="utf-8",
         )
 
+    persist_custom_domain_to_pg(
+        domain_id=domain_id,
+        display_name=resolved_name,
+        kind=kind,
+        manifest_config=manifest_data,
+        code_files=[],
+        ast_symbols=[],
+        ast_edges=[],
+        doc_chunks=[],
+    )
+
     out_payload: dict[str, Any] = {
         "domain_id": domain_id,
         "kind": kind,
@@ -160,20 +189,7 @@ def cmd_init_domain(
 
 def _resolve_repo_name_for_path(cf: Path, source_dir: Path, domain_id: str) -> str:
     """Determines sub-repository name when source_dir is a multi-repo directory."""
-    try:
-        rel_parts = cf.relative_to(source_dir).parts
-        if len(rel_parts) >= 2:
-            top_dir = source_dir / rel_parts[0]
-            if (top_dir / ".git").exists() or (top_dir / "pyproject.toml").exists():
-                return rel_parts[0]
-    except Exception as exc:
-        logger.debug(
-            "Unable to resolve relative repo name for %s (%s): %s",
-            cf,
-            type(exc).__name__,
-            exc,
-        )
-    return domain_id
+    return derive_custom_repo_name(cf, source_dir, domain_id)
 
 
 def cmd_distill_custom_domain(
@@ -220,25 +236,18 @@ def cmd_distill_custom_domain(
         )
     )
 
-    corpus_index_data: dict[str, Any] = {
-        "domain_id": domain_id,
-        "kind": resolved_kind,
-        "source_dir": str(source_dir.resolve()),
-        "code_files": [],
-        "ast_symbols": [],
-        "ast_edges": [],
-        "doc_chunks": [],
-    }
+    code_file_records: list[CodeFileRecord] = []
+    ast_symbol_records: list[ASTSymbolRecord] = []
+    ast_edge_records: list[ASTEdgeRecord] = []
+    doc_chunk_records: list[DocChunkRecord] = []
+    repo_commit_shas: dict[str, str] = {}
 
     examples: list[dict[str, Any]] = []
     if is_code:
         import hashlib
 
-        from context_scout.ingestion.git_merkle_indexer import (
-            CODE_EXTENSIONS,
-            LANG_MAP,
-            compute_git_blob_sha,
-        )
+        effective_exts = set(CODE_EXTENSIONS) | {".cs"}
+        effective_langs = {**LANG_MAP, ".cs": "csharp"}
 
         ignored_dirs = {
             ".git",
@@ -251,10 +260,7 @@ def cmd_distill_custom_domain(
             ".mypy_cache",
             ".ruff_cache",
         }
-        has_sub_git = (
-            any(d.is_dir() and (d / ".git").exists() for d in source_dir.iterdir())
-            and not (source_dir / ".git").exists()
-        )
+        has_sub_repos = is_multi_repo_source_dir(source_dir)
 
         def _ignore_path(p_cand: Path) -> bool:
             r_parts = p_cand.relative_to(source_dir).parts
@@ -262,7 +268,7 @@ def cmd_distill_custom_domain(
                 if part_p in ignored_dirs:
                     return True
                 if part_p == "build":
-                    if has_sub_git and idx_p == 0:
+                    if has_sub_repos and idx_p == 0:
                         continue
                     if idx_p > 0 and r_parts[idx_p - 1] == "src":
                         continue
@@ -272,17 +278,16 @@ def cmd_distill_custom_domain(
         code_files = sorted(
             p
             for p in source_dir.rglob("*")
-            if p.is_file() and p.suffix.lower() in CODE_EXTENSIONS and not _ignore_path(p)
+            if p.is_file() and p.suffix.lower() in effective_exts and not _ignore_path(p)
         )
         if not code_files:
             raise ValueError(f"No code files found in {source_dir}")
 
         ast_extractor = ASTExtractor()
         candidates: list[tuple[str, str, str, int, int, str]] = []
-        sym_name_to_id: dict[str, str] = {}
-        repo_sym_to_id: dict[tuple[str, str], str] = {}
+        sym_name_to_id: dict[str, uuid.UUID] = {}
+        repo_sym_to_id: dict[tuple[str, str], uuid.UUID] = {}
         pending_edges: list[tuple[str, str, str, str, list[str]]] = []
-        repos_seen: set[str] = set()
 
         for cf in code_files:
             try:
@@ -301,27 +306,29 @@ def cmd_distill_custom_domain(
 
             rel = str(cf.relative_to(source_dir)) if cf.is_relative_to(source_dir) else cf.name
             repo_name = _resolve_repo_name_for_path(cf, source_dir, domain_id)
-            repos_seen.add(repo_name)
             scopes = ["public_eng", "public_quant", f"repo:{repo_name}"]
             lines = text.splitlines()
-            file_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{domain_id}:file:{rel}"))
-            lang = LANG_MAP.get(cf.suffix.lower(), cf.suffix.lstrip("."))
+            file_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"{domain_id}:file:{rel}")
+            repo_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"{domain_id}:repo:{repo_name}")
+            lang = effective_langs.get(cf.suffix.lower(), cf.suffix.lstrip("."))
             blob_sha = compute_git_blob_sha(raw_bytes)
             commit_sha = hashlib.sha1(f"{domain_id}:{rel}:{blob_sha}".encode()).hexdigest()
+            repo_commit_shas[repo_name] = commit_sha
 
-            corpus_index_data["code_files"].append(
-                {
-                    "file_id": file_uuid,
-                    "domain_id": domain_id,
-                    "repo_name": repo_name,
-                    "file_path": rel,
-                    "git_commit_sha": commit_sha,
-                    "git_blob_sha": blob_sha,
-                    "language": lang,
-                    "allowed_scopes": scopes,
-                    "raw_content": text,
-                    "line_count": max(1, len(lines)),
-                }
+            code_file_records.append(
+                CodeFileRecord(
+                    file_id=file_uuid,
+                    domain_id=domain_id,
+                    repo_name=repo_name,
+                    file_path=rel,
+                    git_commit_sha=commit_sha,
+                    git_blob_sha=blob_sha,
+                    language=lang,
+                    allowed_scopes=scopes,
+                    raw_content=text,
+                    line_count=max(1, len(lines)),
+                    repo_id=repo_uuid,
+                )
             )
 
             parsed_syms: list[ParsedSymbol] = []
@@ -350,15 +357,19 @@ def cmd_distill_custom_domain(
 
             if parsed_syms:
                 for ps in parsed_syms:
-                    sym_uuid = str(
-                        uuid.uuid5(
-                            uuid.NAMESPACE_DNS,
-                            f"{domain_id}:sym:{rel}:{ps.qualified_name}:{ps.start_line}",
-                        )
+                    sym_uuid = uuid.uuid5(
+                        uuid.NAMESPACE_DNS,
+                        f"{domain_id}:sym:{rel}:{ps.qualified_name}:{ps.start_line}",
                     )
                     sym_name_to_id[ps.qualified_name] = sym_uuid
                     repo_sym_to_id[(repo_name, ps.qualified_name)] = sym_uuid
                     repo_sym_to_id[(repo_name, ps.name)] = sym_uuid
+                    summary = (
+                        ps.contextual_summary
+                        or ps.docstring
+                        or ps.signature_skeleton
+                        or ps.signature
+                    )
                     candidates.append(
                         (
                             repo_name,
@@ -366,22 +377,28 @@ def cmd_distill_custom_domain(
                             ps.qualified_name,
                             ps.start_line,
                             ps.end_line,
-                            ps.contextual_summary or ps.signature_skeleton,
+                            summary,
                         )
                     )
-                    corpus_index_data["ast_symbols"].append(
-                        {
-                            "symbol_id": sym_uuid,
-                            "file_id": file_uuid,
-                            "domain_id": domain_id,
-                            "qualified_name": ps.qualified_name,
-                            "symbol_kind": ps.symbol_kind,
-                            "start_line": ps.start_line,
-                            "end_line": ps.end_line,
-                            "signature_skeleton": ps.signature_skeleton,
-                            "contextual_summary": ps.contextual_summary or ps.signature_skeleton,
-                            "allowed_scopes": scopes,
-                        }
+                    ast_symbol_records.append(
+                        ASTSymbolRecord(
+                            symbol_id=sym_uuid,
+                            file_id=file_uuid,
+                            domain_id=domain_id,
+                            qualified_name=ps.qualified_name,
+                            symbol_kind=ps.symbol_kind,
+                            start_line=ps.start_line,
+                            end_line=max(ps.start_line, ps.end_line),
+                            signature_skeleton=ps.signature_skeleton,
+                            contextual_summary=summary,
+                            allowed_scopes=scopes,
+                            embedding=generate_deterministic_embedding(
+                                f"{ps.qualified_name}\n{ps.signature_skeleton}\n{summary}"
+                            ),
+                            repo_id=repo_uuid,
+                            repo_qualified_id=f"{repo_name}::{ps.qualified_name}",
+                            bare_name=ps.bare_name or ps.name,
+                        )
                     )
                 for pe in parsed_edges:
                     pending_edges.append(
@@ -408,47 +425,59 @@ def cmd_distill_custom_domain(
                         q_sym = f"{cf.stem}.{sym}"
                         candidates.append((repo_name, rel, q_sym, s_ln, e_ln, ln.strip()))
                         file_has_sym = True
-                        sym_uuid = str(
-                            uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:sym:{rel}:{q_sym}:{s_ln}")
+                        sym_uuid = uuid.uuid5(
+                            uuid.NAMESPACE_DNS, f"{domain_id}:sym:{rel}:{q_sym}:{s_ln}"
                         )
                         sym_name_to_id[q_sym] = sym_uuid
+                        repo_sym_to_id[(repo_name, q_sym)] = sym_uuid
                         fallback_kind = "class" if "class" in ln or "struct" in ln else "function"
-                        corpus_index_data["ast_symbols"].append(
-                            {
-                                "symbol_id": sym_uuid,
-                                "file_id": file_uuid,
-                                "domain_id": domain_id,
-                                "qualified_name": q_sym,
-                                "symbol_kind": fallback_kind,
-                                "start_line": s_ln,
-                                "end_line": e_ln,
-                                "signature_skeleton": ln.strip(),
-                                "contextual_summary": "\n".join(
-                                    lines[s_ln - 1 : min(len(lines), s_ln + 8)]
+                        ctx_txt = "\n".join(lines[s_ln - 1 : min(len(lines), s_ln + 8)])
+                        ast_symbol_records.append(
+                            ASTSymbolRecord(
+                                symbol_id=sym_uuid,
+                                file_id=file_uuid,
+                                domain_id=domain_id,
+                                qualified_name=q_sym,
+                                symbol_kind=fallback_kind,
+                                start_line=s_ln,
+                                end_line=e_ln,
+                                signature_skeleton=ln.strip(),
+                                contextual_summary=ctx_txt,
+                                allowed_scopes=scopes,
+                                embedding=generate_deterministic_embedding(
+                                    f"{q_sym}\n{ln.strip()}\n{ctx_txt}"
                                 ),
-                                "allowed_scopes": scopes,
-                            }
+                                repo_id=repo_uuid,
+                                repo_qualified_id=f"{repo_name}::{q_sym}",
+                                bare_name=sym,
+                            )
                         )
                 if not file_has_sym and lines:
                     s_ln, e_ln = 1, min(len(lines), 40)
                     candidates.append((repo_name, rel, cf.stem, s_ln, e_ln, lines[0].strip()))
-                    sym_uuid = str(
-                        uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:sym:{rel}:{cf.stem}:1")
-                    )
+                    sym_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:sym:{rel}:{cf.stem}:1")
                     sym_name_to_id[cf.stem] = sym_uuid
-                    corpus_index_data["ast_symbols"].append(
-                        {
-                            "symbol_id": sym_uuid,
-                            "file_id": file_uuid,
-                            "domain_id": domain_id,
-                            "qualified_name": cf.stem,
-                            "symbol_kind": "function",
-                            "start_line": s_ln,
-                            "end_line": e_ln,
-                            "signature_skeleton": lines[0].strip(),
-                            "contextual_summary": "\n".join(lines[: min(len(lines), 10)]),
-                            "allowed_scopes": scopes,
-                        }
+                    repo_sym_to_id[(repo_name, cf.stem)] = sym_uuid
+                    ctx_txt = "\n".join(lines[: min(len(lines), 10)])
+                    ast_symbol_records.append(
+                        ASTSymbolRecord(
+                            symbol_id=sym_uuid,
+                            file_id=file_uuid,
+                            domain_id=domain_id,
+                            qualified_name=cf.stem,
+                            symbol_kind="function",
+                            start_line=s_ln,
+                            end_line=e_ln,
+                            signature_skeleton=lines[0].strip(),
+                            contextual_summary=ctx_txt,
+                            allowed_scopes=scopes,
+                            embedding=generate_deterministic_embedding(
+                                f"{cf.stem}\n{lines[0].strip()}\n{ctx_txt}"
+                            ),
+                            repo_id=repo_uuid,
+                            repo_qualified_id=f"{repo_name}::{cf.stem}",
+                            bare_name=cf.stem,
+                        )
                     )
 
         for e_idx, (e_repo, src_q, tgt_q, e_kind, e_scopes) in enumerate(pending_edges):
@@ -457,27 +486,34 @@ def cmd_distill_custom_domain(
                 or sym_name_to_id.get(src_q)
                 or repo_sym_to_id.get((e_repo, src_q.split(".")[-1]))
             )
-            if not src_id:
+            if src_id is None:
                 continue
-            tgt_id = (
-                repo_sym_to_id.get((e_repo, tgt_q))
-                or sym_name_to_id.get(tgt_q)
-                or repo_sym_to_id.get((e_repo, tgt_q.split(".")[-1]))
+            tgt_id = repo_sym_to_id.get((e_repo, tgt_q)) or repo_sym_to_id.get(
+                (e_repo, tgt_q.split(".")[-1])
             )
-            edge_uuid = str(
-                uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:edge:{e_idx}:{src_q}:{tgt_q}:{e_kind}")
+            edge_uuid = uuid.uuid5(
+                uuid.NAMESPACE_DNS, f"{domain_id}:edge:{e_idx}:{src_q}:{tgt_q}:{e_kind}"
             )
-            corpus_index_data["ast_edges"].append(
-                {
-                    "edge_id": edge_uuid,
-                    "domain_id": domain_id,
-                    "source_symbol_id": src_id,
-                    "target_qualified_name": tgt_q,
-                    "target_symbol_id": tgt_id,
-                    "edge_kind": e_kind,
-                    "allowed_scopes": e_scopes,
-                }
+            ast_edge_records.append(
+                ASTEdgeRecord(
+                    edge_id=edge_uuid,
+                    domain_id=domain_id,
+                    source_symbol_id=src_id,
+                    target_qualified_name=tgt_q,
+                    target_symbol_id=tgt_id,
+                    edge_kind=e_kind,
+                    allowed_scopes=e_scopes,
+                    is_cross_repo=False,
+                )
             )
+
+        cross_edges = CrossBoundaryContractLinker().link_contracts(
+            domain_id=domain_id,
+            symbols=ast_symbol_records,
+            code_files=code_file_records,
+            doc_chunks=doc_chunk_records,
+        )
+        ast_edge_records.extend(cross_edges)
 
         # Prioritize non-test candidates for primary distillation targets
         prod_candidates = [
@@ -599,31 +635,36 @@ def cmd_distill_custom_domain(
                 and len(re.findall(r"[A-Za-z]{3,}", ln)) >= 3
             ]
             quote = valid_lines[0][:180] if valid_lines else "Verified empirical domain finding."
-            chk_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:doc:{rel_doc}:0"))
-            corpus_index_data["doc_chunks"].append(
-                {
-                    "chunk_id": chk_uuid,
-                    "domain_id": domain_id,
-                    "doc_id": f"{domain_id}:{df.stem}",
-                    "doc_title": doc_title,
-                    "source_uri": f"urn:{domain_id}:{rel_doc}",
-                    "market_scope": "GLOBAL_MULTI",
-                    "authority_weight": 1.0,
-                    "section_heading": section_heading,
-                    "contextual_header": f"{doc_title} — {section_heading}",
-                    "verbatim_content": text,
-                    "metadata_json": {
+            chk_uuid_obj = uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:doc:{rel_doc}:0")
+            chk_uuid = str(chk_uuid_obj)
+            doc_chunk_records.append(
+                DocChunkRecord(
+                    chunk_id=chk_uuid_obj,
+                    domain_id=domain_id,
+                    doc_id=f"{domain_id}:{df.stem}",
+                    doc_title=doc_title,
+                    source_uri=f"urn:{domain_id}:{rel_doc}",
+                    market_scope="ENTERPRISE_DOC",
+                    published_date=datetime.date(2026, 1, 1),
+                    authority_weight=1.0,
+                    section_heading=section_heading,
+                    contextual_header=f"{doc_title} — {section_heading}",
+                    verbatim_content=text,
+                    metadata_json={
                         "filename": df.name,
                         "rel_path": rel_doc,
                         "blob_sha": doc_blob_sha,
                     },
-                    "allowed_scopes": [
+                    allowed_scopes=[
                         "public_eng",
                         "public_quant",
                         "quant_restricted",
                         f"domain:{domain_id}",
                     ],
-                }
+                    embedding=generate_deterministic_embedding(
+                        f"{doc_title}\n{section_heading}\n{text[:1200]}"
+                    ),
+                )
             )
             doc_passages.append(
                 (f"{domain_id}:{df.stem}", doc_title, section_heading, quote, chk_uuid)
@@ -686,11 +727,33 @@ def cmd_distill_custom_domain(
                 }
             )
 
-    corpus_index_path = domains_dir / domain_id / "corpus_index.json"
-    corpus_index_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(corpus_index_path, "w", encoding="utf-8") as f:
-        json.dump(corpus_index_data, f, indent=2)
-    register_custom_corpus_index(domain_id, corpus_index_path)
+    cf_cnt, sym_cnt, edge_cnt, doc_cnt = persist_custom_domain_to_pg(
+        domain_id=domain_id,
+        display_name=str(manifest.get("display_name", domain_id)),
+        kind=resolved_kind,
+        manifest_config=manifest,
+        code_files=code_file_records,
+        ast_symbols=ast_symbol_records,
+        ast_edges=ast_edge_records,
+        doc_chunks=doc_chunk_records,
+        repo_commit_shas=repo_commit_shas,
+        reset_domain_rows=True,
+    )
+
+    legacy_index_path = domains_dir / domain_id / "corpus_index.json"
+    legacy_index_path.unlink(missing_ok=True)
+    sync_manifest_path = domains_dir / domain_id / "sync_manifest.json"
+    write_custom_sync_manifest(
+        manifest_path=sync_manifest_path,
+        domain_id=domain_id,
+        kind=resolved_kind,
+        source_dir=str(source_dir.resolve()),
+        repo_commit_shas=repo_commit_shas,
+        code_files_indexed=cf_cnt,
+        ast_symbols_indexed=sym_cnt,
+        ast_edges_indexed=edge_cnt,
+        doc_chunks_indexed=doc_cnt,
+    )
 
     split_idx = max(1, int(len(examples) * 0.85))
     train_set = examples[:split_idx]
@@ -707,10 +770,9 @@ def cmd_distill_custom_domain(
 
     return {
         "domain_id": domain_id,
-        "files_indexed": len(corpus_index_data["code_files"])
-        + len(corpus_index_data["doc_chunks"]),
-        "symbols_indexed": len(corpus_index_data["ast_symbols"]),
-        "edges_indexed": len(corpus_index_data["ast_edges"]),
+        "files_indexed": cf_cnt + doc_cnt,
+        "symbols_indexed": sym_cnt,
+        "edges_indexed": edge_cnt,
         "train_samples": len(train_set),
         "valid_samples": len(valid_set),
         "train_path": str(data_dir / domain_id / "train.jsonl"),
@@ -780,30 +842,35 @@ def cmd_query_domain(
     handoff_apply: bool = False,
     repo_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Runs local Scout discovery ($0) on a domain and optionally triggers execution handoff."""
-    corpus_index_path = domains_dir / domain_id / "corpus_index.json"
-    allowed_scopes = ["public_eng", "public_quant", f"domain:{domain_id}", f"repo:{domain_id}"]
-    if corpus_index_path.exists():
-        register_custom_corpus_index(domain_id, corpus_index_path)
+    """Runs local Scout discovery ($0) on PostgreSQL 17 and optionally triggers handoff."""
+    sync_manifest_path = domains_dir / domain_id / "sync_manifest.json"
+    allowed_scopes = [
+        "public_eng",
+        "public_quant",
+        "quant_restricted",
+        f"domain:{domain_id}",
+        f"repo:{domain_id}",
+    ]
+    if sync_manifest_path.exists():
+        register_custom_corpus_index(domain_id, sync_manifest_path)
         try:
-            with open(corpus_index_path, encoding="utf-8") as f:
-                idx_data = json.load(f)
-            for cf in [*idx_data.get("code_files", []), *idx_data.get("doc_chunks", [])]:
-                for sc in cf.get("allowed_scopes", []):
-                    if sc not in allowed_scopes:
-                        allowed_scopes.append(str(sc))
+            manifest_meta = json.loads(sync_manifest_path.read_text(encoding="utf-8"))
+            for rname in manifest_meta.get("repo_commit_shas") or {}:
+                rscope = f"repo:{rname}"
+                if rscope not in allowed_scopes:
+                    allowed_scopes.append(rscope)
         except Exception as exc:
             logger.warning(
-                "Failed loading corpus scopes from %s (%s): %s",
-                corpus_index_path,
+                "Failed loading repo scopes from %s (%s): %s",
+                sync_manifest_path,
                 type(exc).__name__,
                 exc,
             )
 
     registry = DomainRegistry(domains_dir=domains_dir)
     registry.load_all()
-    in_mem_repo = InMemoryRLSRepository()
-    bound_repo = BoundGraphRepository(in_mem_repo)
+    pg_repo = PostgresRLSRepository()
+    bound_repo = BoundGraphRepository(pg_repo)
     workflow = ScoutWorkflow(registry=registry, repo=bound_repo)
 
     principal = PrincipalContext(
@@ -883,7 +950,7 @@ def cmd_query_domain(
                 pack=pack_for_exec,
                 principal=principal,
                 repo_root=target_root,
-                repo=in_mem_repo,
+                repo=pg_repo,
                 auto_confirm=True,
                 lint_cmd=lint_cmd,
                 test_cmd=test_cmd,
@@ -903,20 +970,22 @@ def cmd_sync_domain(
     domains_dir: Path = Path("domains"),
     force: bool = True,
 ) -> dict[str, Any]:
-    """Incrementally syncs a custom domain's corpus_index.json with its live working tree."""
+    """Incrementally syncs a custom domain into PostgreSQL 17 from its live working tree."""
     import time
 
-    index_path = domains_dir / domain_id / "corpus_index.json"
-    if not index_path.exists():
-        raise FileNotFoundError(
-            f"corpus_index.json not found for domain '{domain_id}' at {index_path}. "
-            "Run `context-scout distill` first."
-        )
-    register_custom_corpus_index(domain_id, index_path)
+    manifest_path = domains_dir / domain_id / "sync_manifest.json"
+    if not manifest_path.exists():
+        domain_yaml = domains_dir / domain_id / "domain.yaml"
+        if not domain_yaml.exists():
+            raise FileNotFoundError(
+                f"sync_manifest.json not found for domain '{domain_id}' at {manifest_path}. "
+                "Run `context-scout distill` first."
+            )
+    register_custom_corpus_index(domain_id, manifest_path)
     t0 = time.perf_counter()
     report = sync_custom_domain_corpus_if_needed(
         domain_id=domain_id,
-        index_path=index_path,
+        index_path=manifest_path,
         force=force,
     )
     elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
@@ -943,36 +1012,54 @@ def cmd_benchmark_domain(
         repair_and_constrain_code_pointers_json,
     )
 
-    index_path = domains_dir / domain_id / "corpus_index.json"
-    if not index_path.exists():
+    manifest_path = domains_dir / domain_id / "sync_manifest.json"
+    if not manifest_path.exists():
         raise FileNotFoundError(
-            f"corpus_index.json not found for domain '{domain_id}' at {index_path}. "
+            f"sync_manifest.json not found for domain '{domain_id}' at {manifest_path}. "
             "Run `context-scout distill` first."
         )
-    register_custom_corpus_index(domain_id, index_path)
+    register_custom_corpus_index(domain_id, manifest_path)
     sync_report = cmd_sync_domain(domain_id=domain_id, domains_dir=domains_dir, force=True)
 
-    with open(index_path, encoding="utf-8") as f:
-        idx_data = json.load(f)
+    manifest_meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+    allowed_scopes = [
+        "public_eng",
+        "public_quant",
+        "quant_restricted",
+        f"domain:{domain_id}",
+        f"repo:{domain_id}",
+    ]
+    for rname in manifest_meta.get("repo_commit_shas") or {}:
+        rscope = f"repo:{rname}"
+        if rscope not in allowed_scopes:
+            allowed_scopes.append(rscope)
 
-    code_files = idx_data.get("code_files", [])
-    ast_symbols = idx_data.get("ast_symbols", [])
-    ast_edges = idx_data.get("ast_edges", [])
-    doc_chunks = idx_data.get("doc_chunks", [])
+    bm_principal = PrincipalContext(
+        user_id="domain_benchmark_runner",
+        role=RoleType.ENGINEER,
+        allowed_scopes=allowed_scopes,
+    )
+    bound_pg = BoundGraphRepository(PostgresRLSRepository())
+    code_files = bound_pg.list_visible_code_files(bm_principal, domain_id)
+    ast_symbols = bound_pg.list_visible_ast_symbols(bm_principal, domain_id)
+    ast_edges = bound_pg.list_visible_ast_edges(bm_principal, domain_id)
+    doc_chunks = bound_pg.list_visible_doc_chunks(bm_principal, domain_id)
 
-    allowed_scopes = ["public_eng", "public_quant", f"domain:{domain_id}", f"repo:{domain_id}"]
-    for cf in [*code_files, *doc_chunks]:
-        for sc in cf.get("allowed_scopes", []):
+    for cf_rec in code_files:
+        for sc in cf_rec.allowed_scopes:
             if sc not in allowed_scopes:
-                allowed_scopes.append(str(sc))
+                allowed_scopes.append(sc)
+    for dc_rec in doc_chunks:
+        for sc in dc_rec.allowed_scopes:
+            if sc not in allowed_scopes:
+                allowed_scopes.append(sc)
 
     if not code_files and doc_chunks:
         from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
 
         registry_doc = DomainRegistry(domains_dir=domains_dir)
         registry_doc.load_all()
-        in_mem_doc = InMemoryRLSRepository()
-        bound_doc = BoundGraphRepository(in_mem_doc)
+        bound_doc = BoundGraphRepository(PostgresRLSRepository())
         workflow_doc = ScoutWorkflow(registry=registry_doc, repo=bound_doc)
         principal_doc = PrincipalContext(
             user_id="domain_benchmark_runner",
@@ -980,9 +1067,9 @@ def cmd_benchmark_domain(
             allowed_scopes=allowed_scopes,
         )
         slicer_doc = DeterministicSlicer()
-        total_doc_chars = sum(len(str(dc.get("verbatim_content", ""))) for dc in doc_chunks)
+        total_doc_chars = sum(len(dc.verbatim_content) for dc in doc_chunks)
         est_full_doc_tokens = max(1, total_doc_chars // 4)
-        chunk_by_id = {str(dc["chunk_id"]): dc for dc in doc_chunks}
+        chunk_by_id = {str(dc.chunk_id): dc for dc in doc_chunks}
 
         doc_results: list[dict[str, Any]] = []
         doc_hits = 0
@@ -996,10 +1083,10 @@ def cmd_benchmark_domain(
         n_doc_queries = min(max_queries, max(1, len(doc_chunks) * 2))
         for i in range(n_doc_queries):
             dc = doc_chunks[i % len(doc_chunks)]
-            d_id = str(dc.get("doc_id", domain_id))
-            d_title = str(dc.get("doc_title", domain_id))
-            d_sec = str(dc.get("section_heading", ""))
-            d_content = str(dc.get("verbatim_content", ""))
+            d_id = dc.doc_id
+            d_title = dc.doc_title
+            d_sec = dc.section_heading
+            d_content = dc.verbatim_content
             content_words = [
                 w
                 for w in re.findall(r"[A-Za-z0-9_\-]{4,}", d_content)
@@ -1034,9 +1121,7 @@ def cmd_benchmark_domain(
                     total_quotes_checked += 1
                     chk_obj = chunk_by_id.get(cit.chunk_id)
                     if chk_obj is not None:
-                        v_res = slicer_doc.verify_doc_citation(
-                            cit, str(chk_obj.get("verbatim_content", ""))
-                        )
+                        v_res = slicer_doc.verify_doc_citation(cit, chk_obj.verbatim_content)
                         if v_res.is_valid:
                             verbatim_exact_quotes += 1
                 baseline_tok = max(res_doc.pack_token_count + 500, est_full_doc_tokens)
@@ -1097,7 +1182,7 @@ def cmd_benchmark_domain(
         s_lat = sorted(doc_latencies_ms) if doc_latencies_ms else [0.0]
         doc_summary: dict[str, Any] = {
             "domain_id": domain_id,
-            "kind": idx_data.get("kind", "knowledge"),
+            "kind": manifest_meta.get("kind", "knowledge"),
             "files_indexed": len(doc_chunks),
             "symbols_indexed": 0,
             "edges_indexed": 0,
@@ -1128,11 +1213,11 @@ def cmd_benchmark_domain(
             output_json.write_text(json.dumps(doc_summary, indent=2), encoding="utf-8")
         return doc_summary
 
-    file_by_id = {str(cf["file_id"]): cf for cf in code_files}
-    files_by_repo: dict[str, list[dict[str, Any]]] = {}
+    file_by_id = {str(cf.file_id): cf for cf in code_files}
+    files_by_repo: dict[str, list[CodeFileRecord]] = {}
     for cf in code_files:
-        files_by_repo.setdefault(str(cf.get("repo_name", domain_id)), []).append(cf)
-    total_corpus_chars = sum(len(str(cf.get("raw_content", ""))) for cf in code_files)
+        files_by_repo.setdefault(cf.repo_name, []).append(cf)
+    total_corpus_chars = sum(len(cf.raw_content) for cf in code_files)
     estimated_full_repo_tokens = max(1, total_corpus_chars // 4)
 
     # Build diverse evaluation tasks across 4 categories + 2 adversarial/OOS probes
@@ -1140,7 +1225,7 @@ def cmd_benchmark_domain(
         [
             s
             for s in ast_symbols
-            if str(s.get("file_id")) in file_by_id
+            if str(s.file_id) in file_by_id
             and not any(
                 seg
                 in (
@@ -1165,27 +1250,25 @@ def cmd_benchmark_domain(
                     "show_off.py",
                     "mkdocs.yml",
                 )
-                for seg in str(file_by_id[str(s["file_id"])]["file_path"]).split("/")
+                for seg in file_by_id[str(s.file_id)].file_path.split("/")
             )
-            and ".test_" not in str(s.get("qualified_name", ""))
-            and not str(s.get("qualified_name", "")).split(".")[-1].startswith("__")
-            and len(str(s.get("qualified_name", "")).split(".")[-1]) >= 4
-            and str(s.get("symbol_kind", "function"))
-            in ("function", "class", "method", "interface")
+            and ".test_" not in s.qualified_name
+            and not s.qualified_name.split(".")[-1].startswith("__")
+            and len(s.qualified_name.split(".")[-1]) >= 4
+            and s.symbol_kind in ("function", "class", "method", "interface")
         ]
         or [
             s
             for s in ast_symbols
-            if str(s.get("file_id")) in file_by_id
-            and not str(s.get("qualified_name", "")).split(".")[-1].startswith("__")
+            if str(s.file_id) in file_by_id and not s.qualified_name.split(".")[-1].startswith("__")
         ]
         or list(ast_symbols)
     )
 
     # Identify symbols with outgoing edges for 1-hop closure verification
-    edges_by_src: dict[str, list[dict[str, Any]]] = {}
+    edges_by_src: dict[str, list[ASTEdgeRecord]] = {}
     for e in ast_edges:
-        edges_by_src.setdefault(str(e.get("source_symbol_id", "")), []).append(e)
+        edges_by_src.setdefault(str(e.source_symbol_id), []).append(e)
 
     generic_short_names = {
         "name",
@@ -1212,23 +1295,23 @@ def cmd_benchmark_domain(
         "run",
     }
 
-    def _sym_quality_key(s_obj: dict[str, Any]) -> tuple[int, int, int, str]:
-        qn = str(s_obj.get("qualified_name", ""))
+    def _sym_quality_key(s_obj: ASTSymbolRecord) -> tuple[int, int, int, str]:
+        qn = s_obj.qualified_name
         sn = qn.split(".")[-1]
-        sid = str(s_obj.get("symbol_id", ""))
+        sid = str(s_obj.symbol_id)
         has_e = int(sid in edges_by_src)
         non_generic = int(sn.lower() not in generic_short_names and len(sn) >= 5)
-        span = int(s_obj.get("end_line", 10)) - int(s_obj.get("start_line", 1))
+        span = s_obj.end_line - s_obj.start_line
         good_span = int(5 <= span <= 120)
         return (-non_generic, -has_e, -good_span, qn)
 
     # Group symbols by repo_name and language for balanced multi-repo/polyglot coverage
-    by_repo_and_lang: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    by_repo_primary: dict[str, list[dict[str, Any]]] = {}
+    by_repo_and_lang: dict[tuple[str, str], list[ASTSymbolRecord]] = {}
+    by_repo_primary: dict[str, list[ASTSymbolRecord]] = {}
     for s in prod_syms:
-        cf = file_by_id.get(str(s["file_id"]), {})
-        r_name = str(cf.get("repo_name", domain_id))
-        l_name = str(cf.get("language", "python"))
+        cf_match = file_by_id.get(str(s.file_id))
+        r_name = cf_match.repo_name if cf_match is not None else domain_id
+        l_name = cf_match.language if cf_match is not None else "python"
         by_repo_and_lang.setdefault((r_name, l_name), []).append(s)
         by_repo_primary.setdefault(r_name, []).append(s)
 
@@ -1237,7 +1320,7 @@ def cmd_benchmark_domain(
     for r_list in by_repo_primary.values():
         r_list.sort(key=_sym_quality_key)
 
-    balanced_syms: list[dict[str, Any]] = []
+    balanced_syms: list[ASTSymbolRecord] = []
     seen_sym_ids: set[str] = set()
     # First guarantee 1 primary symbol from every repository in sorted order
     for r_name in sorted(by_repo_primary.keys()):
@@ -1245,7 +1328,7 @@ def cmd_benchmark_domain(
             break
         top_sym = by_repo_primary[r_name][0]
         balanced_syms.append(top_sym)
-        seen_sym_ids.add(str(top_sym["symbol_id"]))
+        seen_sym_ids.add(str(top_sym.symbol_id))
 
     # Then round-robin across (repo, language) buckets (non-Python first for polyglot coverage)
     buckets = [
@@ -1259,9 +1342,9 @@ def cmd_benchmark_domain(
             if round_idx < len(b):
                 cand_s = b[round_idx]
                 added_in_round = True
-                if str(cand_s["symbol_id"]) not in seen_sym_ids:
+                if str(cand_s.symbol_id) not in seen_sym_ids:
                     balanced_syms.append(cand_s)
-                    seen_sym_ids.add(str(cand_s["symbol_id"]))
+                    seen_sym_ids.add(str(cand_s.symbol_id))
                     if len(balanced_syms) >= max_queries:
                         break
         if not added_in_round:
@@ -1270,8 +1353,7 @@ def cmd_benchmark_domain(
 
     registry = DomainRegistry(domains_dir=domains_dir)
     registry.load_all()
-    in_mem_repo = InMemoryRLSRepository()
-    bound_repo = BoundGraphRepository(in_mem_repo)
+    bound_repo = BoundGraphRepository(PostgresRLSRepository())
     workflow = ScoutWorkflow(registry=registry, repo=bound_repo)
     qlora_client = LocalGemmaClient(adapter_pool=registry.adapter_pool) if run_live_mlx else None
     if qlora_client is not None:
@@ -1297,17 +1379,17 @@ def cmd_benchmark_domain(
     agent_token_savings_pcts: list[float] = []
 
     for i, sym_item in enumerate(balanced_syms[:max_queries]):
-        cf = file_by_id[str(sym_item["file_id"])]
-        f_path = str(cf["file_path"])
-        repo_n = str(cf["repo_name"])
-        lang = str(cf.get("language", "python"))
-        q_name = str(sym_item["qualified_name"])
+        cf = file_by_id[str(sym_item.file_id)]
+        f_path = cf.file_path
+        repo_n = cf.repo_name
+        lang = cf.language
+        q_name = sym_item.qualified_name
         q_parts = q_name.split(".")
         short_name = q_parts[-1]
         two_part = ".".join(q_parts[-2:]) if len(q_parts) >= 2 else q_name
-        has_edges = str(sym_item["symbol_id"]) in edges_by_src
-        sig_skel = str(sym_item.get("signature_skeleton", "")).strip()
-        ctx_sum = str(sym_item.get("contextual_summary", "")).strip()
+        has_edges = str(sym_item.symbol_id) in edges_by_src
+        sig_skel = sym_item.signature_skeleton.strip()
+        ctx_sum = sym_item.contextual_summary.strip()
         hint_words = " ".join((ctx_sum or sig_skel).split()[:8])
 
         # Non-tautological prompts across 4 difficulty tiers: NEVER include f_path in the prompt!
@@ -1429,16 +1511,14 @@ def cmd_benchmark_domain(
 
             # Compute realistic Without-Scout Agent multi-turn grep + read_file tokens
             repo_cfs = files_by_repo.get(repo_n, [])
-            repo_tree_tokens = max(
-                200, sum(len(str(c.get("file_path", ""))) + 1 for c in repo_cfs) // 4
-            )
+            repo_tree_tokens = max(200, sum(len(c.file_path) + 1 for c in repo_cfs) // 4)
             # Candidate files opened during 3-turn agent exploration (target + localized files)
             explored_paths = list(dict.fromkeys([f_path, *loc_files[:4]]))[:4]
             read_file_tokens_per_turn: list[int] = []
             for ep in explored_paths:
-                ep_cf = next((c for c in code_files if str(c["file_path"]) == ep), None)
+                ep_cf = next((c for c in code_files if c.file_path == ep), None)
                 if ep_cf is not None:
-                    f_toks = min(8000, max(120, len(str(ep_cf.get("raw_content", ""))) // 4))
+                    f_toks = min(8000, max(120, len(ep_cf.raw_content) // 4))
                     read_file_tokens_per_turn.append(f_toks)
             # Multi-turn agent re-sends conversation history across turns
             turn1_in = 850 + repo_tree_tokens + 600
@@ -1458,11 +1538,11 @@ def cmd_benchmark_domain(
             for sl in res.code_slices:
                 total_slices_checked += 1
                 matching_cf = next(
-                    (c for c in code_files if str(c["file_path"]) == sl.file_path),
+                    (c for c in code_files if c.file_path == sl.file_path),
                     None,
                 )
                 if matching_cf is not None:
-                    raw_lines = str(matching_cf["raw_content"]).splitlines()
+                    raw_lines = matching_cf.raw_content.splitlines()
                     slice_body = "\n".join(
                         re.sub(r"^\s*\d+\s*\|\s?", "", ln)
                         for ln in sl.verbatim_code_with_lines.splitlines()
@@ -1542,8 +1622,8 @@ def cmd_benchmark_domain(
         round(sum(token_savings_pcts) / len(token_savings_pcts), 2) if token_savings_pcts else 0.0
     )
 
-    repos_present = sorted({str(cf.get("repo_name", domain_id)) for cf in code_files})
-    langs_present = sorted({str(cf.get("language", "python")) for cf in code_files})
+    repos_present = sorted({cf.repo_name for cf in code_files})
+    langs_present = sorted({cf.language for cf in code_files})
 
     sorted_without = sorted(without_scout_tokens_list) if without_scout_tokens_list else [0]
     sorted_with = sorted(with_scout_tokens_list) if with_scout_tokens_list else [0]
@@ -1744,7 +1824,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_sync = sub.add_parser(
         "sync",
-        help="Incrementally sync a custom domain's corpus_index.json with its live working tree",
+        help="Incrementally sync a custom domain into PostgreSQL 17 from its live working tree",
     )
     p_sync.add_argument("--domain-id", required=True, help="Target domain ID")
     p_sync.add_argument("--domains-dir", type=Path, default=Path("domains"))

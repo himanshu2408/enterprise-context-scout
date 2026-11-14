@@ -319,6 +319,20 @@ class StorybookPlugin:
             )
             if component_name:
                 add_doc_edge(meta_qn, component_name)
+                symbols[-1] = ParsedSymbol(
+                    name=symbols[-1].name,
+                    qualified_name=symbols[-1].qualified_name,
+                    bare_name=symbols[-1].bare_name,
+                    symbol_kind=symbols[-1].symbol_kind,
+                    start_line=symbols[-1].start_line,
+                    end_line=symbols[-1].end_line,
+                    start_byte=symbols[-1].start_byte,
+                    end_byte=symbols[-1].end_byte,
+                    signature=symbols[-1].signature,
+                    signature_skeleton=symbols[-1].signature_skeleton,
+                    docstring=f"@story_component {component_name}",
+                    repo_name=symbols[-1].repo_name,
+                )
 
         for story_name, story_node, sig in exported_stories:
             story_qn = f"{prefix}.{story_name}"
@@ -334,6 +348,7 @@ class StorybookPlugin:
                     end_byte=story_node.end_byte,
                     signature=sig,
                     signature_skeleton=sig,
+                    docstring=f"@story_component {component_name}" if component_name else "",
                     repo_name=repo_name,
                 )
             )

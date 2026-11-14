@@ -114,6 +114,61 @@ def _is_function_like(node: Node | None) -> bool:
     }
 
 
+def _unquote_ts(text: str) -> str:
+    stripped = text.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"', "`"}:
+        return stripped[1:-1]
+    return stripped
+
+
+def _extract_ts_url_expr(node: Node | None, code_bytes: bytes) -> str:
+    """Extract a URL string or template literal path from a TS AST expression node."""
+    if node is None:
+        return ""
+    if node.type in {"string", "template_string"}:
+        raw = _unquote_ts(_node_text(node, code_bytes))
+        return re.sub(r"\$\{[^}]+\}", "{param}", raw)
+    if node.type == "binary_expression":
+        left = _extract_ts_url_expr(node.child_by_field_name("left"), code_bytes)
+        right = _extract_ts_url_expr(node.child_by_field_name("right"), code_bytes)
+        if left or right:
+            return f"{left}{right}"
+    if node.type == "parenthesized_expression":
+        for c in node.children:
+            if c.is_named:
+                return _extract_ts_url_expr(c, code_bytes)
+    return ""
+
+
+def _join_url_paths(base_url: str, sub_path: str) -> str:
+    base = re.sub(r"^https?://[^/]+", "", base_url.strip())
+    sub = re.sub(r"^https?://[^/]+", "", sub_path.strip())
+    if sub.startswith("/") and base and not sub.startswith(base.rstrip("/")):
+        return f"/{base.strip('/')}/{sub.lstrip('/')}" if base.strip("/") else sub
+    if base and sub:
+        return f"/{base.strip('/')}/{sub.lstrip('/')}"
+    return "/" + (sub or base).lstrip("/") if (sub or base) else ""
+
+
+def _extract_ts_dto_fields(node: Node, code_bytes: bytes) -> list[str]:
+    """Extract property_signature names from an interface_body or object_type."""
+    fields: list[str] = []
+
+    def walk_body(cur: Node) -> None:
+        for child in cur.children:
+            if child.type == "property_signature":
+                name_nd = child.child_by_field_name("name")
+                if name_nd is not None:
+                    fname = _unquote_ts(_node_text(name_nd, code_bytes))
+                    if fname:
+                        fields.append(fname)
+            elif child.type in {"interface_body", "object_type"}:
+                walk_body(child)
+
+    walk_body(node)
+    return list(dict.fromkeys(fields))
+
+
 def _find_object_property_value(obj_node: Node, key_name: str, code_bytes: bytes) -> Node | None:
     for child in obj_node.children:
         if child.type == "pair":
@@ -276,7 +331,7 @@ class ReactReduxPlugin:
         symbols: list[ParsedSymbol] = []
         edges: list[ParsedEdge] = []
         seen_edges: set[tuple[str, str, str]] = set()
-        seen_symbols: set[str] = set()
+        seen_symbols: dict[str, int] = {}
         scope_stack: list[tuple[str, str]] = []
 
         def add_edge(src: str, tgt: str, kind: str) -> None:
@@ -293,6 +348,20 @@ class ReactReduxPlugin:
                     )
                 )
 
+        def attach_note(qn: str, note: str) -> None:
+            if not qn or not note:
+                return
+            idx = seen_symbols.get(qn)
+            if idx is None:
+                return
+            prev = symbols[idx]
+            if note in prev.docstring:
+                return
+            merged = f"{prev.docstring} {note}".strip()
+            symbols[idx] = prev.model_copy(
+                update={"docstring": merged, "contextual_summary": merged}
+            )
+
         def add_symbol(
             name: str,
             qn: str,
@@ -304,7 +373,7 @@ class ReactReduxPlugin:
         ) -> None:
             if qn in seen_symbols:
                 return
-            seen_symbols.add(qn)
+            seen_symbols[qn] = len(symbols)
             symbols.append(
                 ParsedSymbol(
                     name=name,
@@ -380,6 +449,148 @@ class ReactReduxPlugin:
                                 walk(val_node)
                                 scope_stack.pop()
 
+        def _extract_rtk_query_spec(ep_call: Node, base_url: str) -> tuple[str, str, list[str]]:
+            """Return (http_method, full_url, referenced_dto_types) from builder.query/mutation."""
+            fn = ep_call.child_by_field_name("function")
+            leaf = _callee_leaf(fn, code_bytes)
+            http_method = "POST" if leaf == "mutation" else "GET"
+            ref_types: list[str] = []
+            type_args = ep_call.child_by_field_name("type_arguments")
+            if type_args is None:
+                type_args = next((c for c in ep_call.children if c.type == "type_arguments"), None)
+            if type_args is not None:
+                for tc in type_args.children:
+                    if tc.type == "type_identifier":
+                        ref_types.append(_node_text(tc, code_bytes))
+                    elif tc.type == "generic_type":
+                        inner_targs = next(
+                            (c for c in tc.children if c.type == "type_arguments"), None
+                        )
+                        if inner_targs is not None:
+                            for sub_t in inner_targs.children:
+                                if sub_t.type == "type_identifier":
+                                    ref_types.append(_node_text(sub_t, code_bytes))
+            url_sub = ""
+            ep_args = ep_call.child_by_field_name("arguments")
+            ep_cfg = (
+                next((c for c in ep_args.children if c.type == "object"), None)
+                if ep_args is not None
+                else None
+            )
+            if ep_cfg is not None:
+                q_node = _find_object_property_value(ep_cfg, "query", code_bytes)
+                if q_node is not None:
+                    q_body = (
+                        q_node.child_by_field_name("body")
+                        if q_node.type == "arrow_function"
+                        else q_node
+                    )
+                    if q_body is not None and q_body.type == "parenthesized_expression":
+                        q_body = next((c for c in q_body.children if c.is_named), q_body)
+                    if q_body is not None and q_body.type == "object":
+                        url_val = _find_object_property_value(q_body, "url", code_bytes)
+                        meth_val = _find_object_property_value(q_body, "method", code_bytes)
+                        url_sub = _extract_ts_url_expr(url_val, code_bytes)
+                        if meth_val is not None:
+                            m_txt = _unquote_ts(_node_text(meth_val, code_bytes)).upper()
+                            if m_txt in {"GET", "POST", "PUT", "DELETE", "PATCH"}:
+                                http_method = m_txt
+                    elif q_body is not None and q_body.type == "statement_block":
+                        ret_nd = next(
+                            (c for c in q_body.children if c.type == "return_statement"), None
+                        )
+                        if ret_nd is not None:
+                            ret_expr = next((c for c in ret_nd.children if c.is_named), None)
+                            if ret_expr is not None and ret_expr.type == "object":
+                                url_val = _find_object_property_value(ret_expr, "url", code_bytes)
+                                meth_val = _find_object_property_value(
+                                    ret_expr, "method", code_bytes
+                                )
+                                url_sub = _extract_ts_url_expr(url_val, code_bytes)
+                                if meth_val is not None:
+                                    m_txt = _unquote_ts(_node_text(meth_val, code_bytes)).upper()
+                                    if m_txt in {"GET", "POST", "PUT", "DELETE", "PATCH"}:
+                                        http_method = m_txt
+                            else:
+                                url_sub = _extract_ts_url_expr(ret_expr, code_bytes)
+                    else:
+                        url_sub = _extract_ts_url_expr(q_body, code_bytes)
+            full_url = _join_url_paths(base_url, url_sub) if (base_url or url_sub) else ""
+            return http_method, full_url, list(dict.fromkeys(ref_types))
+
+        def record_create_api(api_name: str, declarator: Node, call_node: Node) -> None:
+            api_qn = f"{prefix}.{api_name}"
+            doc = _extract_leading_doc_comment(declarator, code_bytes)
+            add_symbol(
+                name=api_name,
+                qn=api_qn,
+                kind="slice",
+                node=declarator,
+                sig=f"createApi({api_name})",
+                doc=doc,
+            )
+            args = call_node.child_by_field_name("arguments")
+            if args is None:
+                return
+            cfg_obj = next((c for c in args.children if c.type == "object"), None)
+            if cfg_obj is None:
+                return
+            base_url = ""
+            bq_val = _find_object_property_value(cfg_obj, "baseQuery", code_bytes)
+            if bq_val is not None and bq_val.type == "call_expression":
+                bq_args = bq_val.child_by_field_name("arguments")
+                bq_obj = (
+                    next((c for c in bq_args.children if c.type == "object"), None)
+                    if bq_args is not None
+                    else None
+                )
+                if bq_obj is not None:
+                    bu_nd = _find_object_property_value(bq_obj, "baseUrl", code_bytes)
+                    base_url = _extract_ts_url_expr(bu_nd, code_bytes)
+
+            ep_val = _find_object_property_value(cfg_obj, "endpoints", code_bytes)
+            if ep_val is None:
+                return
+            ep_body = (
+                ep_val.child_by_field_name("body") if ep_val.type == "arrow_function" else ep_val
+            )
+            if ep_body is not None and ep_body.type == "parenthesized_expression":
+                ep_body = next((c for c in ep_body.children if c.is_named), ep_body)
+            if ep_body is None or ep_body.type != "object":
+                return
+            for child in ep_body.children:
+                if child.type != "pair":
+                    continue
+                k_nd = child.child_by_field_name("key")
+                v_nd = child.child_by_field_name("value")
+                if k_nd is None or v_nd is None or v_nd.type != "call_expression":
+                    continue
+                ep_name = _unquote_ts(_node_text(k_nd, code_bytes))
+                if not ep_name:
+                    continue
+                fn_leaf = _callee_leaf(v_nd.child_by_field_name("function"), code_bytes)
+                if fn_leaf not in {"query", "mutation"}:
+                    continue
+                method, full_url, ref_types = _extract_rtk_query_spec(v_nd, base_url)
+                ep_qn = f"{api_qn}.{ep_name}"
+                notes: list[str] = []
+                if full_url:
+                    notes.append(f"@route {method} {full_url}")
+                for rt in ref_types:
+                    notes.append(f"@dto_ref {rt}")
+                    add_edge(ep_qn, rt, "USES_TYPE")
+                add_symbol(
+                    name=ep_name,
+                    qn=ep_qn,
+                    kind="function",
+                    node=child,
+                    sig=f"{ep_name}: builder.{fn_leaf}({method} {full_url})"
+                    if full_url
+                    else f"{ep_name}: builder.{fn_leaf}",
+                    bare_name=ep_name,
+                    doc=" ".join(notes),
+                )
+
         def handle_call_expression(node: Node) -> bool:
             """Process a call_expression; returns True if children were already visited."""
             func_node = node.child_by_field_name("function")
@@ -388,6 +599,41 @@ class ReactReduxPlugin:
             args = node.child_by_field_name("arguments")
             caller_qn = scope_stack[-1][1] if scope_stack else f"{prefix}.standalone"
             caller_name = scope_stack[-1][0] if scope_stack else ""
+
+            if callee_leaf == "fetch" and scope_stack and args is not None:
+                named_args = [c for c in args.children if c.is_named]
+                if named_args:
+                    url = _extract_ts_url_expr(named_args[0], code_bytes)
+                    method = "GET"
+                    if len(named_args) > 1 and named_args[1].type == "object":
+                        m_nd = _find_object_property_value(named_args[1], "method", code_bytes)
+                        if m_nd is not None:
+                            m_txt = _unquote_ts(_node_text(m_nd, code_bytes)).upper()
+                            if m_txt in {"GET", "POST", "PUT", "DELETE", "PATCH"}:
+                                method = m_txt
+                    if url:
+                        attach_note(caller_qn, f"@route {method} {url}")
+
+            elif callee.startswith("axios") and scope_stack and args is not None:
+                named_args = [c for c in args.children if c.is_named]
+                axios_method = callee_leaf.upper() if callee != "axios" else "GET"
+                if axios_method in {"GET", "POST", "PUT", "DELETE", "PATCH"} and named_args:
+                    url = _extract_ts_url_expr(named_args[0], code_bytes)
+                    if not url and named_args[0].type == "object":
+                        u_nd = _find_object_property_value(named_args[0], "url", code_bytes)
+                        m_nd = _find_object_property_value(named_args[0], "method", code_bytes)
+                        url = _extract_ts_url_expr(u_nd, code_bytes)
+                        if m_nd is not None:
+                            axios_method = _unquote_ts(_node_text(m_nd, code_bytes)).upper()
+                    if url:
+                        attach_note(caller_qn, f"@route {axios_method} {url}")
+
+            elif callee_leaf in {"useQuery", "useMutation"} and scope_stack and args is not None:
+                named_args = [c for c in args.children if c.is_named]
+                if named_args and named_args[0].type == "identifier":
+                    q_ident = _node_text(named_args[0], code_bytes)
+                    if q_ident:
+                        add_edge(caller_qn, q_ident, "CALLS")
 
             if callee_leaf == "dispatch" and args is not None:
                 first_arg = next((c for c in args.children if c.is_named), None)
@@ -481,6 +727,9 @@ class ReactReduxPlugin:
 
             if value_node.type == "call_expression":
                 callee_leaf = _callee_leaf(value_node.child_by_field_name("function"), code_bytes)
+                if callee_leaf == "createApi":
+                    record_create_api(var_name, node, value_node)
+                    return
                 if callee_leaf == "createSlice":
                     record_slice_call(var_name, node, value_node)
                     return
@@ -547,9 +796,62 @@ class ReactReduxPlugin:
                     sig=f"selector {var_name}",
                     doc=_extract_leading_doc_comment(node, code_bytes),
                 )
+            elif value_node.type == "call_expression":
+                callee_leaf = _callee_leaf(value_node.child_by_field_name("function"), code_bytes)
+                if callee_leaf in {"gql", "graphql"}:
+                    gql_raw = _node_text(value_node, code_bytes)
+                    m_gql = re.search(r"\b(query|mutation)\s+([A-Za-z_]\w*)", gql_raw)
+                    if m_gql:
+                        qn = f"{prefix}.{var_name}"
+                        add_symbol(
+                            name=var_name,
+                            qn=qn,
+                            kind="type_alias",
+                            node=node,
+                            sig=f"{var_name} = {m_gql.group(1)} {m_gql.group(2)}",
+                            doc=f"@graphql {m_gql.group(1)} {m_gql.group(2)}",
+                        )
             visit(value_node)
 
+        def handle_interface_or_type(node: Node) -> None:
+            name_nd = node.child_by_field_name("name")
+            if name_nd is None:
+                return
+            tname = _node_text(name_nd, code_bytes)
+            if not tname:
+                return
+            kind = "interface" if node.type == "interface_declaration" else "type_alias"
+            qn = f"{prefix}.{tname}"
+            fields = _extract_ts_dto_fields(node, code_bytes)
+            doc = _extract_leading_doc_comment(node, code_bytes)
+            if fields:
+                doc = f"{doc} @dto {tname} fields={','.join(fields)}".strip()
+            sig = _collapse_ws(_node_text(node, code_bytes))[:200]
+            add_symbol(name=tname, qn=qn, kind=kind, node=node, sig=sig, doc=doc)
+
         def visit(node: Node) -> None:
+            if node.type in {"interface_declaration", "type_alias_declaration"}:
+                handle_interface_or_type(node)
+                return
+            if node.type == "template_string" and scope_stack:
+                parent = node.parent
+                if parent is not None and parent.type == "call_expression":
+                    fn_txt = _callee_leaf(parent.child_by_field_name("function"), code_bytes)
+                    if fn_txt in {"gql", "graphql"}:
+                        m_gql = re.search(
+                            r"\b(query|mutation)\s+([A-Za-z_]\w*)",
+                            _node_text(node, code_bytes),
+                        )
+                        if m_gql:
+                            attach_note(
+                                scope_stack[-1][1],
+                                f"@graphql {m_gql.group(1)} {m_gql.group(2)}",
+                            )
+            if node.type == "member_expression" and scope_stack:
+                expr_txt = _node_text(node, code_bytes)
+                m_env = re.match(r"^(?:process\.env|import\.meta\.env)\.([A-Z0-9_]+)$", expr_txt)
+                if m_env:
+                    attach_note(scope_stack[-1][1], f"@env {m_env.group(1)}")
             if node.type == "function_declaration":
                 handle_function_declaration(node)
                 return

@@ -21,6 +21,7 @@ import datetime
 import json
 import shutil
 import subprocess
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -70,8 +71,12 @@ EXPECTED_REPOS = ("click", "flask", "httpx", "itsdangerous", "jinja", "starlette
 
 
 @pytest.fixture(scope="module")
-def ecosystem_workspace(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
-    """Onboards and indexes the 6-repo Python web ecosystem once for the module."""
+def ecosystem_workspace(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Generator[dict[str, Any], None, None]:
+    """Onboards and indexes the 6-repo Python web ecosystem into PG17 once for the module."""
+    from psycopg import connect
+
     unseen_dir = resolve_local_data_dir("data/unseen_repos")
     for repo_name in EXPECTED_REPOS:
         repo_path = unseen_dir / repo_name
@@ -88,53 +93,66 @@ def ecosystem_workspace(tmp_path_factory: pytest.TempPathFactory) -> dict[str, A
         Path(__file__).resolve().parents[1] / "domains", domains_dir, dirs_exist_ok=True
     )
 
-    init_res = cmd_init_domain(
-        domain_id=domain_id,
-        kind="code",
-        display_name="Python Web Ecosystem Scout (6 Repos)",
-        domains_dir=domains_dir,
-        source_dir=unseen_dir,
-    )
-    distill_res = cmd_distill_custom_domain(
-        domain_id=domain_id,
-        source_dir=unseen_dir,
-        num_samples=80,
-        domains_dir=domains_dir,
-        data_dir=data_dir,
-    )
+    try:
+        init_res = cmd_init_domain(
+            domain_id=domain_id,
+            kind="code",
+            display_name="Python Web Ecosystem Scout (6 Repos)",
+            domains_dir=domains_dir,
+            source_dir=unseen_dir,
+        )
+        distill_res = cmd_distill_custom_domain(
+            domain_id=domain_id,
+            source_dir=unseen_dir,
+            num_samples=80,
+            domains_dir=domains_dir,
+            data_dir=data_dir,
+        )
 
-    corpus_index_path = domains_dir / domain_id / "corpus_index.json"
-    register_custom_corpus_index(domain_id, corpus_index_path)
+        sync_manifest_path = domains_dir / domain_id / "sync_manifest.json"
+        register_custom_corpus_index(domain_id, sync_manifest_path)
 
-    registry = DomainRegistry(domains_dir=domains_dir)
-    registry.load_all()
-    in_mem_repo = InMemoryRLSRepository()
-    bound_repo = BoundGraphRepository(in_mem_repo)
-    workflow = ScoutWorkflow(registry=registry, repo=bound_repo)
+        registry = DomainRegistry(domains_dir=domains_dir)
+        registry.load_all()
+        in_mem_repo = InMemoryRLSRepository()
+        bound_repo = BoundGraphRepository(in_mem_repo)
+        workflow = ScoutWorkflow(registry=registry, repo=bound_repo)
 
-    all_scopes = ["public_eng", "public_quant", f"domain:{domain_id}"] + [
-        f"repo:{r}" for r in EXPECTED_REPOS
-    ]
-    principal = PrincipalContext(
-        user_id="staff_multi_repo_tester",
-        role=RoleType.ENGINEER,
-        allowed_scopes=all_scopes,
-    )
+        all_scopes = ["public_eng", "public_quant", f"domain:{domain_id}"] + [
+            f"repo:{r}" for r in EXPECTED_REPOS
+        ]
+        principal = PrincipalContext(
+            user_id="staff_multi_repo_tester",
+            role=RoleType.ENGINEER,
+            allowed_scopes=all_scopes,
+        )
 
-    return {
-        "root": root,
-        "domains_dir": domains_dir,
-        "data_dir": data_dir,
-        "domain_id": domain_id,
-        "init_res": init_res,
-        "distill_res": distill_res,
-        "corpus_index_path": corpus_index_path,
-        "registry": registry,
-        "in_mem_repo": in_mem_repo,
-        "bound_repo": bound_repo,
-        "workflow": workflow,
-        "principal": principal,
-    }
+        yield {
+            "root": root,
+            "domains_dir": domains_dir,
+            "data_dir": data_dir,
+            "domain_id": domain_id,
+            "init_res": init_res,
+            "distill_res": distill_res,
+            "sync_manifest_path": sync_manifest_path,
+            "registry": registry,
+            "in_mem_repo": in_mem_repo,
+            "bound_repo": bound_repo,
+            "workflow": workflow,
+            "principal": principal,
+        }
+    finally:
+        with connect(ScoutSettings().db_admin_url) as conn:
+            for tbl in (
+                "ast_edges",
+                "ast_symbols",
+                "code_files",
+                "repositories",
+                "doc_chunks",
+                "domain_packs",
+            ):
+                conn.execute(f"DELETE FROM {tbl} WHERE domain_id = %s", (domain_id,))
+            conn.commit()
 
 
 # ============================================================================
@@ -152,8 +170,16 @@ def test_tier0_multi_repo_ecosystem_onboarding_scale(
     assert distill_res["edges_indexed"] >= 40000
     assert distill_res["train_samples"] + distill_res["valid_samples"] == 80
 
-    idx_data = json.loads(ecosystem_workspace["corpus_index_path"].read_text(encoding="utf-8"))
-    repos_indexed = {cf["repo_name"] for cf in idx_data["code_files"]}
+    manifest_path: Path = ecosystem_workspace["sync_manifest_path"]
+    assert manifest_path.exists()
+    assert not manifest_path.with_name("corpus_index.json").exists()
+    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest_data["storage_backend"] == "postgresql_17_rls"
+
+    pg_files = BoundGraphRepository(PostgresRLSRepository()).list_visible_code_files(
+        ecosystem_workspace["principal"], ecosystem_workspace["domain_id"]
+    )
+    repos_indexed = {cf.repo_name for cf in pg_files}
     assert set(EXPECTED_REPOS).issubset(repos_indexed)
 
     # Verify 5-candidate distractor prompt structure in train.jsonl
@@ -168,58 +194,78 @@ def test_tier0_cli_readme_flag_parity(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Verifies exact README.md CLI flags (`--domain-type`, `--source-dir`, `query`) work."""
+    from psycopg import connect
+
     domains_dir = tmp_path / "domains"
     data_dir = tmp_path / "data"
     shutil.copytree(Path("domains"), domains_dir, dirs_exist_ok=True)
 
-    rc_init = main(
-        [
-            "init-domain",
-            "--domain-id",
-            "itsdangerous_custom_scout",
-            "--domain-type",
-            "code",
-            "--source-dir",
-            str(UNSEEN_REPOS_DIR / "itsdangerous"),
-            "--domains-dir",
-            str(domains_dir),
-        ]
-    )
-    assert rc_init == 0
+    try:
+        rc_init = main(
+            [
+                "init-domain",
+                "--domain-id",
+                "itsdangerous_custom_scout",
+                "--domain-type",
+                "code",
+                "--source-dir",
+                str(UNSEEN_REPOS_DIR / "itsdangerous"),
+                "--domains-dir",
+                str(domains_dir),
+            ]
+        )
+        assert rc_init == 0
 
-    # Distill without passing --source-dir (reads source_dir recorded in domain.yaml!)
-    rc_distill = main(
-        [
-            "distill",
-            "--domain-id",
-            "itsdangerous_custom_scout",
-            "--num-samples",
-            "15",
-            "--domains-dir",
-            str(domains_dir),
-            "--data-dir",
-            str(data_dir),
-        ]
-    )
-    assert rc_distill == 0
+        # Distill without passing --source-dir (reads source_dir recorded in domain.yaml!)
+        rc_distill = main(
+            [
+                "distill",
+                "--domain-id",
+                "itsdangerous_custom_scout",
+                "--num-samples",
+                "15",
+                "--domains-dir",
+                str(domains_dir),
+                "--data-dir",
+                str(data_dir),
+            ]
+        )
+        assert rc_distill == 0
+        assert (domains_dir / "itsdangerous_custom_scout" / "sync_manifest.json").exists()
+        assert not (domains_dir / "itsdangerous_custom_scout" / "corpus_index.json").exists()
 
-    capsys.readouterr()
-    rc_query = main(
-        [
-            "query",
-            "--domain-id",
-            "itsdangerous_custom_scout",
-            "--prompt",
-            "Inspect `TimestampSigner.unsign` in `itsdangerous/timed.py`.",
-            "--domains-dir",
-            str(domains_dir),
-        ]
-    )
-    assert rc_query == 0
-    query_out = json.loads(capsys.readouterr().out)
-    assert query_out["result_type"] == "ImplementationContextPack"
-    assert query_out["preflight_report"]["passed"] is True
-    assert any("timed.py" in s["file_path"] for s in query_out["code_slices"])
+        capsys.readouterr()
+        rc_query = main(
+            [
+                "query",
+                "--domain-id",
+                "itsdangerous_custom_scout",
+                "--prompt",
+                "Inspect `TimestampSigner.unsign` in `itsdangerous/timed.py`.",
+                "--domains-dir",
+                str(domains_dir),
+            ]
+        )
+        assert rc_query == 0
+        query_out = json.loads(capsys.readouterr().out)
+        assert query_out["result_type"] == "ImplementationContextPack"
+        assert query_out["preflight_report"]["passed"] is True
+        assert any("timed.py" in s["file_path"] for s in query_out["code_slices"])
+    finally:
+        with connect(ScoutSettings().db_admin_url) as conn:
+            for tbl in (
+                "ast_edges",
+                "ast_symbols",
+                "code_files",
+                "repositories",
+                "doc_chunks",
+                "domain_packs",
+            ):
+                conn.execute(
+                    f"DELETE FROM {tbl} WHERE domain_id = %s",
+                    ("itsdangerous_custom_scout",),
+                )
+            conn.commit()
 
 
 # ============================================================================

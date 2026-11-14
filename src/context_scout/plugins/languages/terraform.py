@@ -233,7 +233,137 @@ class TerraformPlugin:
             module_symbol_kind="class",
         )
         self.last_parse_diagnostics = diag
+        if not diag.abstained:
+            symbols, edges = self._enrich_hcl_contracts(
+                code=code,
+                module_prefix=prefix,
+                repo_name=repo_name,
+                symbols=symbols,
+                edges=edges,
+            )
         return symbols, edges
+
+    def _enrich_hcl_contracts(
+        self,
+        *,
+        code: str,
+        module_prefix: str,
+        repo_name: str,
+        symbols: list[ParsedSymbol],
+        edges: list[ParsedEdge],
+    ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
+        """Extract TF_VAR_* and resource env/service metadata using tree-sitter-hcl."""
+        code_bytes = code.encode("utf-8")
+        tree = _get_hcl_parser().parse(code_bytes)
+        sym_by_qn: dict[str, int] = {sym.qualified_name: idx for idx, sym in enumerate(symbols)}
+        updated_symbols = list(symbols)
+        updated_edges = list(edges)
+
+        def collect_env_names(node: Node) -> list[str]:
+            envs: list[str] = []
+            for child in node.children:
+                if child.type == "block":
+                    btype, _ = _block_type_and_labels(child, code_bytes)
+                    bbody = _find_body_node(child)
+                    if bbody is not None:
+                        if btype in {"env", "environment"}:
+                            attrs = _extract_attribute_strings(bbody, code_bytes)
+                            if attrs.get("name"):
+                                envs.append(attrs["name"])
+                        envs.extend(collect_env_names(bbody))
+                elif child.type == "attribute":
+                    key_nd = next((c for c in child.children if c.type == "identifier"), None)
+                    expr_nd = next((c for c in child.children if c.type == "expression"), None)
+                    if key_nd is not None and expr_nd is not None:
+                        key_name = _node_text(key_nd, code_bytes)
+                        if key_name in {"env_vars", "environment_variables", "env", "variables"}:
+                            obj_nd = next(
+                                (c for c in expr_nd.children if c.type == "object"),
+                                None,
+                            )
+                            if obj_nd is None:
+                                for sub in expr_nd.children:
+                                    if sub.type == "collection_value":
+                                        obj_nd = next(
+                                            (c for c in sub.children if c.type == "object"),
+                                            None,
+                                        )
+                                        if obj_nd is not None:
+                                            break
+                            if obj_nd is not None:
+                                envs.extend(_extract_object_strings(obj_nd, code_bytes).keys())
+                elif child.type == "body":
+                    envs.extend(collect_env_names(child))
+            return envs
+
+        def walk_hcl(node: Node) -> None:
+            for child in node.children:
+                if child.type == "block":
+                    btype, labels = _block_type_and_labels(child, code_bytes)
+                    bbody = _find_body_node(child)
+                    if btype == "variable" and labels:
+                        vname = labels[0]
+                        vqn = f"{module_prefix}.var.{vname}"
+                        tag = f"@env TF_VAR_{vname}"
+                        if vqn in sym_by_qn:
+                            idx = sym_by_qn[vqn]
+                            prev = updated_symbols[idx]
+                            doc = f"{prev.docstring} {tag}".strip()
+                            updated_symbols[idx] = prev.model_copy(
+                                update={"docstring": doc, "contextual_summary": doc}
+                            )
+                        else:
+                            updated_symbols.append(
+                                ParsedSymbol(
+                                    name=f"var.{vname}",
+                                    qualified_name=vqn,
+                                    bare_name=f"var.{vname}",
+                                    symbol_kind="type_alias",
+                                    start_line=child.start_point[0] + 1,
+                                    end_line=child.end_point[0] + 1,
+                                    start_byte=child.start_byte,
+                                    end_byte=child.end_byte,
+                                    signature=f'variable "{vname}"',
+                                    signature_skeleton=f'variable "{vname}"',
+                                    docstring=tag,
+                                    repo_name=repo_name,
+                                )
+                            )
+                    elif btype in {"resource", "data", "module"} and labels and bbody is not None:
+                        target_qn = (
+                            f"{module_prefix}.module.{labels[0]}"
+                            if btype == "module"
+                            else (
+                                f"{module_prefix}.{labels[0]}.{labels[1]}"
+                                if len(labels) >= 2
+                                else ""
+                            )
+                        )
+                        attrs = _extract_attribute_strings(bbody, code_bytes)
+                        envs = collect_env_names(bbody)
+                        tags: list[str] = []
+                        svc_name = attrs.get("name") or attrs.get("service") or ""
+                        if svc_name:
+                            tags.append(f"@service {svc_name}")
+                        for env_key in dict.fromkeys(envs):
+                            tags.append(f"@env {env_key}")
+                        if target_qn in sym_by_qn and tags:
+                            idx = sym_by_qn[target_qn]
+                            prev = updated_symbols[idx]
+                            merged_doc = f"{prev.docstring} {' '.join(tags)}".strip()
+                            updated_symbols[idx] = prev.model_copy(
+                                update={
+                                    "docstring": merged_doc,
+                                    "contextual_summary": merged_doc,
+                                }
+                            )
+                    elif bbody is not None:
+                        walk_hcl(bbody)
+                elif child.type == "body":
+                    walk_hcl(child)
+
+        walk_hcl(tree.root_node)
+        return updated_symbols, updated_edges
 
     def _extract_tf_json(
         self,
@@ -324,7 +454,7 @@ class TerraformPlugin:
             add_sym(
                 f"var.{vname}",
                 f"{module_prefix}.var.{vname}",
-                "variable",
+                "type_alias",
                 f'variable "{vname}"',
             )
 
@@ -332,7 +462,7 @@ class TerraformPlugin:
             add_sym(
                 f"output.{oname}",
                 f"{module_prefix}.output.{oname}",
-                "variable",
+                "type_alias",
                 f'output "{oname}"',
             )
 
