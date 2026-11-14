@@ -1,121 +1,163 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
-import {
-  RoleSwitcher,
-  ROLE_DEFAULT_SCOPES,
-} from "../components/RoleSwitcher";
-import { PrincipalContext } from "../types/contracts";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ROLE_DEFAULT_SCOPES, RoleSwitcher } from "../components/RoleSwitcher";
+import { TEST_ENGINEER_PRINCIPAL } from "./fixtures";
 
-describe("RoleSwitcher Component", () => {
-  const initialPrincipal: PrincipalContext = {
-    user_id: "demo_engineer",
-    role: "engineer",
-    allowed_scopes: ROLE_DEFAULT_SCOPES.engineer,
-    max_session_paid_tokens: 16000,
-  };
+afterEach(() => {
+  cleanup();
+});
 
-  it("renders principal user ID and role buttons", () => {
-    const onPrincipalChange = vi.fn();
-    render(
+describe("RoleSwitcher", () => {
+  it("renders personas, default scopes, and Bearer status pill", () => {
+    const { rerender } = render(
       <RoleSwitcher
-        principal={initialPrincipal}
-        onPrincipalChange={onPrincipalChange}
+        principal={TEST_ENGINEER_PRINCIPAL}
+        onChangePrincipal={vi.fn()}
+        authStatus="ready"
       />
     );
 
-    const input = screen.getByTestId("principal-user-id-input") as HTMLInputElement;
-    expect(input.value).toBe("demo_engineer");
-
-    expect(screen.getByTestId("role-btn-engineer")).toBeInTheDocument();
-    expect(screen.getByTestId("role-btn-quant_researcher")).toBeInTheDocument();
-    expect(screen.getByTestId("role-btn-product_manager")).toBeInTheDocument();
-    expect(screen.getByTestId("role-btn-compliance_officer")).toBeInTheDocument();
-  });
-
-  it("renders all default scopes for engineer role", () => {
-    const onPrincipalChange = vi.fn();
-    render(
-      <RoleSwitcher
-        principal={initialPrincipal}
-        onPrincipalChange={onPrincipalChange}
-      />
+    expect(screen.getByTestId("role-switcher")).toBeInTheDocument();
+    expect(screen.getByTestId("auth-status-badge")).toHaveTextContent(
+      "Bearer Signed"
+    );
+    expect(screen.getByTestId("active-scopes-list")).toHaveTextContent(
+      "public_eng, public_quant"
     );
 
-    expect(screen.getByTestId("scope-chip-public_eng")).toBeInTheDocument();
-    expect(
-      screen.getByTestId("scope-chip-repo:trading_strategies")
-    ).toBeInTheDocument();
-    expect(screen.getByTestId("scope-chip-public_quant")).toBeInTheDocument();
-  });
-
-  it("triggers onPrincipalChange when switching to quant_researcher", () => {
-    const onPrincipalChange = vi.fn();
-    render(
+    rerender(
       <RoleSwitcher
-        principal={initialPrincipal}
-        onPrincipalChange={onPrincipalChange}
+        principal={TEST_ENGINEER_PRINCIPAL}
+        onChangePrincipal={vi.fn()}
+        authStatus="authenticating"
       />
     );
-
-    const quantBtn = screen.getByTestId("role-btn-quant_researcher");
-    fireEvent.click(quantBtn);
-
-    expect(onPrincipalChange).toHaveBeenCalledTimes(1);
-    expect(onPrincipalChange).toHaveBeenCalledWith(
-      expect.objectContaining({
-        role: "quant_researcher",
-        allowed_scopes: expect.arrayContaining([
-          "public_quant",
-          "quant_restricted",
-          "corpus:quant_papers",
-        ]),
-      })
+    expect(screen.getByTestId("auth-status-badge")).toHaveTextContent(
+      "Minting..."
     );
   });
 
-  it("triggers onPrincipalChange when switching to compliance_officer", () => {
-    const onPrincipalChange = vi.fn();
+  it("switches persona to product_manager with its default scopes and updates user ID", () => {
+    const onChange = vi.fn();
     render(
       <RoleSwitcher
-        principal={initialPrincipal}
-        onPrincipalChange={onPrincipalChange}
+        principal={TEST_ENGINEER_PRINCIPAL}
+        onChangePrincipal={onChange}
       />
     );
 
-    const complianceBtn = screen.getByTestId("role-btn-compliance_officer");
-    fireEvent.click(complianceBtn);
+    fireEvent.click(screen.getByTestId("role-btn-product_manager"));
+    expect(onChange).toHaveBeenCalledWith({
+      ...TEST_ENGINEER_PRINCIPAL,
+      role: "product_manager",
+      allowed_scopes: ROLE_DEFAULT_SCOPES.product_manager,
+    });
 
-    expect(onPrincipalChange).toHaveBeenCalledTimes(1);
-    expect(onPrincipalChange).toHaveBeenCalledWith(
-      expect.objectContaining({
-        role: "compliance_officer",
-        allowed_scopes: expect.arrayContaining([
-          "public_eng",
-          "public_quant",
-          "quant_restricted",
-          "repo:trading_strategies",
-        ]),
-      })
-    );
+    fireEvent.change(screen.getByTestId("principal-user-id-input"), {
+      target: { value: "pm_alice" },
+    });
+    expect(onChange).toHaveBeenCalledWith({
+      ...TEST_ENGINEER_PRINCIPAL,
+      user_id: "pm_alice",
+    });
   });
 
-  it("triggers onPrincipalChange when editing the user ID input", () => {
-    const onPrincipalChange = vi.fn();
+  it("switches to quant_researcher and compliance_officer with expected RBAC default scopes", () => {
+    const onChange = vi.fn();
     render(
       <RoleSwitcher
-        principal={initialPrincipal}
-        onPrincipalChange={onPrincipalChange}
+        principal={TEST_ENGINEER_PRINCIPAL}
+        onChangePrincipal={onChange}
       />
     );
 
-    const input = screen.getByTestId("principal-user-id-input");
-    fireEvent.change(input, { target: { value: "lead_quant_42" } });
+    fireEvent.click(screen.getByTestId("role-btn-quant_researcher"));
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...TEST_ENGINEER_PRINCIPAL,
+      role: "quant_researcher",
+      allowed_scopes: ["public_quant"],
+    });
 
-    expect(onPrincipalChange).toHaveBeenCalledTimes(1);
-    expect(onPrincipalChange).toHaveBeenCalledWith(
-      expect.objectContaining({
-        user_id: "lead_quant_42",
-      })
+    fireEvent.click(screen.getByTestId("role-btn-compliance_officer"));
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...TEST_ENGINEER_PRINCIPAL,
+      role: "compliance_officer",
+      allowed_scopes: ["public_eng", "public_quant"],
+    });
+  });
+
+  it("supports toggling scopes, resetting defaults, and switching to valid unscoped_probe", () => {
+    const onChange = vi.fn();
+    render(
+      <RoleSwitcher
+        principal={TEST_ENGINEER_PRINCIPAL}
+        onChangePrincipal={onChange}
+      />
     );
+
+    fireEvent.click(screen.getByTestId("scope-chip-public_eng"));
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...TEST_ENGINEER_PRINCIPAL,
+      allowed_scopes: ["public_quant"],
+    });
+
+    fireEvent.click(screen.getByTestId("scope-chip-restricted_risk"));
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...TEST_ENGINEER_PRINCIPAL,
+      allowed_scopes: ["public_eng", "public_quant", "restricted_risk"],
+    });
+
+    fireEvent.click(screen.getByTestId("unscoped-probe-btn"));
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...TEST_ENGINEER_PRINCIPAL,
+      allowed_scopes: ["unscoped_probe"],
+    });
+
+    fireEvent.click(screen.getByTestId("reset-scopes-btn"));
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...TEST_ENGINEER_PRINCIPAL,
+      allowed_scopes: ROLE_DEFAULT_SCOPES.engineer,
+    });
+  });
+
+  it("never emits an empty allowed_scopes array when toggling off the last active scope", () => {
+    const onChange = vi.fn();
+    render(
+      <RoleSwitcher
+        principal={{
+          ...TEST_ENGINEER_PRINCIPAL,
+          allowed_scopes: ["public_quant"],
+        }}
+        onChangePrincipal={onChange}
+      />
+    );
+
+    fireEvent.click(screen.getByTestId("scope-chip-public_quant"));
+    expect(onChange).toHaveBeenCalledWith({
+      ...TEST_ENGINEER_PRINCIPAL,
+      allowed_scopes: ["unscoped_probe"],
+    });
+  });
+
+  it("displays explicit auth error banner with retry button when signing fails", () => {
+    const onRetry = vi.fn();
+    render(
+      <RoleSwitcher
+        principal={TEST_ENGINEER_PRINCIPAL}
+        onChangePrincipal={vi.fn()}
+        authStatus="error"
+        authError="Session endpoint rejected in production"
+        onRetryAuth={onRetry}
+      />
+    );
+
+    expect(screen.getByTestId("auth-status-badge")).toHaveTextContent(
+      "Auth Failed"
+    );
+    expect(screen.getByTestId("auth-error-banner")).toHaveTextContent(
+      "Session endpoint rejected in production"
+    );
+    fireEvent.click(screen.getByTestId("retry-auth-btn"));
+    expect(onRetry).toHaveBeenCalledTimes(1);
   });
 });

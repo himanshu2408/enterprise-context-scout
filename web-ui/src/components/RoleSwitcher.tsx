@@ -1,98 +1,185 @@
 import React from "react";
-import { Shield, User, KeyRound, Check } from "lucide-react";
+import { KeyRound, Lock, RotateCcw, ShieldCheck, User } from "lucide-react";
 import { PrincipalContext, RoleType } from "../types/contracts";
 
 export interface RoleSwitcherProps {
   principal: PrincipalContext;
-  onPrincipalChange: (principal: PrincipalContext) => void;
+  onChangePrincipal: (next: PrincipalContext) => void;
+  authStatus?: "authenticating" | "ready" | "error";
+  authError?: string | null;
+  onRetryAuth?: () => void;
 }
 
 export const ROLE_DEFAULT_SCOPES: Record<RoleType, string[]> = {
-  engineer: ["public_eng", "repo:trading_strategies", "public_quant"],
-  quant_researcher: ["public_quant", "quant_restricted", "corpus:quant_papers"],
+  engineer: ["public_eng", "public_quant"],
+  quant_researcher: ["public_quant"],
   product_manager: ["public_eng", "public_quant"],
-  compliance_officer: [
-    "public_eng",
-    "public_quant",
-    "quant_restricted",
-    "repo:trading_strategies",
-  ],
+  compliance_officer: ["public_eng", "public_quant"],
 };
 
-const ROLE_DISPLAY_NAMES: Record<RoleType, string> = {
-  engineer: "Lead Quantitative Engineer",
-  quant_researcher: "Senior Quant Researcher",
-  product_manager: "Trading Product Manager",
-  compliance_officer: "Enterprise Compliance Officer",
-};
+const ROLE_OPTIONS: Array<{
+  role: RoleType;
+  label: string;
+  subtitle: string;
+}> = [
+  {
+    role: "engineer",
+    label: "Engineer",
+    subtitle: "Code + AST + Sandbox Patch",
+  },
+  {
+    role: "quant_researcher",
+    label: "Quant / Research",
+    subtitle: "Papers, Formulas & Specs",
+  },
+  {
+    role: "product_manager",
+    label: "Product Manager",
+    subtitle: "Read-Only Architecture",
+  },
+  {
+    role: "compliance_officer",
+    label: "Compliance",
+    subtitle: "Audit & Grounding Checks",
+  },
+];
+
+const AVAILABLE_SCOPES: Array<{ scope: string; label: string }> = [
+  { scope: "public_eng", label: "public_eng" },
+  { scope: "public_quant", label: "public_quant" },
+  { scope: "restricted_risk", label: "restricted_risk" },
+];
 
 export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
   principal,
-  onPrincipalChange,
+  onChangePrincipal,
+  authStatus = "ready",
+  authError = null,
+  onRetryAuth,
 }) => {
-  const handleRoleSelect = (role: RoleType): void => {
-    const scopes = ROLE_DEFAULT_SCOPES[role];
-    onPrincipalChange({
+  const handleRoleSelect = (nextRole: RoleType): void => {
+    onChangePrincipal({
       ...principal,
-      role,
-      allowed_scopes: scopes,
+      role: nextRole,
+      allowed_scopes: [...ROLE_DEFAULT_SCOPES[nextRole]],
+    });
+  };
+
+  const handleToggleScope = (scope: string): void => {
+    const cleaned = principal.allowed_scopes.filter(
+      (s) => s !== "unscoped_probe"
+    );
+    const exists = cleaned.includes(scope);
+    const next = exists
+      ? cleaned.filter((s) => s !== scope)
+      : [...cleaned, scope];
+
+    onChangePrincipal({
+      ...principal,
+      allowed_scopes: next.length > 0 ? next : ["unscoped_probe"],
+    });
+  };
+
+  const handleUnscopedProbe = (): void => {
+    onChangePrincipal({
+      ...principal,
+      allowed_scopes: ["unscoped_probe"],
+    });
+  };
+
+  const handleResetDefaultScopes = (): void => {
+    onChangePrincipal({
+      ...principal,
+      allowed_scopes: [...ROLE_DEFAULT_SCOPES[principal.role]],
     });
   };
 
   const handleUserIdChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
-    onPrincipalChange({
+    onChangePrincipal({
       ...principal,
       user_id: e.target.value,
     });
   };
 
+  const isUnscopedProbe =
+    principal.allowed_scopes.length === 1 &&
+    principal.allowed_scopes[0] === "unscoped_probe";
+
   return (
-    <div className="card role-switcher-card" data-testid="role-switcher">
-      <div className="card-header">
-        <div className="card-title">
-          <Shield className="icon icon-sky" size={18} />
-          <span>Out-of-Band Principal Identity (SEC-04)</span>
+    <section className="panel scope-card role-scope-card" data-testid="role-switcher">
+      <div className="panel-header panel-header-compact">
+        <div className="panel-title-row">
+          <User size={15} className="icon-accent" />
+          <h2 className="panel-title">Persona &amp; RBAC Scope</h2>
         </div>
-        <div className="badge badge-purple">
-          Max Session: {principal.max_session_paid_tokens.toLocaleString()} tokens
-        </div>
+        <span
+          className={`status-pill ${
+            authStatus === "ready"
+              ? "status-pill-success"
+              : authStatus === "authenticating"
+                ? "status-pill-info"
+                : "status-pill-danger"
+          }`}
+          data-testid="auth-status-badge"
+        >
+          <KeyRound size={12} />
+          {authStatus === "ready"
+            ? "Bearer Signed"
+            : authStatus === "authenticating"
+              ? "Minting..."
+              : "Auth Failed"}
+        </span>
       </div>
 
-      <div className="role-switcher-grid">
-        <div className="input-group">
-          <label htmlFor="principal-user-id" className="label">
-            <User size={14} className="icon-muted" /> Principal ID (X-Principal-User-Id)
+      {authStatus === "error" && authError && (
+        <div className="inline-alert inline-alert-danger" data-testid="auth-error-banner">
+          <span>{authError}</span>
+          {onRetryAuth && (
+            <button
+              type="button"
+              className="btn-inline-retry"
+              onClick={onRetryAuth}
+              data-testid="retry-auth-btn"
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="scope-role-top">
+        <div className="user-id-inline">
+          <label htmlFor="principal-user-id" className="field-label">
+            User ID
           </label>
           <input
             id="principal-user-id"
-            data-testid="principal-user-id-input"
             type="text"
-            className="input-text"
+            className="text-input text-input-compact"
             value={principal.user_id}
             onChange={handleUserIdChange}
             placeholder="demo_engineer"
+            data-testid="principal-user-id-input"
           />
         </div>
 
-        <div className="input-group">
-          <label className="label">
-            <KeyRound size={14} className="icon-muted" /> Role Profile
-          </label>
-          <div className="role-buttons" role="radiogroup" aria-label="Role selector">
-            {(Object.keys(ROLE_DEFAULT_SCOPES) as RoleType[]).map((role) => {
-              const isSelected = principal.role === role;
+        <div className="role-pills-block">
+          <span className="field-label">Role Persona</span>
+          <div className="role-grid role-grid-compact">
+            {ROLE_OPTIONS.map((opt) => {
+              const active = principal.role === opt.role;
               return (
                 <button
-                  key={role}
+                  key={opt.role}
                   type="button"
-                  data-testid={`role-btn-${role}`}
-                  className={`btn-pill ${isSelected ? "btn-pill-active" : ""}`}
-                  onClick={() => handleRoleSelect(role)}
-                  aria-checked={isSelected}
-                  role="radio"
+                  className={`role-btn role-btn-compact ${active ? "role-btn-active" : ""}`}
+                  onClick={() => handleRoleSelect(opt.role)}
+                  data-testid={`role-btn-${opt.role}`}
+                  aria-pressed={active}
+                  title={opt.subtitle}
                 >
-                  {isSelected && <Check size={14} className="mr-1" />}
-                  <span>{ROLE_DISPLAY_NAMES[role]}</span>
+                  <span className="role-btn-title">{opt.label}</span>
+                  <span className="role-btn-sub">{opt.subtitle}</span>
                 </button>
               );
             })}
@@ -100,31 +187,64 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
         </div>
       </div>
 
-      <div className="scopes-container">
-        <div className="scopes-label">Active RBAC / PostgreSQL 17 RLS Scopes:</div>
-        <div className="scopes-list" data-testid="active-scopes-list">
-          {principal.allowed_scopes.map((scope) => {
-            const isRestricted =
-              scope.includes("restricted") || scope.includes("strategies");
-            const isQuant = scope.includes("quant");
-            const badgeClass = isRestricted
-              ? "badge-amber"
-              : isQuant
-                ? "badge-purple"
-                : "badge-sky";
+      <div className="scope-rls-row">
+        <div className="scope-rls-controls">
+          <span className="field-label scope-inline-label">RLS Scopes</span>
+          <div className="scope-chips-row">
+            {AVAILABLE_SCOPES.map(({ scope, label }) => {
+              const selected = principal.allowed_scopes.includes(scope);
+              return (
+                <button
+                  key={scope}
+                  type="button"
+                  className={`scope-chip ${selected ? "scope-chip-active" : ""}`}
+                  onClick={() => handleToggleScope(scope)}
+                  data-testid={`scope-chip-${scope}`}
+                  aria-pressed={selected}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+          <div className="scope-actions">
+            <button
+              type="button"
+              className={`link-action ${isUnscopedProbe ? "link-action-active" : ""}`}
+              onClick={handleUnscopedProbe}
+              data-testid="unscoped-probe-btn"
+              title="Simulate caller with zero matching corpus scopes"
+            >
+              Unscoped Probe
+            </button>
+            <button
+              type="button"
+              className="link-action"
+              onClick={handleResetDefaultScopes}
+              data-testid="reset-scopes-btn"
+            >
+              <RotateCcw size={11} /> Reset
+            </button>
+          </div>
+        </div>
 
-            return (
-              <span
-                key={scope}
-                data-testid={`scope-chip-${scope}`}
-                className={`badge ${badgeClass}`}
-              >
-                {scope}
-              </span>
-            );
-          })}
+        <div className="scope-rls-meta">
+          <div className="active-scopes-bar active-scopes-bar-inline" data-testid="active-scopes-list">
+            <Lock size={12} className="icon-muted" />
+            <span>
+              Scopes: <code>{principal.allowed_scopes.join(", ")}</code>
+            </span>
+          </div>
+          <div className="rbac-footnote rbac-footnote-inline">
+            <ShieldCheck size={12} className="icon-success" />
+            <span>
+              {principal.role === "engineer"
+                ? "Sandbox Patch Handoff enabled"
+                : "Read-only Q&A mode"}
+            </span>
+          </div>
         </div>
       </div>
-    </div>
+    </section>
   );
 };
