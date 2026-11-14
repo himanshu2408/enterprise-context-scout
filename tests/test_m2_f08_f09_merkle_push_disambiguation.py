@@ -3,8 +3,10 @@
 import subprocess
 import time
 from pathlib import Path
+from typing import Any, Final
 from uuid import uuid4
 
+import psycopg
 import pytest
 
 from context_scout.ast_engine.extractor import ASTExtractor, match_symbol_identifier
@@ -219,9 +221,7 @@ def test_f08_inward_edge_preservation_on_file_modification(
 def test_f09_cross_repo_symbol_disambiguation(extractor: ASTExtractor) -> None:
     """Verifies that repo_name qualifies symbols and prevents multi-repo collisions."""
     code_auth = (
-        "class TokenValidator:\n"
-        "    def validate(self, token: str) -> bool:\n"
-        "        return True\n"
+        "class TokenValidator:\n    def validate(self, token: str) -> bool:\n        return True\n"
     )
 
     symbols_billing, _edges_billing = extractor.parse_source(
@@ -256,9 +256,7 @@ def test_f09_cross_repo_symbol_disambiguation(extractor: ASTExtractor) -> None:
     )
 
     # Verify match_symbol_identifier matches bare and qualified forms
-    assert match_symbol_identifier(
-        "TokenValidator", billing_syms["TokenValidator"].qualified_name
-    )
+    assert match_symbol_identifier("TokenValidator", billing_syms["TokenValidator"].qualified_name)
     assert match_symbol_identifier(
         "services.auth.TokenValidator", billing_syms["TokenValidator"].qualified_name
     )
@@ -367,6 +365,27 @@ def test_f09_two_phase_cross_repo_linking_and_scoping(
     assert updated_edge.is_cross_repo is True
 
 
+F08_F09_SESSION_DOMAIN_PREFIX: Final[str] = "eval_m2_f08_f09_"
+
+
+def cleanup_f08_f09_session_domain(
+    conn: psycopg.Connection[Any],
+    session_domain: str,
+    expected_prefix: str = F08_F09_SESSION_DOMAIN_PREFIX,
+) -> None:
+    """Strictly deletes test rows scoped to a single session domain_id."""
+    if not session_domain.startswith(expected_prefix):
+        raise ValueError(
+            f"Refusing to clean up domain_id={session_domain!r}: "
+            f"must start with {expected_prefix!r}"
+        )
+    conn.execute("DELETE FROM ast_edges WHERE domain_id = %s;", (session_domain,))
+    conn.execute("DELETE FROM ast_symbols WHERE domain_id = %s;", (session_domain,))
+    conn.execute("DELETE FROM code_files WHERE domain_id = %s;", (session_domain,))
+    conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (session_domain,))
+    conn.commit()
+
+
 def test_f09_live_postgres_cross_repo_reconciler() -> None:
     """Verifies 2-phase cross-repo resolution query against live PostgreSQL 17."""
     settings = ScoutSettings()
@@ -374,7 +393,7 @@ def test_f09_live_postgres_cross_repo_reconciler() -> None:
     pg_repo = PostgresRLSRepository()
     indexer = GitMerkleIndexer()
 
-    domain_id = "trading_code_scout"
+    domain_id = f"{F08_F09_SESSION_DOMAIN_PREFIX}{uuid4().hex[:8]}"
     scopes = ["public_eng"]
 
     app_principal = PrincipalContext(
@@ -383,110 +402,233 @@ def test_f09_live_postgres_cross_repo_reconciler() -> None:
         allowed_scopes=scopes,
     )
 
-    with app_mgr.scoped_transaction(app_principal, enable_hnsw_iterative_scan=False) as conn:
-        fid_auth = uuid4()
-        fid_order = uuid4()
-        repo_auth_name = f"auth-lib-{fid_auth.hex[:4]}"
-        repo_order_name = f"order-app-{fid_order.hex[:4]}"
+    try:
+        with psycopg.connect(settings.db_admin_url) as admin_conn:
+            admin_conn.execute(
+                """
+                INSERT INTO domain_packs (
+                    domain_id, display_name, lora_adapter_id,
+                    primary_truth_source, freshness_half_life_days, config_json
+                )
+                VALUES (%s, 'Eval F09 Reconciler', 'none', 'code', 180, '{"f09_test": true}'::jsonb)
+                ON CONFLICT (domain_id) DO NOTHING;
+                """,
+                (domain_id,),
+            )
+            admin_conn.commit()
 
-        pg_repo.insert_code_file(
-            conn,
-            CodeFileRecord(
-                file_id=fid_auth,
-                domain_id=domain_id,
-                repo_name=repo_auth_name,
-                file_path="src/auth.py",
-                git_commit_sha="c1",
-                git_blob_sha="b1",
-                language="python",
-                allowed_scopes=scopes,
-                raw_content="class SecurityContext: pass",
-                line_count=1,
-            ),
-        )
-        pg_repo.insert_code_file(
-            conn,
-            CodeFileRecord(
-                file_id=fid_order,
-                domain_id=domain_id,
-                repo_name=repo_order_name,
-                file_path="src/order.py",
-                git_commit_sha="c2",
-                git_blob_sha="b2",
-                language="python",
-                allowed_scopes=scopes,
-                raw_content="def create_order(): pass",
-                line_count=1,
-            ),
-        )
+        with app_mgr.scoped_transaction(app_principal, enable_hnsw_iterative_scan=False) as conn:
+            fid_auth = uuid4()
+            fid_order = uuid4()
+            repo_auth_name = f"eval-auth-lib-{fid_auth.hex[:6]}"
+            repo_order_name = f"eval-order-app-{fid_order.hex[:6]}"
 
-        class_name = f"SecurityContext_{fid_auth.hex[:6]}"
-        sym_auth_id = uuid4()
-        sym_auth_qual = f"{repo_auth_name}::auth::{class_name}"
-        pg_repo.insert_ast_symbol(
-            conn,
-            ASTSymbolRecord(
-                symbol_id=sym_auth_id,
-                file_id=fid_auth,
-                domain_id=domain_id,
-                qualified_name=sym_auth_qual,
-                symbol_kind="class",
-                start_line=1,
-                end_line=1,
-                signature_skeleton=f"class {class_name}",
-                contextual_summary="Auth Context",
-                allowed_scopes=scopes,
-                embedding=[0.1] * 768,
-            ),
-        )
+            pg_repo.insert_code_file(
+                conn,
+                CodeFileRecord(
+                    file_id=fid_auth,
+                    domain_id=domain_id,
+                    repo_name=repo_auth_name,
+                    file_path="src/auth.py",
+                    git_commit_sha="c1",
+                    git_blob_sha="b1",
+                    language="python",
+                    allowed_scopes=scopes,
+                    raw_content="class SecurityContext: pass",
+                    line_count=1,
+                ),
+            )
+            pg_repo.insert_code_file(
+                conn,
+                CodeFileRecord(
+                    file_id=fid_order,
+                    domain_id=domain_id,
+                    repo_name=repo_order_name,
+                    file_path="src/order.py",
+                    git_commit_sha="c2",
+                    git_blob_sha="b2",
+                    language="python",
+                    allowed_scopes=scopes,
+                    raw_content="def create_order(): pass",
+                    line_count=1,
+                ),
+            )
 
-        sym_order_id = uuid4()
-        pg_repo.insert_ast_symbol(
-            conn,
-            ASTSymbolRecord(
-                symbol_id=sym_order_id,
-                file_id=fid_order,
-                domain_id=domain_id,
-                qualified_name=f"{repo_order_name}::order::create_order",
-                symbol_kind="function",
-                start_line=1,
-                end_line=1,
-                signature_skeleton="def create_order()",
-                contextual_summary="Order Creator",
-                allowed_scopes=scopes,
-                embedding=[0.2] * 768,
-            ),
-        )
+            class_name = f"SecurityContext_{fid_auth.hex[:6]}"
+            sym_auth_id = uuid4()
+            sym_auth_qual = f"{repo_auth_name}::auth::{class_name}"
+            pg_repo.insert_ast_symbol(
+                conn,
+                ASTSymbolRecord(
+                    symbol_id=sym_auth_id,
+                    file_id=fid_auth,
+                    domain_id=domain_id,
+                    qualified_name=sym_auth_qual,
+                    symbol_kind="class",
+                    start_line=1,
+                    end_line=1,
+                    signature_skeleton=f"class {class_name}",
+                    contextual_summary="Auth Context",
+                    allowed_scopes=scopes,
+                    embedding=[0.1] * 768,
+                ),
+            )
 
-        # Unresolved cross-repo edge
-        edge_id = uuid4()
-        pg_repo.insert_ast_edge(
-            conn,
-            ASTEdgeRecord(
-                edge_id=edge_id,
-                domain_id=domain_id,
-                source_symbol_id=sym_order_id,
-                target_qualified_name=f"UNRESOLVED::auth::{class_name}",
-                target_symbol_id=None,
-                edge_kind="USES_TYPE",
-                allowed_scopes=scopes,
-                is_cross_repo=True,
-            ),
-        )
+            sym_order_id = uuid4()
+            pg_repo.insert_ast_symbol(
+                conn,
+                ASTSymbolRecord(
+                    symbol_id=sym_order_id,
+                    file_id=fid_order,
+                    domain_id=domain_id,
+                    qualified_name=f"{repo_order_name}::order::create_order",
+                    symbol_kind="function",
+                    start_line=1,
+                    end_line=1,
+                    signature_skeleton="def create_order()",
+                    contextual_summary="Order Creator",
+                    allowed_scopes=scopes,
+                    embedding=[0.2] * 768,
+                ),
+            )
 
-        # Execute Phase 2 cross-repo reconciler on PostgreSQL 17
-        resolved_count = indexer.reconcile_cross_repo_edges_postgres(conn, domain_id)
-        assert resolved_count >= 1
+            # Unresolved cross-repo edge
+            edge_id = uuid4()
+            pg_repo.insert_ast_edge(
+                conn,
+                ASTEdgeRecord(
+                    edge_id=edge_id,
+                    domain_id=domain_id,
+                    source_symbol_id=sym_order_id,
+                    target_qualified_name=f"UNRESOLVED::auth::{class_name}",
+                    target_symbol_id=None,
+                    edge_kind="USES_TYPE",
+                    allowed_scopes=scopes,
+                    is_cross_repo=True,
+                ),
+            )
 
-        # Check edge was updated
-        row = conn.execute(
-            """
-            SELECT target_symbol_id, target_qualified_name, is_cross_repo
-            FROM ast_edges WHERE edge_id = %s;
-            """,
-            (edge_id,),
-        ).fetchone()
-        assert row is not None
-        assert row[0] == sym_auth_id
-        assert row[1] == sym_auth_qual
-        assert row[2] is True
+            # Execute Phase 2 cross-repo reconciler on PostgreSQL 17
+            resolved_count = indexer.reconcile_cross_repo_edges_postgres(conn, domain_id)
+            assert resolved_count >= 1
+
+            # Check edge was updated
+            row = conn.execute(
+                """
+                SELECT target_symbol_id, target_qualified_name, is_cross_repo
+                FROM ast_edges WHERE edge_id = %s;
+                """,
+                (edge_id,),
+            ).fetchone()
+            assert row is not None
+            assert row[0] == sym_auth_id
+            assert row[1] == sym_auth_qual
+            assert row[2] is True
+    finally:
+        with psycopg.connect(settings.db_admin_url) as cleanup_conn:
+            cleanup_f08_f09_session_domain(cleanup_conn, domain_id)
+
+
+def test_f09_cleanup_canary_isolation_and_mutation_proof() -> None:
+    """Canary test proving F09 cleanup refuses non-session domains and cannot touch canary rows."""
+    settings = ScoutSettings()
+    pg_repo = PostgresRLSRepository()
+    canary_domain = f"canary_f09_{uuid4().hex[:8]}"
+    session_domain = f"{F08_F09_SESSION_DOMAIN_PREFIX}{uuid4().hex[:8]}"
+    shared_repo = f"eval-f09-canary-repo-{uuid4().hex[:8]}"
+
+    with psycopg.connect(settings.db_admin_url) as conn:
+        try:
+            for dom in (canary_domain, session_domain):
+                conn.execute(
+                    """
+                    INSERT INTO domain_packs (
+                        domain_id, display_name, lora_adapter_id,
+                        primary_truth_source, freshness_half_life_days, config_json
+                    )
+                    VALUES (%s, %s, 'none', 'code', 30, '{}')
+                    ON CONFLICT (domain_id) DO NOTHING;
+                    """,
+                    (dom, f"Canary Test {dom}"),
+                )
+                fid = uuid4()
+                sid = uuid4()
+                pg_repo.insert_code_file(
+                    conn,
+                    CodeFileRecord(
+                        file_id=fid,
+                        domain_id=dom,
+                        repo_name=shared_repo,
+                        file_path="src/shared.py",
+                        git_commit_sha="c1",
+                        git_blob_sha="b1",
+                        language="python",
+                        allowed_scopes=["public_eng"],
+                        raw_content="def f(): pass",
+                        line_count=1,
+                    ),
+                )
+                pg_repo.insert_ast_symbol(
+                    conn,
+                    ASTSymbolRecord(
+                        symbol_id=sid,
+                        file_id=fid,
+                        domain_id=dom,
+                        qualified_name=f"{shared_repo}::shared::f",
+                        symbol_kind="function",
+                        start_line=1,
+                        end_line=1,
+                        signature_skeleton="def f()",
+                        contextual_summary="f",
+                        allowed_scopes=["public_eng"],
+                        embedding=[0.1] * 768,
+                    ),
+                )
+                pg_repo.insert_ast_edge(
+                    conn,
+                    ASTEdgeRecord(
+                        edge_id=uuid4(),
+                        domain_id=dom,
+                        source_symbol_id=sid,
+                        target_qualified_name="builtins::pass",
+                        target_symbol_id=None,
+                        edge_kind="CALLS",
+                        allowed_scopes=["public_eng"],
+                    ),
+                )
+            conn.commit()
+
+            # 1. Helper must refuse non-session domain prefix
+            with pytest.raises(ValueError, match="Refusing to clean up"):
+                cleanup_f08_f09_session_domain(conn, canary_domain)
+
+            # 2. Scoped cleanup deletes session_domain and leaves canary_domain untouched
+            cleanup_f08_f09_session_domain(conn, session_domain)
+
+            for tbl in ("ast_edges", "ast_symbols", "code_files", "domain_packs"):
+                session_cnt = conn.execute(
+                    f"SELECT COUNT(*) FROM {tbl} WHERE domain_id = %s;",
+                    (session_domain,),
+                ).fetchone()
+                canary_cnt = conn.execute(
+                    f"SELECT COUNT(*) FROM {tbl} WHERE domain_id = %s;",
+                    (canary_domain,),
+                ).fetchone()
+                assert session_cnt is not None and session_cnt[0] == 0
+                assert canary_cnt is not None and canary_cnt[0] == 1
+
+            # 3. Mutation check: weakening WHERE domain_id = %s to repo_name destroys canary
+            conn.execute("DELETE FROM code_files WHERE repo_name = %s;", (shared_repo,))
+            conn.commit()
+            post_mutation_cnt = conn.execute(
+                "SELECT COUNT(*) FROM code_files WHERE domain_id = %s;",
+                (canary_domain,),
+            ).fetchone()
+            assert post_mutation_cnt is not None and post_mutation_cnt[0] == 0
+        finally:
+            for dom in (canary_domain, session_domain):
+                conn.execute("DELETE FROM ast_edges WHERE domain_id = %s;", (dom,))
+                conn.execute("DELETE FROM ast_symbols WHERE domain_id = %s;", (dom,))
+                conn.execute("DELETE FROM code_files WHERE domain_id = %s;", (dom,))
+                conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (dom,))
+            conn.commit()

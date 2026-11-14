@@ -1,8 +1,10 @@
 """Tests for Milestone 2 Features F05 (Catalog Tables) and F06 (Recursive CTE 1-Hop Closure)."""
 
 from datetime import UTC, datetime
+from typing import Any, Final
 from uuid import uuid4
 
+import psycopg
 import pytest
 
 from context_scout.config import ScoutSettings
@@ -266,181 +268,363 @@ def test_f06_in_memory_traverse_1hop_neighborhood(
     assert sym_c.symbol_id in connected_ids  # outward type
 
 
+M2_F05_F06_SESSION_DOMAIN_PREFIX: Final[str] = "eval_m2_f05_f06_"
+
+
+def cleanup_m2_f05_f06_session_domain(
+    conn: psycopg.Connection[Any],
+    session_domain: str,
+    expected_prefix: str = M2_F05_F06_SESSION_DOMAIN_PREFIX,
+) -> None:
+    """Strictly deletes F05/F06 test rows scoped to a single session domain_id."""
+    if not session_domain.startswith(expected_prefix):
+        raise ValueError(
+            f"Refusing to clean up domain_id={session_domain!r}: "
+            f"must start with {expected_prefix!r}"
+        )
+    conn.execute("DELETE FROM ast_edges WHERE domain_id = %s;", (session_domain,))
+    conn.execute("DELETE FROM ast_symbols WHERE domain_id = %s;", (session_domain,))
+    conn.execute("DELETE FROM code_files WHERE domain_id = %s;", (session_domain,))
+    conn.execute("DELETE FROM repositories WHERE domain_id = %s;", (session_domain,))
+    conn.execute("DELETE FROM confluence_pages WHERE domain_id = %s;", (session_domain,))
+    conn.execute("DELETE FROM jira_issues WHERE domain_id = %s;", (session_domain,))
+    conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (session_domain,))
+    conn.commit()
+
+
 def test_f05_f06_live_postgres_catalog_and_recursive_cte() -> None:
     """Verifies live PostgreSQL 17 execution of catalog tables and recursive CTE query."""
     settings = ScoutSettings()
-    admin_mgr = RLSConnectionManager(settings.db_admin_url)
     app_mgr = RLSConnectionManager(settings.db_app_url)
     pg_repo = PostgresRLSRepository()
 
-    domain_id = "trading_code_scout"
+    domain_id = f"{M2_F05_F06_SESSION_DOMAIN_PREFIX}{uuid4().hex[:8]}"
     scopes = ["public_eng"]
 
-    admin_principal = PrincipalContext(
-        user_id="admin_user",
-        role=RoleType.ENGINEER,
-        allowed_scopes=scopes,
-    )
     app_principal = PrincipalContext(
         user_id="app_user",
         role=RoleType.ENGINEER,
         allowed_scopes=scopes,
     )
 
-    with admin_mgr.scoped_transaction(admin_principal, enable_hnsw_iterative_scan=False) as conn:
-        conn.execute(
-            """
-            INSERT INTO domain_packs (
-                domain_id, display_name, lora_adapter_id,
-                primary_truth_source, freshness_half_life_days, config_json
+    try:
+        with psycopg.connect(settings.db_admin_url) as admin_conn:
+            admin_conn.execute(
+                """
+                INSERT INTO domain_packs (
+                    domain_id, display_name, lora_adapter_id,
+                    primary_truth_source, freshness_half_life_days, config_json
+                )
+                VALUES (%s, 'Eval F05/F06 CTE', 'none', 'code', 180, '{"m2_cte_test": true}'::jsonb)
+                ON CONFLICT (domain_id) DO NOTHING;
+                """,
+                (domain_id,),
             )
-            VALUES (
-                'trading_code_scout', 'Trading Code Scout', 'gemma4_26b_code_scout',
-                'code', 180, '{"m2_cte_test": true}'::jsonb
-            )
-            ON CONFLICT (domain_id) DO NOTHING;
-            """
-        )
+            admin_conn.commit()
 
-    with app_mgr.scoped_transaction(app_principal, enable_hnsw_iterative_scan=False) as conn:
-        # F05: Catalog Repository CRUD in Postgres
-        repo_id = uuid4()
-        repo_name = f"test-repo-{repo_id.hex[:6]}"
-        repo_rec = RepositoryRecord(
-            repo_id=repo_id,
-            domain_id=domain_id,
-            repo_name=repo_name,
-            source_type="github",
-            remote_url="https://github.com/corp/test.git",
-            default_branch="main",
-            allowed_scopes=scopes,
-            head_commit_sha="c1",
-        )
-        pg_repo.insert_repository(conn, repo_rec)
-        fetched_repo = pg_repo.get_repository(conn, domain_id, repo_name)
-        assert fetched_repo is not None
-        assert fetched_repo.repo_name == repo_name
-
-        # Confluence Page in Postgres
-        page_id = uuid4()
-        conf_id = f"conf-{repo_id.hex[:6]}"
-        page_rec = ConfluencePageRecord(
-            page_id=page_id,
-            domain_id=domain_id,
-            confluence_page_id=conf_id,
-            space_key="M2",
-            title="CTE Specification",
-            version_number=1,
-            author_username="fde_lead",
-            source_url="https://confluence.corp.net/display/M2/CTE",
-            allowed_scopes=scopes,
-            last_modified_at=datetime.now(UTC),
-        )
-        pg_repo.insert_confluence_page(conn, page_rec)
-        fetched_page = pg_repo.get_confluence_page(conn, domain_id, conf_id)
-        assert fetched_page is not None
-        assert fetched_page.title == "CTE Specification"
-
-        # Jira Issue in Postgres
-        issue_id = uuid4()
-        issue_key = f"SCOUT-{repo_id.hex[:4]}"
-        issue_rec = JiraIssueRecord(
-            issue_id=issue_id,
-            domain_id=domain_id,
-            issue_key=issue_key,
-            project_key="SCOUT",
-            summary="Recursive CTE validation",
-            issue_type="Task",
-            status="Closed",
-            source_url="https://jira.corp.net/browse/SCOUT",
-            allowed_scopes=scopes,
-            updated_at=datetime.now(UTC),
-        )
-        pg_repo.insert_jira_issue(conn, issue_rec)
-        fetched_issue = pg_repo.get_jira_issue(conn, domain_id, issue_key)
-        assert fetched_issue is not None
-        assert fetched_issue.summary == "Recursive CTE validation"
-
-        # F06: Live Recursive CTE 1-Hop AST Closure
-        fid_x = uuid4()
-        fid_y = uuid4()
-        file_x = CodeFileRecord(
-            file_id=fid_x,
-            domain_id=domain_id,
-            repo_name=repo_rec.repo_name,
-            file_path="src/router.py",
-            git_commit_sha="c1",
-            git_blob_sha="b1",
-            language="python",
-            allowed_scopes=scopes,
-            raw_content="def route_order(): validate_order()",
-            line_count=1,
-        )
-        file_y = CodeFileRecord(
-            file_id=fid_y,
-            domain_id=domain_id,
-            repo_name=repo_rec.repo_name,
-            file_path="src/validator.py",
-            git_commit_sha="c1",
-            git_blob_sha="b2",
-            language="python",
-            allowed_scopes=scopes,
-            raw_content="def validate_order(): pass",
-            line_count=1,
-        )
-        pg_repo.insert_code_file(conn, file_x)
-        pg_repo.insert_code_file(conn, file_y)
-
-        sym_x = ASTSymbolRecord(
-            symbol_id=uuid4(),
-            file_id=fid_x,
-            domain_id=domain_id,
-            qualified_name=f"{repo_rec.repo_name}::router::route_order",
-            symbol_kind="function",
-            start_line=1,
-            end_line=1,
-            signature_skeleton="def route_order()",
-            contextual_summary="Routes order",
-            allowed_scopes=scopes,
-            embedding=[0.1] * 768,
-        )
-        sym_y = ASTSymbolRecord(
-            symbol_id=uuid4(),
-            file_id=fid_y,
-            domain_id=domain_id,
-            qualified_name=f"{repo_rec.repo_name}::validator::validate_order",
-            symbol_kind="function",
-            start_line=1,
-            end_line=1,
-            signature_skeleton="def validate_order()",
-            contextual_summary="Validates order",
-            allowed_scopes=scopes,
-            embedding=[0.2] * 768,
-        )
-        pg_repo.insert_ast_symbol(conn, sym_x)
-        pg_repo.insert_ast_symbol(conn, sym_y)
-
-        pg_repo.insert_ast_edge(
-            conn,
-            ASTEdgeRecord(
-                edge_id=uuid4(),
+        with app_mgr.scoped_transaction(app_principal, enable_hnsw_iterative_scan=False) as conn:
+            # F05: Catalog Repository CRUD in Postgres
+            repo_id = uuid4()
+            repo_name = f"eval-cte-repo-{repo_id.hex[:6]}"
+            repo_rec = RepositoryRecord(
+                repo_id=repo_id,
                 domain_id=domain_id,
-                source_symbol_id=sym_x.symbol_id,
-                target_qualified_name=sym_y.qualified_name,
-                target_symbol_id=sym_y.symbol_id,
-                edge_kind="CALLS",
+                repo_name=repo_name,
+                source_type="github",
+                remote_url="https://github.com/corp/test.git",
+                default_branch="main",
                 allowed_scopes=scopes,
-            ),
-        )
+                head_commit_sha="c1",
+            )
+            pg_repo.insert_repository(conn, repo_rec)
+            fetched_repo = pg_repo.get_repository(conn, domain_id, repo_name)
+            assert fetched_repo is not None
+            assert fetched_repo.repo_name == repo_name
 
-        # Execute live PostgreSQL 17 recursive CTE
-        records = pg_repo.traverse_1hop_neighborhood(
-            conn,
-            domain_id=domain_id,
-            focus_symbol_id=sym_y.symbol_id,
-            max_direct_callers=10,
-        )
-        assert len(records) > 0
-        connected_ids = {r.symbol.symbol_id for r in records}
-        assert sym_x.symbol_id in connected_ids  # caller recovered via CTE!
-        assert any(r.intent_role == "direct_caller" for r in records)
+            # Confluence Page in Postgres
+            page_id = uuid4()
+            conf_id = f"eval-conf-{repo_id.hex[:6]}"
+            page_rec = ConfluencePageRecord(
+                page_id=page_id,
+                domain_id=domain_id,
+                confluence_page_id=conf_id,
+                space_key="M2",
+                title="CTE Specification",
+                version_number=1,
+                author_username="fde_lead",
+                source_url="https://confluence.corp.net/display/M2/CTE",
+                allowed_scopes=scopes,
+                last_modified_at=datetime.now(UTC),
+            )
+            pg_repo.insert_confluence_page(conn, page_rec)
+            fetched_page = pg_repo.get_confluence_page(conn, domain_id, conf_id)
+            assert fetched_page is not None
+            assert fetched_page.title == "CTE Specification"
+
+            # Jira Issue in Postgres
+            issue_id = uuid4()
+            issue_key = f"EVALCTE-{repo_id.hex[:4]}"
+            issue_rec = JiraIssueRecord(
+                issue_id=issue_id,
+                domain_id=domain_id,
+                issue_key=issue_key,
+                project_key="EVALCTE",
+                summary="Recursive CTE validation",
+                issue_type="Task",
+                status="Closed",
+                source_url="https://jira.corp.net/browse/EVALCTE",
+                allowed_scopes=scopes,
+                updated_at=datetime.now(UTC),
+            )
+            pg_repo.insert_jira_issue(conn, issue_rec)
+            fetched_issue = pg_repo.get_jira_issue(conn, domain_id, issue_key)
+            assert fetched_issue is not None
+            assert fetched_issue.summary == "Recursive CTE validation"
+
+            # F06: Live Recursive CTE 1-Hop AST Closure
+            fid_x = uuid4()
+            fid_y = uuid4()
+            file_x = CodeFileRecord(
+                file_id=fid_x,
+                domain_id=domain_id,
+                repo_name=repo_rec.repo_name,
+                file_path="src/router.py",
+                git_commit_sha="c1",
+                git_blob_sha="b1",
+                language="python",
+                allowed_scopes=scopes,
+                raw_content="def route_order(): validate_order()",
+                line_count=1,
+            )
+            file_y = CodeFileRecord(
+                file_id=fid_y,
+                domain_id=domain_id,
+                repo_name=repo_rec.repo_name,
+                file_path="src/validator.py",
+                git_commit_sha="c1",
+                git_blob_sha="b2",
+                language="python",
+                allowed_scopes=scopes,
+                raw_content="def validate_order(): pass",
+                line_count=1,
+            )
+            pg_repo.insert_code_file(conn, file_x)
+            pg_repo.insert_code_file(conn, file_y)
+
+            sym_x = ASTSymbolRecord(
+                symbol_id=uuid4(),
+                file_id=fid_x,
+                domain_id=domain_id,
+                qualified_name=f"{repo_rec.repo_name}::router::route_order",
+                symbol_kind="function",
+                start_line=1,
+                end_line=1,
+                signature_skeleton="def route_order()",
+                contextual_summary="Routes order",
+                allowed_scopes=scopes,
+                embedding=[0.1] * 768,
+            )
+            sym_y = ASTSymbolRecord(
+                symbol_id=uuid4(),
+                file_id=fid_y,
+                domain_id=domain_id,
+                qualified_name=f"{repo_rec.repo_name}::validator::validate_order",
+                symbol_kind="function",
+                start_line=1,
+                end_line=1,
+                signature_skeleton="def validate_order()",
+                contextual_summary="Validates order",
+                allowed_scopes=scopes,
+                embedding=[0.2] * 768,
+            )
+            pg_repo.insert_ast_symbol(conn, sym_x)
+            pg_repo.insert_ast_symbol(conn, sym_y)
+
+            pg_repo.insert_ast_edge(
+                conn,
+                ASTEdgeRecord(
+                    edge_id=uuid4(),
+                    domain_id=domain_id,
+                    source_symbol_id=sym_x.symbol_id,
+                    target_qualified_name=sym_y.qualified_name,
+                    target_symbol_id=sym_y.symbol_id,
+                    edge_kind="CALLS",
+                    allowed_scopes=scopes,
+                ),
+            )
+
+            # Execute live PostgreSQL 17 recursive CTE
+            records = pg_repo.traverse_1hop_neighborhood(
+                conn,
+                domain_id=domain_id,
+                focus_symbol_id=sym_y.symbol_id,
+                max_direct_callers=10,
+            )
+            assert len(records) > 0
+            connected_ids = {r.symbol.symbol_id for r in records}
+            assert sym_x.symbol_id in connected_ids  # caller recovered via CTE!
+            assert any(r.intent_role == "direct_caller" for r in records)
+    finally:
+        with psycopg.connect(settings.db_admin_url) as cleanup_conn:
+            cleanup_m2_f05_f06_session_domain(cleanup_conn, domain_id)
+
+
+def test_f05_f06_cleanup_canary_isolation_and_mutation_proof() -> None:
+    """Canary test proving F05/F06 cleanup refuses non-session domains and preserves canary rows."""
+    settings = ScoutSettings()
+    pg_repo = PostgresRLSRepository()
+    canary_domain = f"canary_f05_f06_{uuid4().hex[:8]}"
+    session_domain = f"{M2_F05_F06_SESSION_DOMAIN_PREFIX}canary_{uuid4().hex[:8]}"
+    shared_repo = f"eval-cte-shared-{uuid4().hex[:8]}"
+    shared_conf_id = f"eval-conf-shared-{uuid4().hex[:6]}"
+    shared_issue_key = f"EVALCTE-{uuid4().hex[:4]}"
+
+    with psycopg.connect(settings.db_admin_url) as conn:
+        try:
+            for dom in (canary_domain, session_domain):
+                conn.execute(
+                    """
+                    INSERT INTO domain_packs (
+                        domain_id, display_name, lora_adapter_id,
+                        primary_truth_source, freshness_half_life_days, config_json
+                    )
+                    VALUES (%s, %s, 'none', 'code', 30, '{}')
+                    ON CONFLICT (domain_id) DO NOTHING;
+                    """,
+                    (dom, f"Canary F05/F06 {dom}"),
+                )
+                pg_repo.insert_repository(
+                    conn,
+                    RepositoryRecord(
+                        repo_id=uuid4(),
+                        domain_id=dom,
+                        repo_name=shared_repo,
+                        source_type="github",
+                        remote_url="https://github.com/corp/canary.git",
+                        default_branch="main",
+                        allowed_scopes=["public_eng"],
+                        head_commit_sha="c1",
+                    ),
+                )
+                pg_repo.insert_confluence_page(
+                    conn,
+                    ConfluencePageRecord(
+                        page_id=uuid4(),
+                        domain_id=dom,
+                        confluence_page_id=shared_conf_id,
+                        space_key="M2",
+                        title="Canary Page",
+                        version_number=1,
+                        author_username="canary",
+                        source_url="https://confluence.corp.net/display/M2/Canary",
+                        allowed_scopes=["public_eng"],
+                        last_modified_at=datetime.now(UTC),
+                    ),
+                )
+                pg_repo.insert_jira_issue(
+                    conn,
+                    JiraIssueRecord(
+                        issue_id=uuid4(),
+                        domain_id=dom,
+                        issue_key=shared_issue_key,
+                        project_key="EVALCTE",
+                        summary="Canary issue",
+                        issue_type="Task",
+                        status="Closed",
+                        source_url="https://jira.corp.net/browse/EVALCTE",
+                        allowed_scopes=["public_eng"],
+                        updated_at=datetime.now(UTC),
+                    ),
+                )
+                fid = uuid4()
+                sid = uuid4()
+                pg_repo.insert_code_file(
+                    conn,
+                    CodeFileRecord(
+                        file_id=fid,
+                        domain_id=dom,
+                        repo_name=shared_repo,
+                        file_path="src/canary.py",
+                        git_commit_sha="c1",
+                        git_blob_sha="b1",
+                        language="python",
+                        allowed_scopes=["public_eng"],
+                        raw_content="def f(): pass",
+                        line_count=1,
+                    ),
+                )
+                pg_repo.insert_ast_symbol(
+                    conn,
+                    ASTSymbolRecord(
+                        symbol_id=sid,
+                        file_id=fid,
+                        domain_id=dom,
+                        qualified_name=f"{shared_repo}::canary::f",
+                        symbol_kind="function",
+                        start_line=1,
+                        end_line=1,
+                        signature_skeleton="def f()",
+                        contextual_summary="f",
+                        allowed_scopes=["public_eng"],
+                        embedding=[0.1] * 768,
+                    ),
+                )
+                pg_repo.insert_ast_edge(
+                    conn,
+                    ASTEdgeRecord(
+                        edge_id=uuid4(),
+                        domain_id=dom,
+                        source_symbol_id=sid,
+                        target_qualified_name="builtins::pass",
+                        target_symbol_id=None,
+                        edge_kind="CALLS",
+                        allowed_scopes=["public_eng"],
+                    ),
+                )
+            conn.commit()
+
+            # 1. Helper must refuse non-session domain prefix
+            with pytest.raises(ValueError, match="Refusing to clean up"):
+                cleanup_m2_f05_f06_session_domain(conn, canary_domain)
+
+            # 2. Scoped cleanup removes session_domain and leaves canary_domain intact
+            cleanup_m2_f05_f06_session_domain(conn, session_domain)
+
+            for tbl in (
+                "ast_edges",
+                "ast_symbols",
+                "code_files",
+                "repositories",
+                "confluence_pages",
+                "jira_issues",
+                "domain_packs",
+            ):
+                session_cnt = conn.execute(
+                    f"SELECT COUNT(*) FROM {tbl} WHERE domain_id = %s;",
+                    (session_domain,),
+                ).fetchone()
+                canary_cnt = conn.execute(
+                    f"SELECT COUNT(*) FROM {tbl} WHERE domain_id = %s;",
+                    (canary_domain,),
+                ).fetchone()
+                assert session_cnt is not None and session_cnt[0] == 0
+                assert canary_cnt is not None and canary_cnt[0] == 1
+
+            # 3. Mutation check: weakening WHERE domain_id = %s to issue_key destroys canary
+            conn.execute("DELETE FROM jira_issues WHERE issue_key = %s;", (shared_issue_key,))
+            conn.commit()
+            post_mutation_cnt = conn.execute(
+                "SELECT COUNT(*) FROM jira_issues WHERE domain_id = %s;",
+                (canary_domain,),
+            ).fetchone()
+            assert post_mutation_cnt is not None and post_mutation_cnt[0] == 0
+        finally:
+            for dom in (canary_domain, session_domain):
+                conn.execute("DELETE FROM ast_edges WHERE domain_id = %s;", (dom,))
+                conn.execute("DELETE FROM ast_symbols WHERE domain_id = %s;", (dom,))
+                conn.execute("DELETE FROM code_files WHERE domain_id = %s;", (dom,))
+                conn.execute("DELETE FROM repositories WHERE domain_id = %s;", (dom,))
+                conn.execute("DELETE FROM confluence_pages WHERE domain_id = %s;", (dom,))
+                conn.execute("DELETE FROM jira_issues WHERE domain_id = %s;", (dom,))
+                conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (dom,))
+            conn.commit()
