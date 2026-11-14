@@ -85,12 +85,16 @@ def _resolve_auth_secret(secret_key: str | None = None) -> bytes:
     Fails closed by default:
     - In production (is_production_environment() is True), SCOUT_ALLOW_INSECURE_DEV_SECRET
       is strictly IGNORED. Any unset secret, secret in INSECURE_DEFAULT_SECRETS, or
-      secret shorter than 32 characters unconditionally raises a fatal RuntimeError.
-    - In non-production environments, an explicit, cryptographically secure secret
-      (>=32 characters) must be configured via SCOUT_AUTH_HMAC_SECRET or passed as
-      secret_key. If unset, empty, weak (<32 characters), or in INSECURE_DEFAULT_SECRETS,
-      it raises RuntimeError unless SCOUT_ALLOW_INSECURE_DEV_SECRET is explicitly
-      set to 'true' ('1', 'true', 'yes').
+      secret shorter than 32 characters (whether from SCOUT_AUTH_HMAC_SECRET or an
+      explicit secret_key) unconditionally raises a fatal RuntimeError.
+    - In non-production environments:
+      - If an explicit non-empty secret_key argument is passed (e.g., for testing or
+        crafting adversarial test tokens), it is accepted directly and logs a warning
+        when matching INSECURE_DEFAULT_SECRETS.
+      - Otherwise, SCOUT_AUTH_HMAC_SECRET must be >=32 characters and not in
+        INSECURE_DEFAULT_SECRETS; if unset, empty, weak (<32 characters), or in
+        INSECURE_DEFAULT_SECRETS, it raises RuntimeError unless
+        SCOUT_ALLOW_INSECURE_DEV_SECRET is explicitly set to 'true' ('1', 'true', 'yes').
     """
     is_prod = is_production_environment()
     allow_insecure = not is_prod and os.environ.get(

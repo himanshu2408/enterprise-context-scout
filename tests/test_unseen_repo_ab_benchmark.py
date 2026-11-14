@@ -659,21 +659,27 @@ class TestWorktreePatchVerificationAndEnterpriseHardening:
     def test_hmac_signed_principal_token_and_require_signed_auth_enforcement(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        strong_secret = "unit-test-hmac-secret-at-least-32-chars!"
+        monkeypatch.delenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", raising=False)
+        monkeypatch.delenv("SCOUT_ENV", raising=False)
+        monkeypatch.delenv("ENVIRONMENT", raising=False)
+        monkeypatch.delenv("ENV", raising=False)
+
         token = create_signed_principal_token(
             user_id="alice_sec",
             role=RoleType.QUANT_RESEARCHER,
             allowed_scopes=["public_quant", "quant_restricted"],
-            secret_key="unit-test-hmac-secret",
+            secret_key=strong_secret,
             ttl_seconds=300,
         )
-        principal = verify_signed_principal_token(token, secret_key="unit-test-hmac-secret")
+        principal = verify_signed_principal_token(token, secret_key=strong_secret)
         assert principal.user_id == "alice_sec"
         assert principal.role == RoleType.QUANT_RESEARCHER
         assert "quant_restricted" in principal.allowed_scopes
 
         # Tampered signature must raise HTTP 401
         with pytest.raises(HTTPException) as exc_info:
-            verify_signed_principal_token(token + "00", secret_key="unit-test-hmac-secret")
+            verify_signed_principal_token(token + "00", secret_key=strong_secret)
         assert exc_info.value.status_code == 401
 
         # Expired token must raise HTTP 401
@@ -681,16 +687,21 @@ class TestWorktreePatchVerificationAndEnterpriseHardening:
             user_id="alice_sec",
             role=RoleType.ENGINEER,
             allowed_scopes=["public_eng"],
-            secret_key="unit-test-hmac-secret",
+            secret_key=strong_secret,
             ttl_seconds=-10,
         )
         with pytest.raises(HTTPException) as exc_exp:
-            verify_signed_principal_token(expired_tok, secret_key="unit-test-hmac-secret")
+            verify_signed_principal_token(expired_tok, secret_key=strong_secret)
         assert exc_exp.value.status_code == 401
 
-        # When SCOUT_REQUIRE_SIGNED_AUTH=true, unsigned X-Principal-* headers are rejected with 401
+        # A 21-char SCOUT_AUTH_HMAC_SECRET fails closed with RuntimeError (<32 chars)
         monkeypatch.setenv("SCOUT_REQUIRE_SIGNED_AUTH", "true")
         monkeypatch.setenv("SCOUT_AUTH_HMAC_SECRET", "unit-test-hmac-secret")
+        with pytest.raises(RuntimeError, match="minimum 32 characters"):
+            get_principal_context(authorization=f"Bearer {token}")
+
+        # When SCOUT_REQUIRE_SIGNED_AUTH=true with >=32-char secret, unsigned headers fail (401)
+        monkeypatch.setenv("SCOUT_AUTH_HMAC_SECRET", strong_secret)
         with pytest.raises(HTTPException) as exc_unsigned:
             get_principal_context(
                 x_principal_user_id="spoofed_admin",
