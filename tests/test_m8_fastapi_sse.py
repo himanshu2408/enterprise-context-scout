@@ -164,7 +164,12 @@ def test_domains_endpoint_manifest_and_adapter_pool(client: TestClient) -> None:
         )
         assert isinstance(manifest["display_name"], str)
         assert manifest["display_name"].strip() == manifest["display_name"]
-        assert "Scout" in manifest["display_name"] or "Unseen" in manifest["display_name"]
+        expected_name_tokens = {
+            "trading_code_scout": "Scout",
+            "quant_research_scout": "Specialist",
+            "polyglot_unseen_v2": "Unseen",
+        }
+        assert expected_name_tokens[manifest["domain_id"]] in manifest["display_name"]
         assert manifest["authority_rules"]["primary_truth_source"] in ("code", "document")
 
         # Adapter verification
