@@ -1,0 +1,41 @@
+{
+  "base_model_name_or_path": "mlx-community/gemma-4-26b-a4b-it-4bit",
+  "r": 16,
+  "lora_alpha": 32,
+  "lora_dropout": 0.0,
+  "target_modules": [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+  ],
+  "frozen_modules": [
+    "router.proj",
+    "language_model.model.layers.*.router.proj"
+  ],
+  "peft_type": "LORA",
+  "task_type": "CAUSAL_LM",
+  "scaling": 2.0,
+  "num_experts": 128,
+  "is_moe": true,
+  "bias": "none",
+  "fine_tune_type": "lora",
+  "num_layers": 4,
+  "lora_parameters": {
+    "rank": 16,
+    "scale": 2.0,
+    "dropout": 0.0,
+    "keys": [
+      "self_attn.q_proj",
+      "self_attn.k_proj",
+      "self_attn.v_proj",
+      "self_attn.o_proj",
+      "mlp.gate_proj",
+      "mlp.up_proj",
+      "mlp.down_proj"
+    ]
+  }
+}

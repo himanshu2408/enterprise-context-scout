@@ -15,12 +15,14 @@ import hashlib
 import json
 import keyword
 import logging
+import os
 import re
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Final
-from uuid import NAMESPACE_DNS, NAMESPACE_URL, UUID, uuid5
+from typing import TYPE_CHECKING, Any, Final
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg import Connection
 
@@ -35,10 +37,20 @@ from context_scout.db.repositories import (
     ASTSymbolRecord,
     CodeFileRecord,
     DocChunkRecord,
+    InMemoryRLSRepository,
     PostgresRLSRepository,
     RepositoryRecord,
 )
 from context_scout.db.session import RLSConnectionManager
+from context_scout.ingestion.doc_parser import (
+    DocumentChunk,
+    chunk_custom_domain_document,
+    extract_sgml_docbook_text,
+    strip_mdx_boilerplate,
+)
+
+if TYPE_CHECKING:
+    from context_scout.retrieval.embedder import LocalSemanticEmbedder
 from context_scout.schemas.contracts import (
     AuthorityRules,
     CodeSlicePointer,
@@ -373,6 +385,23 @@ PROMPT_STOPWORDS: Final[set[str]] = {
 CUSTOM_CORPUS_INDEX_PATHS: dict[str, Path] = {}
 _FILE_STAT_BLOB_CACHE: dict[Path, tuple[int, int, str]] = {}
 _DOMAIN_SYNC_EPOCHS: dict[str, int] = {}
+_QUERY_EMBEDDER_LOCK = threading.Lock()
+_SHARED_QUERY_EMBEDDER: Any = None
+
+
+def _embed_query_for_hybrid_rrf(query_text: str) -> list[float]:
+    """Computes a 768-dim query embedding using a cached LocalSemanticEmbedder."""
+    global _SHARED_QUERY_EMBEDDER
+    with _QUERY_EMBEDDER_LOCK:
+        if _SHARED_QUERY_EMBEDDER is None:
+            from context_scout.retrieval.embedder import LocalSemanticEmbedder
+
+            _SHARED_QUERY_EMBEDDER = LocalSemanticEmbedder()
+        embedder = _SHARED_QUERY_EMBEDDER
+    vec: list[float] = embedder.embed_text(query_text)
+    return vec
+
+
 _DEFAULT_DUMMY_EMBEDDING: Final[list[float]] = [0.05] * 768
 _SYNC_MANIFEST_FILENAME: Final[str] = "sync_manifest.json"
 _PG_STORAGE_BACKEND: Final[str] = "postgresql_17_rls"
@@ -428,22 +457,118 @@ _SYNC_SKIP_DIRS: Final[set[str]] = {
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
+    "manifests",
 }
 
 CUSTOM_DOC_EXTENSIONS: Final[tuple[str, ...]] = (
     ".md",
+    ".mdx",
     ".txt",
     ".tex",
     ".pdf",
     ".rst",
+    ".adoc",
+    ".sgml",
     ".json",
     ".csv",
     ".html",
+    ".sql",
+    ".tf",
+    ".thrift",
 )
+
+_CUSTOM_DOC_EMBEDDER: LocalSemanticEmbedder | None = None
+
+
+def _get_custom_doc_embedder() -> LocalSemanticEmbedder:
+    global _CUSTOM_DOC_EMBEDDER
+    if _CUSTOM_DOC_EMBEDDER is None:
+        from context_scout.retrieval.embedder import LocalSemanticEmbedder
+
+        _CUSTOM_DOC_EMBEDDER = LocalSemanticEmbedder(allow_deterministic_fallback=False)
+    return _CUSTOM_DOC_EMBEDDER
+
+
+def embed_custom_domain_texts(
+    texts: list[str],
+    batch_size: int = 64,
+) -> list[list[float]]:
+    """Embeds custom-domain chunks via LocalSemanticEmbedder (hash stub only if flag set)."""
+    if not texts:
+        return []
+    if os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() == "1":
+        from context_scout.ingestion.git_merkle_indexer import generate_deterministic_embedding
+
+        return [generate_deterministic_embedding(t) for t in texts]
+    embedder = _get_custom_doc_embedder()
+    return embedder.embed_batch(texts, is_query=False, batch_size=batch_size)
+
+
+def build_custom_doc_chunk_records(
+    *,
+    domain_id: str,
+    file_entries: list[tuple[Path, str, str, bytes, str]],
+    batch_size: int = 64,
+) -> list[DocChunkRecord]:
+    """Chunks multi-format custom documents (400-800 tokens) and embeds them in batches.
+
+    Each entry in `file_entries` is `(disk_path, rel_path, extracted_text, raw_bytes, blob_sha)`.
+    """
+    parsed_chunks: list[DocumentChunk] = []
+    embed_inputs: list[str] = []
+
+    for disk_p, rel_p, text, raw_bytes, blob_sha in file_entries:
+        if not text.strip():
+            continue
+        chunks = chunk_custom_domain_document(
+            file_path=disk_p,
+            text=text,
+            raw_bytes=raw_bytes,
+            domain_id=domain_id,
+            rel_path=rel_p,
+            blob_sha=blob_sha,
+        )
+        for chk in chunks:
+            parsed_chunks.append(chk)
+            embed_inputs.append(
+                f"{chk.doc_title}\n{chk.section_heading}\n{chk.verbatim_content[:1200]}"
+            )
+
+    if not parsed_chunks:
+        return []
+
+    vectors = embed_custom_domain_texts(embed_inputs, batch_size=batch_size)
+    records: list[DocChunkRecord] = []
+    default_scopes = [
+        "public_eng",
+        "public_quant",
+        "quant_restricted",
+        f"domain:{domain_id}",
+    ]
+    for chk, vec in zip(parsed_chunks, vectors, strict=True):
+        records.append(
+            DocChunkRecord(
+                chunk_id=chk.chunk_id,
+                domain_id=domain_id,
+                doc_id=chk.doc_id,
+                doc_title=chk.doc_title,
+                source_uri=chk.source_uri,
+                market_scope="ENTERPRISE_DOC",
+                published_date=datetime.date(2026, 1, 1),
+                authority_weight=1.0,
+                section_heading=chk.section_heading,
+                contextual_header=f"{chk.doc_title} — {chk.section_heading}",
+                verbatim_content=chk.verbatim_content,
+                metadata_json=dict(chk.metadata_json),
+                allowed_scopes=list(default_scopes),
+                embedding=vec,
+            )
+        )
+    return records
 
 
 def extract_document_text(file_path: Path) -> str:
-    """Extracts UTF-8 text from .pdf, .md, .txt, .tex, .rst, .json, .csv, or .html files."""
+    """Extracts UTF-8 text from supported markdown, SGML, PDF, code pattern, and text formats."""
     suffix = file_path.suffix.lower()
     if suffix == ".pdf":
         try:
@@ -464,7 +589,12 @@ def extract_document_text(file_path: Path) -> str:
     raw_bytes = file_path.read_bytes()
     if b"\x00" in raw_bytes[:8192] and suffix != ".pdf":
         return ""
-    return raw_bytes.decode("utf-8", errors="replace").replace("\x00", "")
+    decoded = raw_bytes.decode("utf-8", errors="replace").replace("\x00", "")
+    if suffix == ".sgml" and "<" in decoded and ">" in decoded:
+        return extract_sgml_docbook_text(decoded)
+    if suffix == ".mdx":
+        return strip_mdx_boilerplate(decoded)
+    return decoded
 
 
 def _should_skip_sync_parts(rel_parts: tuple[str, ...], is_multi_repo: bool) -> bool:
@@ -618,13 +748,23 @@ def write_custom_sync_manifest(
     ast_symbols_indexed: int,
     ast_edges_indexed: int,
     doc_chunks_indexed: int,
+    empty_doc_shas: dict[str, str] | None = None,
 ) -> Path:
     """Writes a compact metadata-only sync_manifest.json without corpus payloads."""
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    repo_root = Path(__file__).resolve().parents[3]
+    portable_source_dir = source_dir
+    if source_dir:
+        try:
+            resolved_src = Path(source_dir).resolve()
+            if resolved_src.is_relative_to(repo_root):
+                portable_source_dir = resolved_src.relative_to(repo_root).as_posix()
+        except OSError:
+            portable_source_dir = source_dir
+    payload: dict[str, Any] = {
         "domain_id": domain_id,
         "kind": kind,
-        "source_dir": source_dir,
+        "source_dir": portable_source_dir,
         "synced_at": datetime.datetime.now(datetime.UTC).isoformat(),
         "repo_commit_shas": repo_commit_shas,
         "code_files_indexed": code_files_indexed,
@@ -633,6 +773,8 @@ def write_custom_sync_manifest(
         "doc_chunks_indexed": doc_chunks_indexed,
         "storage_backend": _PG_STORAGE_BACKEND,
     }
+    if empty_doc_shas:
+        payload["empty_doc_shas"] = dict(sorted(empty_doc_shas.items()))
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     register_custom_corpus_index(domain_id, manifest_path)
@@ -1097,11 +1239,27 @@ def sync_custom_domain_corpus_if_needed(
         ).fetchone()
         edge_cnt = int(str(edge_row[0])) if edge_row is not None else 0
         doc_rows = conn.execute(
-            "SELECT chunk_id, metadata_json, verbatim_content FROM doc_chunks WHERE domain_id = %s",
+            "SELECT chunk_id::text, "
+            "coalesce(metadata_json->>'rel_path', metadata_json->>'filename', ''), "
+            "coalesce(metadata_json->>'blob_sha', ''), "
+            "CASE WHEN coalesce(metadata_json->>'blob_sha', '') = '' "
+            "THEN verbatim_content ELSE '' END "
+            "FROM doc_chunks WHERE domain_id = %s",
             (domain_id,),
         ).fetchall()
 
-    if not source_dir_str or not Path(source_dir_str).is_dir():
+    repo_root = Path(__file__).resolve().parents[3]
+    resolved_source_dir = Path(source_dir_str) if source_dir_str else Path("")
+    if (
+        source_dir_str
+        and not resolved_source_dir.is_absolute()
+        and not resolved_source_dir.is_dir()
+    ):
+        repo_relative = repo_root / resolved_source_dir
+        if repo_relative.is_dir():
+            resolved_source_dir = repo_relative
+
+    if not source_dir_str or not resolved_source_dir.is_dir():
         return {
             "synced": False,
             "added": 0,
@@ -1113,58 +1271,86 @@ def sync_custom_domain_corpus_if_needed(
             "edges_indexed": edge_cnt,
         }
 
-    source_dir = Path(source_dir_str)
+    source_dir = resolved_source_dir
     if kind != "code":
-        existing_doc_by_rel: dict[str, tuple[UUID, str, str]] = {}
+        raw_empty_shas = manifest_data.get("empty_doc_shas")
+        empty_doc_shas: dict[str, str] = (
+            {str(k): str(v) for k, v in raw_empty_shas.items()}
+            if isinstance(raw_empty_shas, dict)
+            else {}
+        )
+        raw_repo_shas = manifest_data.get("repo_commit_shas")
+        existing_repo_shas: dict[str, str] = (
+            {str(k): str(v) for k, v in raw_repo_shas.items()}
+            if isinstance(raw_repo_shas, dict)
+            else {}
+        )
+        existing_doc_by_rel: dict[str, list[tuple[str, str, str]]] = {}
         for dr in doc_rows:
-            cid = UUID(str(dr[0]))
-            raw_meta = dr[1]
-            meta_dict = (
-                json.loads(raw_meta)
-                if isinstance(raw_meta, str)
-                else (dict(raw_meta) if isinstance(raw_meta, dict) else {})
-            )
-            rel_k = str(meta_dict.get("rel_path") or meta_dict.get("filename") or "")
+            rel_k = str(dr[1])
             if rel_k:
-                existing_doc_by_rel[rel_k] = (cid, str(meta_dict.get("blob_sha", "")), str(dr[2]))
+                existing_doc_by_rel.setdefault(rel_k, []).append(
+                    (str(dr[0]), str(dr[2]), str(dr[3]))
+                )
 
-        live_docs: dict[str, tuple[Path, str]] = {}
+        live_docs: dict[str, Path] = {}
         doc_added: list[str] = []
         doc_modified: list[str] = []
         doc_unchanged = 0
-        for p in sorted(source_dir.rglob("*")):
-            if not p.is_file() or p.suffix.lower() not in CUSTOM_DOC_EXTENSIONS:
-                continue
-            rel_parts = p.relative_to(source_dir).parts
-            if _should_skip_sync_parts(rel_parts, False):
-                continue
-            rel_p = str(p.relative_to(source_dir))
-            try:
-                blob_sha = hashlib.sha1(p.read_bytes()).hexdigest()
-            except Exception as exc:
-                logger.debug("Skipping unreadable doc file %s (%s): %s", p, type(exc).__name__, exc)
-                continue
-            live_docs[rel_p] = (p, blob_sha)
-            old_doc = existing_doc_by_rel.get(rel_p) or existing_doc_by_rel.get(p.name)
-            if old_doc is None:
-                doc_added.append(rel_p)
-            elif old_doc[1] and old_doc[1] != blob_sha:
-                doc_modified.append(rel_p)
-            elif not old_doc[1]:
-                new_txt = extract_document_text(p)
-                if new_txt and new_txt != old_doc[2]:
+        src_str = str(source_dir)
+        for walk_root, dir_names, file_names in os.walk(src_str):
+            rel_root = os.path.relpath(walk_root, src_str)
+            parent_is_src = os.path.basename(walk_root) == "src"
+            dir_names[:] = sorted(
+                d for d in dir_names if d not in _SYNC_SKIP_DIRS and (d != "build" or parent_is_src)
+            )
+            for fn in sorted(file_names):
+                _, ext = os.path.splitext(fn)
+                if ext.lower() not in CUSTOM_DOC_EXTENSIONS:
+                    continue
+                rel_p = fn if rel_root == "." else f"{rel_root}/{fn}"
+                p = Path(walk_root) / fn
+                try:
+                    st = p.stat()
+                    cached_blob = _FILE_STAT_BLOB_CACHE.get(p)
+                    if (
+                        cached_blob is not None
+                        and cached_blob[0] == st.st_mtime_ns
+                        and cached_blob[1] == st.st_size
+                    ):
+                        blob_sha = cached_blob[2]
+                    else:
+                        blob_sha = hashlib.sha1(p.read_bytes()).hexdigest()
+                        _FILE_STAT_BLOB_CACHE[p] = (st.st_mtime_ns, st.st_size, blob_sha)
+                except Exception as exc:
+                    logger.debug(
+                        "Skipping unreadable doc file %s (%s): %s", p, type(exc).__name__, exc
+                    )
+                    continue
+                live_docs[rel_p] = p
+                old_chunks = existing_doc_by_rel.get(rel_p) or existing_doc_by_rel.get(fn)
+                if not old_chunks:
+                    if empty_doc_shas.get(rel_p) == blob_sha:
+                        doc_unchanged += 1
+                    else:
+                        doc_added.append(rel_p)
+                elif old_chunks[0][1] and old_chunks[0][1] != blob_sha:
                     doc_modified.append(rel_p)
+                elif not old_chunks[0][1]:
+                    new_txt = extract_document_text(p)
+                    if new_txt and new_txt != old_chunks[0][2]:
+                        doc_modified.append(rel_p)
+                    else:
+                        doc_unchanged += 1
                 else:
                     doc_unchanged += 1
-            else:
-                doc_unchanged += 1
 
+        live_names = {os.path.basename(lp) for lp in live_docs}
         doc_deleted_keys = {
-            k
-            for k in existing_doc_by_rel
-            if k not in live_docs and all(Path(lp).name != k for lp in live_docs)
+            k for k in existing_doc_by_rel if k not in live_docs and k not in live_names
         }
-        if not doc_added and not doc_modified and not doc_deleted_keys:
+        stale_empty_keys = [k for k in empty_doc_shas if k not in live_docs]
+        if not doc_added and not doc_modified and not doc_deleted_keys and not stale_empty_keys:
             return {
                 "synced": False,
                 "added": 0,
@@ -1176,63 +1362,70 @@ def sync_custom_domain_corpus_if_needed(
                 "edges_indexed": 0,
             }
 
-        del_doc_ids = [existing_doc_by_rel[k][0] for k in doc_deleted_keys]
-        new_doc_records: list[DocChunkRecord] = []
+        del_doc_ids: list[UUID] = []
+        seen_del_ids: set[str] = set()
+        for k in doc_deleted_keys:
+            for entry in existing_doc_by_rel[k]:
+                if entry[0] not in seen_del_ids:
+                    seen_del_ids.add(entry[0])
+                    del_doc_ids.append(UUID(entry[0]))
+        for rel_p in doc_modified:
+            matched_entries = (
+                existing_doc_by_rel.get(rel_p) or existing_doc_by_rel.get(Path(rel_p).name) or []
+            )
+            for entry in matched_entries:
+                if entry[0] not in seen_del_ids:
+                    seen_del_ids.add(entry[0])
+                    del_doc_ids.append(UUID(entry[0]))
+
+        updated_empty_shas = {k: v for k, v in empty_doc_shas.items() if k in live_docs}
+        doc_file_entries: list[tuple[Path, str, str, bytes, str]] = []
         for rel_p in sorted(doc_added + doc_modified):
-            disk_p, blob_sha = live_docs[rel_p]
+            disk_p = live_docs[rel_p]
+            raw_doc_bytes = disk_p.read_bytes()
+            cached_info = _FILE_STAT_BLOB_CACHE.get(disk_p)
+            blob_sha = (
+                cached_info[2]
+                if cached_info is not None
+                else hashlib.sha1(raw_doc_bytes).hexdigest()
+            )
             text = extract_document_text(disk_p)
             if not text.strip():
+                updated_empty_shas[rel_p] = blob_sha
                 continue
-            doc_title = disk_p.stem.replace("_", " ").replace("-", " ").title()
-            section_heading = "1. Empirical Findings"
-            for ln in text.splitlines():
-                s_ln = ln.strip()
-                if s_ln.startswith("# "):
-                    doc_title = s_ln[2:].strip()
-                    break
-                t_m = re.search(r"\\title\{([^\}]+)\}", s_ln)
-                if t_m:
-                    doc_title = t_m.group(1).strip()
-                    break
-            for ln in text.splitlines():
-                s_ln = ln.strip()
-                if s_ln.startswith("## "):
-                    section_heading = s_ln[3:].strip()
-                    break
-                sec_m = re.search(r"\\section\*?\{([^\}]+)\}", s_ln)
-                if sec_m:
-                    section_heading = sec_m.group(1).strip()
-                    break
-            chk_uuid = uuid5(NAMESPACE_DNS, f"{domain_id}:doc:{rel_p}:0")
-            new_doc_records.append(
-                DocChunkRecord(
-                    chunk_id=chk_uuid,
+            updated_empty_shas.pop(rel_p, None)
+            doc_file_entries.append((disk_p, rel_p, text, raw_doc_bytes, blob_sha))
+
+        if not doc_file_entries and not del_doc_ids:
+            if updated_empty_shas != empty_doc_shas:
+                write_custom_sync_manifest(
+                    manifest_path=cand,
                     domain_id=domain_id,
-                    doc_id=f"{domain_id}:{disk_p.stem}",
-                    doc_title=doc_title,
-                    source_uri=f"urn:{domain_id}:{rel_p}",
-                    market_scope="ENTERPRISE_DOC",
-                    published_date=datetime.date(2026, 1, 1),
-                    authority_weight=1.0,
-                    section_heading=section_heading,
-                    contextual_header=f"{doc_title} — {section_heading}",
-                    verbatim_content=text,
-                    metadata_json={
-                        "filename": disk_p.name,
-                        "rel_path": rel_p,
-                        "blob_sha": blob_sha,
-                    },
-                    allowed_scopes=[
-                        "public_eng",
-                        "public_quant",
-                        "quant_restricted",
-                        f"domain:{domain_id}",
-                    ],
-                    embedding=generate_deterministic_embedding(
-                        f"{doc_title}\n{section_heading}\n{text[:1200]}"
-                    ),
+                    kind=kind,
+                    source_dir=str(source_dir.resolve()),
+                    repo_commit_shas=existing_repo_shas,
+                    code_files_indexed=len(cf_meta_rows),
+                    ast_symbols_indexed=sym_cnt,
+                    ast_edges_indexed=edge_cnt,
+                    doc_chunks_indexed=len(doc_rows),
+                    empty_doc_shas=updated_empty_shas,
                 )
-            )
+            return {
+                "synced": False,
+                "added": 0,
+                "modified": 0,
+                "deleted": 0,
+                "unchanged": doc_unchanged + len(doc_added),
+                "files_indexed": len(doc_rows),
+                "symbols_indexed": 0,
+                "edges_indexed": 0,
+            }
+
+        new_doc_records = build_custom_doc_chunk_records(
+            domain_id=domain_id,
+            file_entries=doc_file_entries,
+            batch_size=64,
+        )
         cf_cnt, sym_cnt, edge_cnt, doc_cnt = persist_custom_domain_to_pg(
             domain_id=domain_id,
             display_name=str(yaml_cfg.get("display_name", domain_id)),
@@ -1249,15 +1442,16 @@ def sync_custom_domain_corpus_if_needed(
             domain_id=domain_id,
             kind=kind,
             source_dir=str(source_dir.resolve()),
-            repo_commit_shas={},
+            repo_commit_shas=existing_repo_shas,
             code_files_indexed=cf_cnt,
             ast_symbols_indexed=sym_cnt,
             ast_edges_indexed=edge_cnt,
             doc_chunks_indexed=doc_cnt,
+            empty_doc_shas=updated_empty_shas,
         )
         return {
             "synced": True,
-            "added": len(doc_added),
+            "added": len(doc_file_entries),
             "modified": len(doc_modified),
             "deleted": len(doc_deleted_keys),
             "unchanged": doc_unchanged,
@@ -1556,6 +1750,13 @@ class BoundGraphRepository:
     def _use_pg17(self) -> bool:
         return self._repo is None or isinstance(self._repo, PostgresRLSRepository)
 
+    def _has_in_memory_domain_records(self, domain_id: str) -> bool:
+        if not isinstance(self._repo, InMemoryRLSRepository):
+            return False
+        return any(f.domain_id == domain_id for f in self._repo._files.values()) or any(
+            c.domain_id == domain_id for c in self._repo._docs.values()
+        )
+
     @contextmanager
     def _pg_tx(self, principal: PrincipalContext) -> Iterator[Connection[tuple[object, ...]]]:
         if self._conn is not None:
@@ -1699,6 +1900,7 @@ class BoundGraphRepository:
         domain_id: str,
         market_scope: MarketRegime | None = None,
         include_stale: bool = False,
+        chunk_ids: list[UUID] | None = None,
     ) -> list[DocChunkRecord]:
         try:
             with self._pg_tx(principal) as conn:
@@ -1711,6 +1913,11 @@ class BoundGraphRepository:
                     WHERE domain_id = %s
                 """
                 params: list[object] = [domain_id]
+                if chunk_ids is not None:
+                    if not chunk_ids:
+                        return []
+                    query += " AND chunk_id = ANY(%s)"
+                    params.append(chunk_ids)
                 if not include_stale:
                     query += " AND is_stale = FALSE"
                 if market_scope is not None:
@@ -2022,7 +2229,9 @@ class BoundGraphRepository:
         if not self._use_pg17() and hasattr(self._repo, "list_visible_code_files"):
             try:
                 result = self._repo.list_visible_code_files(principal, domain_id)
-                if isinstance(result, list) and result:
+                if isinstance(result, list) and (
+                    result or self._has_in_memory_domain_records(domain_id)
+                ):
                     typed_res = list(result)
                     self._files_cache[inst_cache_key] = typed_res
                     return list(typed_res)
@@ -2046,7 +2255,9 @@ class BoundGraphRepository:
         if not self._use_pg17() and hasattr(self._repo, "list_visible_ast_symbols"):
             try:
                 result = self._repo.list_visible_ast_symbols(principal, domain_id)
-                if isinstance(result, list) and result:
+                if isinstance(result, list) and (
+                    result or self._has_in_memory_domain_records(domain_id)
+                ):
                     typed_res = list(result)
                     self._symbols_cache[inst_cache_key] = typed_res
                     return list(typed_res)
@@ -2070,7 +2281,9 @@ class BoundGraphRepository:
         if not self._use_pg17() and hasattr(self._repo, "list_visible_ast_edges"):
             try:
                 result = self._repo.list_visible_ast_edges(principal, domain_id)
-                if isinstance(result, list) and result:
+                if isinstance(result, list) and (
+                    result or self._has_in_memory_domain_records(domain_id)
+                ):
                     typed_res = list(result)
                     self._edges_cache[inst_cache_key] = typed_res
                     return list(typed_res)
@@ -2115,7 +2328,9 @@ class BoundGraphRepository:
                         )
                 else:
                     result = self._repo.list_visible_doc_chunks(principal, domain_id, market_scope)
-                if isinstance(result, list) and result:
+                if isinstance(result, list) and (
+                    result or self._has_in_memory_domain_records(domain_id)
+                ):
                     typed_res = (
                         list(result)
                         if include_stale
@@ -2159,6 +2374,41 @@ class BoundGraphRepository:
                     return result
             except Exception as e:
                 logger.debug("search_visible_doc_chunks fallback: %s", e)
+
+        if (
+            self._use_pg17()
+            and query_text.strip()
+            and os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() != "1"
+        ):
+            try:
+                query_vec = _embed_query_for_hybrid_rrf(query_text)
+                pg_repo = (
+                    self._repo
+                    if isinstance(self._repo, PostgresRLSRepository)
+                    else PostgresRLSRepository()
+                )
+                with self._pg_tx(principal) as conn:
+                    hits = pg_repo.search_doc_chunks_hybrid_rrf(
+                        conn=conn,
+                        domain_id=domain_id,
+                        query_text=query_text,
+                        query_embedding=query_vec,
+                        market_scope=market_scope,
+                        top_k=limit,
+                    )
+                if hits:
+                    ordered_ids = [str(h.item_id) for h in hits]
+                    fetched = self.get_doc_chunks_by_ids(principal, domain_id, ordered_ids)
+                    by_id = {str(c.chunk_id): c for c in fetched}
+                    ranked_hits = [by_id[cid] for cid in ordered_ids if cid in by_id]
+                    if ranked_hits:
+                        return ranked_hits[:limit]
+            except Exception as exc:
+                logger.debug(
+                    "PG17 hybrid RRF doc search fallback (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
 
         base_chunks = self.list_visible_doc_chunks(principal, domain_id, market_scope)
         if not base_chunks and market_scope is not None:
@@ -2210,6 +2460,20 @@ class BoundGraphRepository:
                     return result
             except Exception as e:
                 logger.debug("get_doc_chunks_by_ids fallback: %s", e)
+        if self._use_pg17() and chunk_ids:
+            parsed_uuids: list[UUID] = []
+            for cid in chunk_ids:
+                try:
+                    parsed_uuids.append(UUID(str(cid)))
+                except ValueError:
+                    continue
+            if parsed_uuids:
+                return self._query_pg_doc_chunks(
+                    principal=principal,
+                    domain_id=domain_id,
+                    include_stale=False,
+                    chunk_ids=parsed_uuids,
+                )
         visible = self.list_visible_doc_chunks(principal, domain_id)
         wanted = set(chunk_ids)
         return [c for c in visible if str(c.chunk_id) in wanted]

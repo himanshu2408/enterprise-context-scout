@@ -464,7 +464,7 @@ class QLoRAHyperparameters(BaseModel):
     learning_rate: float = Field(default=1e-4, gt=0.0)
     batch_size: int = Field(default=4, ge=1)
     num_epochs: int = Field(default=3, ge=1)
-    max_seq_length: int = Field(default=2048, ge=256)
+    max_seq_length: int = Field(default=4096, ge=256)
     seed: int = Field(default=42)
 
     @property
@@ -755,6 +755,8 @@ class LocalQLoRATrainer:
         domain_id: str | None = None,
         num_steps: int | None = None,
         use_mlx_native: bool = False,
+        learning_rate: float | None = None,
+        max_seq_length: int | None = None,
     ) -> TrainingRunResult:
         """Executes genuine QLoRA fine-tuning with process mutual exclusion lock (HW-01).
 
@@ -840,9 +842,19 @@ class LocalQLoRATrainer:
                 for name, _ in flat_trainable:
                     assert "router" not in name, f"Router parameter unexpectedly trainable: {name}"
 
-                full_seq_limit = self.hyperparameters.max_seq_length
+                full_seq_limit = (
+                    max_seq_length
+                    if max_seq_length is not None
+                    else self.hyperparameters.max_seq_length
+                )
+                active_lr = (
+                    learning_rate
+                    if learning_rate is not None
+                    else self.hyperparameters.learning_rate
+                )
                 mlx_samples: list[tuple[Any, Any, Any, int]] = []
                 total_tokens = 0
+                truncated_rows = 0
                 for ex in train_data:
                     msgs = ex.get("messages", [])
                     if len(msgs) < 2:
@@ -856,9 +868,13 @@ class LocalQLoRATrainer:
                     target_str = msgs[-1].get("content", "") + "<turn|>\n"
                     prompt_ids = [int(t) for t in mlx_tok.encode(prompt_str)]
                     target_ids = [int(t) for t in mlx_tok.encode(target_str)]
+                    if len(prompt_ids) + len(target_ids) > full_seq_limit:
+                        truncated_rows += 1
+                        keep_prompt = max(64, full_seq_limit - len(target_ids))
+                        prompt_ids = prompt_ids[-keep_prompt:]
                     full_ids = (prompt_ids + target_ids)[:full_seq_limit]
-                    p_len = len(prompt_ids)
-                    t_len = max(1, len(full_ids) - p_len)
+                    p_len = min(len(prompt_ids), max(0, len(full_ids) - 1))
+                    t_len = len(full_ids) - p_len
                     full_mask = [0.0] * p_len + [1.0] * t_len
                     x_arr = mx.array([full_ids[:-1]])
                     y_arr = mx.array([full_ids[1:]])
@@ -868,18 +884,26 @@ class LocalQLoRATrainer:
                 if not mlx_samples:
                     raise ValueError(f"No valid sequences tokenized in {train_jsonl}")
 
-                def _mlx_loss_fn(model_obj: Any, x_arr: Any, y_arr: Any, m_arr: Any) -> Any:
+                if truncated_rows > 0:
+                    logger.warning(
+                        "Truncated %d/%d MLX training sequences at max_seq_length=%d",
+                        truncated_rows,
+                        len(train_data),
+                        full_seq_limit,
+                    )
+
+                def _mlx_loss_fn(model_obj: Any, x_arr: Any, y_tgt: Any, m_arr: Any) -> Any:
                     logits_out = model_obj(x_arr)
-                    unreduced = mnn.losses.cross_entropy(logits_out, y_arr, reduction="none")
+                    unreduced = mnn.losses.cross_entropy(logits_out, y_tgt, reduction="none")
                     return (unreduced * m_arr).sum() / m_arr.sum()
 
                 mnn_any: Any = mnn
                 val_grad_builder: Any = mnn_any.value_and_grad
                 loss_and_grad_fn: Any = val_grad_builder(mlx_model, _mlx_loss_fn)
                 sched_fn: Any = moptim.cosine_decay(
-                    init=self.hyperparameters.learning_rate,
+                    init=active_lr,
                     decay_steps=steps_to_run,
-                    end=self.hyperparameters.learning_rate * 0.1,
+                    end=active_lr * 0.1,
                 )
                 mlx_opt = moptim.AdamW(
                     learning_rate=sched_fn,
@@ -900,11 +924,7 @@ class LocalQLoRATrainer:
                     if step == 1:
                         initial_loss = current_loss
                     final_loss = current_loss
-                    cur_lr = (
-                        float(sched_fn(step).item())
-                        if callable(sched_fn)
-                        else self.hyperparameters.learning_rate
-                    )
+                    cur_lr = float(sched_fn(step).item()) if callable(sched_fn) else active_lr
                     step_history.append(
                         {
                             "step": step,
@@ -930,9 +950,12 @@ class LocalQLoRATrainer:
                     vt_str = v_msgs[-1].get("content", "") + "<turn|>\n"
                     vp_ids = [int(t) for t in mlx_tok.encode(vp_str)]
                     vt_ids = [int(t) for t in mlx_tok.encode(vt_str)]
+                    if len(vp_ids) + len(vt_ids) > full_seq_limit:
+                        v_keep = max(64, full_seq_limit - len(vt_ids))
+                        vp_ids = vp_ids[-v_keep:]
                     v_full = (vp_ids + vt_ids)[:full_seq_limit]
-                    vp_len = len(vp_ids)
-                    vt_len = max(1, len(v_full) - vp_len)
+                    vp_len = min(len(vp_ids), max(0, len(v_full) - 1))
+                    vt_len = len(v_full) - vp_len
                     v_mask = [0.0] * vp_len + [1.0] * vt_len
                     vx_arr = mx.array([v_full[:-1]])
                     vy_arr = mx.array([v_full[1:]])

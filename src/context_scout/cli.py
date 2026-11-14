@@ -12,7 +12,6 @@ Allows any developer cloning the repository to:
 from __future__ import annotations
 
 import argparse
-import datetime
 import json
 import logging
 import re
@@ -28,6 +27,7 @@ from context_scout.agents.gemini_executor import GeminiImplementationExecutor
 from context_scout.agents.preflight_gate import (
     CUSTOM_DOC_EXTENSIONS,
     BoundGraphRepository,
+    build_custom_doc_chunk_records,
     derive_custom_repo_name,
     extract_document_text,
     is_multi_repo_source_dir,
@@ -586,7 +586,7 @@ def cmd_distill_custom_domain(
                 f"found in {source_dir}"
             )
 
-        doc_passages: list[tuple[str, str, str, str, str]] = []
+        doc_file_entries: list[tuple[Path, str, str, bytes, str]] = []
         for df in doc_files:
             try:
                 text = extract_document_text(df)
@@ -594,81 +594,49 @@ def cmd_distill_custom_domain(
                 doc_blob_sha = hashlib.sha1(raw_doc_bytes).hexdigest()
             except Exception as exc:
                 logger.debug(
-                    "Skipping unreadable code file %s during distillation (%s): %s",
-                    cf,
+                    "Skipping unreadable doc file %s during distillation (%s): %s",
+                    df,
                     type(exc).__name__,
                     exc,
                 )
                 continue
             if not text.strip():
                 continue
-
             rel_doc = str(df.relative_to(source_dir)) if df.is_relative_to(source_dir) else df.name
-            doc_title = df.stem.replace("_", " ").replace("-", " ").title()
-            for ln in text.splitlines():
-                stripped_ln = ln.strip()
-                if stripped_ln.startswith("# "):
-                    doc_title = stripped_ln[2:].strip()
-                    break
-                t_match = re.search(r"\\title\{([^\}]+)\}", stripped_ln)
-                if t_match:
-                    doc_title = t_match.group(1).strip()
-                    break
+            doc_file_entries.append((df, rel_doc, text, raw_doc_bytes, doc_blob_sha))
 
-            section_heading = "1. Empirical Findings"
-            for ln in text.splitlines():
-                stripped_ln = ln.strip()
-                if stripped_ln.startswith("## "):
-                    section_heading = stripped_ln[3:].strip()
-                    break
-                sec_m = re.search(r"\\section\*?\{([^\}]+)\}", stripped_ln)
-                if sec_m:
-                    section_heading = sec_m.group(1).strip()
-                    break
+        doc_chunk_records = build_custom_doc_chunk_records(
+            domain_id=domain_id,
+            file_entries=doc_file_entries,
+            batch_size=64,
+        )
 
+        doc_passages: list[tuple[str, str, str, str, str]] = []
+        for rec in doc_chunk_records:
             valid_lines = [
                 ln.strip()
-                for ln in text.splitlines()
+                for ln in rec.verbatim_content.splitlines()
                 if len(ln.strip()) >= 30
-                and not ln.strip().startswith("%")
-                and not ln.strip().startswith("#")
+                and not ln.strip().startswith(("%", "#", "```", "---"))
                 and len(re.findall(r"[A-Za-z]{3,}", ln)) >= 3
             ]
-            quote = valid_lines[0][:180] if valid_lines else "Verified empirical domain finding."
-            chk_uuid_obj = uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain_id}:doc:{rel_doc}:0")
-            chk_uuid = str(chk_uuid_obj)
-            doc_chunk_records.append(
-                DocChunkRecord(
-                    chunk_id=chk_uuid_obj,
-                    domain_id=domain_id,
-                    doc_id=f"{domain_id}:{df.stem}",
-                    doc_title=doc_title,
-                    source_uri=f"urn:{domain_id}:{rel_doc}",
-                    market_scope="ENTERPRISE_DOC",
-                    published_date=datetime.date(2026, 1, 1),
-                    authority_weight=1.0,
-                    section_heading=section_heading,
-                    contextual_header=f"{doc_title} — {section_heading}",
-                    verbatim_content=text,
-                    metadata_json={
-                        "filename": df.name,
-                        "rel_path": rel_doc,
-                        "blob_sha": doc_blob_sha,
-                    },
-                    allowed_scopes=[
-                        "public_eng",
-                        "public_quant",
-                        "quant_restricted",
-                        f"domain:{domain_id}",
-                    ],
-                    embedding=generate_deterministic_embedding(
-                        f"{doc_title}\n{section_heading}\n{text[:1200]}"
-                    ),
+            quote = (
+                valid_lines[0][:180]
+                if valid_lines
+                else (
+                    rec.verbatim_content.strip().splitlines()[0][:180]
+                    or "Verified empirical domain finding."
                 )
             )
             doc_passages.append(
-                (f"{domain_id}:{df.stem}", doc_title, section_heading, quote, chk_uuid)
+                (rec.doc_id, rec.doc_title, rec.section_heading, quote, str(rec.chunk_id))
             )
+
+        if not doc_passages:
+            raise ValueError(f"No non-empty document chunks could be extracted from {source_dir}")
+
+        train_passages = [p for p in doc_passages if "eval_holdout" not in p[0]] or doc_passages
+        doc_passages = train_passages
 
         distill_plugin = (
             PluginRegistry.get_domain_plugin(domain_id)

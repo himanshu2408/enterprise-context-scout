@@ -142,11 +142,47 @@ const QUICK_PICKS: QuickPickScenario[] = [
   },
 ];
 
+const DATA_ENG_QUICK_PICKS: QuickPickScenario[] = [
+  {
+    id: "de_iceberg_cow_mor",
+    label: "Iceberg CoW vs MoR",
+    domainId: "data_engineering_scout",
+    query:
+      "Compare Apache Iceberg Copy-on-Write vs Merge-on-Read delete files, equality deletes compaction trade-offs, and read amplification.",
+    tag: "Lakehouse",
+  },
+  {
+    id: "de_spark_aqe_skew",
+    label: "Spark AQE & Skew",
+    domainId: "data_engineering_scout",
+    query:
+      "How does Spark Adaptive Query Execution handle skewed joins, shuffle partition coalescing, and broadcast thresholds?",
+    tag: "Compute",
+  },
+  {
+    id: "de_flink_eos_cdc",
+    label: "Flink EOS & Debezium CDC",
+    domainId: "data_engineering_scout",
+    query:
+      "Explain Flink two-phase commit exactly-once sink idempotency guarantees and Debezium PostgreSQL WAL replication slot bloat failure modes.",
+    tag: "Streaming / CDC",
+  },
+  {
+    id: "de_dbt_scd2_pg17",
+    label: "dbt Incremental & PG17 MERGE",
+    domainId: "data_engineering_scout",
+    query:
+      "Compare dbt incremental merge strategies, SCD Type 2 atomic temporal validity intervals, and PostgreSQL 17 MERGE concurrency caveats.",
+    tag: "SQL / Warehouse",
+  },
+];
+
 const DEFAULT_DOMAIN_PROMPTS: Record<string, string> = {
   federated_all: QUICK_PICKS[3].query,
   trading_code_scout: QUICK_PICKS[0].query,
   quant_research_scout: QUICK_PICKS[2].query,
   polyglot_unseen_v2: QUICK_PICKS[0].query,
+  data_engineering_scout: DATA_ENG_QUICK_PICKS[0].query,
 };
 
 const ALL_DEFAULT_PROMPTS = new Set<string>(Object.values(DEFAULT_DOMAIN_PROMPTS));
@@ -632,7 +668,10 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
       </div>
 
       <div className="quick-picks-row" aria-label="Sample scenarios">
-        {QUICK_PICKS.map((pick) => (
+        {(selectedDomain === "data_engineering_scout"
+          ? DATA_ENG_QUICK_PICKS
+          : QUICK_PICKS
+        ).map((pick) => (
           <button
             key={pick.id}
             type="button"

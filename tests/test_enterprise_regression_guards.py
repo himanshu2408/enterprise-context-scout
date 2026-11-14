@@ -1981,3 +1981,214 @@ def test_hybrid_doc_citation_extraction_populates_provenance_and_skips_closed_ti
     )
     assert isinstance(unans_res, InsufficientContextDiagnostic)
     assert unans_res.paid_tokens_spent == 0
+
+
+def test_in_memory_workflow_skips_custom_domain_pg_sync_guard(
+    monkeypatch: object,
+) -> None:
+    """Guard: In-memory ScoutWorkflow never calls PG sync_custom_domain_corpus_if_needed."""
+    import time
+    import uuid
+
+    import pytest
+
+    from context_scout.agents.domain_registry import DomainRegistry
+    from context_scout.agents.scout_workflow import ScoutWorkflow
+    from context_scout.db.repositories import (
+        ASTSymbolRecord,
+        CodeFileRecord,
+        InMemoryRLSRepository,
+    )
+    from context_scout.schemas.contracts import InsufficientContextDiagnostic
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    repo = InMemoryRLSRepository()
+    admin = PrincipalContext(
+        user_id="guard_admin",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng"],
+    )
+    fid = uuid.uuid4()
+    src = "def sample_helper(x: int) -> int:\n    return x + 1\n"
+    repo.insert_code_file(
+        admin,
+        CodeFileRecord(
+            file_id=fid,
+            domain_id="polyglot_unseen_v2",
+            repo_name="dummy_repo",
+            file_path="src/sample.py",
+            git_commit_sha="a" * 40,
+            git_blob_sha="b" * 40,
+            language="python",
+            allowed_scopes=["public_eng"],
+            raw_content=src,
+            line_count=2,
+        ),
+    )
+    repo.insert_ast_symbol(
+        admin,
+        ASTSymbolRecord(
+            symbol_id=uuid.uuid4(),
+            file_id=fid,
+            domain_id="polyglot_unseen_v2",
+            qualified_name="sample.sample_helper",
+            symbol_kind="function",
+            start_line=1,
+            end_line=2,
+            signature_skeleton="def sample_helper(x: int) -> int:",
+            contextual_summary="Increment helper.",
+            allowed_scopes=["public_eng"],
+            embedding=[0.1] * 768,
+        ),
+    )
+
+    sync_calls: list[str] = []
+
+    def _spy_sync(domain_id: str, **_kwargs: object) -> None:
+        sync_calls.append(domain_id)
+
+    monkeypatch.setattr(
+        "context_scout.agents.preflight_gate.sync_custom_domain_corpus_if_needed",
+        _spy_sync,
+    )
+
+    reg = DomainRegistry(Path("domains"))
+    reg.load_all()
+    wf = ScoutWorkflow(registry=reg, repo=repo)
+
+    t0 = time.perf_counter()
+    res = wf.run(
+        user_prompt="Refactor MissingNonexistentFunctionV99 in polyglot_unseen_v2",
+        principal=admin,
+        domain_id="polyglot_unseen_v2",
+    )
+    elapsed = time.perf_counter() - t0
+
+    assert isinstance(res, InsufficientContextDiagnostic)
+    assert res.paid_tokens_spent == 0
+    assert len(sync_calls) == 0, f"Expected 0 PG sync calls, got {sync_calls}"
+    assert elapsed < 2.0, f"In-memory workflow took too long: {elapsed:.2f}s"
+
+
+def test_bound_graph_repo_populated_in_memory_never_falls_back_to_pg_guard(
+    monkeypatch: object,
+) -> None:
+    """Guard: Populated InMemoryRLSRepository never falls back to PG on empty filtered query."""
+    import uuid
+
+    import pytest
+
+    from context_scout.agents.preflight_gate import BoundGraphRepository
+    from context_scout.db.repositories import DocChunkRecord, InMemoryRLSRepository
+    from context_scout.schemas.contracts import MarketRegime
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    domain_id = f"eval_mem_guard_{uuid.uuid4().hex[:8]}"
+    repo = InMemoryRLSRepository()
+    admin = PrincipalContext(
+        user_id="guard_admin",
+        role=RoleType.QUANT_RESEARCHER,
+        allowed_scopes=["public_quant"],
+    )
+    repo.insert_doc_chunk(
+        admin,
+        DocChunkRecord(
+            chunk_id=uuid.uuid4(),
+            domain_id=domain_id,
+            doc_id="us_doc_1",
+            doc_title="US Market Microstructure",
+            source_uri="arxiv:2401.00001",
+            market_scope=MarketRegime.US_NYSE_NASDAQ,
+            published_date=None,
+            authority_weight=1.0,
+            section_heading="1. Intro",
+            contextual_header="US Microstructure header",
+            verbatim_content="Order book imbalance impacts short-horizon US equity returns.",
+            metadata_json={},
+            allowed_scopes=["public_quant"],
+            embedding=[0.1] * 768,
+        ),
+    )
+
+    bound = BoundGraphRepository(repo)
+    pg_calls: list[str] = []
+
+    def _spy_pg_doc_chunks(
+        _self: BoundGraphRepository,
+        _principal: PrincipalContext,
+        dom_id: str,
+        **_kwargs: object,
+    ) -> list[DocChunkRecord]:
+        pg_calls.append(dom_id)
+        return []
+
+    monkeypatch.setattr(BoundGraphRepository, "_query_pg_doc_chunks", _spy_pg_doc_chunks)
+
+    in_nse_chunks = bound.list_visible_doc_chunks(
+        admin, domain_id, market_scope=MarketRegime.INDIA_NSE_BSE
+    )
+    assert in_nse_chunks == []
+
+    unauth_principal = PrincipalContext(
+        user_id="unauth_user",
+        role=RoleType.PRODUCT_MANAGER,
+        allowed_scopes=["public_pm"],
+    )
+    unauth_chunks = bound.list_visible_doc_chunks(unauth_principal, domain_id)
+    assert unauth_chunks == []
+    assert len(pg_calls) == 0, f"Expected 0 PG fallback calls, got {pg_calls}"
+
+
+def test_seed_code_corpus_syncs_ast_symbols_and_federated_eval_passes_in_memory_and_pg() -> None:
+    """Guard: PG17 ast_symbols has fresh symbols and FED-01..03 pass in-memory and PG17."""
+    import psycopg
+
+    from context_scout.agents.scout_workflow import FederatedScoutCoordinator
+    from context_scout.config import ScoutSettings
+    from context_scout.evals.golden_dataset import get_default_golden_suite
+    from context_scout.evals.harness import EvaluationHarness
+    from context_scout.schemas.contracts import ImplementationContextPack
+
+    suite = get_default_golden_suite()
+    assert len(suite.federated_tasks) == 3
+
+    with psycopg.connect(ScoutSettings().db_admin_url) as conn:
+        stale_rows = conn.execute(
+            """
+            SELECT qualified_name FROM ast_symbols
+            WHERE domain_id = 'trading_code_scout'
+              AND (
+                  qualified_name LIKE '%%distill_quant_research_scout%%'
+                  OR qualified_name LIKE '%%evaluate_quant_research_sample%%'
+              );
+            """
+        ).fetchall()
+        fresh_rows = conn.execute(
+            """
+            SELECT qualified_name FROM ast_symbols
+            WHERE domain_id = 'trading_code_scout'
+              AND qualified_name LIKE '%%TeacherDistiller.distill_research_domain%%';
+            """
+        ).fetchall()
+    assert stale_rows == [], f"Stale symbols found in PG17: {stale_rows}"
+    assert len(fresh_rows) >= 1, "Expected TeacherDistiller.distill_research_domain in PG17"
+
+    for require_pg, force_mem in ((False, True), (True, False)):
+        harness = EvaluationHarness(require_postgres=require_pg, force_in_memory=force_mem)
+        coordinator = FederatedScoutCoordinator(registry=harness.registry, repo=harness.repo)
+        for task in suite.federated_tasks:
+            principal = PrincipalContext(
+                user_id=f"fed_guard_{task.task_id}",
+                role=RoleType.ENGINEER,
+                allowed_scopes=[
+                    "public_eng",
+                    "public_quant",
+                    f"domain:{harness.research_domain_id}",
+                ],
+                session_budget_tokens=200_000,
+                max_session_paid_tokens=200_000,
+            )
+            pack = coordinator.run(user_prompt=task.user_prompt, principal=principal)
+            assert isinstance(pack, ImplementationContextPack), (
+                f"{task.task_id} failed (require_postgres={require_pg}): {pack}"
+            )

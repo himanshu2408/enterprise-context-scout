@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
+import re
 from datetime import date
 from typing import Any, Final
 from uuid import UUID
@@ -16,6 +18,7 @@ from context_scout.db.repositories import (
     ASTSymbolRecord,
     CodeFileRecord,
     DocChunkRecord,
+    _parse_market_scope,
 )
 from context_scout.db.session import RLSConnectionManager
 from context_scout.schemas.contracts import MarketRegime, PrincipalContext
@@ -436,7 +439,7 @@ class PostgresScoutGraphAdapter:
             doc_id=str(r[2]),
             doc_title=str(r[3]),
             source_uri=str(r[4]),
-            market_scope=MarketRegime(str(r[5])),
+            market_scope=_parse_market_scope(r[5]),
             published_date=pub_date,
             authority_weight=float(str(r[7])),
             section_heading=str(r[8]),
@@ -451,7 +454,7 @@ class PostgresScoutGraphAdapter:
         self,
         principal: PrincipalContext,
         domain_id: str,
-        market_scope: MarketRegime | None = None,
+        market_scope: MarketRegime | str | None = None,
     ) -> list[DocChunkRecord]:
         """Returns visible document chunks under Forced RLS (bounded to 100 rows)."""
         with scoped_db_session(self.connection_manager, principal) as conn:
@@ -478,11 +481,46 @@ class PostgresScoutGraphAdapter:
         principal: PrincipalContext,
         domain_id: str,
         query_text: str,
-        market_scope: MarketRegime | None = None,
+        market_scope: MarketRegime | str | None = None,
         limit: int = 50,
     ) -> list[DocChunkRecord]:
-        """Searches visible document chunks ranked by keyword and market scope under Forced RLS."""
-        import re
+        """Searches visible document chunks ranked by RRF, keyword, and market scope under RLS."""
+        if (
+            query_text.strip()
+            and os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() != "1"
+            and (
+                not os.environ.get("PYTEST_CURRENT_TEST")
+                or os.environ.get("SCOUT_ENABLE_HYBRID_RRF_IN_PYTEST", "").strip() == "1"
+            )
+        ):
+            try:
+                from context_scout.agents.preflight_gate import _embed_query_for_hybrid_rrf
+                from context_scout.db.repositories import PostgresRLSRepository
+
+                query_vec = _embed_query_for_hybrid_rrf(query_text)
+                pg_repo = PostgresRLSRepository()
+                with scoped_db_session(self.connection_manager, principal) as conn:
+                    hits = pg_repo.search_doc_chunks_hybrid_rrf(
+                        conn=conn,
+                        domain_id=domain_id,
+                        query_text=query_text,
+                        query_embedding=query_vec,
+                        market_scope=market_scope,
+                        top_k=limit,
+                    )
+                if hits:
+                    ordered_ids = [str(h.item_id) for h in hits]
+                    fetched = self.get_doc_chunks_by_ids(principal, domain_id, ordered_ids)
+                    by_id = {str(c.chunk_id): c for c in fetched}
+                    ranked_hits = [by_id[cid] for cid in ordered_ids if cid in by_id]
+                    if ranked_hits:
+                        return ranked_hits[:limit]
+            except Exception as exc:
+                logger.debug(
+                    "PG17 hybrid RRF doc search fallback (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
 
         words = [
             w.lower()
@@ -497,6 +535,13 @@ class PostgresScoutGraphAdapter:
                 "way",
                 "how",
                 "what",
+                "does",
+                "stand",
+                "stands",
+                "mean",
+                "means",
+                "define",
+                "definition",
                 "implement",
                 "implementing",
                 "implementation",
@@ -538,10 +583,12 @@ class PostgresScoutGraphAdapter:
                 where_params.extend([pat, pat, pat])
 
             market_bonus_sql = "0"
+            market_order_prefix = ""
             market_bonus_params: list[object] = []
             if market_scope is not None:
                 m_val = market_scope.value if hasattr(market_scope, "value") else str(market_scope)
                 market_bonus_sql = "(CASE WHEN market_scope = %s THEN 5 ELSE 0 END)"
+                market_order_prefix = f"{market_bonus_sql} DESC,"
                 market_bonus_params.append(m_val)
 
             score_expr = " + ".join(score_parts) + f" + {market_bonus_sql}"
@@ -559,7 +606,7 @@ class PostgresScoutGraphAdapter:
                     FROM doc_chunks, q
                     WHERE domain_id = %s
                       AND fts_doc @@ q.tsq
-                    ORDER BY {market_bonus_sql} DESC,
+                    ORDER BY {market_order_prefix}
                              ts_rank_cd(fts_doc, q.tsq) DESC,
                              authority_weight DESC
                     LIMIT 250

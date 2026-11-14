@@ -1,0 +1,17 @@
+{
+  "domain_id": "data_engineering_scout",
+  "kind": "knowledge",
+  "source_dir": "data/data_engineering",
+  "synced_at": "2026-11-14T17:46:38.814412+00:00",
+  "repo_commit_shas": {},
+  "code_files_indexed": 0,
+  "ast_symbols_indexed": 0,
+  "ast_edges_indexed": 0,
+  "doc_chunks_indexed": 31773,
+  "storage_backend": "postgresql_17_rls",
+  "empty_doc_shas": {
+    "train/repos/postgres__postgres/doc/src/sgml/func/allfiles.sgml": "5a60540503b3421d941eebc4d974990c86ef6709",
+    "train/repos/postgres__postgres/doc/src/sgml/ref/allfiles.sgml": "aaba2e4ee705dabc7d72cf18a3535b0a5e441aa5",
+    "train/repos/terraform-google-modules__terraform-google-bigquery/docs/TROUBLESHOOTING.md": "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+  }
+}

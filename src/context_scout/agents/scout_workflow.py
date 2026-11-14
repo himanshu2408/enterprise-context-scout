@@ -54,6 +54,7 @@ from context_scout.db.repositories import (
     ASTSymbolRecord,
     CodeFileRecord,
     DocChunkRecord,
+    PostgresRLSRepository,
 )
 from context_scout.plugins.registry import PluginRegistry
 from context_scout.schemas.contracts import (
@@ -70,6 +71,8 @@ from context_scout.schemas.contracts import (
     QuantStrategyBrief,
     RoleType,
     VerbatimCodeSlice,
+    build_domain_knowledge_brief_prompt,
+    parse_domain_knowledge_brief_json,
 )
 from context_scout.security.guardrails import (
     ShieldGemmaGuardrail,
@@ -111,7 +114,7 @@ def _snap_python_ast_pointer_bounds(
             and node.end_lineno is not None
         ):
             dist = abs(node.lineno - ptr.start_line)
-            if dist <= 15 and dist < best_dist:
+            if dist <= 60 and dist < best_dist:
                 best_dist = dist
                 best_node = node
 
@@ -653,16 +656,37 @@ class LocalGemmaClient:
                     add_generation_prompt=True,
                 )
 
-            raw = str(
-                mlx_lm.generate(
-                    model,
-                    tokenizer,
-                    prompt=formatted,
-                    max_tokens=max_tokens,
-                    verbose=False,
+            gen_kwargs: dict[str, Any] = {
+                "prompt": formatted,
+                "max_tokens": max_tokens,
+                "verbose": False,
+            }
+            try:
+                from mlx_lm.sample_utils import make_logits_processors, make_sampler
+
+                gen_kwargs["sampler"] = make_sampler(temp=0.0)
+                gen_kwargs["logits_processors"] = make_logits_processors(
+                    repetition_penalty=1.05,
+                    repetition_context_size=128,
                 )
+            except Exception as exc:
+                logger.debug("mlx_lm.sample_utils unavailable (%s)", type(exc).__name__)
+
+            try:
+                raw = str(mlx_lm.generate(model, tokenizer, **gen_kwargs))
+            except TypeError:
+                raw = str(
+                    mlx_lm.generate(
+                        model,
+                        tokenizer,
+                        prompt=formatted,
+                        max_tokens=max_tokens,
+                        verbose=False,
+                    )
+                )
+            return (
+                raw.replace("<eos>", "").replace("<end_of_turn>", "").replace("<turn|>", "").strip()
             )
-            return raw.replace("<eos>", "").replace("<end_of_turn>", "").strip()
 
     def _call_mlx_raw(
         self,
@@ -839,7 +863,7 @@ class LocalGemmaClient:
         bounce_back_feedback: str | None,
     ) -> list[CodeSlicePointer]:
         """Deterministic structured output generator using repository AST index."""
-        bound_repo = BoundGraphRepository(repo)
+        bound_repo = repo if isinstance(repo, BoundGraphRepository) else BoundGraphRepository(repo)
         active_principal = principal or PrincipalContext(
             user_id="local_gemma_worker",
             role=RoleType.ENGINEER,
@@ -1535,6 +1559,120 @@ class LocalGemmaClient:
             content = body["choices"][0]["message"]["content"]
             return QuantStrategyBrief.model_validate_json(content)
 
+    def _call_mlx_domain_knowledge_brief(
+        self, user_prompt: str, domain_id: str
+    ) -> DomainKnowledgeBrief | None:
+        """Calls OpenAI-compatible /v1/chat/completions to synthesize a DomainKnowledgeBrief."""
+        slot = self.get_active_adapter(domain_id)
+        model_name = slot.adapter_id if slot else self.model_id
+        schema_fields = ", ".join(DomainKnowledgeBrief.model_fields.keys())
+        payload = {
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a local domain knowledge scout. Return only a valid JSON object "
+                        f"conforming to DomainKnowledgeBrief schema with keys: {schema_fields}."
+                    ),
+                },
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.0,
+            "max_tokens": 1536,
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.endpoint_url}/chat/completions",
+            data=data,
+            headers={"Content-Type": "application/json", "User-Agent": "ContextScout-LocalGemma"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            content = body["choices"][0]["message"]["content"]
+            return DomainKnowledgeBrief.model_validate_json(content)
+
+    @staticmethod
+    def _extract_verified_doc_citations(
+        fresh_chunks: list[DocChunkRecord],
+        *,
+        max_citations: int = 3,
+        diversify_docs: bool = False,
+    ) -> list[DocCitationSpan]:
+        """Extracts verbatim-verified DocCitationSpans from non-stale document chunks."""
+
+        def _is_noisy_line(line: str) -> bool:
+            s = line.strip()
+            if len(s) < 25:
+                return True
+            noisy_prefixes = (
+                "\\begin{table",
+                "\\end{table",
+                "\\maketitle",
+                "\\label{",
+                "\\paragraph{}",
+                "%",
+                "```",
+                "---",
+            )
+            if any(s.startswith(p) for p in noisy_prefixes):
+                return True
+            low = s.lower()
+            boilerplate_markers = (
+                "apache license",
+                "licensed to the apache software foundation",
+                "spdx-license-identifier",
+                "unless required by applicable law",
+                'distributed on an "as is" basis',
+            )
+            return any(m in low for m in boilerplate_markers)
+
+        slicer = DeterministicSlicer()
+        ordered_chunks = list(fresh_chunks)
+        if diversify_docs and len(ordered_chunks) > 1:
+            primary_per_doc: list[DocChunkRecord] = []
+            secondary: list[DocChunkRecord] = []
+            seen_docs: set[str] = set()
+            for chk in ordered_chunks:
+                if chk.doc_id not in seen_docs:
+                    seen_docs.add(chk.doc_id)
+                    primary_per_doc.append(chk)
+                else:
+                    secondary.append(chk)
+            ordered_chunks = primary_per_doc + secondary
+
+        verified_citations: list[DocCitationSpan] = []
+        for chk in ordered_chunks:
+            if len(verified_citations) >= max_citations:
+                break
+            snippet = chk.verbatim_content.strip()
+            if not snippet:
+                continue
+            clean_lines = [ln.strip() for ln in snippet.splitlines() if not _is_noisy_line(ln)]
+            candidates = [
+                *clean_lines,
+                snippet.split(".")[0] + "." if "." in snippet else snippet[:140],
+                *[ln.strip() for ln in snippet.splitlines() if len(ln.strip()) >= 20],
+                snippet[:220],
+            ]
+            for raw_cand in candidates:
+                cand = (
+                    raw_cand
+                    if len(raw_cand) <= 220
+                    else (raw_cand[:220].rsplit(" ", 1)[0].strip() or raw_cand[:220])
+                )
+                if not cand:
+                    continue
+                cand_cit = _build_doc_citation_span(chk, cand)
+                if slicer.verify_doc_citation(
+                    citation=cand_cit,
+                    chunk_content=chk.verbatim_content,
+                ).is_valid:
+                    verified_citations.append(cand_cit)
+                    break
+        return verified_citations
+
     def generate_quant_brief(
         self,
         user_prompt: str,
@@ -1573,7 +1711,7 @@ class LocalGemmaClient:
             if repo is None:
                 return None
 
-        bound_repo = BoundGraphRepository(repo)
+        bound_repo = repo if isinstance(repo, BoundGraphRepository) else BoundGraphRepository(repo)
         domain_plugin = (
             PluginRegistry.get_domain_plugin(domain_id)
             or PluginRegistry.get_primary_domain_plugin()
@@ -1601,49 +1739,10 @@ class LocalGemmaClient:
             limit=40,
         )
 
-        def _is_noisy_latex_line(line: str) -> bool:
-            s = line.strip()
-            if len(s) < 25:
-                return True
-            noisy_prefixes = (
-                "\\begin{table",
-                "\\end{table",
-                "\\maketitle",
-                "\\label{",
-                "\\paragraph{}",
-                "%",
-            )
-            return any(s.startswith(p) for p in noisy_prefixes)
-
         fresh_chunks = [c for c in chunks if not bool(getattr(c, "is_stale", False))]
         slicer = DeterministicSlicer()
-        verified_citations: list[DocCitationSpan] = []
         chunks_by_id = {str(c.chunk_id): c for c in fresh_chunks}
-        for chk in fresh_chunks:
-            if len(verified_citations) >= 3:
-                break
-            snippet = chk.verbatim_content.strip()
-            if not snippet:
-                continue
-            clean_lines = [
-                ln.strip() for ln in snippet.splitlines() if not _is_noisy_latex_line(ln)
-            ]
-            candidates = [
-                *clean_lines,
-                snippet.split(".")[0] + "." if "." in snippet else snippet[:120],
-                *[ln.strip() for ln in snippet.splitlines() if len(ln.strip()) >= 20],
-                snippet,
-            ]
-            for cand in candidates:
-                if not cand:
-                    continue
-                cand_cit = _build_doc_citation_span(chk, cand)
-                if slicer.verify_doc_citation(
-                    citation=cand_cit,
-                    chunk_content=chk.verbatim_content,
-                ).is_valid:
-                    verified_citations.append(cand_cit)
-                    break
+        verified_citations = self._extract_verified_doc_citations(fresh_chunks, max_citations=3)
 
         if not verified_citations:
             logger.info(
@@ -1734,13 +1833,65 @@ class LocalGemmaClient:
         quant_brief: QuantStrategyBrief | None = None,
     ) -> DomainKnowledgeBrief:
         """Synthesizes a domain-agnostic DomainKnowledgeBrief for any document/knowledge domain."""
-        base_brief = quant_brief or self.generate_quant_brief(
-            user_prompt=user_prompt,
-            domain_id=domain_id,
-            repo=repo,
-            principal=principal,
-        )
-        if base_brief is None:
+        if quant_brief is not None:
+            metadata: dict[str, str | float | int | bool] = {
+                "domain_id": domain_id,
+                "verified_citations_count": len(quant_brief.verified_citations),
+            }
+            plugin = (
+                PluginRegistry.get_domain_plugin(domain_id)
+                or PluginRegistry.get_primary_domain_plugin()
+            )
+            if plugin is not None:
+                for k, v in plugin.extract_brief_metadata(quant_brief).items():
+                    if isinstance(v, (str, float, int, bool)):
+                        metadata[k] = v
+
+            summary_quote = (
+                quant_brief.verified_citations[0].verbatim_quote
+                if quant_brief.verified_citations
+                else quant_brief.entry_exit_rules[0]
+            )
+            return DomainKnowledgeBrief(
+                brief_title=quant_brief.strategy_name,
+                domain_id=domain_id,
+                executive_summary=(
+                    f"Grounded synthesis for {quant_brief.strategy_name}: {summary_quote}"
+                ),
+                formal_expression_or_rule=quant_brief.mathematical_signal_latex,
+                core_findings_and_rules=list(quant_brief.entry_exit_rules),
+                domain_constraints_and_caveats=list(quant_brief.market_specific_caveats),
+                known_risks_and_failure_modes=list(quant_brief.known_failure_regimes),
+                structured_metadata=metadata,
+                verified_citations=list(quant_brief.verified_citations),
+            )
+
+        self.set_active_domain(domain_id)
+        has_injected_chunks = "Retrieved Corpus Chunk:" in user_prompt or repo is None
+        can_call_mlx = self.use_live_mlx or self.is_online()
+        if has_injected_chunks and not self.offline_mode and can_call_mlx:
+            try:
+                mlx_kb: DomainKnowledgeBrief | None = None
+                if self.use_live_mlx:
+                    raw_mlx = self._call_in_process_mlx(
+                        user_prompt, domain_id=domain_id, max_tokens=2048
+                    )
+                    mlx_kb, _ = parse_domain_knowledge_brief_json(
+                        raw_mlx,
+                        domain_id=domain_id,
+                        normalize_scalars=True,
+                    )
+                else:
+                    mlx_kb = self._call_mlx_domain_knowledge_brief(user_prompt, domain_id)
+                if mlx_kb is not None and mlx_kb.verified_citations:
+                    return mlx_kb
+            except Exception as exc:
+                logger.warning(
+                    "Local MLX DomainKnowledgeBrief synthesis failed (%s); falling back to RAG",
+                    exc,
+                )
+
+        if repo is None:
             return DomainKnowledgeBrief(
                 brief_title="Insufficient Verified Corpus Citations",
                 domain_id=domain_id,
@@ -1752,36 +1903,117 @@ class LocalGemmaClient:
                 structured_metadata={"domain_id": domain_id, "verified_citations_count": 0},
                 verified_citations=[],
             )
-        metadata: dict[str, str | float | int | bool] = {
-            "domain_id": domain_id,
-            "verified_citations_count": len(base_brief.verified_citations),
-        }
-        plugin = (
-            PluginRegistry.get_domain_plugin(domain_id)
-            or PluginRegistry.get_primary_domain_plugin()
-        )
-        if plugin is not None:
-            for k, v in plugin.extract_brief_metadata(base_brief).items():
-                if isinstance(v, (str, float, int, bool)):
-                    metadata[k] = v
 
-        summary_quote = (
-            base_brief.verified_citations[0].verbatim_quote
-            if base_brief.verified_citations
-            else base_brief.entry_exit_rules[0]
+        bound_repo = repo if isinstance(repo, BoundGraphRepository) else BoundGraphRepository(repo)
+        domain_plugin = PluginRegistry.get_domain_plugin(domain_id)
+        default_scopes = (
+            domain_plugin.get_default_scopes()
+            if domain_plugin is not None
+            else ["public_eng", "public_quant", f"domain:{domain_id}"]
         )
-        return DomainKnowledgeBrief(
-            brief_title=base_brief.strategy_name,
+        active_principal = principal or PrincipalContext(
+            user_id="local_gemma_knowledge",
+            role=RoleType.ENGINEER,
+            allowed_scopes=sorted({"public_eng", *default_scopes}),
+        )
+        chunks = bound_repo.search_visible_doc_chunks(
+            principal=active_principal,
             domain_id=domain_id,
-            executive_summary=(
-                f"Grounded synthesis for {base_brief.strategy_name}: {summary_quote}"
-            ),
-            formal_expression_or_rule=base_brief.mathematical_signal_latex,
-            core_findings_and_rules=list(base_brief.entry_exit_rules),
-            domain_constraints_and_caveats=list(base_brief.market_specific_caveats),
-            known_risks_and_failure_modes=list(base_brief.known_failure_regimes),
-            structured_metadata=metadata,
-            verified_citations=list(base_brief.verified_citations),
+            query_text=user_prompt,
+            limit=30,
+        )
+        fresh_chunks = [c for c in chunks if not bool(getattr(c, "is_stale", False))]
+        chunks_by_id = {str(c.chunk_id): c for c in fresh_chunks}
+        verified_citations = self._extract_verified_doc_citations(
+            fresh_chunks,
+            max_citations=3,
+            diversify_docs=True,
+        )
+        if not verified_citations:
+            return DomainKnowledgeBrief(
+                brief_title="Insufficient Verified Corpus Citations",
+                domain_id=domain_id,
+                executive_summary="No verified corpus citations found for prompt.",
+                formal_expression_or_rule=None,
+                core_findings_and_rules=[],
+                domain_constraints_and_caveats=[],
+                known_risks_and_failure_modes=[],
+                structured_metadata={"domain_id": domain_id, "verified_citations_count": 0},
+                verified_citations=[],
+            )
+
+        slicer = DeterministicSlicer()
+        if (
+            not has_injected_chunks
+            and not self.offline_mode
+            and (self.use_live_mlx or self.is_online())
+        ):
+            chunk_lines = [
+                "Retrieved Corpus Chunk: ["
+                f"chunk_id={c.chunk_id} | doc_id={c.doc_id} | title={c.doc_title} | "
+                f"uri={c.source_uri} | section={c.section_heading} | "
+                f"quote={json.dumps(c.verbatim_quote)}]"
+                for c in verified_citations
+            ]
+            rag_prompt = build_domain_knowledge_brief_prompt(
+                user_prompt=user_prompt,
+                domain_id=domain_id,
+                chunk_lines=chunk_lines,
+            )
+            try:
+                rag_kb: DomainKnowledgeBrief | None = None
+                if self.use_live_mlx:
+                    raw_mlx = self._call_in_process_mlx(
+                        rag_prompt, domain_id=domain_id, max_tokens=2048
+                    )
+                    rag_kb, _ = parse_domain_knowledge_brief_json(
+                        raw_mlx,
+                        domain_id=domain_id,
+                        normalize_scalars=True,
+                    )
+                else:
+                    rag_kb = self._call_mlx_domain_knowledge_brief(rag_prompt, domain_id)
+                if rag_kb is not None:
+                    grounded_cits = [
+                        cit
+                        for cit in rag_kb.verified_citations
+                        if cit.chunk_id in chunks_by_id
+                        and slicer.verify_doc_citation(
+                            citation=cit,
+                            chunk_content=chunks_by_id[cit.chunk_id].verbatim_content,
+                        ).is_valid
+                    ]
+                    rag_kb.verified_citations = grounded_cits or verified_citations
+                    return rag_kb
+            except Exception as exc:
+                logger.warning(
+                    "Live MLX DomainKnowledgeBrief RAG synthesis failed (%s); using fallback",
+                    exc,
+                )
+
+        if domain_plugin is not None:
+            plugin_res = domain_plugin.synthesize_research_brief(
+                user_prompt=user_prompt,
+                domain_id=domain_id,
+                chunks=fresh_chunks,
+                verified_citations=verified_citations,
+            )
+            if isinstance(plugin_res, DomainKnowledgeBrief):
+                return plugin_res
+            if isinstance(plugin_res, QuantStrategyBrief):
+                return self.generate_domain_knowledge_brief(
+                    user_prompt=user_prompt,
+                    domain_id=domain_id,
+                    repo=repo,
+                    principal=active_principal,
+                    quant_brief=plugin_res,
+                )
+
+        return _build_domain_brief_from_citations(
+            user_prompt=user_prompt,
+            domain_id=domain_id,
+            citations=verified_citations,
+            chunks_by_id=chunks_by_id,
         )
 
 
@@ -2230,9 +2462,16 @@ class ScoutWorkflow:
             slicer=self.slicer,
             expander=self.expander,
         )
-        self.local_client = local_client or LocalGemmaClient(
-            adapter_pool=self.registry.adapter_pool if self.registry else None
-        )
+        if local_client is not None:
+            if local_client.adapter_pool is None and self.registry is not None:
+                if not self.registry._manifests and self.registry._domains_dir.exists():
+                    self.registry.load_all()
+                local_client.adapter_pool = self.registry.adapter_pool
+            self.local_client = local_client
+        else:
+            self.local_client = LocalGemmaClient(
+                adapter_pool=self.registry.adapter_pool if self.registry else None
+            )
         self.guardrail = guardrail or ShieldGemmaGuardrail()
         self.auth_gate = auth_gate or DomainAuthorizationGate(self.registry)
         self.max_search_hops = max_search_hops
@@ -2460,12 +2699,26 @@ class ScoutWorkflow:
                 paid_tokens_spent=0,
             )
 
+        is_pg_repo = (
+            self.repo is None
+            or isinstance(self.repo, PostgresRLSRepository)
+            or hasattr(self.repo, "connection_manager")
+        )
         try:
             from context_scout.agents.preflight_gate import sync_custom_domain_corpus_if_needed
             from context_scout.ingestion.git_merkle_indexer import sync_tracked_in_memory_repos
 
             sync_tracked_in_memory_repos(self.repo, principal=principal, domain_id=domain_id)
-            sync_custom_domain_corpus_if_needed(domain_id)
+            if is_pg_repo:
+                domains_dir = getattr(self.registry, "domains_dir", None) or getattr(
+                    self.registry, "_domains_dir", None
+                )
+                index_path = (
+                    domains_dir / domain_id / "sync_manifest.json"
+                    if isinstance(domains_dir, Path)
+                    else None
+                )
+                sync_custom_domain_corpus_if_needed(domain_id, index_path=index_path)
         except Exception as exc:
             logger.debug(
                 "Live repository sync skipped for domain '%s' (%s): %s",
@@ -2592,6 +2845,9 @@ class ScoutWorkflow:
             has_visible_docs=has_visible_docs,
         )
 
+        is_knowledge_contract = (
+            manifest.output_contract == "DomainKnowledgeBrief" and domain_plugin is not None
+        )
         is_doc_domain = (
             manifest.output_contract in ("QuantStrategyBrief", "DomainKnowledgeBrief")
             or (domain_plugin is not None and domain_plugin.is_research_domain(domain_id))
@@ -2606,26 +2862,40 @@ class ScoutWorkflow:
             candidate_pointers = []
             if is_doc_domain:
                 quant_domain = research_domain_id if auto_research_route else domain_id
-                quant_brief = self.local_client.generate_quant_brief(
-                    user_prompt=user_prompt,
-                    domain_id=quant_domain,
-                    repo=doc_bound_repo,
-                    principal=principal,
-                    bounce_back_feedback=None,
-                )
-                if quant_brief is not None and quant_brief.verified_citations:
+                if is_knowledge_contract:
                     domain_knowledge_brief = self.local_client.generate_domain_knowledge_brief(
                         user_prompt=user_prompt,
                         domain_id=quant_domain,
                         repo=doc_bound_repo,
                         principal=principal,
-                        quant_brief=quant_brief,
+                        quant_brief=None,
                     )
-                    supporting_doc_citations = list(quant_brief.verified_citations)
+                    if domain_knowledge_brief.verified_citations:
+                        supporting_doc_citations = list(domain_knowledge_brief.verified_citations)
+                    else:
+                        domain_knowledge_brief = None
+                        supporting_doc_citations = supporting_doc_citations or []
                 else:
-                    quant_brief = None
-                    domain_knowledge_brief = None
-                    supporting_doc_citations = supporting_doc_citations or []
+                    quant_brief = self.local_client.generate_quant_brief(
+                        user_prompt=user_prompt,
+                        domain_id=quant_domain,
+                        repo=doc_bound_repo,
+                        principal=principal,
+                        bounce_back_feedback=None,
+                    )
+                    if quant_brief is not None and quant_brief.verified_citations:
+                        domain_knowledge_brief = self.local_client.generate_domain_knowledge_brief(
+                            user_prompt=user_prompt,
+                            domain_id=quant_domain,
+                            repo=doc_bound_repo,
+                            principal=principal,
+                            quant_brief=quant_brief,
+                        )
+                        supporting_doc_citations = list(quant_brief.verified_citations)
+                    else:
+                        quant_brief = None
+                        domain_knowledge_brief = None
+                        supporting_doc_citations = supporting_doc_citations or []
 
             if not supporting_doc_citations:
                 candidate_doc_chunks = (
@@ -2688,26 +2958,68 @@ class ScoutWorkflow:
                     supporting_doc_citations = list(quant_brief.verified_citations)
         elif is_doc_domain and source_filter != "code":
             quant_domain = research_domain_id if auto_research_route else domain_id
-            quant_brief = self.local_client.generate_quant_brief(
-                user_prompt=user_prompt,
-                domain_id=quant_domain,
-                repo=doc_bound_repo,
-                principal=principal,
-                bounce_back_feedback=None,
-            )
-            if quant_brief is not None and quant_brief.verified_citations:
+            if is_knowledge_contract:
                 domain_knowledge_brief = self.local_client.generate_domain_knowledge_brief(
                     user_prompt=user_prompt,
                     domain_id=quant_domain,
                     repo=doc_bound_repo,
                     principal=principal,
-                    quant_brief=quant_brief,
+                    quant_brief=None,
                 )
-                supporting_doc_citations = list(quant_brief.verified_citations)
+                if domain_knowledge_brief.verified_citations:
+                    supporting_doc_citations = list(domain_knowledge_brief.verified_citations)
+                else:
+                    domain_knowledge_brief = None
+                    supporting_doc_citations = supporting_doc_citations or []
+                if not supporting_doc_citations:
+                    candidate_doc_chunks = (
+                        s1_raw_chunks
+                        if isinstance(filtered_doc_chunks, list) or len(s1_raw_chunks) < 100
+                        else doc_bound_repo.search_visible_doc_chunks(
+                            principal=principal,
+                            domain_id=domain_id,
+                            query_text=user_prompt,
+                            limit=20,
+                        )
+                    )
+                    if candidate_doc_chunks:
+                        extracted_cits = _extract_hybrid_doc_citations(
+                            user_prompt=user_prompt,
+                            doc_chunks=candidate_doc_chunks,
+                            slicer=self.slicer,
+                            validator=self.validator,
+                            min_hits_override=1,
+                        )
+                        if extracted_cits:
+                            supporting_doc_citations = extracted_cits
+                            chunks_by_id = {str(c.chunk_id): c for c in candidate_doc_chunks}
+                            domain_knowledge_brief = _build_domain_brief_from_citations(
+                                user_prompt=user_prompt,
+                                domain_id=domain_id,
+                                citations=extracted_cits,
+                                chunks_by_id=chunks_by_id,
+                            )
             else:
-                quant_brief = None
-                domain_knowledge_brief = None
-                supporting_doc_citations = []
+                quant_brief = self.local_client.generate_quant_brief(
+                    user_prompt=user_prompt,
+                    domain_id=quant_domain,
+                    repo=doc_bound_repo,
+                    principal=principal,
+                    bounce_back_feedback=None,
+                )
+                if quant_brief is not None and quant_brief.verified_citations:
+                    domain_knowledge_brief = self.local_client.generate_domain_knowledge_brief(
+                        user_prompt=user_prompt,
+                        domain_id=quant_domain,
+                        repo=doc_bound_repo,
+                        principal=principal,
+                        quant_brief=quant_brief,
+                    )
+                    supporting_doc_citations = list(quant_brief.verified_citations)
+                else:
+                    quant_brief = None
+                    domain_knowledge_brief = None
+                    supporting_doc_citations = []
             candidate_pointers = []
         else:
             if source_filter == "code":
@@ -2847,8 +3159,9 @@ class ScoutWorkflow:
                             f_rec = files_by_path.get(auto_ptr.file_path)
                             if f_rec is not None:
                                 try:
+                                    snapped_auto = _snap_python_ast_pointer_bounds(auto_ptr, f_rec)
                                     hydrated_auto = self.slicer.slice_pointer(
-                                        pointer=auto_ptr,
+                                        pointer=snapped_auto,
                                         file_record=f_rec,
                                         auto_expanded_by_ast=True,
                                     )
@@ -3784,9 +4097,10 @@ class FederatedScoutCoordinator:
                             f_rec = files_by_path.get(auto_ptr.file_path)
                             if f_rec is not None:
                                 try:
+                                    snapped_auto = _snap_python_ast_pointer_bounds(auto_ptr, f_rec)
                                     hydrated_slices.append(
                                         self.slicer.slice_pointer(
-                                            pointer=auto_ptr,
+                                            pointer=snapped_auto,
                                             file_record=f_rec,
                                             auto_expanded_by_ast=True,
                                         )

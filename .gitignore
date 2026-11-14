@@ -40,7 +40,10 @@ data/tex_sources/
 data/papers/
 data/unseen_repos/
 data/unseen_repos_v2/
+data/data_engineering/
+data/tuning/data_engineering_scout/
 domains/**/corpus_index.json
+domains/*/tuning/*.jsonl
 models/base/
 models/adapters/**/*.safetensors
 

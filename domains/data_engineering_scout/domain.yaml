@@ -1,0 +1,19 @@
+domain_id: data_engineering_scout
+display_name: Data Engineering Concepts & Systems Specialist
+base_model_id: google/gemma-4-26B-A4B-it
+contextualizer_model_id: google/gemma-4-E4B-it
+lora_adapter_id: gemma4_26b_data_engineering
+lora_adapter_path: domains/data_engineering_scout/adapters/gemma4_26b_data_engineering
+embedding_model_id: google/embeddinggemma-2
+embedding_dimensions: 768
+mcp_read_tools_allowed:
+- doc_corpus_mcp:search_hybrid_rrf
+- doc_corpus_mcp:verify_citation_quote
+- doc_corpus_mcp:get_document_section
+authority_rules:
+  primary_truth_source: document
+  require_out_of_sample_check: false
+  require_transaction_cost_check: false
+  freshness_half_life_days: 730
+output_contract: DomainKnowledgeBrief
+source_dir: data/data_engineering
