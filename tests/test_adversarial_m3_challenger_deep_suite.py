@@ -180,7 +180,9 @@ def test_homoglyph_substitution_detected_and_rejected(latin_word: str, homoglyph
     res = slicer.verify_quote(tampered_quote, source_text, reject_absent_tokens=True)
     assert not res.is_valid, f"Homoglyph attack unexpectedly passed: {homoglyph_word}"
     assert res.error_code == SlicerErrorCode.HALLUCINATED_QUOTE
-    assert len(res.unmatched_tokens) > 0
+    assert any(homoglyph_word in tok or tok in homoglyph_word for tok in res.unmatched_tokens), (
+        f"Expected homoglyph '{homoglyph_word}' in unmatched_tokens={res.unmatched_tokens}"
+    )
 
 
 # ==============================================================================

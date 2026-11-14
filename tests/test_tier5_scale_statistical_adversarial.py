@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import math
-import os
 import subprocess
 import time
 import uuid
@@ -409,8 +408,6 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
     @pytest.fixture(autouse=True)
     def skip_if_no_postgres(self) -> None:
         if not is_postgres_reachable():
-            if os.environ.get("SCOUT_EVAL_IN_MEMORY_ONLY") == "1":
-                pytest.skip("Skipping PostgreSQL integration under SCOUT_EVAL_IN_MEMORY_ONLY=1")
             pytest.fail("Live PostgreSQL 17 is required for multi-tenant isolation tests!")
 
     def test_concurrent_multi_tenant_scoped_transactions_no_leakage(self) -> None:

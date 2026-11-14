@@ -1033,8 +1033,6 @@ class TestStorageParityAndNeutralScopes:
     ) -> None:
         """Verifies RLS scope intersections strictly mirror database permissions."""
         if not is_postgres_reachable():
-            if os.environ.get("SCOUT_EVAL_IN_MEMORY_ONLY") == "1":
-                pytest.skip("Skipping PostgreSQL parity test under SCOUT_EVAL_IN_MEMORY_ONLY=1")
             pytest.fail(
                 "Live PostgreSQL 17 is required for store parity verification but is unreachable!"
             )
@@ -1067,8 +1065,6 @@ class TestStorageParityAndNeutralScopes:
     def test_fixture_cannot_touch_rows_of_another_domain(self) -> None:
         """Proves benchmark teardown isolates by domain_id and cannot touch other domains."""
         if not is_postgres_reachable():
-            if os.environ.get("SCOUT_EVAL_IN_MEMORY_ONLY") == "1":
-                pytest.skip("Skipping canary test under explicit SCOUT_EVAL_IN_MEMORY_ONLY=1")
             pytest.fail("Live PostgreSQL 17 is required for canary test but is unreachable!")
 
         import psycopg
@@ -1077,6 +1073,7 @@ class TestStorageParityAndNeutralScopes:
 
         st = ScoutSettings()
         canary_domain = f"canary_verification_domain_{uuid.uuid4().hex[:8]}"
+        canary_repo_name = f"canary/repo-{uuid.uuid4().hex[:8]}"
         canary_fid = uuid.uuid4()
         session_domain = f"eval_synthetic_{uuid.uuid4().hex[:12]}"
 
@@ -1099,7 +1096,7 @@ class TestStorageParityAndNeutralScopes:
                 CodeFileRecord(
                     file_id=canary_fid,
                     domain_id=canary_domain,
-                    repo_name="canary/repo",
+                    repo_name=canary_repo_name,
                     file_path="src/canary.py",
                     git_commit_sha="1111222233334444555566667777888899990000",
                     git_blob_sha="2222333344445555666677778888999900001111",
@@ -1136,11 +1133,11 @@ class TestStorageParityAndNeutralScopes:
                         )
 
                 # 4. Mutation proof: verify that breaking teardown predicate deletes canary
-                def flawed_teardown(c: psycopg.Connection) -> None:
-                    # Flawed predicate deletes by repo without domain_id isolation
-                    c.execute("DELETE FROM code_files WHERE repo_name = 'canary/repo';")
+                def flawed_teardown(c: psycopg.Connection, target_repo: str) -> None:
+                    # Flawed predicate deletes by unique test repo without domain_id isolation
+                    c.execute("DELETE FROM code_files WHERE repo_name = %s;", (target_repo,))
 
-                flawed_teardown(conn)
+                flawed_teardown(conn, canary_repo_name)
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT COUNT(*) FROM code_files WHERE domain_id = %s;",

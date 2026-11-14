@@ -292,8 +292,7 @@ def test_exception_recording_on_span() -> None:
     assert span.status.status_code == trace.StatusCode.ERROR
     assert "Simulated crash" in (span.status.description or "")
 
-    assert len(span.events) >= 1
-    assert span.events[0].name == "exception"
+    assert {ev.name for ev in span.events} == {"exception"}
 
 
 def test_end_to_end_scout_workflow_span_capture(principal: PrincipalContext) -> None:
@@ -368,7 +367,9 @@ def test_end_to_end_scout_workflow_span_capture(principal: PrincipalContext) -> 
     wf_spans = tracer.find_spans_by_name("scout.workflow")
     assert len(wf_spans) == 1
     pf_spans = tracer.find_spans_by_name("scout.preflight_gate")
-    assert len(pf_spans) >= 1
+    assert len(pf_spans) == 1
+    assert pf_spans[0].attributes is not None
+    assert pf_spans[0].attributes[ATTR_DOMAIN_ID] == DOMAIN_ID
 
     root_attrs = wf_spans[0].attributes
     assert root_attrs is not None
@@ -525,7 +526,7 @@ def test_structured_json_span_exporter() -> None:
         ctx.record_retrieval(doc_chunks_count=2, ast_symbols_count=4)
 
     logs = tracer.get_json_logs()
-    assert len(logs) >= 1
+    assert any(entry.get("name") == "scout.retrieval" for entry in logs)
 
     last_log = logs[-1]
     assert "trace_id" in last_log
@@ -578,7 +579,7 @@ def test_standardized_and_legacy_attribute_dual_emission() -> None:
         g_ctx.record_report(mock_report)
 
     spans = tracer.find_spans_by_name("scout.preflight_gate")
-    assert len(spans) >= 1
+    assert spans[-1].name == "scout.preflight_gate"
     attrs = spans[-1].attributes
     assert attrs is not None
 

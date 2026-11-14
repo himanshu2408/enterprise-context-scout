@@ -825,7 +825,9 @@ def test_scout_workflow_4stage_dag_execution_and_adk_export(
     )
     assert isinstance(pack, ImplementationContextPack)
     assert pack.domain_id == DOMAIN_CODE
-    assert len(pack.code_slices) >= 1
+    assert any("order_flow_imbalance" in s.file_path for s in pack.code_slices), (
+        f"Expected order_flow_imbalance slice, got {[s.file_path for s in pack.code_slices]}"
+    )
     assert pack.preflight_report.passed is True
     assert len(pack.architectural_execution_plan) == 4
 
@@ -885,8 +887,12 @@ def test_federated_scout_coordinator_cross_domain_pipeline(
     assert composite_pack.domain_id == "trading_code_scout"
     assert composite_pack.quant_strategy_spec is not None
     assert composite_pack.quant_strategy_spec.friction_verdict == FrictionVerdict.REALISTIC_FRICTION
-    assert len(composite_pack.supporting_doc_citations) >= 1
-    assert len(composite_pack.code_slices) >= 1
+    assert any(c.verbatim_quote for c in composite_pack.supporting_doc_citations), (
+        "Expected verified doc citations with non-empty verbatim quotes"
+    )
+    assert any(s.file_path.endswith(".py") for s in composite_pack.code_slices), (
+        f"Expected Python code slice, got {[s.file_path for s in composite_pack.code_slices]}"
+    )
     assert composite_pack.preflight_report.passed is True
 
 
@@ -1128,6 +1134,7 @@ def test_e2e_scout_to_gemini_to_worktree_roi_telemetry(
 def test_live_postgres_m5_preflight_and_scout_pipeline(
     principal: PrincipalContext,
     domain_registry: DomainRegistry,
+    ephemeral_pg_domain: str,
 ) -> None:
     """Tests PreFlightValidator and ScoutWorkflow against live PostgreSQL 17 under Forced RLS."""
     settings = ScoutSettings()
@@ -1148,7 +1155,7 @@ def test_live_postgres_m5_preflight_and_scout_pipeline(
             conn,
             CodeFileRecord(
                 file_id=file_id,
-                domain_id=DOMAIN_CODE,
+                domain_id=ephemeral_pg_domain,
                 repo_name="live-trading",
                 file_path=unique_path,
                 git_commit_sha="live_commit_123",
@@ -1165,7 +1172,7 @@ def test_live_postgres_m5_preflight_and_scout_pipeline(
             ASTSymbolRecord(
                 symbol_id=sym_id,
                 file_id=file_id,
-                domain_id=DOMAIN_CODE,
+                domain_id=ephemeral_pg_domain,
                 qualified_name="trading_strategies.order_router.LiveOrderRouter",
                 symbol_kind="class",
                 start_line=1,
@@ -1177,37 +1184,32 @@ def test_live_postgres_m5_preflight_and_scout_pipeline(
             ),
         )
 
-    try:
-        adapter = PostgresScoutGraphAdapter(conn_mgr)
-        validator = PreFlightValidator(repo=adapter)
-        target_slice = VerbatimCodeSlice(
-            repo_name="live-trading",
-            file_path=unique_path,
-            start_line=1,
-            end_line=3,
-            qualified_symbol="trading_strategies.order_router.LiveOrderRouter",
-            selection_reason="Target router slice",
-            modification_intent=ModificationIntent.MODIFY_TARGET,
-            git_commit_sha="live_commit_123",
-            git_blob_sha="live_blob_456",
-            verbatim_code_with_lines="   1 | class LiveOrderRouter:\n",
-        )
+    adapter = PostgresScoutGraphAdapter(conn_mgr)
+    validator = PreFlightValidator(repo=adapter)
+    target_slice = VerbatimCodeSlice(
+        repo_name="live-trading",
+        file_path=unique_path,
+        start_line=1,
+        end_line=3,
+        qualified_symbol="trading_strategies.order_router.LiveOrderRouter",
+        selection_reason="Target router slice",
+        modification_intent=ModificationIntent.MODIFY_TARGET,
+        git_commit_sha="live_commit_123",
+        git_blob_sha="live_blob_456",
+        verbatim_code_with_lines="   1 | class LiveOrderRouter:\n",
+    )
 
-        report = validator.validate(
-            code_slices=[target_slice],
-            user_prompt="Refactor LiveOrderRouter",
-            normalized_rrf_score=0.90,
-            repo=adapter,
-            principal=principal,
-            domain_id=DOMAIN_CODE,
-        )
-        assert report.passed is True
-        assert len(report.unresolved_symbols) == 0
-        assert len(report.missing_reference_identifiers) == 0
-    finally:
-        with conn_mgr.scoped_transaction(principal) as conn:
-            conn.execute("DELETE FROM ast_symbols WHERE symbol_id = %s;", (sym_id,))
-            conn.execute("DELETE FROM code_files WHERE file_id = %s;", (file_id,))
+    report = validator.validate(
+        code_slices=[target_slice],
+        user_prompt="Refactor LiveOrderRouter",
+        normalized_rrf_score=0.90,
+        repo=adapter,
+        principal=principal,
+        domain_id=ephemeral_pg_domain,
+    )
+    assert report.passed is True
+    assert len(report.unresolved_symbols) == 0
+    assert len(report.missing_reference_identifiers) == 0
 
 
 @pytest.mark.postgres
@@ -1234,14 +1236,19 @@ def test_live_postgres_federated_scout_coordinator_seeded_corpus(
     assert isinstance(pack, ImplementationContextPack)
     assert pack.preflight_report.passed is True
     assert pack.quant_strategy_spec is not None
-    assert len(pack.supporting_doc_citations) >= 1
-    assert len(pack.code_slices) >= 1
+    assert any(c.verbatim_quote for c in pack.supporting_doc_citations)
+    assert any(
+        "order_flow_imbalance" in s.file_path.lower()
+        or "orderflowimbalance" in s.qualified_symbol.lower()
+        for s in pack.code_slices
+    ), f"Expected OrderFlowImbalance slice in {[s.file_path for s in pack.code_slices]}"
 
 
 @pytest.mark.postgres
 def test_live_postgres_execution_telemetry_and_budget_accumulation(
     principal: PrincipalContext,
     temp_git_repo: Path,
+    ephemeral_pg_domain: str,
 ) -> None:
     """Verifies live PostgreSQL 17 execution_telemetry insertion and budget accumulation."""
     settings = ScoutSettings()
@@ -1273,7 +1280,7 @@ def test_live_postgres_execution_telemetry_and_budget_accumulation(
 
         pack = ImplementationContextPack(
             trace_id=str(uuid.uuid4()),
-            domain_id=DOMAIN_CODE,
+            domain_id=ephemeral_pg_domain,
             user_task="Add slippage tolerance check to OrderFlowImbalanceAnalyzer",
             architectural_execution_plan=["Enforce slippage bounds"],
             code_slices=[slice1],

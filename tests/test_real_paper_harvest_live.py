@@ -135,6 +135,7 @@ def test_pdf_fulltext_extraction_fallback() -> None:
             assert len(chunk.verbatim_content) > 0
 
 
+@pytest.mark.live
 def test_openalex_live_query_syntax() -> None:
     """Verifies that build_openalex_query_url executes against OpenAlex API returning HTTP 200."""
     for market in [
@@ -201,6 +202,7 @@ def test_openalex_live_query_syntax() -> None:
             pytest.skip(f"Network timeout reaching OpenAlex: {err}")
 
 
+@pytest.mark.live
 def test_arxiv_live_atom_feed() -> None:
     """Verifies that build_arxiv_query_url returns valid Atom XML with papers."""
     query = MARKET_QUERY_PRESETS[MarketRegime.INDIA_NSE_BSE]

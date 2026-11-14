@@ -851,8 +851,7 @@ class TestChallengerCheck4CitationTampering:
         )
 
         assert not passed
-        assert len(reasons) > 0
-        assert "failed verbatim verification" in reasons[0]
+        assert any("failed verbatim verification" in r for r in reasons)
 
     def test_mathematical_metric_tampering_is_detected_and_rejected(
         self, base_repo: InMemoryRLSRepository, principal: PrincipalContext
@@ -884,7 +883,7 @@ class TestChallengerCheck4CitationTampering:
         )
 
         assert not passed
-        assert len(reasons) > 0
+        assert any("failed verbatim verification" in r for r in reasons)
 
     def test_unclosed_syntax_delimiters_detected_as_truncated_quote(
         self, base_repo: InMemoryRLSRepository, principal: PrincipalContext

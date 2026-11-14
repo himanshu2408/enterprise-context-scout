@@ -705,7 +705,10 @@ class TestPreFlightValidator:
         )
         assert report.passed is False
         assert report.check_results["check_1_syntax"] is False
-        assert len(report.syntax_errors) > 0
+        assert any(
+            "syntax" in err.lower() or "order_flow_imbalance.py" in err
+            for err in report.syntax_errors
+        ), f"Expected syntax error diagnostic, got {report.syntax_errors}"
 
     def test_check_5_fails_on_unanchored_git_provenance(
         self,
@@ -741,7 +744,10 @@ class TestPreFlightValidator:
         )
         assert report.passed is False
         assert report.check_results["check_5_provenance"] is False
-        assert len(report.unanchored_provenance_items) > 0
+        assert any(
+            "order_flow_imbalance.py" in item or "placeholder_sha" in item
+            for item in report.unanchored_provenance_items
+        ), f"Expected provenance item, got {report.unanchored_provenance_items}"
 
     def test_evaluate_gate_returns_gate_pass_and_gate_abstention(
         self,

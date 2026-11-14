@@ -1,1 +1,1 @@
-"""Test fixtures package for enterprise-context-scout."""
+"""Shared test fixtures and PostgreSQL tenant isolation helpers."""

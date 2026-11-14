@@ -272,7 +272,10 @@ def test_local_gemma_client_deterministic_fallback(
         repo=test_repo,
         principal=principal,
     )
-    assert len(pointers) >= 1
+    assert [p.qualified_symbol for p in pointers] == [
+        "trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+        "trading_strategies.models.OrderBookSnapshot",
+    ]
     target = pointers[0]
     assert "OrderFlowImbalanceAnalyzer" in target.qualified_symbol
     assert target.start_line == 3
@@ -303,7 +306,7 @@ def test_local_gemma_client_bounce_back_remediation(
     symbols_covered = [p.qualified_symbol for p in remediated]
     assert any("OrderBookSnapshot" in s for s in symbols_covered)
     remediated_slices = [p for p in remediated if "OrderBookSnapshot" in p.qualified_symbol]
-    assert len(remediated_slices) > 0
+    assert len(remediated_slices) == 1
     assert "Remediated via $0 bounce-back feedback" in remediated_slices[0].selection_reason
 
 
@@ -322,7 +325,9 @@ def test_local_gemma_client_quant_brief_generation(
     assert brief.strategy_name != ""
     assert MarketRegime.GERMANY_XETRA_DAX in brief.target_markets
     assert r"E[Y \mid X]" in brief.mathematical_signal_latex
-    assert len(brief.verified_citations) >= 1
+    assert any(
+        "Order flow imbalance exhibits" in c.verbatim_quote for c in brief.verified_citations
+    )
     # Check citation is verbatim from doc chunk
     first_cit = brief.verified_citations[0]
     assert "Order flow imbalance exhibits" in first_cit.verbatim_quote
@@ -467,8 +472,11 @@ def test_federated_scout_coordinator_2stage_dag(
         FrictionVerdict.REALISTIC_FRICTION,
         FrictionVerdict.UNVERIFIED_FRICTION_WARNING,
     )
-    assert len(result.supporting_doc_citations) >= 1
-    assert len(result.code_slices) >= 1
+    assert any(
+        "order flow" in c.verbatim_quote.lower() or "xetra" in c.verbatim_quote.lower()
+        for c in result.supporting_doc_citations
+    )
+    assert any(s.file_path.endswith(".py") for s in result.code_slices)
     assert result.preflight_report.passed is True
     assert result.preflight_report.citations_verified_100_pct is True
 

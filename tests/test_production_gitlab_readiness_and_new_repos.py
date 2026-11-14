@@ -445,10 +445,12 @@ async def test_mcp_assemble_verified_context_pack_and_sec04_guard() -> None:
 
 def test_unseen_repo_three_previously_missed_tasks_now_hit_top5_symbol_recall() -> None:
     """Verify HTTPX-04, CLICK-01, and CLICK-14 all achieve Top-5 File & Symbol Recall."""
-    httpx_dir = Path("data/unseen_repos/httpx")
-    click_dir = Path("data/unseen_repos/click")
+    from tests.fixtures.corpus_paths import resolve_local_data_dir
+
+    httpx_dir = resolve_local_data_dir("data/unseen_repos/httpx")
+    click_dir = resolve_local_data_dir("data/unseen_repos/click")
     if not httpx_dir.exists() or not click_dir.exists():
-        pytest.skip("Unseen repositories not cloned locally")
+        pytest.fail("Unseen repositories not cloned locally")
 
     suite = build_unseen_repo_suite()
     principal = PrincipalContext(

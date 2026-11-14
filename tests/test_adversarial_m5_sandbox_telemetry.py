@@ -566,6 +566,7 @@ class TestLivePostgresTelemetrySchemaAdversarial:
     def test_live_postgres_telemetry_schema_and_upsert_resilience(
         self,
         principal: PrincipalContext,
+        ephemeral_pg_domain: str,
     ) -> None:
         """Directly exercises execution_telemetry CRUD, check constraints, and conflict updates."""
         settings = ScoutSettings()
@@ -578,7 +579,7 @@ class TestLivePostgresTelemetrySchemaAdversarial:
             # 1. Insert valid record
             initial_record = ExecutionTelemetryRecord(
                 trace_id=trace_id,
-                domain_id=DOMAIN_CODE,
+                domain_id=ephemeral_pg_domain,
                 principal_id=principal.user_id,
                 principal_role="engineer",
                 execution_mode=ExecutionMode.GEMINI_HANDOFF,
@@ -625,13 +626,11 @@ class TestLivePostgresTelemetrySchemaAdversarial:
             assert persisted_update.missing_context_requests == []
             assert persisted_update.latency_ms == 250
 
-            # Clean up
-            conn.execute("DELETE FROM execution_telemetry WHERE trace_id = %s;", (trace_id,))
-
     @pytest.mark.postgres
     def test_live_postgres_check_constraint_negative_tokens_rejected(
         self,
         principal: PrincipalContext,
+        ephemeral_pg_domain: str,
     ) -> None:
         """Verifies PostgreSQL 17 table constraint rejects negative local_tokens_read."""
         settings = ScoutSettings()
@@ -650,13 +649,14 @@ class TestLivePostgresTelemetrySchemaAdversarial:
                     latency_ms
                 ) VALUES (%s, %s, %s, %s, 'gemini_handoff', -50, 100, 50, 0.1, true, 10);
                 """,
-                (uuid.uuid4(), DOMAIN_CODE, principal.user_id, "engineer"),
+                (uuid.uuid4(), ephemeral_pg_domain, principal.user_id, "engineer"),
             )
 
     @pytest.mark.postgres
     def test_live_postgres_check_constraint_invalid_mode_rejected(
         self,
         principal: PrincipalContext,
+        ephemeral_pg_domain: str,
     ) -> None:
         """Verifies PostgreSQL 17 table constraint rejects invalid execution_mode enum values."""
         settings = ScoutSettings()
@@ -675,13 +675,14 @@ class TestLivePostgresTelemetrySchemaAdversarial:
                     latency_ms
                 ) VALUES (%s, %s, %s, %s, 'hacked_mode', 100, 100, 50, 0.1, true, 10);
                 """,
-                (uuid.uuid4(), DOMAIN_CODE, principal.user_id, "engineer"),
+                (uuid.uuid4(), ephemeral_pg_domain, principal.user_id, "engineer"),
             )
 
     @pytest.mark.postgres
     def test_live_postgres_token_consumption_time_window_filtering(
         self,
         principal: PrincipalContext,
+        ephemeral_pg_domain: str,
     ) -> None:
         """Verifies get_principal_paid_tokens_consumed respects the since_hours window."""
         settings = ScoutSettings()
@@ -709,7 +710,7 @@ class TestLivePostgresTelemetrySchemaAdversarial:
                     10000, 5000, 5000, 0.05, true, 50, %s
                 );
                 """,
-                (trace_recent, DOMAIN_CODE, user_id, now),
+                (trace_recent, ephemeral_pg_domain, user_id, now),
             )
 
             # Record 2: 15,000 tokens from 48h ago
@@ -725,7 +726,7 @@ class TestLivePostgresTelemetrySchemaAdversarial:
                     20000, 15000, 5000, 0.15, true, 50, %s
                 );
                 """,
-                (trace_old, DOMAIN_CODE, user_id, old_time),
+                (trace_old, ephemeral_pg_domain, user_id, old_time),
             )
 
             # Query with since_hours=24: should only return 5,000 tokens
@@ -735,6 +736,3 @@ class TestLivePostgresTelemetrySchemaAdversarial:
             # Query with since_hours=72: should return 20,000 tokens
             tokens_72h = pg_repo.get_principal_paid_tokens_consumed(conn, user_id, since_hours=72)
             assert tokens_72h == 20_000
-
-            # Clean up
-            conn.execute("DELETE FROM execution_telemetry WHERE principal_id = %s;", (user_id,))

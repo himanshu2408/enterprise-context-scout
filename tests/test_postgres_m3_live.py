@@ -17,34 +17,15 @@ def settings() -> ScoutSettings:
     return ScoutSettings()
 
 
-def test_live_doc_chunks_forced_rls_isolation(settings: ScoutSettings) -> None:
+def test_live_doc_chunks_forced_rls_isolation(
+    settings: ScoutSettings,
+    ephemeral_pg_domain: str,
+) -> None:
     """Verifies that live PostgreSQL 17 doc_chunks enforces forced RLS scope isolation."""
     mgr = RLSConnectionManager(settings.db_app_url)
-    admin_mgr = RLSConnectionManager(settings.db_admin_url)
     repo = PostgresRLSRepository()
 
-    # 1. Setup domain pack prerequisite
-    admin_principal = PrincipalContext(
-        user_id="admin_user",
-        role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "quant_restricted"],
-    )
-    with admin_mgr.scoped_transaction(admin_principal, enable_hnsw_iterative_scan=False) as conn:
-        conn.execute(
-            """
-            INSERT INTO domain_packs (
-                domain_id, display_name, lora_adapter_id,
-                primary_truth_source, freshness_half_life_days, config_json
-            )
-            VALUES (
-                'quant_research_scout', 'Quant Research Scout', 'gemma4_26b_quant_scout',
-                'document', 180, '{"m3_test": true}'::jsonb
-            )
-            ON CONFLICT (domain_id) DO NOTHING;
-            """
-        )
-
-    # 2. Insert restricted doc chunk using quant_restricted principal
+    # 1. Insert restricted doc chunk using quant_restricted principal inside isolated eval_ domain
     quant_principal = PrincipalContext(
         user_id="quant_trader_restricted",
         role=RoleType.QUANT_RESEARCHER,
@@ -55,7 +36,7 @@ def test_live_doc_chunks_forced_rls_isolation(settings: ScoutSettings) -> None:
 
     restricted_record = DocChunkRecord(
         chunk_id=chunk_id,
-        domain_id="quant_research_scout",
+        domain_id=ephemeral_pg_domain,
         doc_id="arxiv:2403.99999",
         doc_title="Proprietary Alpha Discovery in Indian Equities",
         source_uri="https://arxiv.org/abs/2403.99999",
@@ -73,58 +54,32 @@ def test_live_doc_chunks_forced_rls_isolation(settings: ScoutSettings) -> None:
     with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
         repo.insert_doc_chunk(conn, restricted_record)
 
-    try:
-        # 3. Principal with only public_eng scope must see ZERO rows
-        public_principal = PrincipalContext(
-            user_id="public_user_1",
-            role=RoleType.PRODUCT_MANAGER,
-            allowed_scopes=["public_eng"],
+    # 2. Principal with only public_eng scope must see ZERO rows
+    public_principal = PrincipalContext(
+        user_id="public_user_1",
+        role=RoleType.PRODUCT_MANAGER,
+        allowed_scopes=["public_eng"],
+    )
+    with mgr.scoped_transaction(public_principal, enable_hnsw_iterative_scan=False) as conn:
+        visible_public = repo.list_visible_doc_chunks(conn, ephemeral_pg_domain)
+        assert visible_public == [], (
+            "RLS Security Violation: Public principal saw quant_restricted doc chunk!"
         )
-        with mgr.scoped_transaction(public_principal, enable_hnsw_iterative_scan=False) as conn:
-            visible_public = repo.list_visible_doc_chunks(conn, "quant_research_scout")
-            assert not any(c.chunk_id == chunk_id for c in visible_public), (
-                "RLS Security Violation: Public principal saw quant_restricted doc chunk!"
-            )
 
-        # 4. Quant principal MUST see the row
-        with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
-            visible_quant = repo.list_visible_doc_chunks(conn, "quant_research_scout")
-            matching = [c for c in visible_quant if c.chunk_id == chunk_id]
-            assert len(matching) == 1, "Quant principal failed to see authorized doc chunk"
-            assert matching[0].doc_id == "arxiv:2403.99999"
-
-    finally:
-        with admin_mgr.scoped_transaction(
-            admin_principal, enable_hnsw_iterative_scan=False
-        ) as conn:
-            conn.execute("DELETE FROM doc_chunks WHERE chunk_id = %s;", (chunk_id,))
+    # 3. Quant principal MUST see the row
+    with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
+        visible_quant = repo.list_visible_doc_chunks(conn, ephemeral_pg_domain)
+        assert [c.chunk_id for c in visible_quant] == [chunk_id]
+        assert visible_quant[0].doc_id == "arxiv:2403.99999"
 
 
-def test_live_doc_chunks_3way_hybrid_rrf_query(settings: ScoutSettings) -> None:
+def test_live_doc_chunks_3way_hybrid_rrf_query(
+    settings: ScoutSettings,
+    ephemeral_pg_domain: str,
+) -> None:
     """Verifies live PostgreSQL 17 3-way hybrid RRF query using FTS, pgvector, and pg_trgm."""
     mgr = RLSConnectionManager(settings.db_app_url)
-    admin_mgr = RLSConnectionManager(settings.db_admin_url)
     repo = PostgresRLSRepository()
-
-    admin_principal = PrincipalContext(
-        user_id="admin_user",
-        role=RoleType.ENGINEER,
-        allowed_scopes=["public_quant"],
-    )
-    with admin_mgr.scoped_transaction(admin_principal, enable_hnsw_iterative_scan=False) as conn:
-        conn.execute(
-            """
-            INSERT INTO domain_packs (
-                domain_id, display_name, lora_adapter_id,
-                primary_truth_source, freshness_half_life_days, config_json
-            )
-            VALUES (
-                'quant_research_scout', 'Quant Research Scout', 'gemma4_26b_quant_scout',
-                'document', 180, '{"m3_test": true}'::jsonb
-            )
-            ON CONFLICT (domain_id) DO NOTHING;
-            """
-        )
 
     principal = PrincipalContext(
         user_id="quant_trader_live",
@@ -148,7 +103,7 @@ def test_live_doc_chunks_3way_hybrid_rrf_query(settings: ScoutSettings) -> None:
 
     record_nse = DocChunkRecord(
         chunk_id=chunk_id_nse,
-        domain_id="quant_research_scout",
+        domain_id=ephemeral_pg_domain,
         doc_id="arxiv:2403.01182",
         doc_title="Momentum with Indian STT",
         source_uri="https://arxiv.org/abs/2403.01182",
@@ -168,7 +123,7 @@ def test_live_doc_chunks_3way_hybrid_rrf_query(settings: ScoutSettings) -> None:
     )
     record_xetra = DocChunkRecord(
         chunk_id=chunk_id_xetra,
-        domain_id="quant_research_scout",
+        domain_id=ephemeral_pg_domain,
         doc_id="arxiv:2311.08941",
         doc_title="Xetra DAX Liquidity",
         source_uri="https://arxiv.org/abs/2311.08941",
@@ -188,7 +143,7 @@ def test_live_doc_chunks_3way_hybrid_rrf_query(settings: ScoutSettings) -> None:
     )
     record_us = DocChunkRecord(
         chunk_id=chunk_id_us,
-        domain_id="quant_research_scout",
+        domain_id=ephemeral_pg_domain,
         doc_id="arxiv:2401.05432",
         doc_title="US Order Flow Imbalance",
         source_uri="https://arxiv.org/abs/2401.05432",
@@ -210,46 +165,37 @@ def test_live_doc_chunks_3way_hybrid_rrf_query(settings: ScoutSettings) -> None:
     with mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn:
         repo.insert_doc_chunks_batch(conn, [record_nse, record_xetra, record_us])
 
-    try:
-        # Execute 3-way hybrid search with HNSW iterative scan active
-        with mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=True) as conn:
-            hits = repo.search_doc_chunks_hybrid_rrf(
-                conn=conn,
-                domain_id="quant_research_scout",
-                query_text="Securities Transaction Tax STT delivery NSE",
-                query_embedding=emb_nse,
-                market_scope=MarketRegime.INDIA_NSE_BSE,
-                top_k=5,
-            )
+    # Execute 3-way hybrid search with HNSW iterative scan active
+    with mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=True) as conn:
+        hits = repo.search_doc_chunks_hybrid_rrf(
+            conn=conn,
+            domain_id=ephemeral_pg_domain,
+            query_text="Securities Transaction Tax STT delivery NSE",
+            query_embedding=emb_nse,
+            market_scope=MarketRegime.INDIA_NSE_BSE,
+            top_k=5,
+        )
 
-            assert len(hits) >= 1, f"Expected at least 1 hit for IN_NSE, got {len(hits)}"
-            matching_hits = [h for h in hits if h.item_id == chunk_id_nse]
-            assert len(matching_hits) == 1, "Expected inserted NSE chunk in search hits"
-            hit = matching_hits[0]
-            assert 0.0 <= hit.normalized_rrf_score <= 1.0
-            assert hit.bm25_rank is not None and hit.bm25_rank >= 1
-            assert hit.vector_rank is not None and hit.vector_rank >= 1
+        assert [h.item_id for h in hits] == [chunk_id_nse], (
+            f"Expected exact IN_NSE hit {[chunk_id_nse]}, got {[h.item_id for h in hits]}"
+        )
+        hit = hits[0]
+        assert 0.0 <= hit.normalized_rrf_score <= 1.0
+        assert hit.bm25_rank == 1
+        assert hit.vector_rank == 1
 
-            # Search across all markets without market_scope filter
-            all_hits = repo.search_doc_chunks_hybrid_rrf(
-                conn=conn,
-                domain_id="quant_research_scout",
-                query_text="equity execution",
-                query_embedding=emb_nse,
-                market_scope=None,
-                top_k=5,
-            )
-            assert (
-                len(all_hits) >= 3
-            ), f"Expected at least 3 hits across all markets, got {len(all_hits)}"
-            for h in all_hits:
-                assert 0.0 <= h.normalized_rrf_score <= 1.0
-
-    finally:
-        with admin_mgr.scoped_transaction(
-            admin_principal, enable_hnsw_iterative_scan=False
-        ) as conn:
-            conn.execute(
-                "DELETE FROM doc_chunks WHERE chunk_id IN (%s, %s, %s);",
-                (chunk_id_nse, chunk_id_xetra, chunk_id_us),
-            )
+        # Search across all markets without market_scope filter
+        all_hits = repo.search_doc_chunks_hybrid_rrf(
+            conn=conn,
+            domain_id=ephemeral_pg_domain,
+            query_text="equity execution",
+            query_embedding=emb_nse,
+            market_scope=None,
+            top_k=5,
+        )
+        assert {h.item_id for h in all_hits} == {chunk_id_nse, chunk_id_xetra, chunk_id_us}, (
+            f"Expected exact 3 inserted chunks across all markets, "
+            f"got {[h.item_id for h in all_hits]}"
+        )
+        for h in all_hits:
+            assert 0.0 <= h.normalized_rrf_score <= 1.0

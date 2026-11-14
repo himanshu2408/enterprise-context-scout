@@ -286,34 +286,13 @@ def test_inmemory_hybrid_rrf_multi_tenant_rls_isolation() -> None:
     assert len(hits_public) == 0
 
 
-def test_postgres_live_forced_rls_multi_tenant_isolation() -> None:
+def test_postgres_live_forced_rls_multi_tenant_isolation(
+    ephemeral_pg_domain: str,
+) -> None:
     """Stress-tests forced RLS multi-tenant boundary on live PostgreSQL 17 daemon."""
     settings = ScoutSettings()
     mgr = RLSConnectionManager(settings.db_app_url)
-    admin_mgr = RLSConnectionManager(settings.db_admin_url)
     repo = PostgresRLSRepository()
-
-    admin_principal = PrincipalContext(
-        user_id="admin_sec_auditor",
-        role=RoleType.ENGINEER,
-        allowed_scopes=["tenant_x_isolated", "tenant_y_isolated"],
-    )
-
-    # Ensure domain pack exists
-    with admin_mgr.scoped_transaction(admin_principal, enable_hnsw_iterative_scan=False) as conn:
-        conn.execute(
-            """
-            INSERT INTO domain_packs (
-                domain_id, display_name, lora_adapter_id,
-                primary_truth_source, freshness_half_life_days, config_json
-            )
-            VALUES (
-                'quant_research_scout', 'Quant Research Scout', 'gemma4_26b_quant_scout',
-                'document', 180, '{"m3_adversarial": true}'::jsonb
-            )
-            ON CONFLICT (domain_id) DO NOTHING;
-            """
-        )
 
     principal_x = PrincipalContext(
         user_id="user_tenant_x",
@@ -337,7 +316,7 @@ def test_postgres_live_forced_rls_multi_tenant_isolation() -> None:
 
     chunk_x = DocChunkRecord(
         chunk_id=id_x,
-        domain_id="quant_research_scout",
+        domain_id=ephemeral_pg_domain,
         doc_id="tenant_x_doc",
         doc_title="Tenant X Proprietary Flow",
         source_uri="https://tenant_x.internal/doc",
@@ -353,7 +332,7 @@ def test_postgres_live_forced_rls_multi_tenant_isolation() -> None:
     )
     chunk_y = DocChunkRecord(
         chunk_id=id_y,
-        domain_id="quant_research_scout",
+        domain_id=ephemeral_pg_domain,
         doc_id="tenant_y_doc",
         doc_title="Tenant Y Proprietary Flow",
         source_uri="https://tenant_y.internal/doc",
@@ -375,58 +354,47 @@ def test_postgres_live_forced_rls_multi_tenant_isolation() -> None:
     with mgr.scoped_transaction(principal_y, enable_hnsw_iterative_scan=False) as conn:
         repo.insert_doc_chunk(conn, chunk_y)
 
-    try:
-        # Principal X searches with exact text that matches both documents
-        with mgr.scoped_transaction(principal_x, enable_hnsw_iterative_scan=True) as conn:
-            hits_x = repo.search_doc_chunks_hybrid_rrf(
-                conn=conn,
-                domain_id="quant_research_scout",
-                query_text="Securities Transaction Tax 15 bps delivery",
-                query_embedding=emb,
-                market_scope=MarketRegime.INDIA_NSE_BSE,
-                top_k=10,
-            )
-            assert any(h.item_id == id_x for h in hits_x), "Tenant X should see its own chunk"
-            assert not any(h.item_id == id_y for h in hits_x), (
-                "CRITICAL SECURITY VIOLATION: Tenant X saw Tenant Y's isolated row in RRF search!"
-            )
+    # Principal X searches with exact text that matches both documents
+    with mgr.scoped_transaction(principal_x, enable_hnsw_iterative_scan=True) as conn:
+        hits_x = repo.search_doc_chunks_hybrid_rrf(
+            conn=conn,
+            domain_id=ephemeral_pg_domain,
+            query_text="Securities Transaction Tax 15 bps delivery",
+            query_embedding=emb,
+            market_scope=MarketRegime.INDIA_NSE_BSE,
+            top_k=10,
+        )
+        assert [h.item_id for h in hits_x] == [id_x], (
+            f"Expected exact Tenant X chunk {[id_x]}, got {[h.item_id for h in hits_x]}"
+        )
 
-        # Principal Y searches with exact text
-        with mgr.scoped_transaction(principal_y, enable_hnsw_iterative_scan=True) as conn:
-            hits_y = repo.search_doc_chunks_hybrid_rrf(
-                conn=conn,
-                domain_id="quant_research_scout",
-                query_text="Securities Transaction Tax 15 bps delivery",
-                query_embedding=emb,
-                market_scope=MarketRegime.INDIA_NSE_BSE,
-                top_k=10,
-            )
-            assert any(h.item_id == id_y for h in hits_y), "Tenant Y should see its own chunk"
-            assert not any(h.item_id == id_x for h in hits_y), (
-                "CRITICAL SECURITY VIOLATION: Tenant Y saw Tenant X's isolated row in RRF search!"
-            )
+    # Principal Y searches with exact text
+    with mgr.scoped_transaction(principal_y, enable_hnsw_iterative_scan=True) as conn:
+        hits_y = repo.search_doc_chunks_hybrid_rrf(
+            conn=conn,
+            domain_id=ephemeral_pg_domain,
+            query_text="Securities Transaction Tax 15 bps delivery",
+            query_embedding=emb,
+            market_scope=MarketRegime.INDIA_NSE_BSE,
+            top_k=10,
+        )
+        assert [h.item_id for h in hits_y] == [id_y], (
+            f"Expected exact Tenant Y chunk {[id_y]}, got {[h.item_id for h in hits_y]}"
+        )
 
-        # Unauthorized Principal searches
-        with mgr.scoped_transaction(
-            principal_unauthorized, enable_hnsw_iterative_scan=True
-        ) as conn:
-            hits_unauth = repo.search_doc_chunks_hybrid_rrf(
-                conn=conn,
-                domain_id="quant_research_scout",
-                query_text="Securities Transaction Tax 15 bps delivery",
-                query_embedding=emb,
-                market_scope=MarketRegime.INDIA_NSE_BSE,
-                top_k=10,
-            )
-            assert len(hits_unauth) == 0, (
-                "CRITICAL SECURITY VIOLATION: Unauthorized user saw isolated rows!"
-            )
-
-    finally:
-        with admin_mgr.scoped_transaction(
-            admin_principal, enable_hnsw_iterative_scan=False
-        ) as conn:
-            conn.execute("DELETE FROM doc_chunks WHERE chunk_id IN (%s, %s);", (id_x, id_y))
+    # Unauthorized Principal searches
+    with mgr.scoped_transaction(principal_unauthorized, enable_hnsw_iterative_scan=True) as conn:
+        hits_unauth = repo.search_doc_chunks_hybrid_rrf(
+            conn=conn,
+            domain_id=ephemeral_pg_domain,
+            query_text="Securities Transaction Tax 15 bps delivery",
+            query_embedding=emb,
+            market_scope=MarketRegime.INDIA_NSE_BSE,
+            top_k=10,
+        )
+        assert hits_unauth == [], (
+            "CRITICAL SECURITY VIOLATION: Unauthorized user saw isolated rows!"
+        )
 
 
 # ==============================================================================

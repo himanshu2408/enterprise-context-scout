@@ -18,7 +18,6 @@ Empirical verification and stress testing of:
 from __future__ import annotations
 
 import contextlib
-import os
 import threading
 import time
 import uuid
@@ -47,8 +46,6 @@ from context_scout.schemas.contracts import PrincipalContext, RoleType
 def postgres_admin_conn():
     """Provides a live PostgreSQL 17 admin connection for test verification."""
     if not is_postgres_reachable():
-        if os.environ.get("SCOUT_EVAL_IN_MEMORY_ONLY") == "1":
-            pytest.skip("Skipping PostgreSQL live harness tests under SCOUT_EVAL_IN_MEMORY_ONLY=1")
         pytest.fail("Live PostgreSQL 17 instance is unreachable at db_admin_url!")
 
     st = ScoutSettings()

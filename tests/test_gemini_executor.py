@@ -324,7 +324,7 @@ def test_git_worktree_sandbox_invalid_patch_handling(temp_git_repo: Path) -> Non
     with GitWorktreeSandbox(repo_root=temp_git_repo) as sandbox:
         ok, err = sandbox.apply_patch(invalid_patch)
         assert ok is False
-        assert len(err) > 0
+        assert "no valid patches" in err.lower() or "unrecognized input" in err.lower()
 
 
 def test_human_confirmation_gate_blocks_merge_until_approved(
@@ -388,6 +388,7 @@ def test_live_postgres_execution_telemetry_persistence(
     principal: PrincipalContext,
     sample_context_pack: ImplementationContextPack,
     temp_git_repo: Path,
+    ephemeral_pg_domain: str,
 ) -> None:
     """Integration test persisting telemetry directly into PostgreSQL 17 execution_telemetry."""
     settings = ScoutSettings()
@@ -398,11 +399,12 @@ def test_live_postgres_execution_telemetry_persistence(
         allowed_scopes=list(principal.allowed_scopes),
         max_session_paid_tokens=principal.max_session_paid_tokens,
     )
+    isolated_pack = sample_context_pack.model_copy(update={"domain_id": ephemeral_pg_domain})
 
     with conn_mgr.scoped_transaction(live_principal) as conn:
         executor = GeminiImplementationExecutor(api_key=None)
         result, telemetry = executor.execute_implementation(
-            pack=sample_context_pack,
+            pack=isolated_pack,
             principal=live_principal,
             repo_root=temp_git_repo,
             conn=conn,
@@ -416,7 +418,7 @@ def test_live_postgres_execution_telemetry_persistence(
         retrieved = pg_repo.get_execution_telemetry(conn, telemetry.trace_id)
         assert retrieved is not None
         assert retrieved.trace_id == telemetry.trace_id
-        assert retrieved.domain_id == DOMAIN_ID
+        assert retrieved.domain_id == ephemeral_pg_domain
         assert retrieved.paid_tokens_saved == telemetry.paid_tokens_saved
         assert retrieved.estimated_usd_saved == telemetry.estimated_usd_saved
 

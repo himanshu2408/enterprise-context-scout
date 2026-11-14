@@ -194,9 +194,30 @@ class TestF04ProvenanceBoundaries:
             )
 
     def test_b04_04_doc_version_semantic_formats(self) -> None:
+        from context_scout.db.schema import DocChunkRecord
+
         versions = ["1", "1.0", "v2.3.4-rc1", "rev_1042"]
         for v in versions:
-            assert len(v) > 0
+            rec = DocChunkRecord(
+                chunk_id=uuid4(),
+                domain_id="eval_boundary_docs",
+                doc_id="doc-v-test",
+                doc_title="Version Format Doc",
+                source_uri="confluence://space/doc-v-test",
+                market_scope=None,
+                published_date=None,
+                authority_weight=1.0,
+                section_heading="Overview",
+                contextual_header="Version Format Doc > Overview",
+                verbatim_content="Semantic version check content.",
+                metadata_json={"version": v},
+                allowed_scopes=["public_eng"],
+                embedding=[0.0] * 768,
+                source_type="confluence",
+                version_str=v,
+            )
+            assert rec.version_str == v
+            assert rec.is_stale is False
 
     def test_b04_05_extremely_long_file_path_1024_chars(self) -> None:
         path_str = "src/" + ("sub/" * 100) + "file.py"
