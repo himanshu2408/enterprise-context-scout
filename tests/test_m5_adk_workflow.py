@@ -681,7 +681,6 @@ def test_val_02_verbatim_citation_verification(
     assert rep_bad.citations_verified_100_pct is False
 
 
-
 # =============================================================================
 # 2. LocalGemmaClient Clamping & Adapter Swapping (HW-01, ARC-02)
 # =============================================================================
@@ -910,9 +909,7 @@ def test_gemini_executor_model_validation_and_budget_enforcement(
     exec_fast = GeminiImplementationExecutor(model_id=DEFAULT_FAST_MODEL_ID, api_key=None)
     assert exec_fast.model_id == "gemini-3.8-flash"
 
-    exec_frontier = GeminiImplementationExecutor(
-        model_id=FRONTIER_REASONING_MODEL_ID, api_key=None
-    )
+    exec_frontier = GeminiImplementationExecutor(model_id=FRONTIER_REASONING_MODEL_ID, api_key=None)
     assert exec_frontier.model_id == "gemini-4-argon"
 
     # Invalid non-Google model rejected
@@ -1064,7 +1061,6 @@ def test_git_worktree_sandbox_lifecycle_and_human_confirmation(temp_git_repo: Pa
         assert sandbox.worktree_dir is not None
         wt_file = sandbox.worktree_dir / "src" / "trading_strategies" / "order_flow_imbalance.py"
         assert "Human confirmation verified" in wt_file.read_text(encoding="utf-8")
-
 
 
 # =============================================================================

@@ -898,4 +898,3 @@ def test_challenger_deterministic_slicer_quote_tampering_adversarial_matrix() ->
         assert gate_res.details[0].error_code == CitationFailureCode.HALLUCINATED_QUOTE, (
             f"Attack '{attack_name}' failed with {gate_res.details[0].error_code}"
         )
-

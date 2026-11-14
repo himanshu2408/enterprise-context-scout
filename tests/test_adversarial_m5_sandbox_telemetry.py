@@ -156,9 +156,7 @@ class TestGitWorktreeSandboxAdversarial:
                 assert ok is False, f"Garbage diff unexpectedly applied: {bad_diff!r}"
                 assert isinstance(msg, str)
 
-    def test_patch_conflict_markers_rejected_by_git_apply(
-        self, temp_git_repo: Path
-    ) -> None:
+    def test_patch_conflict_markers_rejected_by_git_apply(self, temp_git_repo: Path) -> None:
         """Tests patch containing raw git merge conflict markers is rejected by apply_patch."""
         conflict_patch = (
             "--- a/src/trading_strategies/order_flow_imbalance.py\n"

@@ -158,8 +158,7 @@ function helper() {
     assert len(dispatches) == 1, f"Expected 1 DISPATCHES edge, got {dispatches}"
     assert "doSomething" in dispatches[0].target_qualified_name
     err = (
-        f"Dispatch from standalone function leaked to MyComp: "
-        f"{dispatches[0].source_qualified_name}"
+        f"Dispatch from standalone function leaked to MyComp: {dispatches[0].source_qualified_name}"
     )
     assert not dispatches[0].source_qualified_name.endswith(".MyComp"), err
 

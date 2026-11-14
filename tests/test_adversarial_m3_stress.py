@@ -372,6 +372,7 @@ def test_adversarial_gitlab_push_webhook_blob_persistence() -> None:
     REQUIREMENT: When push webhook processes modified files, repository MUST contain
     the updated CodeFileRecord.
     """
+
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if "/repository/compare" in url:
@@ -394,7 +395,9 @@ def test_adversarial_gitlab_push_webhook_blob_persistence() -> None:
             return httpx.Response(200, content=b"def service():\n    return True\n")
         return httpx.Response(404, json={})
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://gitlab.example.com")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://gitlab.example.com"
+    )
     plugin = GitLabConnectorPlugin(base_url="https://gitlab.example.com", client=client)
     repo = InMemoryRLSRepository()
 
@@ -429,8 +432,7 @@ def test_adversarial_gitlab_push_webhook_blob_persistence() -> None:
     # Verify repository actually has the code file
     files = getattr(repo, "_files", {})
     assert len(files) >= 1, (
-        f"GitLab push webhook claimed {res.items_indexed} items indexed, "
-        f"but repo has 0 code files!"
+        f"GitLab push webhook claimed {res.items_indexed} items indexed, but repo has 0 code files!"
     )
 
     # Permanent Regression Assertion: Verify AST symbols are actually extracted and persisted
@@ -583,7 +585,9 @@ def test_adversarial_gitlab_push_webhook_renamed_file_lifecycle() -> None:
             return httpx.Response(200, content=b"def new_service():\n    return True\n")
         return httpx.Response(404, json={})
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://gitlab.example.com")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://gitlab.example.com"
+    )
     plugin = GitLabConnectorPlugin(base_url="https://gitlab.example.com", client=client)
 
     task = QueueTask(
@@ -687,7 +691,9 @@ def test_adversarial_gitlab_push_webhook_deletion_orphan_symbols() -> None:
             )
         return httpx.Response(404, json={})
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://gitlab.example.com")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://gitlab.example.com"
+    )
     plugin = GitLabConnectorPlugin(base_url="https://gitlab.example.com", client=client)
 
     task = QueueTask(
@@ -757,7 +763,9 @@ def test_adversarial_gitlab_push_webhook_postgres_deletion() -> None:
             )
         return httpx.Response(404, json={})
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://gitlab.example.com")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://gitlab.example.com"
+    )
     plugin = GitLabConnectorPlugin(base_url="https://gitlab.example.com", client=client)
 
     task = QueueTask(

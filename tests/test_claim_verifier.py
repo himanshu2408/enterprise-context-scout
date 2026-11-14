@@ -122,9 +122,7 @@ def test_authentic_international_unicode_accepted() -> None:
     assert rec_rus.is_verified is True
 
     # Authentic Greek math
-    math_source = (
-        "Total loss calculation: loss = \u03b1 * loss_primary + \u03b2 * loss_auxiliary."
-    )
+    math_source = "Total loss calculation: loss = \u03b1 * loss_primary + \u03b2 * loss_auxiliary."
     rec_math = verifier.verify_single_claim(
         "loss = \u03b1 * loss_primary + \u03b2 * loss_auxiliary",
         [math_source],
@@ -145,9 +143,9 @@ def test_strict_abstain_policy() -> None:
         "Under NO circumstances should the gateway allow unauthenticated fallback mode. "
         "The authentication timeout is set to 500 ms."
     )
-    verifier = ClaimVerifier(ClaimVerifierConfig(
-        policy=ClaimVerificationPolicy.STRICT_ABSTAIN_ON_ANY_UNVERIFIED
-    ))
+    verifier = ClaimVerifier(
+        ClaimVerifierConfig(policy=ClaimVerificationPolicy.STRICT_ABSTAIN_ON_ANY_UNVERIFIED)
+    )
 
     claims = [
         "The authentication timeout is set to 500 ms.",
@@ -166,10 +164,12 @@ def test_prune_and_mark_policy() -> None:
         "Under NO circumstances should the gateway allow unauthenticated fallback mode. "
         "The authentication timeout is set to 500 ms."
     )
-    verifier = ClaimVerifier(ClaimVerifierConfig(
-        policy=ClaimVerificationPolicy.PRUNE_AND_MARK_LOW_TRUST,
-        min_verified_claims=1,
-    ))
+    verifier = ClaimVerifier(
+        ClaimVerifierConfig(
+            policy=ClaimVerificationPolicy.PRUNE_AND_MARK_LOW_TRUST,
+            min_verified_claims=1,
+        )
+    )
 
     claims = [
         "The authentication timeout is set to 500 ms.",
@@ -185,10 +185,12 @@ def test_prune_and_mark_policy() -> None:
 
 def test_min_verified_count_policy() -> None:
     source = "The authentication timeout is set to 500 ms."
-    verifier = ClaimVerifier(ClaimVerifierConfig(
-        policy=ClaimVerificationPolicy.MIN_VERIFIED_COUNT,
-        min_verified_claims=2,
-    ))
+    verifier = ClaimVerifier(
+        ClaimVerifierConfig(
+            policy=ClaimVerificationPolicy.MIN_VERIFIED_COUNT,
+            min_verified_claims=2,
+        )
+    )
 
     claims = [
         "The authentication timeout is set to 500 ms.",

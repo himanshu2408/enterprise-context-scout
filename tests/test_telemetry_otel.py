@@ -281,8 +281,9 @@ def test_exception_recording_on_span() -> None:
     """Verifies that an unhandled exception inside a traced block records the exception."""
     tracer = get_tracer()
 
-    with pytest.raises(RuntimeError, match="Simulated crash"), tracer.trace_workflow(
-        span_name="scout.workflow"
+    with (
+        pytest.raises(RuntimeError, match="Simulated crash"),
+        tracer.trace_workflow(span_name="scout.workflow"),
     ):
         raise RuntimeError("Simulated crash")
 

@@ -63,9 +63,7 @@ def _make_chunk(
 
 def test_confluence_valid_citation() -> None:
     gate = DocumentCitationGate()
-    quote = (
-        "All microservices must implement OAuth 2.0 PKCE flow with 15-minute token rotation."
-    )
+    quote = "All microservices must implement OAuth 2.0 PKCE flow with 15-minute token rotation."
     chunk = _make_chunk(
         doc_id="10928374",
         title="Authentication Architecture RFC-82",

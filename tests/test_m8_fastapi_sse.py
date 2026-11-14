@@ -717,6 +717,4 @@ def test_repository_hygiene_zero_prohibited_terms() -> None:
         text=True,
     )
     # git grep returns code 1 when no matches are found
-    assert result.returncode == 1, (
-        f"Found prohibited paths/secrets in repository:\n{result.stdout}"
-    )
+    assert result.returncode == 1, f"Found prohibited paths/secrets in repository:\n{result.stdout}"

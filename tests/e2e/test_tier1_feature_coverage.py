@@ -98,7 +98,6 @@ class TestF01SignedAuthRemediation:
         is_401 = getattr(exc_info.value, "status_code", None) == 401
         assert "signature" in str(exc_info.value).lower() or is_401
 
-
     def test_f01_04_signed_token_malformed_bearer_scheme_rejection(self) -> None:
         with pytest.raises(Exception) as exc_info:
             get_principal_context(authorization="Basic dXNlcjpwYXNz")
@@ -378,7 +377,6 @@ class TestF05PersistentPostgreSQL:
         assert len(repo.list_visible_code_files(principal, "quant_research_scout")) == 0
 
 
-
 # ============================================================================
 # F06: Recursive CTE Graph Traversal
 # ============================================================================
@@ -452,7 +450,6 @@ class TestF06RecursiveCTEGraphTraversal:
         )
         edges = repo.list_visible_ast_edges(principal, "nonexistent_domain")
         assert len(edges) == 0
-
 
 
 # ============================================================================
@@ -1331,7 +1328,6 @@ class TestF29AdversarialCoverageHardeningTier5:
         _clean_text, is_injection, sigs = PromptInjectionSanitizer.sanitize(prompt)
         assert is_injection is True
         assert "ignore_previous_instructions" in sigs
-
 
     def test_f29_04_extreme_payload_size_bounded_memory(self) -> None:
         large_token_count = 500_000

@@ -311,9 +311,9 @@ def test_git_worktree_sandbox_lifecycle_and_patch_application(
     assert not sandbox.worktree_dir.exists()
 
     # Original repo remains untouched on main branch
-    orig_content = (
-        temp_git_repo / "src" / "trading_strategies" / "order_manager.py"
-    ).read_text(encoding="utf-8")
+    orig_content = (temp_git_repo / "src" / "trading_strategies" / "order_manager.py").read_text(
+        encoding="utf-8"
+    )
     assert "# Added parameter doc" not in orig_content
 
 

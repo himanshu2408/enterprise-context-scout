@@ -234,7 +234,6 @@ class TestRejectionSamplingAdversarialProbe:
         assert res_50.token_overlap_ratio == 0.0
 
 
-
 class TestLeakageAdversarialProbe:
     """Mathematically proves zero data leakage between train and valid holdout sets."""
 

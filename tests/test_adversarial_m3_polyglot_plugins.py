@@ -70,12 +70,8 @@ class WebhookHandler:
         file_path="backend/webhook.py",
     )
     symbol_names = [s.name for s in symbols]
-    assert "WebhookHandler" in symbol_names, (
-        f"WebhookHandler missing from symbols: {symbol_names}"
-    )
-    assert "handle_event" in symbol_names, (
-        f"handle_event missing from symbols: {symbol_names}"
-    )
+    assert "WebhookHandler" in symbol_names, f"WebhookHandler missing from symbols: {symbol_names}"
+    assert "handle_event" in symbol_names, f"handle_event missing from symbols: {symbol_names}"
 
 
 def test_registry_unregister_before_initialization() -> None:
@@ -124,8 +120,7 @@ export function useUserData(userId: string) {
 """
     _symbols, edges = plugin.extract_ast(code, "src/hooks/useUserData.ts")
     self_calls = [
-        e for e in edges
-        if e.edge_kind == "CALLS" and e.target_qualified_name == "useUserData"
+        e for e in edges if e.edge_kind == "CALLS" and e.target_qualified_name == "useUserData"
     ]
     assert len(self_calls) == 0, f"Found self-referencing CALLS edge: {self_calls}"
 
@@ -359,9 +354,7 @@ resource "google_storage_bucket" "backup" {
     symbols, _ = plugin.extract_ast(code, "main.tf")
     names = [s.name for s in symbols]
     assert "app_server" in names, f"app_server missing: {names}"
-    assert "backup" in names, (
-        f"backup resource was swallowed by app_server: {names}"
-    )
+    assert "backup" in names, f"backup resource was swallowed by app_server: {names}"
 
 
 def test_terraform_dynamic_blocks_and_provider_versions() -> None:
@@ -681,9 +674,7 @@ resource "google_cloud_run_v2_service" "api" {
 """
     _symbols, edges = plugin.extract_ast(code, "main.tf")
     phantom_edges = [
-        e
-        for e in edges
-        if e.edge_kind == "CALLS" and "internal_gateway" in e.target_qualified_name
+        e for e in edges if e.edge_kind == "CALLS" and "internal_gateway" in e.target_qualified_name
     ]
     assert len(phantom_edges) == 0, (
         f"Phantom CALLS edge emitted from interpolated URL: {phantom_edges}"

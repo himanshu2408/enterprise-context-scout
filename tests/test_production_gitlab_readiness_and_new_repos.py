@@ -211,13 +211,11 @@ def test_git_working_tree_live_uncommitted_edits_and_auto_workflow_sync() -> Non
         legacy_file = pkg_dir / "legacy_batch.py"
 
         settlement_file.write_text(
-            "def settle_wire_transfer(amount_usd: float) -> bool:\n"
-            "    return amount_usd > 0.0\n",
+            "def settle_wire_transfer(amount_usd: float) -> bool:\n    return amount_usd > 0.0\n",
             encoding="utf-8",
         )
         legacy_file.write_text(
-            "def run_legacy_batch() -> int:\n"
-            "    return 42\n",
+            "def run_legacy_batch() -> int:\n    return 42\n",
             encoding="utf-8",
         )
         subprocess.run(["git", "add", "."], cwd=tmp_dir, check=True, capture_output=True)
@@ -529,9 +527,7 @@ def test_benchmark_domain_cli_on_polyglot_multi_repo_corpus() -> None:
             encoding="utf-8",
         )
         (r2 / "main.tf").write_text(
-            'resource "google_SQL_database_instance" "rls_primary" {\n'
-            '  name = "rls-primary"\n'
-            "}\n",
+            'resource "google_SQL_database_instance" "rls_primary" {\n  name = "rls-primary"\n}\n',
             encoding="utf-8",
         )
 

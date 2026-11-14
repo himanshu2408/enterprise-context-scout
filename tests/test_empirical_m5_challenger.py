@@ -299,7 +299,6 @@ class TestChallengerPromptIdentifierPartitioning:
         assert report.bounce_back_feedback is not None
         assert "Check 2 (Prompt Identifier Partitioning, VAL-01)" in report.bounce_back_feedback
 
-
     def test_partitioning_distinguishes_novel_symbols_without_false_positives(
         self, base_repo: InMemoryRLSRepository, principal: PrincipalContext
     ) -> None:
@@ -324,8 +323,7 @@ class TestChallengerPromptIdentifierPartitioning:
                 git_commit_sha="commit_ofi_adv",
                 git_blob_sha="blob_ofi_adv",
                 verbatim_code_with_lines=(
-                    "   3 | class OrderFlowImbalanceAnalyzer:\n"
-                    "   4 |     pass\n"
+                    "   3 | class OrderFlowImbalanceAnalyzer:\n   4 |     pass\n"
                 ),
                 auto_expanded_by_ast=False,
             )
@@ -637,9 +635,8 @@ class TestChallengerCheck1InternalSymbolResolution:
         )
 
         file2_id = uuid.uuid4()
-        content2 = (
-            "class HeavyDependency:\n"
-            + "".join(f"    field_{i}: int = {i}\n" for i in range(50))
+        content2 = "class HeavyDependency:\n" + "".join(
+            f"    field_{i}: int = {i}\n" for i in range(50)
         )
         repo.insert_code_file(
             principal,

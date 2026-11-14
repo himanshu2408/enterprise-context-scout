@@ -706,7 +706,7 @@ class TestF18CitationDecouplingBoundaries:
         assert score_fail < threshold
 
     def test_b18_05_zero_width_space_in_citation(self) -> None:
-        raw_text = "Verbatim\u200B quote\uFEFF text"
+        raw_text = "Verbatim\u200b quote\ufeff text"
         clean = unicodedata.normalize("NFKC", raw_text)
         assert len(clean) <= len(raw_text)
 
@@ -1058,7 +1058,7 @@ class TestF29AdversarialStressBoundaries:
     """Boundary conditions for F29 Adversarial Inputs."""
 
     def test_b29_01_invisible_zero_width_chars_stripped(self) -> None:
-        payload = "admin" + ("\u200B" * 500)
+        payload = "admin" + ("\u200b" * 500)
         clean = PromptInjectionSanitizer.strip_invisible_unicode(payload)
         assert len(clean) == 5
 

@@ -434,8 +434,7 @@ def test_market_regime_scepticism_gate_nse_friction() -> None:
                 source_uri=chunk.source_uri,
                 section_heading=chunk.section_heading,
                 verbatim_quote=(
-                    "Securities Transaction Tax (STT) requires at least "
-                    "15 bps round-trip friction."
+                    "Securities Transaction Tax (STT) requires at least 15 bps round-trip friction."
                 ),
             )
         ],
@@ -468,8 +467,7 @@ def test_market_regime_scepticism_gate_nse_friction() -> None:
                 source_uri=chunk.source_uri,
                 section_heading=chunk.section_heading,
                 verbatim_quote=(
-                    "Securities Transaction Tax (STT) requires at least "
-                    "15 bps round-trip friction."
+                    "Securities Transaction Tax (STT) requires at least 15 bps round-trip friction."
                 ),
             )
         ],

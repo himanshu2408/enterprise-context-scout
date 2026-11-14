@@ -105,14 +105,10 @@ def test_jira_permission_mapping() -> None:
     )
     assert browse_scopes == ["jira:project:RISK:read"]
 
-    write_scopes = PermissionMirror.map_jira_permissions_to_scopes(
-        project, [JiraPermission.WRITE]
-    )
+    write_scopes = PermissionMirror.map_jira_permissions_to_scopes(project, [JiraPermission.WRITE])
     assert write_scopes == ["jira:project:RISK:read", "jira:project:RISK:write"]
 
-    admin_scopes = PermissionMirror.map_jira_permissions_to_scopes(
-        project, [JiraPermission.ADMIN]
-    )
+    admin_scopes = PermissionMirror.map_jira_permissions_to_scopes(project, [JiraPermission.ADMIN])
     assert admin_scopes == [
         "jira:project:RISK:admin",
         "jira:project:RISK:read",
@@ -152,9 +148,7 @@ def test_enterprise_identity_profile_resolution() -> None:
             )
         ],
         jira_memberships=[
-            JiraProjectMembership(
-                project_key="ALPHA", permissions=[JiraPermission.BROWSE]
-            )
+            JiraProjectMembership(project_key="ALPHA", permissions=[JiraPermission.BROWSE])
         ],
         custom_scopes=["audit:viewer"],
     )

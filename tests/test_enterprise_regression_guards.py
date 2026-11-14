@@ -665,9 +665,7 @@ def test_readme_schema_and_contract_alignment_guard() -> None:
         if target.startswith(("http://", "https://", "#")):
             continue
         clean_target = target.split("#", 1)[0]
-        assert Path(clean_target).exists(), (
-            f"Broken relative link in README.md: {clean_target}"
-        )
+        assert Path(clean_target).exists(), f"Broken relative link in README.md: {clean_target}"
         if clean_target.startswith("reports/"):
             assert clean_target.endswith(".md"), (
                 f"README.md report link must use human-readable .md format, got: {clean_target}"
@@ -1139,24 +1137,13 @@ def test_enterprise_production_class_state_cross_file_dto_and_caller_anti_starva
             "    return raw_id.strip().upper()",
         ]
     )
-    dto_code = (
-        "class CreateOrderDTO(BaseAuthenticatedDTO):\n"
-        "    symbol: str\n"
-        "    qty: int\n"
-    )
-    base_dto_code = (
-        "class BaseAuthenticatedDTO:\n"
-        "    tenant_id: str\n"
-        "    idempotency_key: str\n"
-    )
+    dto_code = "class CreateOrderDTO(BaseAuthenticatedDTO):\n    symbol: str\n    qty: int\n"
+    base_dto_code = "class BaseAuthenticatedDTO:\n    tenant_id: str\n    idempotency_key: str\n"
     caller_code = (
         "def handle_http_post(svc: OrderExecutionService, payload: CreateOrderDTO) -> str:\n"
         "    return svc.submit_order(payload)\n"
     )
-    other_repo_test_code = (
-        "def test_submit_order() -> None:\n"
-        "    assert True\n"
-    )
+    other_repo_test_code = "def test_submit_order() -> None:\n    assert True\n"
 
     files = [
         CodeFileRecord(
@@ -1615,8 +1602,3 @@ def test_multi_domain_knowledge_pdf_sync_mcp_benchmark_and_handoff_guard(
             assert quote_data["verified"] is True
 
     asyncio.run(_exercise_doc_mcp())
-
-
-
-
-

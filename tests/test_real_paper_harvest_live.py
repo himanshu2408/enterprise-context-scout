@@ -118,9 +118,7 @@ def test_pdf_fulltext_extraction_fallback() -> None:
 
         parsed_sections = parser.parse_pdf(real_pdf_bytes)
         assert len(parsed_sections) >= 1
-        assert any(
-            sec.heading for sec in parsed_sections
-        )
+        assert any(sec.heading for sec in parsed_sections)
 
         chunks = parser.chunk_pdf(
             doc_id="test_pdf_doc",

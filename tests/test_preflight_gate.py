@@ -225,9 +225,7 @@ class TestPreFlightValidator:
         )
 
         # Initially, pack ONLY contains the target slice
-        file_rec = test_repo._files[
-            next(iter(test_repo._files.keys()))
-        ]
+        file_rec = test_repo._files[next(iter(test_repo._files.keys()))]
         target_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
             file_path="src/trading_strategies/order_flow_imbalance.py",
@@ -379,9 +377,7 @@ class TestPreFlightValidator:
         )
 
         # Only pass OrderBookSnapshot in slice, NOT OrderFlowImbalanceAnalyzer
-        file2_rec = next(
-            f for f in test_repo._files.values() if "models.py" in f.file_path
-        )
+        file2_rec = next(f for f in test_repo._files.values() if "models.py" in f.file_path)
         model_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
             file_path="src/trading_strategies/models.py",
@@ -535,9 +531,7 @@ class TestPreFlightValidator:
         )
         assert report_invalid.passed is False
         assert report_invalid.citations_verified_100_pct is False
-        assert "Check 6 (Citation Verification)" in (
-            report_invalid.bounce_back_feedback or ""
-        )
+        assert "Check 6 (Citation Verification)" in (report_invalid.bounce_back_feedback or "")
 
     def test_pure_code_task_defaults_citation_verified(
         self,
@@ -597,13 +591,11 @@ class TestPreFlightValidator:
         )
         assert report.passed is False
 
-        diagnostic: InsufficientContextDiagnostic = (
-            validator.create_diagnostic(
-                trace_id="trace_gate_test_001",
-                domain_id=DOMAIN_ID,
-                report=report,
-                partial_candidate_files=["src/trading_strategies/order_flow_imbalance.py"],
-            )
+        diagnostic: InsufficientContextDiagnostic = validator.create_diagnostic(
+            trace_id="trace_gate_test_001",
+            domain_id=DOMAIN_ID,
+            report=report,
+            partial_candidate_files=["src/trading_strategies/order_flow_imbalance.py"],
         )
 
         assert diagnostic.trace_id == "trace_gate_test_001"

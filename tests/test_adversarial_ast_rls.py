@@ -975,15 +975,11 @@ def test_adversarial_postgres_empty_and_injected_scopes(settings: ScoutSettings)
     with mgr.scoped_transaction(unauthorized_principal, enable_hnsw_iterative_scan=False) as conn:
         cf_rows = conn.execute("SELECT count(*) FROM code_files;").fetchone()
         assert cf_rows is not None
-        assert cf_rows[0] == 0, (
-            f"Unauthorized scope leaked {cf_rows[0]} code_files rows!"
-        )
+        assert cf_rows[0] == 0, f"Unauthorized scope leaked {cf_rows[0]} code_files rows!"
 
         sym_rows = conn.execute("SELECT count(*) FROM ast_symbols;").fetchone()
         assert sym_rows is not None
-        assert sym_rows[0] == 0, (
-            f"Unauthorized scope leaked {sym_rows[0]} ast_symbols rows!"
-        )
+        assert sym_rows[0] == 0, f"Unauthorized scope leaked {sym_rows[0]} ast_symbols rows!"
 
     # 3. Raw connection without set_config (NULL setting) sees 0 rows due to Forced RLS
     import psycopg

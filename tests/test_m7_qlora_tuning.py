@@ -125,7 +125,6 @@ class TestModelAcquisitionAndVerification:
             assert metrics["final_loss"] < metrics["initial_loss"]
 
 
-
 class TestQLoRAMemoryMath:
     """Tests 4-bit QLoRA unified memory math on Apple Silicon M5 Pro 48GB."""
 
@@ -351,9 +350,7 @@ class TestVertexPEFTTrainer:
 
     def test_dry_run_validation(self) -> None:
         """Verifies dry-run validation checks pass and produce realistic cost estimates."""
-        trainer = VertexPEFTTrainer(
-            config=VertexPEFTConfig(domain_id="quant_research_scout")
-        )
+        trainer = VertexPEFTTrainer(config=VertexPEFTConfig(domain_id="quant_research_scout"))
         dry_run_res = trainer.dry_run()
 
         assert dry_run_res["status"] == "VALID"
@@ -507,4 +504,3 @@ class TestDomainAdaptersIntegration:
         assert (tmp_path / "m7_qlora_benchmark_report.json").is_file()
         assert (tmp_path / "m7_qlora_benchmark_report.md").is_file()
         assert "Milestone 7 Empirical QLoRA Benchmark Report" in md_report
-

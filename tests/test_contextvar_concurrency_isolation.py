@@ -212,6 +212,7 @@ async def test_fastapi_http_concurrent_request_isolation() -> None:
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+
         async def fetch_profile(token: str) -> httpx.Response:
             return await client.get(
                 "/api/v1/concurrency/whoami",
@@ -259,6 +260,7 @@ async def test_unauthenticated_request_concurrency_does_not_affect_authenticated
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+
         async def send_valid() -> httpx.Response:
             await asyncio.sleep(0.005)
             return await client.get(

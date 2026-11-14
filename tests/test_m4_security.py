@@ -172,24 +172,18 @@ def test_domain_authorization_gate_trading_code_scout(
     assert gate.is_tool_allowed("trading_code_scout", "search_code_trigram")
 
     # Unauthorized tools
-    assert not gate.is_tool_allowed(
-        "trading_code_scout", "quant_corpus_mcp:search_papers_hybrid"
-    )
+    assert not gate.is_tool_allowed("trading_code_scout", "quant_corpus_mcp:search_papers_hybrid")
     assert not gate.is_tool_allowed("trading_code_scout", "arbitrary_shell_exec")
 
     # Authorize with bound principal
     with bind_session_principal(sample_engineer_principal):
-        p = gate.authorize_tool_call(
-            "trading_code_scout", "code_repo_mcp:search_ast_symbols"
-        )
+        p = gate.authorize_tool_call("trading_code_scout", "code_repo_mcp:search_ast_symbols")
         assert p is not None
         assert p.user_id == "eng_user_01"
 
         # Calling unauthorized tool raises DomainToolAccessDeniedError
         with pytest.raises(DomainToolAccessDeniedError) as exc_info:
-            gate.authorize_tool_call(
-                "trading_code_scout", "quant_corpus_mcp:search_papers_hybrid"
-            )
+            gate.authorize_tool_call("trading_code_scout", "quant_corpus_mcp:search_papers_hybrid")
         assert "not authorized for domain 'trading_code_scout'" in str(exc_info.value)
 
 
@@ -200,27 +194,17 @@ def test_domain_authorization_gate_quant_research_scout(
     gate = DomainAuthorizationGate(registry=domain_registry)
 
     # Authorized tools for quant domain
-    assert gate.is_tool_allowed(
-        "quant_research_scout", "quant_corpus_mcp:search_papers_hybrid"
-    )
+    assert gate.is_tool_allowed("quant_research_scout", "quant_corpus_mcp:search_papers_hybrid")
     assert gate.is_tool_allowed("quant_research_scout", "search_quant_papers_hybrid")
-    assert gate.is_tool_allowed(
-        "quant_research_scout", "quant_corpus_mcp:compare_market_frictions"
-    )
+    assert gate.is_tool_allowed("quant_research_scout", "quant_corpus_mcp:compare_market_frictions")
 
     # Unauthorized tools
-    assert not gate.is_tool_allowed(
-        "quant_research_scout", "code_repo_mcp:search_ast_symbols"
-    )
+    assert not gate.is_tool_allowed("quant_research_scout", "code_repo_mcp:search_ast_symbols")
 
     with bind_session_principal(sample_quant_principal):
-        gate.authorize_tool_call(
-            "quant_research_scout", "quant_corpus_mcp:search_papers_hybrid"
-        )
+        gate.authorize_tool_call("quant_research_scout", "quant_corpus_mcp:search_papers_hybrid")
         with pytest.raises(DomainToolAccessDeniedError):
-            gate.authorize_tool_call(
-                "quant_research_scout", "code_repo_mcp:search_ast_symbols"
-            )
+            gate.authorize_tool_call("quant_research_scout", "code_repo_mcp:search_ast_symbols")
 
 
 def test_domain_authorization_enforce_authentication(
@@ -255,7 +239,7 @@ def test_require_scope_enforcement(
 
 
 def test_strip_invisible_unicode() -> None:
-    dirty = "Normal\u200Btext\uFEFFwith\u2060zero\u202Ewidth\u0000chars"
+    dirty = "Normal\u200btext\ufeffwith\u2060zero\u202ewidth\u0000chars"
     cleaned = PromptInjectionSanitizer.strip_invisible_unicode(dirty)
     assert cleaned == "Normaltextwithzerowidthchars"
 
@@ -284,9 +268,7 @@ def test_strip_comment_payloads() -> None:
     ],
 )
 def test_scan_injection_signatures_detects_attacks(injection_payload: str) -> None:
-    is_injection, signatures = PromptInjectionSanitizer.scan_injection_signatures(
-        injection_payload
-    )
+    is_injection, signatures = PromptInjectionSanitizer.scan_injection_signatures(injection_payload)
     assert is_injection is True
     assert len(signatures) >= 1
 
@@ -326,13 +308,15 @@ def test_secret_redactor_redacts_credentials() -> None:
     fake_github_pat = "".join(["gh", "p_", "111122223333444455556666777788889999"])
     fake_gitlab_pat = "".join(["gl", "pat-", "abc123def456ghi789jk"])
     fake_user_path = "".join(["/", "Users", "/", "johndoe", "/workspace/secrets.env"])
-    fake_private_key = "".join([
-        "-----",
-        "BEGIN RSA ",
-        "PRIVATE KEY-----\n",
-        "MIIEowIBAAKCAQEA0\n",
-        "-----END RSA PRIVATE KEY-----",
-    ])
+    fake_private_key = "".join(
+        [
+            "-----",
+            "BEGIN RSA ",
+            "PRIVATE KEY-----\n",
+            "MIIEowIBAAKCAQEA0\n",
+            "-----END RSA PRIVATE KEY-----",
+        ]
+    )
 
     raw_sample = (
         "Config dump:\n"

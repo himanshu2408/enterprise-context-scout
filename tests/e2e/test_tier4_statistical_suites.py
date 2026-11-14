@@ -57,9 +57,7 @@ class TestTier4Eval01UnanswerableSuite:
         # 0 errors in N=300 trials proves true error rate <= 1.0% at 95% confidence
         k_failures = 0
         n_trials = len(unanswerable_corpus)
-        bound = compute_clopper_pearson(
-            k_failures, n_trials, confidence_level=0.95, one_sided=True
-        )
+        bound = compute_clopper_pearson(k_failures, n_trials, confidence_level=0.95, one_sided=True)
         assert bound.p_upper <= 0.01
         assert bound.upper_percentage <= 1.0  # 0.9936%
 
@@ -92,14 +90,10 @@ class TestTier4Eval02StaleContentSuite:
     def stale_corpus(self) -> list[StaleItem]:
         return get_stale_content_set(100)
 
-    def test_eval02_01_sample_size_satisfies_n_ge_100(
-        self, stale_corpus: list[StaleItem]
-    ) -> None:
+    def test_eval02_01_sample_size_satisfies_n_ge_100(self, stale_corpus: list[StaleItem]) -> None:
         assert len(stale_corpus) >= 100
 
-    def test_eval02_02_rule_of_three_confidence_bound(
-        self, stale_corpus: list[StaleItem]
-    ) -> None:
+    def test_eval02_02_rule_of_three_confidence_bound(self, stale_corpus: list[StaleItem]) -> None:
         # Rule of three: 0 failures in 100 trials yields 95% upper limit <= 3.0%
         r3 = compute_rule_of_three(len(stale_corpus))
         assert r3 <= 0.03
@@ -112,9 +106,7 @@ class TestTier4Eval02StaleContentSuite:
             assert item.is_stale is True
             assert item.abstention_required is True
 
-    def test_eval02_04_stale_categories_distribution(
-        self, stale_corpus: list[StaleItem]
-    ) -> None:
+    def test_eval02_04_stale_categories_distribution(self, stale_corpus: list[StaleItem]) -> None:
         types = {i.content_type for i in stale_corpus}
         assert len(types) >= 4
 
@@ -160,9 +152,7 @@ class TestTier4Eval03SameNameCollisionSuite:
         kinds = {t.collision_kind for t in collision_corpus}
         assert len(kinds) == 3
 
-    def test_eval03_05_sha256_uniqueness(
-        self, collision_corpus: list[CollisionTask]
-    ) -> None:
+    def test_eval03_05_sha256_uniqueness(self, collision_corpus: list[CollisionTask]) -> None:
         hashes = [t.sha256_hash for t in collision_corpus]
         assert len(hashes) == len(set(hashes))
 
@@ -204,9 +194,7 @@ class TestTier4Eval04AnswerableSuite:
             assert len(task.target_symbols) >= 1
             assert task.target_file.startswith(("src/", "modules/"))
 
-    def test_eval04_05_sha256_uniqueness(
-        self, answerable_corpus: list[AnswerableTask]
-    ) -> None:
+    def test_eval04_05_sha256_uniqueness(self, answerable_corpus: list[AnswerableTask]) -> None:
         hashes = [t.sha256_hash for t in answerable_corpus]
         assert len(hashes) == len(set(hashes))
 
@@ -246,9 +234,7 @@ class TestTier4Eval05TokenABSuite:
         assert res.is_significant is True
         assert res.p_value < 0.01
 
-    def test_eval05_04_cohens_d_large_effect_size(
-        self, token_ab_corpus: list[TokenABTask]
-    ) -> None:
+    def test_eval05_04_cohens_d_large_effect_size(self, token_ab_corpus: list[TokenABTask]) -> None:
         a_tokens = [t.arm_a_exploration_tokens for t in token_ab_corpus]
         b_tokens = [t.arm_b_scouted_tokens for t in token_ab_corpus]
         res = compute_token_ab_significance(a_tokens, b_tokens)

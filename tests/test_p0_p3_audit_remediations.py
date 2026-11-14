@@ -250,8 +250,7 @@ def test_p0_05_slicer_math_interval_and_prefix_truncation_detection() -> None:
         "the optimal execution trajectory converges smoothly."
     )
     quote = (
-        "for any trading horizon t in [0, T), "
-        "the optimal execution trajectory converges smoothly."
+        "for any trading horizon t in [0, T), the optimal execution trajectory converges smoothly."
     )
     res = slicer.verify_quote(quote=quote, source_text=source)
     assert res.is_valid is True

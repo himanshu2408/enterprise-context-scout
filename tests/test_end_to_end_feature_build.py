@@ -77,11 +77,7 @@ def test_build_real_feature_from_context_pack_in_worktree_sandbox() -> None:
     assert cost_floor_bps >= 5.0
 
     # Verify the Context Pack localized OrderFlowImbalanceSignal with byte-exact source lines
-    ofi_slices = [
-        s
-        for s in result.code_slices
-        if "order_flow_imbalance.py" in s.file_path
-    ]
+    ofi_slices = [s for s in result.code_slices if "order_flow_imbalance.py" in s.file_path]
     assert len(ofi_slices) >= 1
     primary_slice = ofi_slices[0]
     assert "OrderFlowImbalanceSignal" in primary_slice.verbatim_code_with_lines
@@ -126,9 +122,7 @@ def test_build_real_feature_from_context_pack_in_worktree_sandbox() -> None:
     assert tests_passed is True, f"Behavioral test failed: {verify_out}"
 
 
-def test_clone_and_train_custom_domain_end_to_end_via_cli(
-    tmp_path: Path, capsys: object
-) -> None:
+def test_clone_and_train_custom_domain_end_to_end_via_cli(tmp_path: Path, capsys: object) -> None:
     """Verifies any user can scaffold, distill, and train a brand-new custom domain via CLI."""
     # 1. Verify hardware auto-detection CLI
     rc_hw = cli_main(["hardware"])
@@ -210,10 +204,7 @@ def test_clone_and_train_custom_domain_end_to_end_via_cli(
     )
     assert rc_train == 0
     adapter_dir = (
-        domains_dir
-        / "payments_ledger_scout"
-        / "adapters"
-        / "gemma4_26b_payments_ledger_scout"
+        domains_dir / "payments_ledger_scout" / "adapters" / "gemma4_26b_payments_ledger_scout"
     )
     assert (adapter_dir / "adapters.safetensors").is_file()
     assert (adapter_dir / "adapter_config.json").is_file()
