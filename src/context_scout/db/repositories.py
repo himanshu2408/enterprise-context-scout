@@ -64,6 +64,38 @@ def _as_opt_dt(val: object) -> datetime | None:
     return _as_dt(val)
 
 
+def _serialize_market_scope(market_scope: MarketRegime | str | None) -> str | None:
+    """Serializes MarketRegime | str | None to SQL NULL or text without 'None' strings."""
+    if market_scope is None:
+        return None
+    if isinstance(market_scope, MarketRegime):
+        return market_scope.value
+    cleaned = str(market_scope).strip()
+    if not cleaned or cleaned == "None":
+        return None
+    return cleaned
+
+
+def _parse_market_scope(raw_scope: object) -> MarketRegime | str | None:
+    """Parses DB market_scope into MarketRegime, preserved str label, or None."""
+    if raw_scope is None:
+        return None
+    val = str(raw_scope).strip()
+    if not val or val == "None":
+        return None
+    try:
+        return MarketRegime(val)
+    except ValueError:
+        return val
+
+
+def _apply_authority_score(base_rrf: float, authority_weight: float) -> float:
+    """Factors authority_weight into RRF score while preserving exact 6-decimal equality at 1.0."""
+    if math.isclose(authority_weight, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        return base_rrf
+    return round(min(1.0, max(0.0, base_rrf * authority_weight)), 6)
+
+
 def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     if len(vec_a) != len(vec_b) or not vec_a:
         raise ValueError("Vectors must have matching non-zero dimensions")
@@ -427,9 +459,10 @@ class PostgresRLSRepository:
             INSERT INTO confluence_pages (
                 page_id, domain_id, confluence_page_id, space_key,
                 title, version_number, author_username, source_url,
-                allowed_scopes, last_modified_at, indexed_at
+                allowed_scopes, last_modified_at, indexed_at,
+                status, is_deleted
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, NOW()))
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, NOW()), 'current', FALSE)
             ON CONFLICT (domain_id, confluence_page_id) DO UPDATE SET
                 space_key = EXCLUDED.space_key,
                 title = EXCLUDED.title,
@@ -438,7 +471,9 @@ class PostgresRLSRepository:
                 source_url = EXCLUDED.source_url,
                 allowed_scopes = EXCLUDED.allowed_scopes,
                 last_modified_at = EXCLUDED.last_modified_at,
-                indexed_at = NOW();
+                indexed_at = NOW(),
+                status = 'current',
+                is_deleted = FALSE;
             """,
             (
                 record.page_id,
@@ -456,18 +491,23 @@ class PostgresRLSRepository:
         )
 
     def get_confluence_page(
-        self, conn: Connection[tuple[object, ...]], domain_id: str, confluence_page_id: str
+        self,
+        conn: Connection[tuple[object, ...]],
+        domain_id: str,
+        confluence_page_id: str,
+        include_deleted: bool = False,
     ) -> ConfluencePageRecord | None:
-        row = conn.execute(
-            """
+        query = """
             SELECT page_id, domain_id, confluence_page_id, space_key,
                    title, version_number, author_username, source_url,
                    allowed_scopes, last_modified_at, indexed_at
             FROM confluence_pages
-            WHERE domain_id = %s AND confluence_page_id = %s;
-            """,
-            (domain_id, confluence_page_id),
-        ).fetchone()
+            WHERE domain_id = %s AND confluence_page_id = %s
+        """
+        if not include_deleted:
+            query += " AND NOT is_deleted"
+        query += ";"
+        row = conn.execute(query, (domain_id, confluence_page_id)).fetchone()
         if not row:
             return None
         return ConfluencePageRecord(
@@ -485,32 +525,27 @@ class PostgresRLSRepository:
         )
 
     def list_confluence_pages(
-        self, conn: Connection[tuple[object, ...]], domain_id: str, space_key: str | None = None
+        self,
+        conn: Connection[tuple[object, ...]],
+        domain_id: str,
+        space_key: str | None = None,
+        include_deleted: bool = False,
     ) -> list[ConfluencePageRecord]:
+        query = """
+            SELECT page_id, domain_id, confluence_page_id, space_key,
+                   title, version_number, author_username, source_url,
+                   allowed_scopes, last_modified_at, indexed_at
+            FROM confluence_pages
+            WHERE domain_id = %s
+        """
+        params: list[object] = [domain_id]
         if space_key:
-            rows = conn.execute(
-                """
-                SELECT page_id, domain_id, confluence_page_id, space_key,
-                       title, version_number, author_username, source_url,
-                       allowed_scopes, last_modified_at, indexed_at
-                FROM confluence_pages
-                WHERE domain_id = %s AND space_key = %s
-                ORDER BY title;
-                """,
-                (domain_id, space_key),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT page_id, domain_id, confluence_page_id, space_key,
-                       title, version_number, author_username, source_url,
-                       allowed_scopes, last_modified_at, indexed_at
-                FROM confluence_pages
-                WHERE domain_id = %s
-                ORDER BY title;
-                """,
-                (domain_id,),
-            ).fetchall()
+            query += " AND space_key = %s"
+            params.append(space_key)
+        if not include_deleted:
+            query += " AND NOT is_deleted"
+        query += " ORDER BY title;"
+        rows = conn.execute(query, tuple(params)).fetchall()
         return [
             ConfluencePageRecord(
                 page_id=UUID(str(row[0])),
@@ -527,6 +562,74 @@ class PostgresRLSRepository:
             )
             for row in rows
         ]
+
+    def tombstone_confluence_pages(
+        self,
+        conn: Connection[tuple[object, ...]],
+        domain_id: str,
+        confluence_page_ids: list[str],
+        reason: str = "Page deleted or archived in Confluence",
+        status: str = "deleted",
+    ) -> tuple[int, int]:
+        """Soft-deletes Confluence pages and marks their active doc_chunks stale."""
+        clean_ids = [pid for pid in confluence_page_ids if pid]
+        if not clean_ids:
+            return (0, 0)
+        doc_ids = [f"confluence:{pid}" for pid in clean_ids]
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE confluence_pages
+                SET is_deleted = TRUE,
+                    status = %s
+                WHERE domain_id = %s
+                  AND confluence_page_id = ANY(%s::text[])
+                  AND (NOT is_deleted OR status <> %s);
+                """,
+                (status, domain_id, clean_ids, status),
+            )
+            pages_tombstoned = max(cur.rowcount or 0, 0)
+            cur.execute(
+                """
+                UPDATE doc_chunks
+                SET is_stale = TRUE,
+                    stale_reason = %s
+                WHERE domain_id = %s
+                  AND doc_id = ANY(%s::text[])
+                  AND NOT is_stale;
+                """,
+                (reason, domain_id, doc_ids),
+            )
+            chunks_flagged = max(cur.rowcount or 0, 0)
+        return (pages_tombstoned, chunks_flagged)
+
+    def update_confluence_allowed_scopes(
+        self,
+        conn: Connection[tuple[object, ...]],
+        domain_id: str,
+        confluence_page_id: str,
+        allowed_scopes: list[str],
+    ) -> int:
+        """Synchronizes changed allowed_scopes across confluence_pages and active doc_chunks."""
+        doc_id = f"confluence:{confluence_page_id}"
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE confluence_pages
+                SET allowed_scopes = %s
+                WHERE domain_id = %s AND confluence_page_id = %s;
+                """,
+                (allowed_scopes, domain_id, confluence_page_id),
+            )
+            cur.execute(
+                """
+                UPDATE doc_chunks
+                SET allowed_scopes = %s
+                WHERE domain_id = %s AND doc_id = %s AND NOT is_stale;
+                """,
+                (allowed_scopes, domain_id, doc_id),
+            )
+            return max(cur.rowcount or 0, 0)
 
     def insert_jira_issue(
         self, conn: Connection[tuple[object, ...]], record: JiraIssueRecord
@@ -869,15 +972,14 @@ class PostgresRLSRepository:
     def insert_doc_chunk(
         self, conn: Connection[tuple[object, ...]], record: DocChunkRecord
     ) -> None:
-        market_val = (
-            record.market_scope.value
-            if isinstance(record.market_scope, MarketRegime)
-            else str(record.market_scope)
-        )
+        market_val = _serialize_market_scope(record.market_scope)
         doc_title = record.doc_title.replace("\x00", "")
         section_heading = record.section_heading.replace("\x00", "")
         contextual_header = record.contextual_header.replace("\x00", "")
         verbatim_content = record.verbatim_content.replace("\x00", "")
+        stale_reason = (
+            record.stale_reason.replace("\x00", "") if record.stale_reason is not None else None
+        )
         vec_literal = "[" + ",".join(f"{v:.6f}" for v in record.embedding) + "]"
         conn.execute(
             """
@@ -885,9 +987,16 @@ class PostgresRLSRepository:
                 chunk_id, domain_id, doc_id, doc_title, source_uri,
                 market_scope, published_date, authority_weight,
                 section_heading, contextual_header, verbatim_content,
-                metadata_json, allowed_scopes, embedding
+                metadata_json, allowed_scopes, embedding,
+                source_type, version_str, is_stale, stale_reason
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::vector)
+            VALUES (
+                %s, %s, %s, %s, %s,
+                %s, %s, %s,
+                %s, %s, %s,
+                %s::jsonb, %s, %s::vector,
+                %s, %s, %s, %s
+            )
             """,
             (
                 record.chunk_id,
@@ -904,6 +1013,10 @@ class PostgresRLSRepository:
                 json.dumps(record.metadata_json),
                 record.allowed_scopes,
                 vec_literal,
+                record.source_type,
+                record.version_str,
+                record.is_stale,
+                stale_reason,
             ),
         )
 
@@ -917,9 +1030,16 @@ class PostgresRLSRepository:
                 chunk_id, domain_id, doc_id, doc_title, source_uri,
                 market_scope, published_date, authority_weight,
                 section_heading, contextual_header, verbatim_content,
-                metadata_json, allowed_scopes, embedding
+                metadata_json, allowed_scopes, embedding,
+                source_type, version_str, is_stale, stale_reason
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::vector)
+            VALUES (
+                %s, %s, %s, %s, %s,
+                %s, %s, %s,
+                %s, %s, %s,
+                %s::jsonb, %s, %s::vector,
+                %s, %s, %s, %s
+            )
         """
         params_seq = [
             (
@@ -928,9 +1048,7 @@ class PostgresRLSRepository:
                 record.doc_id,
                 record.doc_title.replace("\x00", ""),
                 record.source_uri,
-                record.market_scope.value
-                if isinstance(record.market_scope, MarketRegime)
-                else str(record.market_scope),
+                _serialize_market_scope(record.market_scope),
                 record.published_date,
                 record.authority_weight,
                 record.section_heading.replace("\x00", ""),
@@ -939,6 +1057,12 @@ class PostgresRLSRepository:
                 json.dumps(record.metadata_json),
                 record.allowed_scopes,
                 "[" + ",".join(f"{v:.6f}" for v in record.embedding) + "]",
+                record.source_type,
+                record.version_str,
+                record.is_stale,
+                record.stale_reason.replace("\x00", "")
+                if record.stale_reason is not None
+                else None,
             )
             for record in records
         ]
@@ -950,22 +1074,25 @@ class PostgresRLSRepository:
         self,
         conn: Connection[tuple[object, ...]],
         domain_id: str,
-        market_scope: MarketRegime | None = None,
+        market_scope: MarketRegime | str | None = None,
+        include_stale: bool = False,
     ) -> list[DocChunkRecord]:
         query = """
             SELECT chunk_id, domain_id, doc_id, doc_title, source_uri,
                    market_scope, published_date, authority_weight,
                    section_heading, contextual_header, verbatim_content,
-                   metadata_json, allowed_scopes, embedding
+                   metadata_json, allowed_scopes, embedding,
+                   source_type, version_str, is_stale, stale_reason
             FROM doc_chunks
             WHERE domain_id = %s
         """
         params: list[object] = [domain_id]
-        if market_scope is not None:
+        if not include_stale:
+            query += " AND NOT is_stale"
+        serialized_market = _serialize_market_scope(market_scope)
+        if serialized_market is not None:
             query += " AND market_scope = %s"
-            params.append(
-                market_scope.value if hasattr(market_scope, "value") else str(market_scope)
-            )
+            params.append(serialized_market)
         query += " ORDER BY doc_id, chunk_id;"
 
         rows = conn.execute(query, tuple(params)).fetchall()
@@ -1006,7 +1133,7 @@ class PostgresRLSRepository:
                     doc_id=str(r[2]),
                     doc_title=str(r[3]),
                     source_uri=str(r[4]),
-                    market_scope=MarketRegime(str(r[5])),
+                    market_scope=_parse_market_scope(r[5]),
                     published_date=pub_date,
                     authority_weight=float(str(r[7])),
                     section_heading=str(r[8]),
@@ -1015,6 +1142,10 @@ class PostgresRLSRepository:
                     metadata_json=meta_dict,
                     allowed_scopes=scopes_list,
                     embedding=emb_floats,
+                    source_type=str(r[14]) if r[14] is not None else "quant_paper",
+                    version_str=str(r[15]) if r[15] is not None else "1",
+                    is_stale=bool(r[16]),
+                    stale_reason=str(r[17]) if r[17] is not None else None,
                 )
             )
         return results
@@ -1025,15 +1156,12 @@ class PostgresRLSRepository:
         domain_id: str,
         query_text: str,
         query_embedding: list[float],
-        market_scope: MarketRegime | None = None,
+        market_scope: MarketRegime | str | None = None,
         top_k: int = 5,
+        include_stale: bool = False,
     ) -> list[RankedSearchHit]:
         vec_literal = "[" + ",".join(f"{v:.6f}" for v in query_embedding) + "]"
-        market_str = (
-            (market_scope.value if hasattr(market_scope, "value") else str(market_scope))
-            if market_scope is not None
-            else None
-        )
+        market_str = _serialize_market_scope(market_scope)
         candidate_pool = max(100, top_k * 10)
         penalty_rank = candidate_pool + 1
         query = """
@@ -1048,6 +1176,8 @@ class PostgresRLSRepository:
                     FROM doc_chunks
                     WHERE domain_id = %s
                       AND (%s::text IS NULL OR market_scope = %s)
+                      AND authority_weight > 0.0
+                      AND (%s OR NOT is_stale)
                     ORDER BY ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) DESC, chunk_id
                     LIMIT %s
                 ) fts_sub
@@ -1062,6 +1192,8 @@ class PostgresRLSRepository:
                     FROM doc_chunks
                     WHERE domain_id = %s
                       AND (%s::text IS NULL OR market_scope = %s)
+                      AND authority_weight > 0.0
+                      AND (%s OR NOT is_stale)
                     ORDER BY embedding <=> %s::vector ASC
                     LIMIT %s
                 ) vec_sub
@@ -1077,6 +1209,8 @@ class PostgresRLSRepository:
                     FROM doc_chunks
                     WHERE domain_id = %s
                       AND (%s::text IS NULL OR market_scope = %s)
+                      AND authority_weight > 0.0
+                      AND (%s OR NOT is_stale)
                     ORDER BY (similarity(verbatim_content, %s) * authority_weight) DESC, chunk_id
                     LIMIT %s
                 ) trgm_sub
@@ -1091,32 +1225,38 @@ class PostgresRLSRepository:
             SELECT d.chunk_id, d.doc_title, d.section_heading,
                    COALESCE(f.fts_rank, %s) AS fts_rank,
                    COALESCE(v.vec_rank, %s) AS vec_rank,
-                   COALESCE(t.trgm_rank, %s) AS trgm_rank
+                   COALESCE(t.trgm_rank, %s) AS trgm_rank,
+                   d.authority_weight
             FROM candidate_ids c
             JOIN doc_chunks d ON d.chunk_id = c.chunk_id
             LEFT JOIN fts_ranked f ON d.chunk_id = f.chunk_id
             LEFT JOIN vec_ranked v ON d.chunk_id = v.chunk_id
             LEFT JOIN trgm_ranked t ON d.chunk_id = t.chunk_id
             WHERE d.domain_id = %s
-              AND (%s::text IS NULL OR d.market_scope = %s);
+              AND (%s::text IS NULL OR d.market_scope = %s)
+              AND d.authority_weight > 0.0
+              AND (%s OR NOT d.is_stale);
         """
         params = (
             query_text,
             domain_id,
             market_str,
             market_str,
+            include_stale,
             query_text,
             candidate_pool,
             vec_literal,
             domain_id,
             market_str,
             market_str,
+            include_stale,
             vec_literal,
             candidate_pool,
             query_text,
             domain_id,
             market_str,
             market_str,
+            include_stale,
             query_text,
             candidate_pool,
             penalty_rank,
@@ -1125,9 +1265,10 @@ class PostgresRLSRepository:
             domain_id,
             market_str,
             market_str,
+            include_stale,
         )
         rows = conn.execute(query, params).fetchall()
-        hits: list[RankedSearchHit] = []
+        scored_hits: list[tuple[float, float, float, RankedSearchHit]] = []
         for r in rows:
             chunk_id = UUID(str(r[0]))
             doc_title = str(r[1])
@@ -1135,21 +1276,22 @@ class PostgresRLSRepository:
             fts_rank = int(str(r[3]))
             vec_rank = int(str(r[4]))
             trgm_rank = int(str(r[5]))
-            norm_rrf = compute_normalized_rrf(
+            auth_weight = float(str(r[6]))
+            base_rrf = compute_normalized_rrf(
                 [trgm_rank, fts_rank, vec_rank], num_modalities=3, k=60
             )
-            hits.append(
-                RankedSearchHit(
-                    item_id=chunk_id,
-                    qualified_name_or_title=f"{doc_title} > {section_heading}",
-                    normalized_rrf_score=norm_rrf,
-                    trigram_rank=trgm_rank,
-                    bm25_rank=fts_rank,
-                    vector_rank=vec_rank,
-                )
+            weighted_score = _apply_authority_score(base_rrf, auth_weight)
+            hit = RankedSearchHit(
+                item_id=chunk_id,
+                qualified_name_or_title=f"{doc_title} > {section_heading}",
+                normalized_rrf_score=weighted_score,
+                trigram_rank=trgm_rank,
+                bm25_rank=fts_rank,
+                vector_rank=vec_rank,
             )
-        hits.sort(key=lambda h: h.normalized_rrf_score, reverse=True)
-        return hits[:top_k]
+            scored_hits.append((weighted_score, base_rrf * auth_weight, auth_weight, hit))
+        scored_hits.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        return [item[3] for item in scored_hits[:top_k]]
 
     def search_symbols_hybrid_rrf(
         self,
@@ -1534,6 +1676,7 @@ class InMemoryRLSRepository:
         self._repos: dict[UUID, RepositoryRecord] = {}
         self._commits: dict[UUID, RepoCommitRecord] = {}
         self._confluence: dict[UUID, ConfluencePageRecord] = {}
+        self._deleted_confluence: set[tuple[str, str]] = set()
         self._jira: dict[UUID, JiraIssueRecord] = {}
 
     def insert_repository(self, principal: PrincipalContext, record: RepositoryRecord) -> None:
@@ -1580,6 +1723,7 @@ class InMemoryRLSRepository:
     ) -> None:
         if not _scopes_intersect(record.allowed_scopes, principal.allowed_scopes):
             raise PermissionError("Principal lacks scope to insert confluence_page row")
+        self._deleted_confluence.discard((record.domain_id, record.confluence_page_id))
         # Upsert: purge existing record for (domain_id, confluence_page_id)
         for old_id, p in list(self._confluence.items()):
             if (
@@ -1590,8 +1734,14 @@ class InMemoryRLSRepository:
         self._confluence[record.page_id] = record
 
     def get_confluence_page(
-        self, principal: PrincipalContext, domain_id: str, confluence_page_id: str
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        confluence_page_id: str,
+        include_deleted: bool = False,
     ) -> ConfluencePageRecord | None:
+        if not include_deleted and (domain_id, confluence_page_id) in self._deleted_confluence:
+            return None
         for p in self._confluence.values():
             if (
                 p.domain_id == domain_id
@@ -1602,15 +1752,89 @@ class InMemoryRLSRepository:
         return None
 
     def list_confluence_pages(
-        self, principal: PrincipalContext, domain_id: str, space_key: str | None = None
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        space_key: str | None = None,
+        include_deleted: bool = False,
     ) -> list[ConfluencePageRecord]:
         return [
             p
             for p in self._confluence.values()
             if p.domain_id == domain_id
             and (space_key is None or p.space_key == space_key)
+            and (
+                include_deleted
+                or (p.domain_id, p.confluence_page_id) not in self._deleted_confluence
+            )
             and _scopes_intersect(p.allowed_scopes, principal.allowed_scopes)
         ]
+
+    def tombstone_confluence_pages(
+        self,
+        domain_id: str,
+        confluence_page_ids: list[str],
+        reason: str = "Page deleted or archived in Confluence",
+        status: str = "deleted",
+    ) -> tuple[int, int]:
+        """Soft-deletes Confluence pages and marks their active doc_chunks stale in memory."""
+        import dataclasses
+
+        del status
+        clean_ids = {pid for pid in confluence_page_ids if pid}
+        if not clean_ids:
+            return (0, 0)
+
+        pages_tombstoned = 0
+        for pid in clean_ids:
+            key = (domain_id, pid)
+            had_page = any(
+                p.domain_id == domain_id and p.confluence_page_id == pid
+                for p in self._confluence.values()
+            )
+            if key not in self._deleted_confluence:
+                self._deleted_confluence.add(key)
+                if had_page:
+                    pages_tombstoned += 1
+
+        target_doc_ids = {f"confluence:{pid}" for pid in clean_ids}
+        chunks_flagged = 0
+        for cid, doc in list(self._docs.items()):
+            if doc.domain_id == domain_id and doc.doc_id in target_doc_ids and not doc.is_stale:
+                self._docs[cid] = dataclasses.replace(
+                    doc,
+                    is_stale=True,
+                    stale_reason=reason,
+                )
+                chunks_flagged += 1
+        return (pages_tombstoned, chunks_flagged)
+
+    def update_confluence_allowed_scopes(
+        self,
+        domain_id: str,
+        confluence_page_id: str,
+        allowed_scopes: list[str],
+    ) -> int:
+        """Synchronizes allowed_scopes across in-memory confluence_pages and active doc_chunks."""
+        import dataclasses
+
+        scopes_copy = list(allowed_scopes)
+        for pid_uuid, page_rec in list(self._confluence.items()):
+            if (
+                page_rec.domain_id == domain_id
+                and page_rec.confluence_page_id == confluence_page_id
+            ):
+                self._confluence[pid_uuid] = dataclasses.replace(
+                    page_rec, allowed_scopes=scopes_copy
+                )
+
+        target_doc_id = f"confluence:{confluence_page_id}"
+        updated_chunks = 0
+        for cid, doc in list(self._docs.items()):
+            if doc.domain_id == domain_id and doc.doc_id == target_doc_id and not doc.is_stale:
+                self._docs[cid] = dataclasses.replace(doc, allowed_scopes=scopes_copy)
+                updated_chunks += 1
+        return updated_chunks
 
     def insert_jira_issue(self, principal: PrincipalContext, record: JiraIssueRecord) -> None:
         if not _scopes_intersect(record.allowed_scopes, principal.allowed_scopes):
@@ -1705,13 +1929,16 @@ class InMemoryRLSRepository:
         self,
         principal: PrincipalContext,
         domain_id: str,
-        market_scope: MarketRegime | None = None,
+        market_scope: MarketRegime | str | None = None,
+        include_stale: bool = False,
     ) -> list[DocChunkRecord]:
+        target_mkt = _serialize_market_scope(market_scope)
         return [
             d
             for d in self._docs.values()
             if d.domain_id == domain_id
-            and (market_scope is None or d.market_scope == market_scope)
+            and (include_stale or not d.is_stale)
+            and (target_mkt is None or _serialize_market_scope(d.market_scope) == target_mkt)
             and _scopes_intersect(d.allowed_scopes, principal.allowed_scopes)
         ]
 
@@ -2038,14 +2265,24 @@ class InMemoryRLSRepository:
         domain_id: str,
         query_text: str,
         query_embedding: list[float],
-        market_scope: MarketRegime | None = None,
+        market_scope: MarketRegime | str | None = None,
         top_k: int = 5,
+        include_stale: bool = False,
     ) -> list[RankedSearchHit]:
         """Executes RLS-filtered 3-way Normalized RRF over doc_chunks.
 
         Combines BM25 lexical rank, vector cosine similarity, and trigram/authority.
         """
-        visible = self.list_visible_doc_chunks(principal, domain_id, market_scope=market_scope)
+        visible = [
+            d
+            for d in self.list_visible_doc_chunks(
+                principal,
+                domain_id,
+                market_scope=market_scope,
+                include_stale=include_stale,
+            )
+            if d.authority_weight > 0.0
+        ]
         if not visible:
             return []
 
@@ -2071,25 +2308,27 @@ class InMemoryRLSRepository:
         trgm_order = sorted(range(len(visible)), key=lambda i: trgm_scores[i], reverse=True)
         trgm_ranks = {visible[idx].chunk_id: rank + 1 for rank, idx in enumerate(trgm_order)}
 
-        hits: list[RankedSearchHit] = []
+        scored_hits: list[tuple[float, float, float, RankedSearchHit]] = []
         for d in visible:
             r_trgm = trgm_ranks[d.chunk_id]
             r_bm25 = bm25_ranks[d.chunk_id]
             r_vec = vec_ranks[d.chunk_id]
-            norm_rrf = compute_normalized_rrf([r_trgm, r_bm25, r_vec], num_modalities=3, k=60)
-            hits.append(
-                RankedSearchHit(
-                    item_id=d.chunk_id,
-                    qualified_name_or_title=f"{d.doc_title} > {d.section_heading}",
-                    normalized_rrf_score=norm_rrf,
-                    trigram_rank=r_trgm,
-                    bm25_rank=r_bm25,
-                    vector_rank=r_vec,
-                )
+            base_rrf = compute_normalized_rrf([r_trgm, r_bm25, r_vec], num_modalities=3, k=60)
+            weighted_score = _apply_authority_score(base_rrf, d.authority_weight)
+            hit = RankedSearchHit(
+                item_id=d.chunk_id,
+                qualified_name_or_title=f"{d.doc_title} > {d.section_heading}",
+                normalized_rrf_score=weighted_score,
+                trigram_rank=r_trgm,
+                bm25_rank=r_bm25,
+                vector_rank=r_vec,
+            )
+            scored_hits.append(
+                (weighted_score, base_rrf * d.authority_weight, d.authority_weight, hit)
             )
 
-        hits.sort(key=lambda h: h.normalized_rrf_score, reverse=True)
-        return hits[:top_k]
+        scored_hits.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        return [item[3] for item in scored_hits[:top_k]]
 
     def record_execution_telemetry(
         self,

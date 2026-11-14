@@ -134,6 +134,10 @@ ALTER TABLE doc_chunks ADD COLUMN IF NOT EXISTS version_str TEXT NOT NULL DEFAUL
 ALTER TABLE doc_chunks ADD COLUMN IF NOT EXISTS is_stale BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE doc_chunks ADD COLUMN IF NOT EXISTS stale_reason TEXT;
 
+-- E. confluence_pages: lifecycle status and soft-delete tombstone columns
+ALTER TABLE confluence_pages ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'current';
+ALTER TABLE confluence_pages ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE;
+
 ALTER TABLE doc_chunks ALTER COLUMN market_scope DROP NOT NULL;
 ALTER TABLE doc_chunks DROP CONSTRAINT IF EXISTS doc_chunks_market_scope_check;
 ALTER TABLE doc_chunks ADD CONSTRAINT doc_chunks_market_scope_check CHECK (

@@ -31,7 +31,17 @@ from pathlib import Path
 from typing import Any, Final
 
 from context_scout.agents.citation_gate import DocumentCitationGate
+from context_scout.agents.conflict_detector import ConflictDetector
 from context_scout.agents.domain_registry import AdapterPool, AdapterSlot, DomainRegistry
+from context_scout.agents.intent_router import (
+    QueryIntentClassifier,
+    QueryIntentMode,
+    SourceFilter,
+    filter_doc_chunks_by_source,
+    format_doc_citation_label,
+    is_jira_chunk,
+    is_wiki_chunk,
+)
 from context_scout.agents.preflight_gate import (
     PROMPT_STOPWORDS,
     BoundGraphRepository,
@@ -1922,6 +1932,119 @@ def _numeric_version(version_str: str) -> float:
         return 0.0
 
 
+class _SourceFilteredGraphRepo:
+    """Wraps a BoundGraphRepository to enforce source_filter on visible doc chunks."""
+
+    def __init__(self, inner: BoundGraphRepository, source_filter: SourceFilter) -> None:
+        self._inner = inner
+        self._source_filter = source_filter
+
+    def list_visible_doc_chunks(
+        self, principal: PrincipalContext, domain_id: str
+    ) -> list[DocChunkRecord]:
+        raw_chunks = self._inner.list_visible_doc_chunks(principal, domain_id)
+        return filter_doc_chunks_by_source(raw_chunks, self._source_filter)
+
+    def search_visible_doc_chunks(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        query_text: str = "",
+        market_scope: MarketRegime | None = None,
+        limit: int = 10,
+    ) -> list[DocChunkRecord]:
+        raw_chunks = self._inner.search_visible_doc_chunks(
+            principal=principal,
+            domain_id=domain_id,
+            query_text=query_text,
+            market_scope=market_scope,
+            limit=limit,
+        )
+        return filter_doc_chunks_by_source(raw_chunks, self._source_filter)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def _detect_pack_conflicts(
+    code_slices: list[VerbatimCodeSlice],
+    doc_chunks: list[DocChunkRecord],
+    initial_conflicts: list[str] | None = None,
+) -> list[str]:
+    """Runs ConflictDetector across visible Confluence pages and code slices, preserving order."""
+    detector = ConflictDetector()
+    page_conflicts = detector.detect_confluence_page_conflicts(doc_chunks)
+    code_doc_conflicts = detector.detect_code_vs_doc_conflicts(code_slices, doc_chunks)
+    combined = [
+        *(initial_conflicts or []),
+        *page_conflicts,
+        *code_doc_conflicts,
+    ]
+    return list(dict.fromkeys(combined))
+
+
+def _build_domain_brief_from_citations(
+    *,
+    user_prompt: str,
+    domain_id: str,
+    citations: list[DocCitationSpan],
+    chunks_by_id: dict[str, DocChunkRecord] | None = None,
+) -> DomainKnowledgeBrief:
+    """Synthesizes a grounded DomainKnowledgeBrief directly from verified citations."""
+    if not citations:
+        return DomainKnowledgeBrief(
+            brief_title="Insufficient Verified Corpus Citations",
+            domain_id=domain_id,
+            executive_summary="No verified corpus citations found for prompt.",
+            formal_expression_or_rule=None,
+            core_findings_and_rules=[],
+            domain_constraints_and_caveats=[],
+            known_risks_and_failure_modes=[],
+            structured_metadata={"domain_id": domain_id, "verified_citations_count": 0},
+            verified_citations=[],
+        )
+
+    chunk_lookup = chunks_by_id or {}
+    formatted_labels: list[str] = []
+    findings: list[str] = []
+    for cit in citations:
+        chk = chunk_lookup.get(cit.chunk_id)
+        meta = dict(getattr(chk, "metadata_json", {}) or {}) if chk is not None else None
+        pub_date = getattr(chk, "published_date", None) if chk is not None else None
+        label = format_doc_citation_label(cit, metadata=meta, published_date=pub_date)
+        formatted_labels.append(label)
+        findings.append(f"{label} {cit.verbatim_quote}")
+
+    primary_title = citations[0].doc_title or citations[0].doc_id or "Verified Documentation"
+    return DomainKnowledgeBrief(
+        brief_title=primary_title,
+        domain_id=domain_id,
+        executive_summary=(
+            f"Grounded synthesis for '{user_prompt.strip()}' across "
+            f"{len(citations)} verified citation(s): {'; '.join(formatted_labels)}"
+        ),
+        formal_expression_or_rule=None,
+        core_findings_and_rules=findings,
+        domain_constraints_and_caveats=[
+            (
+                f"Grounded exclusively in {len(citations)} verified non-stale citation(s) "
+                f"visible under domain '{domain_id}' RBAC scopes."
+            )
+        ],
+        known_risks_and_failure_modes=[
+            (
+                "Stale, superseded, or negatively resolved documents are excluded; "
+                "re-verify upstream Confluence/Jira revisions before policy changes."
+            )
+        ],
+        structured_metadata={
+            "domain_id": domain_id,
+            "verified_citations_count": len(citations),
+        },
+        verified_citations=list(citations),
+    )
+
+
 def _build_doc_citation_span(chk: DocChunkRecord, verbatim_quote: str) -> DocCitationSpan:
     """Builds DocCitationSpan with Confluence/Jira provenance extracted from chunk metadata/URI."""
     meta = dict(getattr(chk, "metadata_json", {}) or {})
@@ -1948,7 +2071,7 @@ def _build_doc_citation_span(chk: DocChunkRecord, verbatim_quote: str) -> DocCit
             if doc_match:
                 ticket_key = doc_match.group(1)
 
-    return DocCitationSpan(
+    span = DocCitationSpan(
         chunk_id=str(chk.chunk_id),
         doc_id=chk.doc_id,
         doc_title=chk.doc_title,
@@ -1959,6 +2082,24 @@ def _build_doc_citation_span(chk: DocChunkRecord, verbatim_quote: str) -> DocCit
         page_id=page_id or None,
         ticket_key=ticket_key or None,
     )
+    has_enterprise_meta = bool(
+        meta.get("space_key")
+        or meta.get("space")
+        or meta.get("last_updated")
+        or meta.get("updated_at")
+        or getattr(chk, "published_date", None)
+        or is_wiki_chunk(chk)
+        or is_jira_chunk(chk)
+    )
+    if has_enterprise_meta:
+        formatted = format_doc_citation_label(
+            span,
+            metadata=meta,
+            published_date=getattr(chk, "published_date", None),
+        )
+        if formatted.startswith("[") and formatted.endswith("]"):
+            span = span.model_copy(update={"section_heading": formatted[1:-1]})
+    return span
 
 
 def _extract_hybrid_doc_citations(
@@ -1968,12 +2109,20 @@ def _extract_hybrid_doc_citations(
     slicer: DeterministicSlicer,
     validator: PreFlightValidator | None = None,
     max_citations: int = 3,
+    min_hits_override: int | None = None,
 ) -> list[DocCitationSpan]:
     """Extracts verified non-stale doc citations matching substantive query terms."""
-    raw_terms = re.findall(r"[A-Za-z0-9_]{3,}", user_prompt)
+    raw_terms = re.findall(r"[A-Za-z0-9_-]{3,}", user_prompt)
+    expanded_terms: list[str] = []
+    for tok in raw_terms:
+        expanded_terms.append(tok)
+        if "-" in tok:
+            for part in tok.split("-"):
+                if len(part) >= 3:
+                    expanded_terms.append(part)
     query_terms = [
         t.lower()
-        for t in dict.fromkeys(raw_terms)
+        for t in dict.fromkeys(expanded_terms)
         if t.lower() not in PROMPT_STOPWORDS
         and t.lower() not in CONVERSATIONAL_AND_GENERIC_WORDS
         and t.lower() not in _HYBRID_DOC_META_WORDS
@@ -1989,7 +2138,9 @@ def _extract_hybrid_doc_citations(
         else set()
     )
 
-    min_hits = 2 if len(query_terms) >= 2 else 1
+    min_hits = (
+        min_hits_override if min_hits_override is not None else (2 if len(query_terms) >= 2 else 1)
+    )
     scored: list[tuple[int, float, float, DocChunkRecord]] = []
     for chk in doc_chunks:
         if bool(getattr(chk, "is_stale", False)):
@@ -2189,6 +2340,7 @@ class ScoutWorkflow:
         supporting_doc_citations: list[DocCitationSpan] | None = None,
         max_bounce_backs: int = 1,
         on_stage_event: Callable[[dict[str, Any]], None] | None = None,
+        source_filter: SourceFilter = "all",
     ) -> ImplementationContextPack | InsufficientContextDiagnostic:
         """Executes the 4-stage Scout Workflow DAG with OpenTelemetry instrumentation."""
         domain_id = _resolve_default_domain(domain_id, role="code")
@@ -2212,6 +2364,7 @@ class ScoutWorkflow:
                     supporting_doc_citations=supporting_doc_citations,
                     max_bounce_backs=max_bounce_backs,
                     on_stage_event=on_stage_event,
+                    source_filter=source_filter,
                 )
             except ModelUnavailableError as e:
                 logger.warning(
@@ -2243,6 +2396,7 @@ class ScoutWorkflow:
         supporting_doc_citations: list[DocCitationSpan] | None,
         max_bounce_backs: int,
         on_stage_event: Callable[[dict[str, Any]], None] | None = None,
+        source_filter: SourceFilter = "all",
     ) -> ImplementationContextPack | InsufficientContextDiagnostic:
         """Executes the 4-stage Scout Workflow DAG."""
         dag_t0 = time.perf_counter()
@@ -2286,6 +2440,7 @@ class ScoutWorkflow:
                 doc_chunks=doc_chunks,
                 max_bounce_backs=max_bounce_backs,
                 on_stage_event=on_stage_event,
+                source_filter=source_filter,
             )
 
         try:
@@ -2339,10 +2494,16 @@ class ScoutWorkflow:
         s1_t0 = time.perf_counter()
         _ = self.local_client.set_active_domain(domain_id)
         visible_files = run_bound_repo.list_visible_code_files(principal, domain_id)
-        if isinstance(doc_chunks, list):
-            s1_raw_chunks = doc_chunks
+        filtered_doc_chunks = filter_doc_chunks_by_source(doc_chunks, source_filter)
+        doc_bound_repo: BoundGraphRepository | _SourceFilteredGraphRepo = (
+            _SourceFilteredGraphRepo(run_bound_repo, source_filter)
+            if source_filter != "all"
+            else run_bound_repo
+        )
+        if isinstance(filtered_doc_chunks, list):
+            s1_raw_chunks = filtered_doc_chunks
         else:
-            s1_raw_chunks = run_bound_repo.list_visible_doc_chunks(principal, domain_id)
+            s1_raw_chunks = doc_bound_repo.list_visible_doc_chunks(principal, domain_id)
         stale_excluded_s1 = sum(1 for c in s1_raw_chunks if bool(getattr(c, "is_stale", False)))
         visible_chunks_s1 = len(s1_raw_chunks) - stale_excluded_s1
         s1_ms = max(1, int((time.perf_counter() - s1_t0) * 1000))
@@ -2403,7 +2564,8 @@ class ScoutWorkflow:
             )
         )
         auto_research_route = (
-            domain_plugin is not None
+            source_filter != "code"
+            and domain_plugin is not None
             and not has_code_indicators
             and domain_plugin.should_auto_route_research(
                 user_prompt, domain_id, allowed_scopes=principal.allowed_scopes
@@ -2415,19 +2577,121 @@ class ScoutWorkflow:
             else domain_id
         )
 
+        has_visible_code = bool(visible_files)
+        has_visible_docs = bool(s1_raw_chunks) or bool(supporting_doc_citations)
+        if (
+            not has_visible_docs
+            and research_domain_id != domain_id
+            and doc_bound_repo.list_visible_doc_chunks(principal, research_domain_id)
+        ):
+            has_visible_docs = True
+        intent_decision = QueryIntentClassifier.classify(
+            user_prompt,
+            source_filter=source_filter,
+            has_visible_code=has_visible_code,
+            has_visible_docs=has_visible_docs,
+        )
+
         is_doc_domain = (
             manifest.output_contract in ("QuantStrategyBrief", "DomainKnowledgeBrief")
             or (domain_plugin is not None and domain_plugin.is_research_domain(domain_id))
             or auto_research_route
         )
+        used_research_domain = False
         quant_brief: QuantStrategyBrief | None = None
         domain_knowledge_brief: DomainKnowledgeBrief | None = None
-        if is_doc_domain:
+        candidate_pointers: list[CodeSlicePointer] = []
+
+        if intent_decision.mode == QueryIntentMode.PURE_DOCUMENTATION:
+            candidate_pointers = []
+            if is_doc_domain:
+                quant_domain = research_domain_id if auto_research_route else domain_id
+                quant_brief = self.local_client.generate_quant_brief(
+                    user_prompt=user_prompt,
+                    domain_id=quant_domain,
+                    repo=doc_bound_repo,
+                    principal=principal,
+                    bounce_back_feedback=None,
+                )
+                if quant_brief is not None and quant_brief.verified_citations:
+                    domain_knowledge_brief = self.local_client.generate_domain_knowledge_brief(
+                        user_prompt=user_prompt,
+                        domain_id=quant_domain,
+                        repo=doc_bound_repo,
+                        principal=principal,
+                        quant_brief=quant_brief,
+                    )
+                    supporting_doc_citations = list(quant_brief.verified_citations)
+                else:
+                    quant_brief = None
+                    domain_knowledge_brief = None
+                    supporting_doc_citations = supporting_doc_citations or []
+
+            if not supporting_doc_citations:
+                candidate_doc_chunks = (
+                    s1_raw_chunks
+                    if isinstance(filtered_doc_chunks, list) or len(s1_raw_chunks) < 100
+                    else doc_bound_repo.search_visible_doc_chunks(
+                        principal=principal,
+                        domain_id=domain_id,
+                        query_text=user_prompt,
+                        limit=20,
+                    )
+                )
+                if candidate_doc_chunks:
+                    extracted_cits = _extract_hybrid_doc_citations(
+                        user_prompt=user_prompt,
+                        doc_chunks=candidate_doc_chunks,
+                        slicer=self.slicer,
+                        validator=self.validator,
+                        min_hits_override=1,
+                    )
+                    if extracted_cits:
+                        supporting_doc_citations = extracted_cits
+                        chunks_by_id = {str(c.chunk_id): c for c in candidate_doc_chunks}
+                        domain_knowledge_brief = _build_domain_brief_from_citations(
+                            user_prompt=user_prompt,
+                            domain_id=domain_id,
+                            citations=extracted_cits,
+                            chunks_by_id=chunks_by_id,
+                        )
+            elif domain_knowledge_brief is None:
+                chunks_by_id = {str(c.chunk_id): c for c in s1_raw_chunks}
+                domain_knowledge_brief = _build_domain_brief_from_citations(
+                    user_prompt=user_prompt,
+                    domain_id=domain_id,
+                    citations=supporting_doc_citations,
+                    chunks_by_id=chunks_by_id,
+                )
+
+            if (
+                not supporting_doc_citations
+                and not is_doc_domain
+                and research_domain_id != domain_id
+            ):
+                quant_brief = self.local_client.generate_quant_brief(
+                    user_prompt=user_prompt,
+                    domain_id=research_domain_id,
+                    repo=doc_bound_repo,
+                    principal=principal,
+                    bounce_back_feedback=None,
+                )
+                if quant_brief is not None and quant_brief.verified_citations:
+                    used_research_domain = True
+                    domain_knowledge_brief = self.local_client.generate_domain_knowledge_brief(
+                        user_prompt=user_prompt,
+                        domain_id=research_domain_id,
+                        repo=doc_bound_repo,
+                        principal=principal,
+                        quant_brief=quant_brief,
+                    )
+                    supporting_doc_citations = list(quant_brief.verified_citations)
+        elif is_doc_domain and source_filter != "code":
             quant_domain = research_domain_id if auto_research_route else domain_id
             quant_brief = self.local_client.generate_quant_brief(
                 user_prompt=user_prompt,
                 domain_id=quant_domain,
-                repo=run_bound_repo,
+                repo=doc_bound_repo,
                 principal=principal,
                 bounce_back_feedback=None,
             )
@@ -2435,7 +2699,7 @@ class ScoutWorkflow:
                 domain_knowledge_brief = self.local_client.generate_domain_knowledge_brief(
                     user_prompt=user_prompt,
                     domain_id=quant_domain,
-                    repo=run_bound_repo,
+                    repo=doc_bound_repo,
                     principal=principal,
                     quant_brief=quant_brief,
                 )
@@ -2444,10 +2708,10 @@ class ScoutWorkflow:
                 quant_brief = None
                 domain_knowledge_brief = None
                 supporting_doc_citations = []
-
-        if is_doc_domain:
             candidate_pointers = []
         else:
+            if source_filter == "code":
+                supporting_doc_citations = []
             candidate_pointers = self.local_client.generate_code_pointers(
                 user_prompt=user_prompt,
                 domain_id=domain_id,
@@ -2455,11 +2719,17 @@ class ScoutWorkflow:
                 principal=principal,
                 bounce_back_feedback=None,
             )
-            if candidate_pointers and supporting_doc_citations is None and s1_raw_chunks:
+            if (
+                intent_decision.mode == QueryIntentMode.HYBRID_CODE_AND_DOCS
+                and source_filter != "code"
+                and candidate_pointers
+                and supporting_doc_citations is None
+                and s1_raw_chunks
+            ):
                 candidate_doc_chunks = (
                     s1_raw_chunks
-                    if isinstance(doc_chunks, list) or len(s1_raw_chunks) < 100
-                    else run_bound_repo.search_visible_doc_chunks(
+                    if isinstance(filtered_doc_chunks, list) or len(s1_raw_chunks) < 100
+                    else doc_bound_repo.search_visible_doc_chunks(
                         principal=principal,
                         domain_id=domain_id,
                         query_text=user_prompt,
@@ -2474,6 +2744,13 @@ class ScoutWorkflow:
                 )
                 if hybrid_cits:
                     supporting_doc_citations = hybrid_cits
+                    chunks_by_id = {str(c.chunk_id): c for c in candidate_doc_chunks}
+                    domain_knowledge_brief = _build_domain_brief_from_citations(
+                        user_prompt=user_prompt,
+                        domain_id=domain_id,
+                        citations=hybrid_cits,
+                        chunks_by_id=chunks_by_id,
+                    )
 
         s2_ms = max(1, int((time.perf_counter() - s2_t0) * 1000))
         if on_stage_event is not None:
@@ -2590,6 +2867,16 @@ class ScoutWorkflow:
             user_prompt=user_prompt,
         )
 
+        if intent_decision.mode == QueryIntentMode.PURE_DOCUMENTATION:
+            hydrated_slices = []
+
+        conflict_doc_chunks: list[DocChunkRecord] = list(s1_raw_chunks)
+        if not conflict_doc_chunks and (auto_research_route or used_research_domain):
+            conflict_doc_chunks = doc_bound_repo.list_visible_doc_chunks(
+                principal, research_domain_id
+            )
+        conflicts = _detect_pack_conflicts(hydrated_slices, conflict_doc_chunks)
+
         s3_ms = max(1, int((time.perf_counter() - s3_t0) * 1000))
         if on_stage_event is not None:
             on_stage_event(
@@ -2601,7 +2888,7 @@ class ScoutWorkflow:
                     "details": _stage3_details(
                         slices=hydrated_slices,
                         citations_count=len(supporting_doc_citations or []),
-                        conflicts_count=0,
+                        conflicts_count=len(conflicts),
                         elapsed_ms=s3_ms,
                     ),
                 }
@@ -2637,7 +2924,9 @@ class ScoutWorkflow:
                 paid_tokens_spent=0,
             )
 
-        val_domain = research_domain_id if auto_research_route else domain_id
+        val_domain = (
+            research_domain_id if (auto_research_route or used_research_domain) else domain_id
+        )
         initial_report = self.validator.validate(
             code_slices=hydrated_slices,
             user_prompt=user_prompt,
@@ -2646,7 +2935,7 @@ class ScoutWorkflow:
             repo=run_bound_repo,
             principal=principal,
             domain_id=val_domain,
-            doc_chunks=doc_chunks,
+            doc_chunks=filtered_doc_chunks,
         )
 
         final_report = initial_report
@@ -2654,7 +2943,11 @@ class ScoutWorkflow:
             re.search(r"\bbounce[-_\s]?back\b", user_prompt, flags=re.IGNORECASE)
         )
 
-        if (not initial_report.passed or explicit_bounce_request) and max_bounce_backs > 0:
+        if (
+            (not initial_report.passed or explicit_bounce_request)
+            and max_bounce_backs > 0
+            and intent_decision.mode != QueryIntentMode.PURE_DOCUMENTATION
+        ):
             active_feedback = (
                 initial_report.bounce_back_feedback
                 or "Pre-flight validation triggered $0 local self-correction pass"
@@ -2713,7 +3006,7 @@ class ScoutWorkflow:
                 repo=run_bound_repo,
                 principal=principal,
                 domain_id=val_domain,
-                doc_chunks=doc_chunks,
+                doc_chunks=filtered_doc_chunks,
             )
 
         if not final_report.passed:
@@ -2786,13 +3079,15 @@ class ScoutWorkflow:
             retrieved_doc_tokens += sum(
                 max(1, int(len(c.verbatim_quote) / 3.8)) for c in supporting_doc_citations
             )
-        if doc_chunks:
-            if isinstance(doc_chunks, list):
+        if filtered_doc_chunks:
+            if isinstance(filtered_doc_chunks, list):
                 retrieved_doc_tokens += sum(
-                    max(1, int(len(c.verbatim_content) / 3.8)) for c in doc_chunks
+                    max(1, int(len(c.verbatim_content) / 3.8)) for c in filtered_doc_chunks
                 )
-            elif isinstance(doc_chunks, dict):
-                retrieved_doc_tokens += sum(max(1, int(len(v) / 3.8)) for v in doc_chunks.values())
+            elif isinstance(filtered_doc_chunks, dict):
+                retrieved_doc_tokens += sum(
+                    max(1, int(len(v) / 3.8)) for v in filtered_doc_chunks.values()
+                )
 
         total_tokens_explored = (
             est_pack_tokens + explored_file_tokens + candidate_symbol_tokens + retrieved_doc_tokens
@@ -2834,12 +3129,13 @@ class ScoutWorkflow:
                 paid_tokens_spent=0,
             )
 
+        conflicts = _detect_pack_conflicts(hydrated_slices, conflict_doc_chunks)
         pack = ImplementationContextPack(
             trace_id=active_trace_id,
             domain_id=domain_id,
             user_task=user_prompt,
             architectural_execution_plan=plan,
-            doc_vs_code_conflicts_detected=[],
+            doc_vs_code_conflicts_detected=conflicts,
             code_slices=hydrated_slices,
             supporting_doc_citations=supporting_doc_citations or [],
             quant_strategy_spec=quant_brief,
@@ -3164,6 +3460,7 @@ class FederatedScoutCoordinator:
         doc_chunks: dict[str, str] | list[DocChunkRecord] | None = None,
         max_bounce_backs: int = 1,
         on_stage_event: Callable[[dict[str, Any]], None] | None = None,
+        source_filter: SourceFilter = "all",
     ) -> ImplementationContextPack | InsufficientContextDiagnostic:
         """Executes the 2-stage cross-domain federated DAG with OpenTelemetry instrumentation."""
         active_trace_id = trace_id or f"fed_trace_{uuid.uuid4().hex[:12]}"
@@ -3183,6 +3480,7 @@ class FederatedScoutCoordinator:
                 doc_chunks=doc_chunks,
                 max_bounce_backs=max_bounce_backs,
                 on_stage_event=on_stage_event,
+                source_filter=source_filter,
             )
             fed_span.record_pack(result)
             return result
@@ -3196,6 +3494,7 @@ class FederatedScoutCoordinator:
         doc_chunks: dict[str, str] | list[DocChunkRecord] | None,
         max_bounce_backs: int,
         on_stage_event: Callable[[dict[str, Any]], None] | None = None,
+        source_filter: SourceFilter = "all",
     ) -> ImplementationContextPack | InsufficientContextDiagnostic:
         """Executes the 2-stage cross-domain federated DAG."""
         dag_t0 = time.perf_counter()
@@ -3238,15 +3537,21 @@ class FederatedScoutCoordinator:
             active_principal = principal
 
         # ---------------------------------------------------------------------
-        # Stage 1: Research Domain Extraction
+        # Stage 1: Research / Documentation Domain Extraction
         # ---------------------------------------------------------------------
         s1_t0 = time.perf_counter()
         self.local_client.set_active_domain(research_domain)
         visible_files = fed_bound_repo.list_visible_code_files(active_principal, code_domain)
-        active_chunks = (
+        raw_active_chunks = (
             doc_chunks
             if doc_chunks is not None
             else fed_bound_repo.list_visible_doc_chunks(active_principal, research_domain)
+        )
+        active_chunks = filter_doc_chunks_by_source(raw_active_chunks, source_filter)
+        doc_bound_repo: BoundGraphRepository | _SourceFilteredGraphRepo = (
+            _SourceFilteredGraphRepo(fed_bound_repo, source_filter)
+            if source_filter != "all"
+            else fed_bound_repo
         )
         stale_excluded_s1 = (
             sum(1 for c in active_chunks if bool(getattr(c, "is_stale", False)))
@@ -3258,51 +3563,96 @@ class FederatedScoutCoordinator:
             if isinstance(active_chunks, list)
             else len(active_chunks)
         )
-        quant_brief = self.local_client.generate_quant_brief(
-            user_prompt=user_prompt,
-            domain_id=research_domain,
-            repo=fed_bound_repo,
-            principal=active_principal,
-            bounce_back_feedback=None,
+        intent_decision = QueryIntentClassifier.classify(
+            user_prompt,
+            source_filter=source_filter,
+            has_visible_code=bool(visible_files),
+            has_visible_docs=bool(active_chunks),
         )
-        s1_ms = max(1, int((time.perf_counter() - s1_t0) * 1000))
 
-        if quant_brief is None:
-            no_brief_reason = "Research brief synthesis returned no verified citations"
-            if on_stage_event is not None:
-                on_stage_event(
-                    {
-                        "event_type": "stage_update",
-                        "stage": 1,
-                        "stage_name": "Stage 1: Research Domain Extraction",
-                        "status": "completed",
-                        "details": _stage1_details(
-                            domains=[research_domain, code_domain],
-                            principal=active_principal,
-                            visible_files_count=len(visible_files),
-                            visible_chunks_count=visible_chunks_s1,
-                            stale_excluded_count=stale_excluded_s1,
-                            elapsed_ms=s1_ms,
-                        ),
-                    }
-                )
-            return InsufficientContextDiagnostic(
-                trace_id=active_trace_id,
+        quant_brief: QuantStrategyBrief | None = None
+        domain_knowledge_brief: DomainKnowledgeBrief | None = None
+        citations: list[DocCitationSpan] = []
+
+        if intent_decision.mode == QueryIntentMode.PURE_CODE:
+            s1_ms = max(1, int((time.perf_counter() - s1_t0) * 1000))
+        else:
+            quant_brief = self.local_client.generate_quant_brief(
+                user_prompt=user_prompt,
                 domain_id=research_domain,
-                reason=no_brief_reason,
-                missing_symbols=[],
-                partial_candidate_files=[],
-                paid_tokens_spent=0,
+                repo=doc_bound_repo,
+                principal=active_principal,
+                bounce_back_feedback=None,
             )
+            if quant_brief is not None and quant_brief.verified_citations:
+                citations = list(quant_brief.verified_citations)
+                domain_knowledge_brief = self.local_client.generate_domain_knowledge_brief(
+                    user_prompt=user_prompt,
+                    domain_id=research_domain,
+                    repo=doc_bound_repo,
+                    principal=active_principal,
+                    quant_brief=quant_brief,
+                )
+            elif isinstance(active_chunks, list) and active_chunks:
+                quant_brief = None
+                fallback_min_hits = (
+                    1 if intent_decision.mode == QueryIntentMode.PURE_DOCUMENTATION else None
+                )
+                citations = _extract_hybrid_doc_citations(
+                    user_prompt=user_prompt,
+                    doc_chunks=active_chunks,
+                    slicer=self.slicer,
+                    validator=self.validator,
+                    min_hits_override=fallback_min_hits,
+                )
+                if citations:
+                    chunks_by_id = {str(c.chunk_id): c for c in active_chunks}
+                    domain_knowledge_brief = _build_domain_brief_from_citations(
+                        user_prompt=user_prompt,
+                        domain_id=research_domain,
+                        citations=citations,
+                        chunks_by_id=chunks_by_id,
+                    )
+            s1_ms = max(1, int((time.perf_counter() - s1_t0) * 1000))
 
-        if quant_brief.friction_verdict == FrictionVerdict.FAILS_AFTER_COSTS:
+            if quant_brief is None and not citations:
+                no_brief_reason = "Research brief synthesis returned no verified citations"
+                if on_stage_event is not None:
+                    on_stage_event(
+                        {
+                            "event_type": "stage_update",
+                            "stage": 1,
+                            "stage_name": "Stage 1: Research Domain Extraction",
+                            "status": "completed",
+                            "details": _stage1_details(
+                                domains=[research_domain, code_domain],
+                                principal=active_principal,
+                                visible_files_count=len(visible_files),
+                                visible_chunks_count=visible_chunks_s1,
+                                stale_excluded_count=stale_excluded_s1,
+                                elapsed_ms=s1_ms,
+                            ),
+                        }
+                    )
+                return InsufficientContextDiagnostic(
+                    trace_id=active_trace_id,
+                    domain_id=research_domain,
+                    reason=no_brief_reason,
+                    missing_symbols=[],
+                    partial_candidate_files=[],
+                    paid_tokens_spent=0,
+                )
+
+        if (
+            quant_brief is not None
+            and quant_brief.friction_verdict == FrictionVerdict.FAILS_AFTER_COSTS
+        ):
             logger.warning(
                 "Research brief failed domain rule check: assumed %s bps for %s",
                 quant_brief.transaction_cost_bps_assumed,
                 quant_brief.target_markets,
             )
 
-        citations: list[DocCitationSpan] = list(quant_brief.verified_citations)
         if on_stage_event is not None:
             on_stage_event(
                 {
@@ -3327,19 +3677,25 @@ class FederatedScoutCoordinator:
         s2_t0 = time.perf_counter()
         self.local_client.set_active_domain(code_domain)
 
-        code_prompt = (
-            f"{user_prompt}\n"
-            f"Strategy Name: {quant_brief.strategy_name}\n"
-            f"Mathematical Signal: {quant_brief.mathematical_signal_latex}"
-        )
+        if quant_brief is not None:
+            code_prompt = (
+                f"{user_prompt}\n"
+                f"Strategy Name: {quant_brief.strategy_name}\n"
+                f"Mathematical Signal: {quant_brief.mathematical_signal_latex}"
+            )
+        else:
+            code_prompt = user_prompt
 
-        code_pointers = self.local_client.generate_code_pointers(
-            user_prompt=code_prompt,
-            domain_id=code_domain,
-            repo=fed_bound_repo,
-            principal=active_principal,
-            bounce_back_feedback=None,
-        )
+        if intent_decision.mode == QueryIntentMode.PURE_DOCUMENTATION:
+            code_pointers = []
+        else:
+            code_pointers = self.local_client.generate_code_pointers(
+                user_prompt=code_prompt,
+                domain_id=code_domain,
+                repo=fed_bound_repo,
+                principal=active_principal,
+                bounce_back_feedback=None,
+            )
         s2_ms = max(1, int((time.perf_counter() - s2_t0) * 1000))
 
         if on_stage_event is not None:
@@ -3443,12 +3799,32 @@ class FederatedScoutCoordinator:
                                         exc,
                                     )
 
+        if intent_decision.mode == QueryIntentMode.PURE_DOCUMENTATION:
+            hydrated_slices = []
+
         conflicts: list[str] = []
-        if quant_brief.friction_verdict == FrictionVerdict.FAILS_AFTER_COSTS:
+        if (
+            quant_brief is not None
+            and quant_brief.friction_verdict == FrictionVerdict.FAILS_AFTER_COSTS
+        ):
             conflicts.append(
                 f"Paper assumes {quant_brief.transaction_cost_bps_assumed} bps transaction costs, "
                 f"which fails statutory friction floor for: {quant_brief.target_markets}"
             )
+
+        fed_chunk_records: list[DocChunkRecord] = (
+            list(active_chunks)
+            if isinstance(active_chunks, list)
+            else (
+                doc_bound_repo.list_visible_doc_chunks(active_principal, research_domain)
+                + doc_bound_repo.list_visible_doc_chunks(active_principal, code_domain)
+            )
+        )
+        conflicts = _detect_pack_conflicts(
+            hydrated_slices,
+            fed_chunk_records,
+            initial_conflicts=conflicts,
+        )
 
         s3_ms = max(1, int((time.perf_counter() - s3_t0) * 1000))
         if on_stage_event is not None:
@@ -3470,6 +3846,11 @@ class FederatedScoutCoordinator:
         # ---------------------------------------------------------------------
         # Stage 3: Composite Pre-Flight Gate & Local Bounce-Back Loop
         # ---------------------------------------------------------------------
+        validation_domain = (
+            research_domain
+            if intent_decision.mode == QueryIntentMode.PURE_DOCUMENTATION
+            else code_domain
+        )
         report = self.validator.validate(
             code_slices=hydrated_slices,
             user_prompt=user_prompt,
@@ -3478,14 +3859,18 @@ class FederatedScoutCoordinator:
             normalized_rrf_score=normalized_rrf_score,
             repo=fed_bound_repo,
             principal=active_principal,
-            domain_id=code_domain,
+            domain_id=validation_domain,
             doc_chunks=active_chunks,
         )
 
         explicit_bounce_request = bool(
             re.search(r"\bbounce[-_\s]?back\b", user_prompt, flags=re.IGNORECASE)
         )
-        if (not report.passed or explicit_bounce_request) and max_bounce_backs > 0:
+        if (
+            (not report.passed or explicit_bounce_request)
+            and max_bounce_backs > 0
+            and intent_decision.mode != QueryIntentMode.PURE_DOCUMENTATION
+        ):
             active_feedback = (
                 report.bounce_back_feedback
                 or "Pre-flight validation triggered $0 local self-correction pass"
@@ -3545,7 +3930,7 @@ class FederatedScoutCoordinator:
                 normalized_rrf_score=normalized_rrf_score,
                 repo=fed_bound_repo,
                 principal=active_principal,
-                domain_id=code_domain,
+                domain_id=validation_domain,
                 doc_chunks=active_chunks,
             )
 
@@ -3569,7 +3954,7 @@ class FederatedScoutCoordinator:
                 )
             return self.validator.create_diagnostic(
                 trace_id=active_trace_id,
-                domain_id=code_domain,
+                domain_id=validation_domain,
                 report=report,
                 partial_candidate_files=list({s.file_path for s in hydrated_slices}),
             )
@@ -3577,11 +3962,23 @@ class FederatedScoutCoordinator:
         # ---------------------------------------------------------------------
         # Composite Pack Assembly
         # ---------------------------------------------------------------------
-        plan = [
-            (
+        if quant_brief is not None:
+            stage1_plan_line = (
                 f"Stage 1 (Research {research_domain}): Extracted '{quant_brief.strategy_name}' "
                 f"with verdict {quant_brief.friction_verdict.value}"
-            ),
+            )
+        elif domain_knowledge_brief is not None:
+            stage1_plan_line = (
+                f"Stage 1 (Documentation {research_domain}): Extracted "
+                f"'{domain_knowledge_brief.brief_title}' with {len(citations)} citation(s)"
+            )
+        else:
+            stage1_plan_line = (
+                f"Stage 1 (Intent {intent_decision.mode.value}): "
+                "Routed directly to code localization"
+            )
+        plan = [
+            stage1_plan_line,
             (
                 f"Stage 2 (Code {code_domain}): Located {len(hydrated_slices)} code slices "
                 "via AST localization"
@@ -3591,6 +3988,8 @@ class FederatedScoutCoordinator:
         ]
 
         total_slice_chars = sum(len(s.verbatim_code_with_lines) for s in hydrated_slices)
+        if citations:
+            total_slice_chars += sum(len(c.verbatim_quote) for c in citations)
         est_tokens = max(1, int(total_slice_chars / 3.8)) + 300
 
         if isinstance(active_chunks, dict):
@@ -3609,15 +4008,26 @@ class FederatedScoutCoordinator:
         total_code_tokens = sum(max(1, int(len(f.raw_content) / 3.8)) for f in explored_files)
         total_tokens_explored = max(est_tokens, total_doc_tokens + total_code_tokens)
 
+        pack_domain = (
+            research_domain
+            if intent_decision.mode == QueryIntentMode.PURE_DOCUMENTATION
+            else code_domain
+        )
+        conflicts = _detect_pack_conflicts(
+            hydrated_slices,
+            fed_chunk_records,
+            initial_conflicts=conflicts,
+        )
         pack = ImplementationContextPack(
             trace_id=active_trace_id,
-            domain_id=code_domain,
+            domain_id=pack_domain,
             user_task=user_prompt,
             architectural_execution_plan=plan,
             doc_vs_code_conflicts_detected=conflicts,
             code_slices=hydrated_slices,
             supporting_doc_citations=citations,
             quant_strategy_spec=quant_brief,
+            domain_knowledge_brief=domain_knowledge_brief,
             preflight_report=report,
             local_tokens_consumed=total_tokens_explored,
             pack_token_count=est_tokens,

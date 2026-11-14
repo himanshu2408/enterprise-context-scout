@@ -435,6 +435,7 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
     const requestPayload = {
       domain_id: selectedDomain,
       query: trimmedQuery,
+      source_filter: sourceFilter,
     };
 
     if (mode === "stream") {

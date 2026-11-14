@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from context_scout.agents.domain_registry import DomainRegistry
+from context_scout.agents.intent_router import SourceFilter, filter_doc_chunks_by_source
 from context_scout.agents.scout_workflow import (
     FederatedScoutCoordinator,
     LocalGemmaClient,
@@ -66,7 +67,11 @@ _FEDERATED_STAGE_TITLES: dict[int, str] = {
 }
 
 
-def _resolve_federated_doc_chunks(repo: Any, principal: PrincipalContext) -> dict[str, str]:
+def _resolve_federated_doc_chunks(
+    repo: Any,
+    principal: PrincipalContext,
+    source_filter: SourceFilter = "all",
+) -> dict[str, str]:
     """Resolves visible doc_chunks from live PostgreSQL or InMemory repository under RLS."""
     primary_plugin = PluginRegistry.get_primary_domain_plugin()
     fallback_chunks = (
@@ -74,9 +79,12 @@ def _resolve_federated_doc_chunks(repo: Any, principal: PrincipalContext) -> dic
         if primary_plugin is not None
         else {}
     )
-    chunks_map: dict[str, str] = {str(k): str(v) for k, v in fallback_chunks.items()} or {
-        "chk_default_seed": "Default domain fallback verification chunk."
-    }
+    if source_filter == "all":
+        chunks_map: dict[str, str] = {str(k): str(v) for k, v in fallback_chunks.items()} or {
+            "chk_default_seed": "Default domain fallback verification chunk."
+        }
+    else:
+        chunks_map = {}
     research_domain_id = (
         primary_plugin.get_role_domain_ids().get("research", primary_plugin.domain_id)
         if primary_plugin is not None
@@ -85,7 +93,8 @@ def _resolve_federated_doc_chunks(repo: Any, principal: PrincipalContext) -> dic
     if hasattr(repo, "list_visible_doc_chunks"):
         try:
             visible = repo.list_visible_doc_chunks(principal, research_domain_id)
-            for chk in visible[:50]:
+            filtered_visible = filter_doc_chunks_by_source(list(visible), source_filter)
+            for chk in filtered_visible[:50]:
                 chunks_map[str(chk.chunk_id)] = chk.verbatim_content
         except Exception as exc:
             logger.warning(
@@ -204,7 +213,9 @@ def query_scout(
         system="gemma",
     ) as span:
         if request.domain_id == "federated_all":
-            fed_doc_chunks = _resolve_federated_doc_chunks(repo, principal)
+            fed_doc_chunks = _resolve_federated_doc_chunks(
+                repo, principal, source_filter=request.source_filter
+            )
             coordinator = FederatedScoutCoordinator(
                 registry=registry,
                 repo=repo,
@@ -217,6 +228,7 @@ def query_scout(
                 normalized_rrf_score=request.normalized_rrf_score,
                 doc_chunks=fed_doc_chunks,
                 max_bounce_backs=request.max_bounce_backs,
+                source_filter=request.source_filter,
             )
         else:
             workflow = ScoutWorkflow(
@@ -231,6 +243,7 @@ def query_scout(
                 trace_id=active_trace_id,
                 normalized_rrf_score=request.normalized_rrf_score,
                 max_bounce_backs=request.max_bounce_backs,
+                source_filter=request.source_filter,
             )
 
         span.record_pack(result)
@@ -344,7 +357,10 @@ async def stream_scout(
             try:
                 if is_federated:
                     fed_chunks = await asyncio.to_thread(
-                        _resolve_federated_doc_chunks, repo, principal
+                        _resolve_federated_doc_chunks,
+                        repo,
+                        principal,
+                        request.source_filter,
                     )
                     coordinator = FederatedScoutCoordinator(
                         registry=registry,
@@ -360,6 +376,7 @@ async def stream_scout(
                         doc_chunks=fed_chunks,
                         max_bounce_backs=request.max_bounce_backs,
                         on_stage_event=push_stage_event,
+                        source_filter=request.source_filter,
                     )
                 workflow = ScoutWorkflow(
                     registry=registry,
@@ -375,6 +392,7 @@ async def stream_scout(
                     normalized_rrf_score=request.normalized_rrf_score,
                     max_bounce_backs=request.max_bounce_backs,
                     on_stage_event=push_stage_event,
+                    source_filter=request.source_filter,
                 )
             finally:
                 loop.call_soon_threadsafe(event_queue.put_nowait, None)
