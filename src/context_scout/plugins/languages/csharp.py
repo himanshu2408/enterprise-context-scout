@@ -1,8 +1,4 @@
-"""C# and .NET Language Plugin for context scout.
-
-Extracts classes, interfaces, records, methods, DI registrations, and NuGet manifest dependencies.
-Implements a high-precision C# parser for .NET codebases.
-"""
+"""C# language plugin using tree-sitter-c-sharp AST traversal."""
 
 from __future__ import annotations
 
@@ -11,14 +7,118 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import tree_sitter_c_sharp as tscsharp
+from tree_sitter import Language, Node, Parser
+
+from context_scout.ast_engine.extractor import (
+    ParseDiagnostics,
+    _node_text,
+    inspect_tree_errors,
+)
 from context_scout.ast_engine.models import ParsedEdge, ParsedSymbol
 from context_scout.plugins.base import DependencyEdge
 
 logger = logging.getLogger(__name__)
 
+_CSHARP_LANGUAGE = Language(tscsharp.language())
+
+_DI_METHODS = frozenset(
+    {
+        "AddScoped",
+        "AddSingleton",
+        "AddTransient",
+        "AddHostedService",
+        "TryAddScoped",
+        "TryAddSingleton",
+        "TryAddTransient",
+    }
+)
+
+_TYPE_DECLARATION_NODES = frozenset(
+    {
+        "class_declaration",
+        "interface_declaration",
+        "record_declaration",
+        "struct_declaration",
+        "enum_declaration",
+    }
+)
+
+_CSHARP_BUILTIN_CALLS = frozenset(
+    {
+        "nameof",
+        "typeof",
+        "sizeof",
+        "default",
+        "checked",
+        "unchecked",
+    }
+)
+
+
+def _collapse_ws(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _extract_type_name(node: Node, code_bytes: bytes) -> str:
+    """Extract the base identifier/qualified name from a C# type syntax node."""
+    if node.type in {"identifier", "qualified_name", "predefined_type"}:
+        return _node_text(node, code_bytes)
+    if node.type == "generic_name":
+        name_node = node.child_by_field_name("name")
+        if name_node is not None:
+            return _node_text(name_node, code_bytes)
+        for child in node.children:
+            if child.type == "identifier":
+                return _node_text(child, code_bytes)
+    if node.type == "alias_qualified_name":
+        name_node = node.child_by_field_name("name")
+        if name_node is not None:
+            return _extract_type_name(name_node, code_bytes)
+    for child in node.children:
+        if child.type in {"identifier", "qualified_name", "generic_name"}:
+            return _extract_type_name(child, code_bytes)
+    return ""
+
+
+def _extract_signature_before_body(node: Node, code_bytes: bytes) -> str:
+    """Build a compact single-line signature stopping before the declaration body."""
+    body_node = node.child_by_field_name("body")
+    end_byte = node.end_byte
+    if body_node is not None:
+        end_byte = body_node.start_byte
+    else:
+        for child in node.children:
+            if child.type in {"block", "arrow_expression_clause", "declaration_list", ";"}:
+                end_byte = min(end_byte, child.start_byte)
+                break
+    raw = code_bytes[node.start_byte : end_byte].decode("utf-8", errors="replace")
+    return _collapse_ws(raw)
+
+
+def _extract_leading_doc_comment(node: Node, code_bytes: bytes) -> str:
+    """Collect immediately preceding XML/line comments as a concise docstring."""
+    comments: list[str] = []
+    sibling = node.prev_sibling
+    while sibling is not None and sibling.type == "comment":
+        text = _node_text(sibling, code_bytes).strip()
+        if text.startswith("///"):
+            comments.append(text[3:].strip())
+        elif text.startswith("//"):
+            comments.append(text[2:].strip())
+        sibling = sibling.prev_sibling
+    if not comments:
+        return ""
+    comments.reverse()
+    return "\n".join(line for line in comments if line)
+
 
 class CSharpPlugin:
-    """Plug-in for C# source code (.cs) and .NET project manifests (.csproj, .sln)."""
+    """Language plugin for C# (.cs) source and .csproj/.sln manifests."""
+
+    def __init__(self) -> None:
+        self._parser = Parser(_CSHARP_LANGUAGE)
+        self.last_parse_diagnostics: ParseDiagnostics | None = None
 
     @property
     def language_id(self) -> str:
@@ -33,413 +133,372 @@ class CSharpPlugin:
         return (".csproj", ".sln", "Directory.Build.props", "packages.config")
 
     def can_handle(self, file_path: str) -> bool:
-        normalized = file_path.replace("\\", "/").lower()
-        return normalized.endswith(".cs") or any(
-            normalized.endswith(m.lower()) for m in self.manifest_files
-        )
+        lower = file_path.lower()
+        return any(lower.endswith(ext) for ext in self.file_extensions)
 
-    def extract_ast(
-        self,
-        code: str,
-        file_path: str,
-        repo_name: str = "",
-        module_prefix: str = "",
-    ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
-        """Parses C# source into symbols and directed edges."""
-        if not module_prefix and file_path:
-            module_prefix = self._derive_module_prefix(file_path)
-
-        return self._parse_heuristic(code, file_path, repo_name, module_prefix)
+    def _derive_module_prefix(self, file_path: str) -> str:
+        if not file_path:
+            return "csharp_module"
+        stem = re.sub(r"\.cs$", "", file_path, flags=re.IGNORECASE)
+        normalized = stem.replace("\\", "/").strip("/")
+        dotted = ".".join(part for part in normalized.split("/") if part)
+        return dotted or "csharp_module"
 
     def extract_manifest_dependencies(
         self,
         file_path: str,
         content: str,
     ) -> list[DependencyEdge]:
-        """Extracts NuGet PackageReferences and ProjectReferences from .csproj or .sln."""
-        edges: list[DependencyEdge] = []
-        path_lower = file_path.lower()
+        """Extract NuGet dependencies from .csproj, Directory.Build.props, or packages.config."""
+        deps: list[DependencyEdge] = []
+        lower_name = Path(file_path).name.lower()
 
-        if path_lower.endswith(".csproj") or path_lower.endswith(".props"):
+        if lower_name.endswith(".csproj") or lower_name == "directory.build.props":
             try:
                 root = ET.fromstring(content)
-                for pr in root.findall(".//PackageReference"):
-                    pkg_id = pr.attrib.get("Include") or pr.attrib.get("Update")
-                    version = pr.attrib.get("Version") or "*"
-                    if pkg_id:
-                        edges.append(
-                            DependencyEdge(
-                                source_identifier=Path(file_path).stem,
-                                target_package=pkg_id,
-                                version_constraint=version,
-                                scope="compile",
-                                manifest_path=file_path,
+                for pkg_ref in root.iter():
+                    tag = pkg_ref.tag.split("}")[-1]
+                    if tag in {"PackageReference", "PackageVersion"}:
+                        pkg_name = pkg_ref.attrib.get("Include") or pkg_ref.attrib.get("Update")
+                        version = pkg_ref.attrib.get("Version", "")
+                        if not version:
+                            for child in pkg_ref:
+                                if child.tag.split("}")[-1] == "Version" and child.text:
+                                    version = child.text.strip()
+                                    break
+                        if pkg_name:
+                            deps.append(
+                                DependencyEdge(
+                                    source_identifier=file_path,
+                                    target_package=pkg_name.strip(),
+                                    version_constraint=version.strip() or "*",
+                                    scope="compile",
+                                    manifest_path=file_path,
+                                )
                             )
-                        )
-                for proj_ref in root.findall(".//ProjectReference"):
-                    inc = proj_ref.attrib.get("Include")
-                    if inc:
-                        target_name = Path(inc.replace("\\", "/")).stem
-                        edges.append(
-                            DependencyEdge(
-                                source_identifier=Path(file_path).stem,
-                                target_package=target_name,
-                                version_constraint="local",
-                                scope="project_reference",
-                                manifest_path=file_path,
+                    elif tag == "ProjectReference":
+                        include = pkg_ref.attrib.get("Include", "").strip()
+                        if include:
+                            proj_name = Path(include.replace("\\", "/")).stem or include
+                            deps.append(
+                                DependencyEdge(
+                                    source_identifier=file_path,
+                                    target_package=proj_name,
+                                    version_constraint="*",
+                                    scope="project_reference",
+                                    manifest_path=file_path,
+                                )
                             )
-                        )
-            except ET.ParseError:
-                # Regex fallback for malformed or templated XML
-                pkg_pat = r'<PackageReference\s+[^>]*Include="([^"]+)"(?:\s+Version="([^"]+)")?'
-                for m in re.finditer(pkg_pat, content):
-                    edges.append(
+                self.last_parse_diagnostics = ParseDiagnostics(parser_backend="xml_etree")
+                return deps
+            except ET.ParseError as exc:
+                logger.warning(
+                    "XML parse error in %s (%s); using regex PackageReference fallback.",
+                    file_path,
+                    exc,
+                )
+                self.last_parse_diagnostics = ParseDiagnostics(
+                    parser_backend="xml_regex_fallback",
+                    has_parse_error=True,
+                    low_confidence_fallback=True,
+                    reason=f"ET.ParseError: {exc}",
+                )
+                pkg_pattern = re.compile(
+                    r'<Package(?:Reference|Version)\s+[^>]*?Include=["\']([^"\']+)["\']'
+                    r'(?:[^>]*?Version=["\']([^"\']+)["\'])?',
+                    re.IGNORECASE,
+                )
+                for match in pkg_pattern.finditer(content):
+                    deps.append(
                         DependencyEdge(
-                            source_identifier=Path(file_path).stem,
-                            target_package=m.group(1),
-                            version_constraint=m.group(2) or "*",
+                            source_identifier=file_path,
+                            target_package=match.group(1).strip(),
+                            version_constraint=(match.group(2) or "*").strip(),
                             scope="compile",
                             manifest_path=file_path,
                         )
                     )
-        elif path_lower.endswith(".sln"):
-            sln_pat = r'Project\("[^"]+"\)\s*=\s*"([^"]+)",\s*"([^"]+)"'
-            for m in re.finditer(sln_pat, content):
-                edges.append(
-                    DependencyEdge(
-                        source_identifier=Path(file_path).stem,
-                        target_package=m.group(1),
-                        version_constraint="solution_project",
-                        scope="project_reference",
-                        manifest_path=file_path,
-                    )
+                proj_pattern = re.compile(
+                    r'<ProjectReference\s+[^>]*?Include=["\']([^"\']+)["\']',
+                    re.IGNORECASE,
                 )
+                for match in proj_pattern.finditer(content):
+                    include = match.group(1).strip()
+                    proj_name = Path(include.replace("\\", "/")).stem or include
+                    deps.append(
+                        DependencyEdge(
+                            source_identifier=file_path,
+                            target_package=proj_name,
+                            version_constraint="*",
+                            scope="project_reference",
+                            manifest_path=file_path,
+                        )
+                    )
+                return deps
 
-        return edges
+        if lower_name == "packages.config":
+            try:
+                root = ET.fromstring(content)
+                for pkg in root.iter("package"):
+                    pkg_id = pkg.attrib.get("id")
+                    version = pkg.attrib.get("version", "")
+                    if pkg_id:
+                        deps.append(
+                            DependencyEdge(
+                                source_identifier=file_path,
+                                target_package=pkg_id.strip(),
+                                version_constraint=version.strip() or "*",
+                                scope="compile",
+                                manifest_path=file_path,
+                            )
+                        )
+                self.last_parse_diagnostics = ParseDiagnostics(parser_backend="xml_etree")
+            except ET.ParseError as exc:
+                logger.warning("XML parse error in %s: %s", file_path, exc)
+                self.last_parse_diagnostics = ParseDiagnostics(
+                    parser_backend="xml_etree",
+                    has_parse_error=True,
+                    abstained=True,
+                    reason=f"ET.ParseError: {exc}",
+                )
+            return deps
 
-    def _derive_module_prefix(self, file_path: str) -> str:
-        clean = file_path.replace("\\", "/").lstrip("/")
-        if clean.startswith("src/"):
-            clean = clean[4:]
-        if clean.endswith(".cs"):
-            clean = clean[:-3]
-        return clean.replace("/", ".")
+        return deps
 
-    def _parse_heuristic(
+    def extract_ast(
         self,
         code: str,
-        file_path: str,
-        repo_name: str,
-        module_prefix: str,
+        file_path: str = "",
+        repo_name: str = "",
+        module_prefix: str = "",
     ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
+        """Extract C# namespaces, types, methods, inheritance, usings, and DI edges."""
+        if not code or not code.strip():
+            self.last_parse_diagnostics = ParseDiagnostics(parser_backend="tree-sitter-c-sharp")
+            return [], []
+
+        code_bytes = code.encode("utf-8")
+        tree = self._parser.parse(code_bytes)
+        has_err, err_cnt, miss_cnt = inspect_tree_errors(tree.root_node)
+        if has_err:
+            logger.warning(
+                "CSharpPlugin parse error in %s (errors=%d, missing=%d); abstaining.",
+                file_path or "<memory>",
+                err_cnt,
+                miss_cnt,
+            )
+            self.last_parse_diagnostics = ParseDiagnostics(
+                parser_backend="tree-sitter-c-sharp",
+                has_parse_error=True,
+                abstained=True,
+                error_node_count=err_cnt,
+                missing_node_count=miss_cnt,
+                reason="Syntax/parse error detected by tree-sitter-c-sharp",
+            )
+            return [], []
+
+        self.last_parse_diagnostics = ParseDiagnostics(parser_backend="tree-sitter-c-sharp")
+        prefix = module_prefix or self._derive_module_prefix(file_path)
+
         symbols: list[ParsedSymbol] = []
         edges: list[ParsedEdge] = []
-        # Mask comments, raw strings (C# 11+), verbatim strings, and regular strings
-        # while preserving line breaks
-        clean_code = re.sub(
-            r'(//[^\n]*)|'
-            r'(/\*[\s\S]*?\*/)|'
-            r'(\$*("{3,}))[\s\S]*?\4|'
-            r'((?:\$@|@\$|@)"(?:""|[^"])*")|'
-            r'(\$?"(?:\\.|[^"\\])*")|'
-            r"('(?:\\.|[^'\\])*')",
-            lambda m: re.sub(r"[^\n]", " ", m.group(0)),
-            code,
-        )
-        lines = clean_code.splitlines()
-
-        # Regex patterns
-        ns_decl_pat = re.compile(r"^\s*namespace\s+([A-Za-z0-9_.]+)")
-        using_pat = re.compile(r"^\s*using\s+([A-Za-z0-9_.]+)\s*;")
-
-        # Support primary constructors with deeply nested parentheses
-        # (tuples, default(...), nameof(...))
-        p_inner = r"[^()]*"
-        for _ in range(10):
-            p_inner = rf"(?:[^()]|\({p_inner}\))*"
-        paren_rec = rf"(?:\({p_inner}\))"
-        type_pat = re.compile(
-            r"(?:^|\s|;)(?:\[[^\]]+\]\s*)*(?:public|internal|private|protected|static|abstract|sealed|partial|\s)*"
-            r"\b(class|interface|record|struct|enum)\s+([A-Za-z0-9_]+)(?:<[^>]+>)?"
-            rf"(?:{paren_rec})?"
-            r"(?:\s*:\s*(.*?))?\s*(?:\bwhere\b[^{;]+)?([\{;]|$)"
-        )
-        type_start_pat = re.compile(
-            r"(?:^|\s|;)(?:\[[^\]]+\]\s*)*(?:public|internal|private|protected|static|abstract|sealed|partial|\s)*"
-            r"\b(class|interface|record|struct|enum)\s+([A-Za-z0-9_]+)"
-        )
-
-        # Require at least one explicit access or method modifier;
-        # disallow pure whitespace in modifier group
-        method_pat = re.compile(
-            r"(?:^|\s|;)(?:\[[^\]]+\]\s*)*(?:(?:public|private|protected|internal|static|"
-            r"virtual|override|abstract|async|sealed|partial)\s+)+"
-            r"(?:(?:Task(?:<[^>]+>)?|ValueTask(?:<[^>]+>)?|[A-Za-z0-9_<>\[\],?]+)\s+)+"
-            r"([A-Za-z0-9_]+)\s*\(([^)]*)\)"
-        )
-
-        # Dependency Injection Registrations (services.AddScoped, etc.)
-        di_pat = re.compile(
-            r"\bservices\s*\.\s*Add(Scoped|Singleton|Transient|HostedService)\s*<\s*([A-Za-z0-9_]+)(?:\s*,\s*([A-Za-z0-9_]+))?\s*>\s*\("
-        )
-
-        def _clean_cs_line(line_str: str) -> str:
-            cleaned = re.sub(r'(\$*("{3,}))[\s\S]*?\2', '""', line_str)
-            cleaned = re.sub(r'((?:\$@|@\$|@)"(?:""|[^"])*")', '""', cleaned)
-            cleaned = re.sub(r'"(?:\\.|[^"\\])*"', '""', cleaned)
-            cleaned = re.sub(r"'(?:\\.|[^'\\])*'", "''", cleaned)
-            return cleaned
-
         usings: list[str] = []
-        file_namespace = module_prefix
-        ns_stack: list[tuple[str, int]] = []  # (ns_name, entry_brace_depth)
-        class_stack: list[tuple[str, str, int]] = []  # (class_name, repo_qual, entry_brace_depth)
-        pending_ns: str | None = None
-        pending_class: tuple[str, str] | None = None
-        brace_depth = 0
+        ns_stack: list[str] = []
+        type_stack: list[tuple[str, str]] = []
+        seen_edge_keys: set[tuple[str, str, str]] = set()
 
-        i = 0
-        total_lines = len(lines)
-        while i < total_lines:
-            idx = i + 1
-            line = lines[i]
-            stripped = line.strip()
-            line_no_comment = re.sub(r"//.*$", "", line)
-            line_clean_cs = _clean_cs_line(line_no_comment)
-            stripped_nc = line_clean_cs.strip()
-
-            if not stripped or stripped.startswith("//") or stripped.startswith("/*"):
-                i += 1
-                continue
-
-            # Using directive
-            m_u = using_pat.match(stripped)
-            if m_u:
-                usings.append(m_u.group(1))
-                brace_depth += line_clean_cs.count("{") - line_clean_cs.count("}")
-                i += 1
-                continue
-
-            # Namespace directive
-            m_ns = ns_decl_pat.match(stripped_nc)
-            if m_ns:
-                ns_name = m_ns.group(1)
-                if ";" in stripped_nc:
-                    file_namespace = ns_name
-                elif "{" in line_clean_cs:
-                    entry_depth = brace_depth + 1
-                    ns_stack.append((ns_name, entry_depth))
-                    pending_ns = None
-                else:
-                    pending_ns = ns_name
-
-            # If there's a pending namespace and this line opens a brace
-            if pending_ns and "{" in line_clean_cs and not m_ns:
-                entry_depth = brace_depth + 1
-                ns_stack.append((pending_ns, entry_depth))
-                pending_ns = None
-
-            # If there's a pending class and this line opens a brace
-            if pending_class and "{" in line_clean_cs:
-                entry_depth = brace_depth + 1
-                class_stack.append((pending_class[0], pending_class[1], entry_depth))
-                pending_class = None
-
-            current_namespace = ".".join(ns for ns, _ in ns_stack) if ns_stack else file_namespace
-
-            # Multiline type declaration accumulation
-            if (
-                type_start_pat.search(line_clean_cs)
-                and not stripped.startswith("return ")
-                and not stripped.startswith("var ")
-                and not stripped.startswith("throw ")
-                and not ("{" in line_clean_cs or ";" in line_clean_cs)
-            ):
-                buf = [stripped_nc]
-                while i + 1 < total_lines and not ("{" in buf[-1] or ";" in buf[-1]):
-                    i += 1
-                    next_nc = _clean_cs_line(re.sub(r"//.*$", "", lines[i])).strip()
-                    if next_nc:
-                        buf.append(next_nc)
-                line_no_comment = " ".join(buf)
-                line_clean_cs = line_no_comment
-                stripped_nc = line_clean_cs.strip()
-                stripped = line_clean_cs.strip()
-
-            # Type matching
-            m_type = type_pat.search(line_no_comment)
-            if (
-                m_type
-                and not stripped.startswith("return ")
-                and not stripped.startswith("var ")
-                and not stripped.startswith("throw ")
-            ):
-                kind = m_type.group(1)
-                name = m_type.group(2)
-                base_clause = m_type.group(3)
-                terminator = m_type.group(4)
-
-                enclosing_classes = [cls for cls, _, _ in class_stack]
-                bare = ".".join([*enclosing_classes, name]) if enclosing_classes else name
-                qual = f"{current_namespace}.{bare}" if current_namespace else bare
-                repo_qual = f"{repo_name}::{current_namespace}::{bare}" if repo_name else qual
-
-                sym_kind = (
-                    "class"
-                    if kind in ("class", "record", "struct")
-                    else ("interface" if kind == "interface" else "type_alias")
-                )
-                symbols.append(
-                    ParsedSymbol(
-                        name=name,
-                        qualified_name=repo_qual,
-                        symbol_kind=sym_kind,
-                        start_line=idx,
-                        end_line=i + 1,
-                        start_byte=0,
-                        end_byte=0,
-                        signature=stripped,
-                        signature_skeleton=f"{kind} {name}",
-                        contextual_summary=f"C# {kind} {name} declared in {current_namespace}",
-                        repo_name=repo_name,
-                        repo_qualified_id=repo_qual,
-                        bare_name=bare,
-                    )
-                )
-
-                if "{" in line_clean_cs:
-                    entry_depth = brace_depth + 1
-                    class_stack.append((name, repo_qual, entry_depth))
-                    pending_class = None
-                elif ";" in terminator or ";" in stripped_nc:
-                    pending_class = None
-                else:
-                    pending_class = (name, repo_qual)
-
-                # Base clause handling: strip generic parameters <...>
-                if base_clause:
-                    clean_base = re.sub(r"/\*.*?\*/", "", base_clause)
-                    while "<" in clean_base and ">" in clean_base:
-                        clean_base = re.sub(r"<[^<>]*>", "", clean_base)
-                    ignored_base = ("where", "class", "new", "struct", "record", "notnull")
-                    for base_item in re.findall(r"[A-Za-z0-9_]+", clean_base):
-                        if base_item not in ignored_base:
-                            edge_k = (
-                                "INHERITS"
-                                if base_item.startswith("I") or kind in ("class", "record")
-                                else "USES_TYPE"
-                            )
-                            edges.append(
-                                ParsedEdge(
-                                    source_qualified_name=repo_qual,
-                                    target_qualified_name=base_item,
-                                    edge_kind=edge_k,
-                                )
-                            )
-            # Method matching
-            method_search_str = (
-                line_no_comment[m_type.end():] if m_type else line_no_comment
-            )
-            m_meth = method_pat.search(method_search_str)
-            if m_meth and class_stack:
-                    m_name = m_meth.group(1)
-                    forbidden = (
-                        "if",
-                        "while",
-                        "for",
-                        "switch",
-                        "catch",
-                        "using",
-                        "lock",
-                        "return",
-                        "throw",
-                        "yield",
-                        "record",
-                        "class",
-                        "interface",
-                        "struct",
-                    )
-                    if m_name not in forbidden:
-                        enclosing_class_path = ".".join(cls for cls, _, _ in class_stack)
-                        bare = f"{enclosing_class_path}.{m_name}"
-                        qual = f"{current_namespace}.{bare}" if current_namespace else bare
-                        repo_qual = (
-                            f"{repo_name}::{current_namespace}::{bare}"
-                            if repo_name
-                            else qual
-                        )
-                        symbols.append(
-                            ParsedSymbol(
-                                name=m_name,
-                                qualified_name=repo_qual,
-                                symbol_kind="method",
-                                start_line=idx,
-                                end_line=idx,
-                                start_byte=0,
-                                end_byte=0,
-                                signature=stripped,
-                                signature_skeleton=f"{m_name}(...)",
-                                contextual_summary=f"C# method {bare}",
-                                repo_name=repo_name,
-                                repo_qualified_id=repo_qual,
-                                bare_name=bare,
-                            )
-                        )
-
-            # DI Registrations
-            for m_di in di_pat.finditer(line):
-                svc_iface = m_di.group(2)
-                svc_impl = m_di.group(3)
-                source_sym = (
-                    class_stack[-1][1]
-                    if class_stack
-                    else (
-                        f"{repo_name}::{current_namespace}::Program"
-                        if repo_name
-                        else (
-                            f"{current_namespace}.Program"
-                            if current_namespace
-                            else "Program"
-                        )
-                    )
-                )
+        def add_edge(src: str, tgt: str, kind: str) -> None:
+            if not src or not tgt:
+                return
+            key = (src, tgt, kind)
+            if key not in seen_edge_keys:
+                seen_edge_keys.add(key)
                 edges.append(
                     ParsedEdge(
-                        source_qualified_name=source_sym,
-                        target_qualified_name=svc_iface,
-                        edge_kind="PROVISIONED_BY",
+                        source_qualified_name=src,
+                        target_qualified_name=tgt,
+                        edge_kind=kind,
                     )
                 )
-                if svc_impl:
-                    edges.append(
-                        ParsedEdge(
-                            source_qualified_name=svc_iface,
-                            target_qualified_name=svc_impl,
-                            edge_kind="USES_TYPE",
-                        )
-                    )
 
-            # Update brace depth and pop scope stacks
-            opens = line_clean_cs.count("{")
-            closes = line_clean_cs.count("}")
-            brace_depth += opens - closes
-            while class_stack and brace_depth < class_stack[-1][2]:
-                class_stack.pop()
-            while ns_stack and brace_depth < ns_stack[-1][1]:
+        def qualify_name(leaf: str) -> str:
+            if type_stack:
+                return f"{type_stack[-1][1]}.{leaf}"
+            if ns_stack:
+                return f"{'.'.join(ns_stack)}.{leaf}"
+            return f"{prefix}.{leaf}"
+
+        def record_using(node: Node) -> None:
+            target = ""
+            for child in node.children:
+                if child.type == "name_equals":
+                    continue
+                if child.type in {"qualified_name", "identifier"}:
+                    target = _node_text(child, code_bytes)
+            if target and target not in usings:
+                usings.append(target)
+
+        def scan_invocations(node: Node, owner_qn: str) -> None:
+            if node.type == "invocation_expression":
+                func_node = node.child_by_field_name("function")
+                method_name = ""
+                generic_node: Node | None = None
+                if func_node is not None:
+                    if func_node.type == "member_access_expression":
+                        member_name = func_node.child_by_field_name("name")
+                        if member_name is not None:
+                            if member_name.type == "generic_name":
+                                generic_node = member_name
+                                method_name = _extract_type_name(member_name, code_bytes)
+                            else:
+                                method_name = _node_text(member_name, code_bytes)
+                    elif func_node.type == "generic_name":
+                        generic_node = func_node
+                        method_name = _extract_type_name(func_node, code_bytes)
+                    elif func_node.type == "identifier":
+                        method_name = _node_text(func_node, code_bytes)
+
+                if method_name in _DI_METHODS and generic_node is not None:
+                    for child in generic_node.children:
+                        if child.type == "type_argument_list":
+                            type_args = [
+                                _extract_type_name(arg, code_bytes)
+                                for arg in child.children
+                                if arg.is_named
+                            ]
+                            type_args = [t for t in type_args if t]
+                            if len(type_args) >= 2:
+                                add_edge(type_args[0], type_args[1], "PROVISIONED_BY")
+                                add_edge(owner_qn, type_args[1], "REGISTERS")
+                            elif len(type_args) == 1:
+                                add_edge(owner_qn, type_args[0], "PROVISIONED_BY")
+                elif method_name and method_name not in _CSHARP_BUILTIN_CALLS:
+                    add_edge(owner_qn, method_name, "CALLS")
+
+            for child in node.children:
+                if child.type not in _TYPE_DECLARATION_NODES:
+                    scan_invocations(child, owner_qn)
+
+        def handle_type_declaration(node: Node) -> None:
+            name_node = node.child_by_field_name("name")
+            if name_node is None:
+                return
+            type_name = _node_text(name_node, code_bytes)
+            if not type_name:
+                return
+            qn = qualify_name(type_name)
+            symbol_kind = "interface" if node.type == "interface_declaration" else "class"
+            sig = _extract_signature_before_body(node, code_bytes)
+            doc = _extract_leading_doc_comment(node, code_bytes)
+            symbols.append(
+                ParsedSymbol(
+                    name=type_name,
+                    qualified_name=qn,
+                    bare_name=type_name,
+                    symbol_kind=symbol_kind,
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte,
+                    signature=sig,
+                    signature_skeleton=sig,
+                    docstring=doc,
+                    repo_name=repo_name,
+                )
+            )
+            for imported in usings:
+                add_edge(qn, imported, "IMPORTS")
+
+            for child in node.children:
+                if child.type == "base_list":
+                    for base_child in child.children:
+                        if not base_child.is_named:
+                            continue
+                        base_name = _extract_type_name(base_child, code_bytes)
+                        if base_name:
+                            add_edge(qn, base_name, "INHERITS")
+
+            type_stack.append((type_name, qn))
+            body_node = node.child_by_field_name("body")
+            if body_node is not None:
+                walk(body_node)
+            else:
+                for child in node.children:
+                    if child.type == "declaration_list":
+                        walk(child)
+            type_stack.pop()
+
+        def handle_method_declaration(node: Node) -> None:
+            name_node = node.child_by_field_name("name")
+            if name_node is None:
+                return
+            method_name = _node_text(name_node, code_bytes)
+            if not method_name:
+                return
+            qn = qualify_name(method_name)
+            kind = "method" if type_stack else "function"
+            bare = f"{type_stack[-1][0]}.{method_name}" if type_stack else method_name
+            sig = _extract_signature_before_body(node, code_bytes)
+            doc = _extract_leading_doc_comment(node, code_bytes)
+            symbols.append(
+                ParsedSymbol(
+                    name=method_name,
+                    qualified_name=qn,
+                    bare_name=bare,
+                    symbol_kind=kind,
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte,
+                    signature=sig,
+                    signature_skeleton=sig,
+                    docstring=doc,
+                    repo_name=repo_name,
+                )
+            )
+            scan_invocations(node, qn)
+
+        def walk(node: Node) -> None:
+            file_scoped_pushed = False
+            for child in node.children:
+                if child.type == "using_directive":
+                    record_using(child)
+                elif child.type == "file_scoped_namespace_declaration":
+                    ns_name_node = child.child_by_field_name("name")
+                    ns_name = _node_text(ns_name_node, code_bytes)
+                    has_nested_body = any(
+                        c.type in {"declaration_list", *_TYPE_DECLARATION_NODES}
+                        for c in child.children
+                    )
+                    if ns_name:
+                        ns_stack.append(ns_name)
+                        if has_nested_body:
+                            walk(child)
+                            ns_stack.pop()
+                        else:
+                            file_scoped_pushed = True
+                elif child.type == "namespace_declaration":
+                    ns_name_node = child.child_by_field_name("name")
+                    ns_name = _node_text(ns_name_node, code_bytes)
+                    if ns_name:
+                        ns_stack.append(ns_name)
+                    body_node = child.child_by_field_name("body")
+                    if body_node is not None:
+                        walk(body_node)
+                    else:
+                        walk(child)
+                    if ns_name:
+                        ns_stack.pop()
+                elif child.type in _TYPE_DECLARATION_NODES:
+                    handle_type_declaration(child)
+                elif child.type in {"method_declaration", "constructor_declaration"}:
+                    handle_method_declaration(child)
+                elif child.type == "declaration_list":
+                    walk(child)
+                elif child.type == "global_statement":
+                    scan_invocations(child, prefix)
+            if file_scoped_pushed:
                 ns_stack.pop()
 
-            i += 1
-
-        # Connect imports to namespace
-        for u in usings:
-            for s in symbols:
-                if s.symbol_kind in ("class", "interface"):
-                    edges.append(
-                        ParsedEdge(
-                            source_qualified_name=s.qualified_name,
-                            target_qualified_name=u,
-                            edge_kind="IMPORTS",
-                        )
-                    )
-
+        walk(tree.root_node)
         return symbols, edges

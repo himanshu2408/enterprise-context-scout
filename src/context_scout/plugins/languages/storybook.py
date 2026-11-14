@@ -1,22 +1,82 @@
-"""Storybook & MDX Language Plugin for context scout.
-
-Extracts Component Story Format 3 (CSF3) metadata, story variants, and component documentation.
-Emits DOCUMENTS_COMPONENT edges linking stories to source React/HTML components.
-"""
+"""Storybook (.stories.* and .mdx) language plugin."""
 
 from __future__ import annotations
 
 import logging
 import re
 
+import tree_sitter_typescript as tstypescript
+from tree_sitter import Language, Node, Parser
+
+from context_scout.ast_engine.extractor import (
+    ParseDiagnostics,
+    _node_text,
+    inspect_tree_errors,
+)
 from context_scout.ast_engine.models import ParsedEdge, ParsedSymbol
 from context_scout.plugins.base import DependencyEdge
 
 logger = logging.getLogger(__name__)
 
+_TS_LANGUAGE = Language(tstypescript.language_typescript())
+_TSX_LANGUAGE = Language(tstypescript.language_tsx())
+
+_SKIPPED_IMPORT_NAMES = frozenset({"React", "FC", "Props", "Story", "StoryObj", "Meta"})
+
+
+def _unquote(text: str) -> str:
+    text = text.strip()
+    if len(text) >= 2 and (
+        (text[0] == '"' and text[-1] == '"')
+        or (text[0] == "'" and text[-1] == "'")
+        or (text[0] == "`" and text[-1] == "`")
+    ):
+        return text[1:-1]
+    return text
+
+
+def _unwrap_object_literal(node: Node | None) -> Node | None:
+    current = node
+    while current is not None:
+        if current.type == "object":
+            return current
+        if current.type in {"as_expression", "satisfies_expression", "type_assertion"}:
+            inner = current.child_by_field_name("expression")
+            if inner is None:
+                named = [c for c in current.children if c.is_named]
+                inner = named[0] if named else None
+            current = inner
+            continue
+        if current.type == "parenthesized_expression":
+            named = [c for c in current.children if c.is_named]
+            current = named[0] if named else None
+            continue
+        break
+    return None
+
+
+def _extract_meta_type_component(node: Node | None, code_bytes: bytes) -> str:
+    """Look for Meta<typeof Component> inside a type annotation / as / satisfies node."""
+    if node is None:
+        return ""
+    if node.type == "type_query":
+        named = [c for c in node.children if c.is_named]
+        if named:
+            return _node_text(named[-1], code_bytes)
+    for child in node.children:
+        found = _extract_meta_type_component(child, code_bytes)
+        if found:
+            return found
+    return ""
+
 
 class StorybookPlugin:
-    """Extracts Storybook CSF3 and MDX stories and documentation graphs."""
+    """Language plugin for Storybook stories (.stories.tsx/.ts/.jsx/.js and .mdx)."""
+
+    def __init__(self) -> None:
+        self._ts_parser = Parser(_TS_LANGUAGE)
+        self._tsx_parser = Parser(_TSX_LANGUAGE)
+        self.last_parse_diagnostics: ParseDiagnostics | None = None
 
     @property
     def language_id(self) -> str:
@@ -28,277 +88,346 @@ class StorybookPlugin:
 
     @property
     def manifest_files(self) -> tuple[str, ...]:
-        return (".storybook/main.ts", ".storybook/main.js")
+        return ()
 
     def can_handle(self, file_path: str) -> bool:
-        normalized = file_path.replace("\\", "/").lower()
-        return ".stories." in normalized or normalized.endswith(".mdx")
+        lower = file_path.lower()
+        return any(lower.endswith(ext) for ext in self.file_extensions)
+
+    def _derive_module_prefix(self, file_path: str) -> str:
+        if not file_path:
+            return "storybook"
+        stem = re.sub(
+            r"(?:\.stories\.(?:tsx|ts|jsx|js)|\.mdx)$",
+            "",
+            file_path,
+            flags=re.IGNORECASE,
+        )
+        normalized = stem.replace("\\", "/").strip("/")
+        dotted = ".".join(part for part in normalized.split("/") if part)
+        return dotted or "storybook"
+
+    def extract_manifest_dependencies(
+        self,
+        file_path: str,
+        content: str,
+    ) -> list[DependencyEdge]:
+        return []
 
     def extract_ast(
         self,
         code: str,
-        file_path: str,
+        file_path: str = "",
         repo_name: str = "",
         module_prefix: str = "",
     ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
-        if not module_prefix and file_path:
-            module_prefix = self._derive_module_prefix(file_path)
+        """Extract Storybook Meta and story symbols using tree-sitter-typescript (or MDX)."""
+        if not code or not code.strip():
+            self.last_parse_diagnostics = ParseDiagnostics(parser_backend="tree-sitter-typescript")
+            return [], []
+
+        prefix = module_prefix or self._derive_module_prefix(file_path)
 
         if file_path.lower().endswith(".mdx"):
-            return self._extract_mdx(code, file_path, repo_name, module_prefix)
+            self.last_parse_diagnostics = ParseDiagnostics(
+                parser_backend="mdx_heuristic_fallback",
+                has_parse_error=False,
+                abstained=False,
+                low_confidence_fallback=True,
+                reason="MDX uses heuristic extraction (no tree-sitter-mdx grammar)",
+            )
+            return self._extract_mdx(code, prefix, repo_name)
 
-        return self._extract_csf3(code, file_path, repo_name, module_prefix)
+        lower = file_path.lower()
+        is_ts_only = lower.endswith((".stories.ts", ".stories.js"))
+        parser = self._ts_parser if is_ts_only else self._tsx_parser
+        code_bytes = code.encode("utf-8")
+        tree = parser.parse(code_bytes)
+        has_err, err_cnt, miss_cnt = inspect_tree_errors(tree.root_node)
+        if has_err:
+            logger.warning(
+                "StorybookPlugin parse error in %s (errors=%d, missing=%d); abstaining.",
+                file_path or "<memory>",
+                err_cnt,
+                miss_cnt,
+            )
+            self.last_parse_diagnostics = ParseDiagnostics(
+                parser_backend="tree-sitter-typescript",
+                has_parse_error=True,
+                abstained=True,
+                error_node_count=err_cnt,
+                missing_node_count=miss_cnt,
+                reason="Syntax/parse error detected by tree-sitter-typescript",
+            )
+            return [], []
 
-    def _extract_csf3(
-        self,
-        code: str,
-        file_path: str,
-        repo_name: str,
-        module_prefix: str,
-    ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
+        self.last_parse_diagnostics = ParseDiagnostics(parser_backend="tree-sitter-typescript")
+        imported_components: list[str] = []
+        meta_title = ""
+        component_name = ""
+        meta_node: Node | None = None
+        var_objects: dict[str, tuple[Node, str]] = {}
+        exported_stories: list[tuple[str, Node, str]] = []
+
+        for child in tree.root_node.children:
+            if child.type == "import_statement":
+                stmt_text = _node_text(child, code_bytes)
+                if re.match(r"^\s*import\s+type\b", stmt_text):
+                    continue
+                src_node = child.child_by_field_name("source")
+                src_str = _unquote(_node_text(src_node, code_bytes)) if src_node is not None else ""
+                if "@storybook" in src_str or src_str == "react":
+                    continue
+                for clause in child.children:
+                    if clause.type == "import_clause":
+                        for cnode in clause.children:
+                            if cnode.type == "identifier":
+                                cname = _node_text(cnode, code_bytes)
+                                if cname not in _SKIPPED_IMPORT_NAMES:
+                                    imported_components.append(cname)
+                            elif cnode.type == "named_imports":
+                                for spec in cnode.children:
+                                    if spec.type == "import_specifier":
+                                        alias = spec.child_by_field_name("alias")
+                                        name_nd = spec.child_by_field_name("name")
+                                        picked = alias or name_nd
+                                        if picked is not None:
+                                            cname = _node_text(picked, code_bytes)
+                                            if cname not in _SKIPPED_IMPORT_NAMES:
+                                                imported_components.append(cname)
+
+            elif child.type in {"lexical_declaration", "variable_declaration"}:
+                for decl in child.children:
+                    if decl.type != "variable_declarator":
+                        continue
+                    name_nd = decl.child_by_field_name("name")
+                    val_nd = decl.child_by_field_name("value")
+                    if name_nd is None or name_nd.type != "identifier":
+                        continue
+                    vname = _node_text(name_nd, code_bytes)
+                    obj = _unwrap_object_literal(val_nd)
+                    type_hint = _extract_meta_type_component(decl, code_bytes)
+                    if obj is not None:
+                        var_objects[vname] = (obj, type_hint)
+
+            elif child.type == "export_statement":
+                export_text = _node_text(child, code_bytes).lstrip()
+                is_default = export_text.startswith("export default")
+                if is_default:
+                    val_nd = child.child_by_field_name("value")
+                    if val_nd is None:
+                        val_nd = next(
+                            (
+                                c
+                                for c in child.children
+                                if c.is_named and c.type not in {"decorator"}
+                            ),
+                            None,
+                        )
+                    obj = _unwrap_object_literal(val_nd)
+                    if obj is not None:
+                        meta_node = obj
+                        component_name = _extract_meta_type_component(val_nd, code_bytes)
+                    elif val_nd is not None and val_nd.type == "identifier":
+                        ident = _node_text(val_nd, code_bytes)
+                        if ident in var_objects:
+                            meta_node, hint = var_objects[ident]
+                            component_name = hint
+                else:
+                    for sub in child.children:
+                        if sub.type in {"lexical_declaration", "variable_declaration"}:
+                            for decl in sub.children:
+                                if decl.type != "variable_declarator":
+                                    continue
+                                name_nd = decl.child_by_field_name("name")
+                                val_nd = decl.child_by_field_name("value")
+                                if name_nd is None or name_nd.type != "identifier":
+                                    continue
+                                sname = _node_text(name_nd, code_bytes)
+                                if sname.lower() == "meta" or sname == "default":
+                                    obj = _unwrap_object_literal(val_nd)
+                                    if obj is not None:
+                                        meta_node = obj
+                                        if not component_name:
+                                            component_name = _extract_meta_type_component(
+                                                decl, code_bytes
+                                            )
+                                else:
+                                    sig = " ".join(_node_text(decl, code_bytes).split())[:120]
+                                    exported_stories.append((sname, decl, sig))
+
+        if meta_node is None and "meta" in var_objects:
+            meta_node, hint = var_objects["meta"]
+            if not component_name:
+                component_name = hint
+
+        if meta_node is not None:
+            for item in meta_node.children:
+                if item.type == "pair":
+                    knd = item.child_by_field_name("key")
+                    vnd = item.child_by_field_name("value")
+                    if knd is None or vnd is None:
+                        continue
+                    ktext = _unquote(_node_text(knd, code_bytes))
+                    if ktext == "title" and vnd.type in {"string", "template_string"}:
+                        meta_title = _unquote(_node_text(vnd, code_bytes))
+                    elif ktext == "component" and vnd.type in {"identifier", "member_expression"}:
+                        component_name = _node_text(vnd, code_bytes)
+                elif item.type == "shorthand_property_identifier":
+                    if _node_text(item, code_bytes) == "component" and imported_components:
+                        component_name = imported_components[0]
+
+        if not component_name and imported_components:
+            component_name = imported_components[0]
+
         symbols: list[ParsedSymbol] = []
         edges: list[ParsedEdge] = []
-        lines = code.splitlines()
+        seen_edges: set[tuple[str, str, str]] = set()
 
-        doc_component: str | None = None
-        meta_title = ""
+        def add_doc_edge(src: str, tgt: str) -> None:
+            if not src or not tgt:
+                return
+            key = (src, tgt, "DOCUMENTS_COMPONENT")
+            if key not in seen_edges:
+                seen_edges.add(key)
+                edges.append(
+                    ParsedEdge(
+                        source_qualified_name=src,
+                        target_qualified_name=tgt,
+                        edge_kind="DOCUMENTS_COMPONENT",
+                    )
+                )
 
-        meta_title_pat = re.compile(r"title\s*:\s*['\"]([^'\"]+)['\"]")
-        meta_comp_pat = re.compile(r"component\s*:\s*([A-Za-z0-9_]+)")
-        meta_typeof_pat = re.compile(r"Meta<typeof\s+([A-Za-z0-9_]+)>")
-        imp_pat = re.compile(
-            r"import\s+(?:type\s+)?(?:([A-Za-z0-9_]+)\s*,?\s*)?(?:\{([^}]+)\})?\s+from\s+['\"]([^'\"]+)['\"]",
-            re.DOTALL,
-        )
-        story_variant_pat = re.compile(
-            r"export\s+const\s+([A-Za-z0-9_]+)\s*(?::\s*(?:Story|StoryObj)[^=]*)?=\s*"
-        )
-
-        candidates_from_imports: list[str] = []
-
-        clean_code = re.sub(r"/\*[\s\S]*?\*/", "", code)
-        clean_code = re.sub(r"//[^\n]*", "", clean_code)
-
-        for m_imp in imp_pat.finditer(clean_code):
-            default_id = m_imp.group(1)
-            named_ids = m_imp.group(2)
-            src_path = m_imp.group(3)
-            if not ("@storybook" in src_path or src_path.startswith("react")):
-                if default_id and default_id not in ("type", "React"):
-                    candidates_from_imports.append(default_id)
-                if named_ids:
-                    clean_named = re.sub(r"/\*[\s\S]*?\*/", "", named_ids)
-                    clean_named = re.sub(r"//[^\n]*", "", clean_named)
-                    for item in clean_named.split(","):
-                        clean_item = item.strip()
-                        if " " in clean_item:
-                            clean_item = clean_item.split()[-1]
-                        if (
-                            clean_item
-                            and re.match(r"^[A-Za-z_$][A-Za-z0-9_$]*$", clean_item)
-                            and clean_item
-                            not in (
-                                "type",
-                                "React",
-                                "FC",
-                                "Props",
-                                "Story",
-                                "StoryObj",
-                                "Meta",
-                            )
-                        ):
-                            candidates_from_imports.append(clean_item)
-
-        for ln in lines:
-            m_t = meta_title_pat.search(ln)
-            if m_t:
-                meta_title = m_t.group(1)
-            m_c = meta_comp_pat.search(ln)
-            if m_c and m_c.group(1) not in ("undefined", "null"):
-                doc_component = m_c.group(1)
-            m_type = meta_typeof_pat.search(ln)
-            if m_type and not doc_component:
-                doc_component = m_type.group(1)
-
-        if not doc_component and candidates_from_imports:
-            doc_component = candidates_from_imports[0]
-
-        # Meta symbol
-        meta_bare = "Meta"
-        meta_qual = (
-            f"{repo_name}::{module_prefix}::{meta_bare}"
-            if repo_name
-            else f"{module_prefix}.{meta_bare}"
-        )
-        symbols.append(
-            ParsedSymbol(
-                name="Meta",
-                qualified_name=meta_qual,
-                symbol_kind="story",
-                start_line=1,
-                end_line=1,
-                start_byte=0,
-                end_byte=0,
-                signature=f"Meta: title='{meta_title}'",
-                signature_skeleton=f"Meta<{doc_component or 'unknown'}>",
-                contextual_summary=f"Storybook CSF3 Meta definition for '{meta_title}'",
-                repo_name=repo_name,
-                repo_qualified_id=meta_qual,
-                bare_name=meta_bare,
-            )
-        )
-
-        if doc_component:
-            edges.append(
-                ParsedEdge(
-                    source_qualified_name=meta_qual,
-                    target_qualified_name=doc_component,
-                    edge_kind="DOCUMENTS_COMPONENT",
+        if meta_node is not None or meta_title:
+            anchor = meta_node if meta_node is not None else tree.root_node
+            meta_qn = f"{prefix}.Meta"
+            meta_sig = f'Meta(title="{meta_title}", component="{component_name}")'
+            symbols.append(
+                ParsedSymbol(
+                    name="Meta",
+                    qualified_name=meta_qn,
+                    bare_name="Meta",
+                    symbol_kind="story",
+                    start_line=anchor.start_point[0] + 1,
+                    end_line=anchor.end_point[0] + 1,
+                    start_byte=anchor.start_byte,
+                    end_byte=anchor.end_byte,
+                    signature=meta_sig,
+                    signature_skeleton=meta_sig,
+                    repo_name=repo_name,
                 )
             )
+            if component_name:
+                add_doc_edge(meta_qn, component_name)
 
-        # Story variants extraction
-        for idx, line in enumerate(lines, start=1):
-            for m_story in story_variant_pat.finditer(line):
-                if m_story and m_story.group(1) not in ("meta", "default"):
-                    story_name = m_story.group(1)
-                    bare = story_name
-                    repo_qual = (
-                        f"{repo_name}::{module_prefix}::{bare}"
-                        if repo_name
-                        else f"{module_prefix}.{bare}"
-                    )
-                    symbols.append(
-                        ParsedSymbol(
-                            name=story_name,
-                            qualified_name=repo_qual,
-                            symbol_kind="story",
-                            start_line=idx,
-                            end_line=idx,
-                            start_byte=0,
-                            end_byte=0,
-                            signature=line.strip(),
-                            signature_skeleton=f"export const {story_name}: Story",
-                            contextual_summary=(
-                                f"Storybook variant '{story_name}' documenting "
-                                f"{doc_component or 'component'}"
-                            ),
-                            repo_name=repo_name,
-                            repo_qualified_id=repo_qual,
-                            bare_name=bare,
-                        )
-                    )
-                    if doc_component:
-                        edges.append(
-                            ParsedEdge(
-                                source_qualified_name=repo_qual,
-                                target_qualified_name=doc_component,
-                                edge_kind="DOCUMENTS_COMPONENT",
-                            )
-                        )
+        for story_name, story_node, sig in exported_stories:
+            story_qn = f"{prefix}.{story_name}"
+            symbols.append(
+                ParsedSymbol(
+                    name=story_name,
+                    qualified_name=story_qn,
+                    bare_name=story_name,
+                    symbol_kind="story",
+                    start_line=story_node.start_point[0] + 1,
+                    end_line=story_node.end_point[0] + 1,
+                    start_byte=story_node.start_byte,
+                    end_byte=story_node.end_byte,
+                    signature=sig,
+                    signature_skeleton=sig,
+                    repo_name=repo_name,
+                )
+            )
+            if component_name:
+                add_doc_edge(story_qn, component_name)
 
         return symbols, edges
 
     def _extract_mdx(
         self,
         code: str,
-        file_path: str,
-        repo_name: str,
         module_prefix: str,
+        repo_name: str,
     ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
         symbols: list[ParsedSymbol] = []
         edges: list[ParsedEdge] = []
-        lines = code.splitlines()
+        lines = code.splitlines(keepends=True)
+        line_offsets: list[int] = []
+        offset = 0
+        for line in lines:
+            line_offsets.append(offset)
+            offset += len(line.encode("utf-8"))
 
-        meta_pat = re.compile(
-            r"<Meta\s+title=['\"]([^'\"]+)['\"](?:\s+component=\{([A-Za-z0-9_]+)\})?"
+        meta_match = re.search(
+            r'<Meta\b[^>]*?title=["\']([^"\']+)["\'][^>]*?/?>',
+            code,
         )
-        story_pat = re.compile(r"<Story\s+name=['\"]([^'\"]+)['\"]")
+        of_match = re.search(
+            r"<Meta\b[^>]*?(?:of|component)=\{([A-Za-z_]\w*)\}[^>]*?/?>",
+            code,
+        )
 
-        target_comp: str | None = None
-        for idx, line in enumerate(lines, start=1):
-            m_meta = meta_pat.search(line)
-            if m_meta:
-                title = m_meta.group(1)
-                target_comp = m_meta.group(2)
-                bare = "Meta"
-                repo_qual = (
-                    f"{repo_name}::{module_prefix}::{bare}"
-                    if repo_name
-                    else f"{module_prefix}.{bare}"
-                )
-                symbols.append(
-                    ParsedSymbol(
-                        name="Meta",
-                        qualified_name=repo_qual,
-                        symbol_kind="story",
-                        start_line=idx,
-                        end_line=idx,
-                        start_byte=0,
-                        end_byte=0,
-                        signature=line.strip(),
-                        signature_skeleton=f"<Meta title='{title}' />",
-                        contextual_summary=f"Storybook MDX Meta '{title}'",
-                        repo_name=repo_name,
-                        repo_qualified_id=repo_qual,
-                        bare_name=bare,
-                    )
-                )
-                if target_comp:
-                    edges.append(
-                        ParsedEdge(
-                            source_qualified_name=repo_qual,
-                            target_qualified_name=target_comp,
-                            edge_kind="DOCUMENTS_COMPONENT",
-                        )
-                    )
+        comp_name = ""
+        if of_match:
+            comp_name = of_match.group(1)
 
-            m_st = story_pat.search(line)
-            if m_st:
-                st_name = m_st.group(1)
-                bare = st_name
-                repo_qual = (
-                    f"{repo_name}::{module_prefix}::{bare}"
-                    if repo_name
-                    else f"{module_prefix}.{bare}"
+        if meta_match:
+            title = meta_match.group(1)
+            start_line = code[: meta_match.start()].count("\n") + 1
+            start_byte = len(code[: meta_match.start()].encode("utf-8"))
+            end_byte = len(code[: meta_match.end()].encode("utf-8"))
+            meta_qn = f"{module_prefix}.Meta"
+            symbols.append(
+                ParsedSymbol(
+                    name="Meta",
+                    qualified_name=meta_qn,
+                    bare_name="Meta",
+                    symbol_kind="story",
+                    start_line=start_line,
+                    end_line=start_line,
+                    start_byte=start_byte,
+                    end_byte=end_byte,
+                    signature=f'<Meta title="{title}" />',
+                    signature_skeleton=f'<Meta title="{title}" />',
+                    repo_name=repo_name,
                 )
-                symbols.append(
-                    ParsedSymbol(
-                        name=st_name,
-                        qualified_name=repo_qual,
-                        symbol_kind="story",
-                        start_line=idx,
-                        end_line=idx,
-                        start_byte=0,
-                        end_byte=0,
-                        signature=line.strip(),
-                        signature_skeleton=f"<Story name='{st_name}' />",
-                        contextual_summary=f"Storybook MDX story variant '{st_name}'",
-                        repo_name=repo_name,
-                        repo_qualified_id=repo_qual,
-                        bare_name=bare,
+            )
+            if comp_name:
+                edges.append(
+                    ParsedEdge(
+                        source_qualified_name=meta_qn,
+                        target_qualified_name=comp_name,
+                        edge_kind="DOCUMENTS_COMPONENT",
                     )
                 )
-                if target_comp:
-                    edges.append(
-                        ParsedEdge(
-                            source_qualified_name=repo_qual,
-                            target_qualified_name=target_comp,
-                            edge_kind="DOCUMENTS_COMPONENT",
-                        )
+
+        for smatch in re.finditer(r'<Story\b[^>]*?name=["\']([^"\']+)["\']', code):
+            sname = smatch.group(1)
+            start_line = code[: smatch.start()].count("\n") + 1
+            start_byte = len(code[: smatch.start()].encode("utf-8"))
+            end_byte = len(code[: smatch.end()].encode("utf-8"))
+            sqn = f"{module_prefix}.{sname}"
+            symbols.append(
+                ParsedSymbol(
+                    name=sname,
+                    qualified_name=sqn,
+                    bare_name=sname,
+                    symbol_kind="story",
+                    start_line=start_line,
+                    end_line=start_line,
+                    start_byte=start_byte,
+                    end_byte=end_byte,
+                    signature=f'<Story name="{sname}">',
+                    signature_skeleton=f'<Story name="{sname}">',
+                    repo_name=repo_name,
+                )
+            )
+            if comp_name:
+                edges.append(
+                    ParsedEdge(
+                        source_qualified_name=sqn,
+                        target_qualified_name=comp_name,
+                        edge_kind="DOCUMENTS_COMPONENT",
                     )
+                )
 
         return symbols, edges
-
-    def extract_manifest_dependencies(self, file_path: str, content: str) -> list[DependencyEdge]:
-        return []
-
-    def _derive_module_prefix(self, file_path: str) -> str:
-        clean = file_path.replace("\\", "/").lstrip("/")
-        if clean.startswith("src/"):
-            clean = clean[4:]
-        for suffix in (".stories.tsx", ".stories.ts", ".stories.jsx", ".stories.js", ".mdx"):
-            if clean.endswith(suffix):
-                clean = clean[:-len(suffix)]
-                break
-        return clean.replace("/", ".")
