@@ -3,7 +3,7 @@
 Enforces four deterministic gates before calling paid Gemini execution models:
 - Check 1: Internal symbol resolution via AST indexing & 1-hop ASTDependencyExpander closure.
 - Check 2: Prompt identifier partitioning (VAL-01) distinguishing reference vs novel symbols.
-- Check 3: Normalized RRF threshold (BLK-01, >=0.55 or cross-encoder score >=0.60).
+- Check 3: Normalized RRF threshold (BLK-01, >=0.65 or cross-encoder score >=0.60).
 - Check 4: Verbatim citation verification (VAL-02, >=0.98 token overlap with NFKC normalization).
 """
 
@@ -407,8 +407,13 @@ def extract_document_text(file_path: Path) -> str:
             extracted = "\n\n".join(p.strip() for p in pages if p.strip())
             if extracted.strip():
                 return extracted
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "PDF text extraction fallback to raw bytes for %s (%s): %s",
+                file_path,
+                type(exc).__name__,
+                exc,
+            )
     raw_bytes = file_path.read_bytes()
     if b"\x00" in raw_bytes[:8192] and suffix != ".pdf":
         return ""
@@ -528,8 +533,13 @@ def sync_custom_domain_corpus_if_needed(
                 with open(manifest_yaml, encoding="utf-8") as mf:
                     m_data = yaml.safe_load(mf) or {}
                 source_dir_str = str(m_data.get("source_dir", "")).strip()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Failed loading manifest source_dir for domain '%s' (%s): %s",
+                    domain_id,
+                    type(exc).__name__,
+                    exc,
+                )
 
     if not source_dir_str:
         _CUSTOM_CORPUS_MEM_CACHE[domain_id] = (stat_mtime, now, data)
@@ -585,7 +595,13 @@ def sync_custom_domain_corpus_if_needed(
             try:
                 raw_b = p.read_bytes()
                 blob_sha = hashlib.sha1(raw_b).hexdigest()
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Skipping unreadable doc file %s during sync (%s): %s",
+                    p,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
             live_docs[rel_p] = (p, blob_sha)
             old_chk = existing_doc_by_rel.get(rel_p) or existing_doc_by_rel.get(p.name)
@@ -687,7 +703,13 @@ def sync_custom_domain_corpus_if_needed(
             with open(cand, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
             new_mtime = cand.stat().st_mtime_ns
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Failed persisting synced doc corpus index for '%s' (%s): %s",
+                domain_id,
+                type(exc).__name__,
+                exc,
+            )
             new_mtime = stat_mtime
         _CUSTOM_CORPUS_MEM_CACHE[domain_id] = (new_mtime, now, data)
         _clear_parsed_cache_for_domain(domain_id)
@@ -740,7 +762,13 @@ def sync_custom_domain_corpus_if_needed(
                 header = f"blob {len(raw_b)}\x00".encode("ascii")
                 blob_sha = hashlib.sha1(header + raw_b).hexdigest()
                 _FILE_STAT_BLOB_CACHE[p] = (st.st_mtime_ns, st.st_size, blob_sha)
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Skipping unreadable changed file %s (%s): %s",
+                disk_p,
+                type(exc).__name__,
+                exc,
+            )
             continue
         live_files_meta[rel_path] = (p, repo_n, blob_sha)
         old_entry = existing_by_path.get(rel_path)
@@ -798,7 +826,13 @@ def sync_custom_domain_corpus_if_needed(
         disk_p, repo_n, blob_sha = live_files_meta[rel_path]
         try:
             raw_text = disk_p.read_text(encoding="utf-8", errors="replace").replace("\x00", "")
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Skipping unreadable changed file %s (%s): %s",
+                disk_p,
+                type(exc).__name__,
+                exc,
+            )
             continue
         file_uuid = str(uuid5(NAMESPACE_URL, f"{domain_id}:file:{rel_path}"))
         commit_sha = hashlib.sha1(f"{domain_id}:{rel_path}:{blob_sha}".encode()).hexdigest()
@@ -826,7 +860,13 @@ def sync_custom_domain_corpus_if_needed(
         )
         try:
             parsed_syms, parsed_edges = extractor.parse_source(raw_text, lang, file_path=sub_rel)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "AST extraction failed for %s (%s): %s",
+                sub_rel,
+                type(exc).__name__,
+                exc,
+            )
             parsed_syms, parsed_edges = [], []
 
         for sym_idx, ps in enumerate(parsed_syms):
@@ -895,7 +935,13 @@ def sync_custom_domain_corpus_if_needed(
         with open(cand, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         new_mtime = cand.stat().st_mtime_ns
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Failed persisting synced code corpus index for '%s' (%s): %s",
+            domain_id,
+            type(exc).__name__,
+            exc,
+        )
         new_mtime = stat_mtime
 
     _CUSTOM_CORPUS_MEM_CACHE[domain_id] = (new_mtime, now, data)
@@ -948,8 +994,12 @@ class BoundGraphRepository:
                 return self._repo.traverse_1hop_neighborhood(
                     principal, domain_id, focus_symbol_id, max_direct_callers
                 )
-            except (TypeError, Exception):
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "traverse_1hop_neighborhood fallback (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
         return []
 
     def list_visible_code_files(
@@ -960,7 +1010,12 @@ class BoundGraphRepository:
                 result = self._repo.list_visible_code_files(principal, domain_id)
                 if isinstance(result, list) and result:
                     return result
-            except TypeError:
+            except TypeError as exc:
+                logger.debug(
+                    "Falling back to conn signature in BoundGraphRepository (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
                 if self._conn is not None:
                     result = self._repo.list_visible_code_files(self._conn, domain_id)
                     if isinstance(result, list) and result:
@@ -1006,7 +1061,12 @@ class BoundGraphRepository:
                 result = self._repo.list_visible_ast_symbols(principal, domain_id)
                 if isinstance(result, list) and result:
                     return result
-            except TypeError:
+            except TypeError as exc:
+                logger.debug(
+                    "Falling back to conn signature in BoundGraphRepository (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
                 if self._conn is not None:
                     result = self._repo.list_visible_ast_symbols(self._conn, domain_id)
                     if isinstance(result, list) and result:
@@ -1065,7 +1125,12 @@ class BoundGraphRepository:
                 result = self._repo.list_visible_ast_edges(principal, domain_id)
                 if isinstance(result, list) and result:
                     return result
-            except TypeError:
+            except TypeError as exc:
+                logger.debug(
+                    "Falling back to conn signature in BoundGraphRepository (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
                 if self._conn is not None:
                     result = self._repo.list_visible_ast_edges(self._conn, domain_id)
                     if isinstance(result, list) and result:
@@ -1125,7 +1190,12 @@ class BoundGraphRepository:
                 result = self._repo.list_visible_doc_chunks(principal, domain_id, market_scope)
                 if isinstance(result, list) and result:
                     return result
-            except TypeError:
+            except TypeError as exc:
+                logger.debug(
+                    "Falling back to conn signature in BoundGraphRepository (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
                 if self._conn is not None:
                     result = self._repo.list_visible_doc_chunks(self._conn, domain_id, market_scope)
                     if isinstance(result, list) and result:
@@ -1140,7 +1210,13 @@ class BoundGraphRepository:
                 mkt_val = str(item.get("market_scope", MarketRegime.GLOBAL_MULTI.value))
                 try:
                     mkt = MarketRegime(mkt_val)
-                except ValueError:
+                except ValueError as exc:
+                    logger.debug(
+                        "Unknown market_scope '%s', defaulting to GLOBAL_MULTI (%s): %s",
+                        mkt_val,
+                        type(exc).__name__,
+                        exc,
+                    )
                     mkt = MarketRegime.GLOBAL_MULTI
                 allowed_mkts = (market_scope, MarketRegime.GLOBAL_MULTI)
                 if market_scope is not None and mkt not in allowed_mkts:
@@ -1423,10 +1499,18 @@ class PreFlightValidator:
             return principal
         if self.principal is not None:
             return self.principal
+        from context_scout.plugins.registry import PluginRegistry
+
+        default_scopes = ["public_eng"]
+        primary_plugin = PluginRegistry.get_primary_domain_plugin()
+        if primary_plugin is not None:
+            for scope in primary_plugin.get_default_scopes():
+                if scope not in default_scopes:
+                    default_scopes.append(scope)
         return PrincipalContext(
             user_id="preflight_system",
             role=RoleType.ENGINEER,
-            allowed_scopes=["public_eng", "repo:trading_strategies", "corpus:quant_papers"],
+            allowed_scopes=default_scopes,
         )
 
     def extract_prompt_candidates(self, user_prompt: str) -> tuple[set[str], set[str]]:

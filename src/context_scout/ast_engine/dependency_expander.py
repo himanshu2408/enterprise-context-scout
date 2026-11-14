@@ -1,5 +1,6 @@
 """Bounded 1-hop AST dependency closure engine enforcing SEC-03."""
 
+import logging
 import re
 from collections import defaultdict
 from typing import Final, Literal, Protocol
@@ -17,6 +18,8 @@ from context_scout.schemas.contracts import (
     ModificationIntent,
     PrincipalContext,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ScoutGraphRepository(Protocol):
@@ -80,8 +83,12 @@ class ASTDependencyExpander:
                 )
                 if neighbors:
                     return self._build_result_from_neighbors(focus_symbol, neighbors)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "1-hop neighborhood CTE failed (%s): %s; using in-memory closure",
+                    type(exc).__name__,
+                    exc,
+                )
 
         visible_symbols = {
             s.symbol_id: s for s in repo.list_visible_ast_symbols(principal, domain_id)

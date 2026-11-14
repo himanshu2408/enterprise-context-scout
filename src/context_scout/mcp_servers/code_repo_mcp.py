@@ -1,4 +1,4 @@
-"""Code Repository Enterprise MCP Server (Model 1: trading_code_scout).
+"""Code Repository Enterprise MCP Server.
 
 Implements typed read tools backed by live PostgreSQL 17 Forced RLS,
 ASTDependencyExpander, and DeterministicSlicer under out-of-band context (SEC-04).
@@ -27,6 +27,7 @@ from context_scout.mcp_servers.common import (
     PostgresScoutGraphAdapter,
     bound_payload_dict,
 )
+from context_scout.plugins.registry import PluginRegistry
 from context_scout.security.rbac import (
     DomainAuthorizationGate,
     get_current_principal,
@@ -36,16 +37,32 @@ from context_scout.security.rbac import (
 
 logger = logging.getLogger(__name__)
 
-DOMAIN_ID: Final[str] = "trading_code_scout"
 MAX_SLICE_LINES: Final[int] = 200
+
+
+def _resolve_default_code_domain_id(
+    settings: ScoutSettings,
+    domain_id: str | None = None,
+) -> str:
+    """Resolves target code domain ID from override, settings, or registered plugins."""
+    if domain_id:
+        return domain_id
+    if settings.default_domain_id and settings.default_domain_id != "default":
+        return settings.default_domain_id
+    primary_plugin = PluginRegistry.get_primary_domain_plugin()
+    if primary_plugin is not None:
+        return primary_plugin.get_role_domain_ids().get("code", settings.default_domain_id)
+    return settings.default_domain_id
 
 
 def create_code_repo_mcp_server(
     settings: ScoutSettings | None = None,
     connection_manager: RLSConnectionManager | None = None,
+    domain_id: str | None = None,
 ) -> MCPServer:
     """Factory creating the code_repo_mcp MCP Server with out-of-band security controls."""
     st = settings or ScoutSettings()
+    default_domain_id = _resolve_default_code_domain_id(st, domain_id=domain_id)
     conn_mgr = connection_manager or RLSConnectionManager(st.db_app_url)
     registry = DomainRegistry(st.domains_dir)
     registry.load_all()
@@ -75,7 +92,9 @@ def create_code_repo_mcp_server(
         """Searches code_files under live PostgreSQL 17 RLS."""
         validate_tool_call_arguments({"query": query, "file_pattern": file_pattern, "limit": limit})
         principal = get_current_principal()
-        auth_gate.authorize_tool_call(DOMAIN_ID, "code_repo_mcp:search_code_trigram", principal)
+        auth_gate.authorize_tool_call(
+            default_domain_id, "code_repo_mcp:search_code_trigram", principal
+        )
 
         clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
         clean_pattern = f"%{file_pattern.strip()}%" if file_pattern else None
@@ -94,7 +113,15 @@ def create_code_repo_mcp_server(
             search_str = f"%{query}%"
             rows = conn.execute(
                 sql,
-                (query, DOMAIN_ID, clean_pattern, clean_pattern, query, search_str, clamped_limit),
+                (
+                    query,
+                    default_domain_id,
+                    clean_pattern,
+                    clean_pattern,
+                    query,
+                    search_str,
+                    clamped_limit,
+                ),
             ).fetchall()
 
             matches: list[dict[str, Any]] = []
@@ -150,7 +177,9 @@ def create_code_repo_mcp_server(
         """Resolves symbol in ast_symbols JOIN code_files under live PostgreSQL 17 RLS."""
         validate_tool_call_arguments({"symbol_name": symbol_name, "limit": limit})
         principal = get_current_principal()
-        auth_gate.authorize_tool_call(DOMAIN_ID, "code_repo_mcp:lookup_ast_symbol", principal)
+        auth_gate.authorize_tool_call(
+            default_domain_id, "code_repo_mcp:lookup_ast_symbol", principal
+        )
 
         clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
         clean_name = symbol_name.strip()
@@ -177,7 +206,7 @@ def create_code_repo_mcp_server(
                 sql,
                 (
                     clean_name,
-                    DOMAIN_ID,
+                    default_domain_id,
                     clean_name,
                     wildcard_name,
                     clean_name,
@@ -224,7 +253,9 @@ def create_code_repo_mcp_server(
         """Expands 1-hop AST closure using ASTDependencyExpander and PostgresScoutGraphAdapter."""
         validate_tool_call_arguments({"symbol_name": symbol_name})
         principal = get_current_principal()
-        auth_gate.authorize_tool_call(DOMAIN_ID, "code_repo_mcp:expand_ast_1hop_closure", principal)
+        auth_gate.authorize_tool_call(
+            default_domain_id, "code_repo_mcp:expand_ast_1hop_closure", principal
+        )
 
         clean_name = symbol_name.strip()
 
@@ -240,7 +271,7 @@ def create_code_repo_mcp_server(
                 ORDER BY (qualified_name = %s) DESC
                 LIMIT 1;
                 """,
-                (DOMAIN_ID, clean_name, f"%{clean_name}%", clean_name),
+                (default_domain_id, clean_name, f"%{clean_name}%", clean_name),
             ).fetchone()
 
             if not row:
@@ -286,7 +317,7 @@ def create_code_repo_mcp_server(
             focus_symbol=focus_record,
             repo=graph_adapter,
             principal=principal,
-            domain_id=DOMAIN_ID,
+            domain_id=default_domain_id,
         )
 
         direct_callers: list[dict[str, Any]] = [
@@ -362,7 +393,9 @@ def create_code_repo_mcp_server(
             }
         )
         principal = get_current_principal()
-        auth_gate.authorize_tool_call(DOMAIN_ID, "code_repo_mcp:slice_file_lines", principal)
+        auth_gate.authorize_tool_call(
+            default_domain_id, "code_repo_mcp:slice_file_lines", principal
+        )
 
         clean_path = file_path.strip().lstrip("/")
         requested_count = end_line - start_line + 1
@@ -382,7 +415,7 @@ def create_code_repo_mcp_server(
                   AND (file_path = %s OR file_path ILIKE %s)
                 LIMIT 1;
                 """,
-                (DOMAIN_ID, repo_name, clean_path, f"%{clean_path}"),
+                (default_domain_id, repo_name, clean_path, f"%{clean_path}"),
             ).fetchone()
 
             if not row:
@@ -433,10 +466,12 @@ def create_code_repo_mcp_server(
         limit: int = 5,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Searches GitHub issues stored in doc_chunks under domain trading_code_scout."""
+        """Searches GitHub issues stored in doc_chunks under the configured code domain."""
         validate_tool_call_arguments({"query": query, "state": state, "limit": limit})
         principal = get_current_principal()
-        auth_gate.authorize_tool_call(DOMAIN_ID, "code_repo_mcp:search_github_issues", principal)
+        auth_gate.authorize_tool_call(
+            default_domain_id, "code_repo_mcp:search_github_issues", principal
+        )
 
         clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
         clean_state = state.strip().lower() if state else None
@@ -468,7 +503,7 @@ def create_code_repo_mcp_server(
                 (
                     query,
                     query,
-                    DOMAIN_ID,
+                    default_domain_id,
                     clean_state,
                     clean_state,
                     query,
@@ -524,22 +559,23 @@ def create_code_repo_mcp_server(
     )
     async def assemble_verified_context_pack(
         query: str,
-        domain_id: str = DOMAIN_ID,
+        domain_id: str | None = None,
         max_bounce_backs: int = 1,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Assembles a verified ImplementationContextPack under out-of-band PrincipalContext."""
+        target_domain_id = domain_id or default_domain_id
         validate_tool_call_arguments(
             {
                 "query": query,
-                "domain_id": domain_id,
+                "domain_id": target_domain_id,
                 "max_bounce_backs": max_bounce_backs,
             }
         )
         principal = get_current_principal()
         registry.load_all()
         auth_gate.authorize_tool_call(
-            domain_id, "code_repo_mcp:assemble_verified_context_pack", principal
+            target_domain_id, "code_repo_mcp:assemble_verified_context_pack", principal
         )
 
         from context_scout.agents.scout_workflow import ScoutWorkflow
@@ -555,7 +591,7 @@ def create_code_repo_mcp_server(
         pack_or_diag = workflow.run(
             user_prompt=query,
             principal=principal,
-            domain_id=domain_id,
+            domain_id=target_domain_id,
             max_bounce_backs=clamped_bounces,
         )
         dumped: dict[str, Any] = pack_or_diag.model_dump(mode="json")

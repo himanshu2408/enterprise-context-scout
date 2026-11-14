@@ -2,8 +2,8 @@
 
 Decoupled citation verification engine validating 100% of document citations
 across any enterprise source (Confluence, Jira, technical specs, arXiv, local docs)
-with strict provenance checks, verbatim quote grounding (NFKC + SequenceMatcher >=0.98),
-staleness detection, and deterministic InsufficientContextDiagnostic production.
+with strict provenance checks, verbatim quote grounding (exact NFKC normalized substring
+verification), staleness detection, and deterministic InsufficientContextDiagnostic production.
 """
 
 from __future__ import annotations
@@ -138,7 +138,14 @@ class DocumentCitationGate:
                 c_ver = int(norm_version_str)
             if c_ver <= 0:
                 raise ValueError(f"Non-positive version: {c_ver}")
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as exc:
+            logger.debug(
+                "Invalid Confluence citation version '%s' for page %s (%s): %s",
+                citation.version,
+                page_id,
+                type(exc).__name__,
+                exc,
+            )
             return (
                 False,
                 CitationFailureCode.MISSING_PROVENANCE,
@@ -184,7 +191,14 @@ class DocumentCitationGate:
                         l_ver = int(f_latest) if f_latest.is_integer() else None
                     else:
                         l_ver = int(norm_latest_str)
-                except (ValueError, TypeError):
+                except (ValueError, TypeError) as exc:
+                    logger.debug(
+                        "Ignoring non-numeric latest Confluence version '%s' for page %s (%s): %s",
+                        latest_version,
+                        page_id,
+                        type(exc).__name__,
+                        exc,
+                    )
                     l_ver = None
 
                 if l_ver is not None:

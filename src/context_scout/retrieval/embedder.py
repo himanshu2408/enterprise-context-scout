@@ -26,8 +26,11 @@ def resolve_torch_device() -> str:
             return "mps"
         if torch.cuda.is_available():
             return "cuda"
-    except ImportError:
-        pass
+    except ImportError as exc:
+        logger.debug(
+            "torch unavailable for device probe (%s); falling back to CPU",
+            type(exc).__name__,
+        )
     return "cpu"
 
 
@@ -75,7 +78,13 @@ class LocalSemanticEmbedder:
                     model_kwargs={"torch_dtype": torch_dtype},
                     local_files_only=True,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Local SentenceTransformer cache miss for %s (%s): %s; trying remote",
+                    self.model_id,
+                    type(exc).__name__,
+                    exc,
+                )
                 self._model = SentenceTransformer(
                     self.model_id,
                     device=self.device,

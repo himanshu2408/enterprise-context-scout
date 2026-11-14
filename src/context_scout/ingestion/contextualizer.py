@@ -13,6 +13,7 @@ from typing import Final, Protocol, runtime_checkable
 
 from context_scout.config import ScoutSettings
 from context_scout.ingestion.doc_parser import DocumentChunk
+from context_scout.plugins.registry import PluginRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -103,10 +104,12 @@ class DeterministicContextualizer:
                 if hasattr(chunk.market_scope, "value")
                 else str(chunk.market_scope)
             )
-            if "NSE" in market_val:
-                friction = "15 bps STT floor"
-            elif "XETRA" in market_val:
-                friction = "10 bps floor"
+            domain_plugin = (
+                PluginRegistry.get_domain_plugin(getattr(chunk, "domain_id", "") or "")
+                or PluginRegistry.get_primary_domain_plugin()
+            )
+            if domain_plugin is not None:
+                friction = domain_plugin.infer_friction_label(market_val)
             else:
                 friction = "5 bps floor"
 

@@ -1,6 +1,7 @@
 """Git Blob-SHA Merkle incremental indexer with Tree-Sitter AST extraction and RLS persistence."""
 
 import hashlib
+import logging
 import math
 import subprocess
 import time
@@ -23,6 +24,8 @@ from context_scout.db.repositories import (
     PostgresRLSRepository,
 )
 from context_scout.schemas.contracts import PrincipalContext
+
+logger = logging.getLogger(__name__)
 
 CODE_EXTENSIONS: Final[set[str]] = {
     ".py",
@@ -179,8 +182,13 @@ def _resolve_commit_sha(repo_dir: Path, ref: str = "HEAD") -> str:
                                     cand = line.split()[0]
                                     if len(cand) == 40:
                                         return cand
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Direct .git ref lookup failed for %s (%s): %s; falling back to git rev-parse",
+                ref,
+                type(exc).__name__,
+                exc,
+            )
 
     rev_cmd = subprocess.run(
         ["git", "rev-parse", ref],
@@ -341,8 +349,13 @@ class GitMerkleIndexer:
                             if tree.get(rel_part) != wt_blob:
                                 tree[rel_part] = wt_blob
                                 dirty_mutations.append(f"M:{rel_part}:{wt_blob}")
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to hash working-tree file %s (%s): %s",
+                                rel_part,
+                                type(exc).__name__,
+                                exc,
+                            )
                 if dirty_mutations:
                     wt_digest = hashlib.sha1(
                         "|".join(sorted(dirty_mutations)).encode("utf-8")
@@ -436,8 +449,13 @@ class GitMerkleIndexer:
         if prefer_working_tree and disk_file.is_file():
             try:
                 return disk_file.read_text(encoding="utf-8", errors="replace").replace("\x00", "")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "Working-tree read failed for %s (%s): %s; falling back to git cat-file",
+                    file_path,
+                    type(exc).__name__,
+                    exc,
+                )
         if blob_sha:
             proc = subprocess.run(
                 ["git", "-C", str(repo_dir), "cat-file", "-p", blob_sha],
@@ -1377,8 +1395,13 @@ def sync_tracked_in_memory_repos(
                 isolate_by_commit=False,
             )
             results.append(st)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Incremental repo sync skipped %s (%s): %s",
+                repo_dir,
+                type(exc).__name__,
+                exc,
+            )
     return results
 
 

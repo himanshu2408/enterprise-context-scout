@@ -1,6 +1,7 @@
 """RLS-enforced repositories and 3-way Normalized RRF search (M1 Foundation)."""
 
 import json
+import logging
 import math
 from collections import Counter
 from datetime import date, datetime
@@ -29,6 +30,8 @@ from context_scout.schemas.contracts import (
     PrincipalContext,
     compute_normalized_rrf,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
@@ -1415,7 +1418,13 @@ class PostgresRLSRepository:
         for fid in file_ids:
             try:
                 clean_ids.append(str(UUID(str(fid))))
-            except ValueError:
+            except ValueError as exc:
+                logger.debug(
+                    "Ignoring malformed file_id %r (%s): %s",
+                    fid,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
         if not clean_ids:
             return []
@@ -2151,7 +2160,13 @@ class InMemoryRLSRepository:
         for fid in file_ids:
             try:
                 target_ids.add(fid if isinstance(fid, UUID) else UUID(str(fid)))
-            except ValueError:
+            except ValueError as exc:
+                logger.debug(
+                    "Ignoring malformed file_id %r (%s): %s",
+                    fid,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
         if not target_ids:
             return []

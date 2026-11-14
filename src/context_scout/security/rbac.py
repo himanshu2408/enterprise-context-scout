@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -11,6 +12,8 @@ from psycopg import Connection
 
 from context_scout.db.session import RLSConnectionManager
 from context_scout.schemas.contracts import PrincipalContext
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from context_scout.agents.domain_registry import DomainRegistry
@@ -151,8 +154,12 @@ class DomainAuthorizationGate:
                 elif manifest.mcp_read_tools_allowed:
                     prefix = manifest.mcp_read_tools_allowed[0].split(":")[0]
                     return f"{prefix}:{tool_name}"
-            except KeyError:
-                pass
+            except KeyError as exc:
+                logger.debug(
+                    "Domain %r not found in DomainRegistry during tool canonicalization (%s)",
+                    domain_id,
+                    type(exc).__name__,
+                )
 
         return tool_name
 
@@ -160,7 +167,13 @@ class DomainAuthorizationGate:
         """Checks if a tool is permitted for the given domain."""
         try:
             manifest = self._registry.get(domain_id)
-        except KeyError:
+        except KeyError as exc:
+            logger.debug(
+                "Denying tool %r: domain %r not registered (%s)",
+                tool_name,
+                domain_id,
+                type(exc).__name__,
+            )
             return False
 
         canonical = self.canonicalize_tool_name(domain_id, tool_name)
@@ -189,7 +202,12 @@ class DomainAuthorizationGate:
         if not self.is_tool_allowed(domain_id, tool_name):
             try:
                 allowed = self._registry.get(domain_id).mcp_read_tools_allowed
-            except KeyError:
+            except KeyError as exc:
+                logger.debug(
+                    "No tool allow-list registered for domain %r (%s)",
+                    domain_id,
+                    type(exc).__name__,
+                )
                 allowed = []
             raise DomainToolAccessDeniedError(
                 f"Tool '{tool_name}' is not authorized for domain '{domain_id}'. "

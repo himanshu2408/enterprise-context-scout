@@ -61,9 +61,13 @@ class IndexingWorker:
         try:
             signal.signal(signal.SIGINT, _handle_signal)
             signal.signal(signal.SIGTERM, _handle_signal)
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError) as exc:
             # Happens in secondary threads during testing
-            pass
+            logger.debug(
+                "Skipping signal handler registration outside main thread (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
 
     def run_once(self) -> bool:
         """Attempts to claim and execute a single task. Returns True if task processed."""

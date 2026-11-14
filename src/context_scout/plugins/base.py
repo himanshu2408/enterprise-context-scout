@@ -118,3 +118,109 @@ class SourceConnectorPlugin(Protocol):
     def mirror_permissions(self, container_key: str) -> list[str]:
         """Maps container or user identity into PostgreSQL RLS allowed_scopes."""
         ...
+
+
+@runtime_checkable
+class DomainPlugin(Protocol):
+    """Protocol for domain-specific heuristics, prompts, seed data, and evaluation specs."""
+
+    @property
+    def domain_id(self) -> str:
+        """Primary canonical identifier for this domain plugin."""
+        ...
+
+    def supported_domain_ids(self) -> tuple[str, ...]:
+        """All domain IDs (code, research, federated) handled by this plugin."""
+        ...
+
+    def get_role_domain_ids(self) -> dict[str, str]:
+        """Mapping of abstract roles ('code', 'research', 'federated') to domain IDs."""
+        ...
+
+    def get_default_scopes(self) -> list[str]:
+        """Default principal scopes associated with this domain pack."""
+        ...
+
+    def get_adapter_specs(self) -> list[dict[str, str]]:
+        """Adapter specifications (domain_id, adapter_rel_path, label, role) for tuning/evals."""
+        ...
+
+    def is_federated_domain(self, domain_id: str) -> bool:
+        """Returns True if domain_id represents this plugin's federated coordinator."""
+        ...
+
+    def is_research_domain(self, domain_id: str) -> bool:
+        """Returns True if domain_id represents a document/research synthesis domain."""
+        ...
+
+    def should_auto_route_research(self, prompt: str, domain_id: str) -> bool:
+        """Returns True if a code-domain prompt should auto-route through research synthesis."""
+        ...
+
+    def infer_friction_label(self, market_scope: str) -> str:
+        """Infers domain-specific contextual header annotation from market scope string."""
+        ...
+
+    def infer_market_scopes(self, prompt: str) -> list[Any]:
+        """Infers target market/regime enums from a user prompt."""
+        ...
+
+    def synthesize_research_brief(
+        self,
+        user_prompt: str,
+        domain_id: str,
+        chunks: list[Any],
+        verified_citations: list[Any],
+    ) -> Any:
+        """Synthesizes a domain-specific structured research brief from verified chunks."""
+        ...
+
+    def extract_brief_metadata(self, brief: Any) -> dict[str, Any]:
+        """Extracts neutral metadata dict from a domain-specific research brief."""
+        ...
+
+    def validate_research_brief(
+        self,
+        brief: Any,
+        doc_chunks: list[Any],
+    ) -> tuple[bool, str]:
+        """Validates domain-specific business rules on a research brief."""
+        ...
+
+    def build_distillation_prompt_and_brief(
+        self,
+        domain_id: str,
+        doc_id: str,
+        title: str,
+        sec_head: str,
+        quote: str,
+        chk_id: str,
+        manifest: dict[str, Any],
+    ) -> tuple[str, str]:
+        """Builds a training prompt and structured brief JSON for CLI custom distillation."""
+        ...
+
+    def get_demo_seed_payloads(self) -> dict[str, Any]:
+        """Returns domain-specific demo code/doc seed records and fallback identifiers."""
+        ...
+
+    def get_tuning_specs(self) -> dict[str, Any]:
+        """Returns domain-specific distillation, training, and benchmark metadata."""
+        ...
+
+    def build_research_distillation_sample(
+        self,
+        domain_id: str,
+        target_chunk: Any,
+        quote_text: str,
+        rng: Any,
+    ) -> dict[str, Any]:
+        """Builds valid/invalid brief payloads and prompts for teacher distillation."""
+        ...
+
+    def verify_research_brief_output(
+        self,
+        raw_output: str,
+    ) -> tuple[bool, list[str], list[str]]:
+        """Validates raw research brief JSON output and returns (is_valid, doc_ids, titles)."""
+        ...

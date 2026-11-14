@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from datetime import date
 from typing import Any, Final
 from uuid import UUID
@@ -23,6 +24,8 @@ from context_scout.security.rbac import (
     scoped_db_session,
     validate_tool_call_arguments,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_PAYLOAD_ITEMS: Final[int] = 10
 MAX_PAYLOAD_BYTES: Final[int] = 32768  # 32 KB hard serialized JSON cap
@@ -317,7 +320,13 @@ class PostgresScoutGraphAdapter:
         for fid in file_ids:
             try:
                 valid_uuids.append(str(UUID(str(fid))))
-            except ValueError:
+            except ValueError as exc:
+                logger.debug(
+                    "Skipping invalid code file UUID %r (%s): %s",
+                    fid,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
         if not valid_uuids:
             return []
@@ -564,7 +573,13 @@ class PostgresScoutGraphAdapter:
         for cid in chunk_ids:
             try:
                 valid_uuids.append(str(UUID(str(cid))))
-            except ValueError:
+            except ValueError as exc:
+                logger.debug(
+                    "Skipping invalid doc chunk UUID %r (%s): %s",
+                    cid,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
         if not valid_uuids:
             return []

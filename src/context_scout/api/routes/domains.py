@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -15,6 +16,7 @@ from context_scout.api.dependencies import (
 )
 from context_scout.api.schemas import DomainDetail, DomainsResponse
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Domains"])
 
 
@@ -44,8 +46,13 @@ def list_domains(
                     with open(candidate, encoding="utf-8") as f:
                         training_metrics = json.load(f)
                     break
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Failed loading training metrics from %s (%s): %s",
+                        candidate,
+                        type(exc).__name__,
+                        exc,
+                    )
 
         domain_details.append(
             DomainDetail(

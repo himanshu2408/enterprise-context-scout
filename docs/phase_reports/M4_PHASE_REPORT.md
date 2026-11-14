@@ -1,5 +1,11 @@
 # Milestone 4 Phase Report: Deterministic Abstention, Live PostgreSQL 17 Preflight Gates & Zero-Spend Verification
 
+> **[RETRACTION / CORRECTION — 2026-11-14]**
+> Earlier claims in this report are formally corrected and relabelled:
+> - **Synthetic Fixture Counts vs. Empirical Benchmarks:** Reported `300/300` (`N=300, k=300`) abstention and EVAL-01/EVAL-04 numbers were **synthetic unit/logic regression checks** over constructed fixtures—NOT empirical real-world corpus benchmarks—and must not be cited as statistical production readiness proof.
+> - **Retracted Environment & Hygiene Claims:** Earlier `"tree clean"`, `"DB untouched"`, and `"tested on PostgreSQL"` claims are retracted where suites ran against `InMemoryRLSRepository` or touched the shared dev database (`PA-F`), and Rule `E16` domain neutrality remained incomplete in core `agents/`, `api/`, `evals/`, and `tuning/` modules until the 2026-11-14 remediation (`PA-G`).
+> - **Parser Note (`PA-C`):** References to polyglot AST checks prior to Critical C relied on regex-based language plugins rather than tree-sitter grammars.
+
 **Milestone:** M4 (Deterministic 6-Check Preflight Gates, Dynamic Clopper-Pearson Abstention Bounds, Rule E16 Multi-Tenant Isolation & Live PostgreSQL 17 Verification)  
 **Status:** COMPLETE (100% Unanimous Consensus: Auditor CLEAN, Reviewers 1–2 APPROVE, Challengers 1–2 APPROVE, Gate 4 PASS)  
 **Verification Record:** 13 Live Postgres Benchmark Tests, 18 Preflight Gate Tests, 13 Workflow Tests, 34 Adversarial Challenger Tests, 340 E2E Tests, Guard 17 Natural-Language Regression Test (419 Total Empirical Tests Passed), 0 Ruff Violations across 190 files  

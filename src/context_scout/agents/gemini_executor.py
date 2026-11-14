@@ -493,8 +493,11 @@ class GeminiImplementationExecutor:
                 from google.oauth2 import credentials as oauth2_creds
 
                 self.credentials = oauth2_creds.Credentials(token=self.service_token)
-            except ImportError:
-                pass
+            except ImportError as exc:
+                logger.debug(
+                    "google.oauth2.credentials unavailable (%s); continuing without ADC wrapper",
+                    type(exc).__name__,
+                )
 
         # Optional backwards-compatibility API key
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
@@ -726,7 +729,13 @@ class GeminiImplementationExecutor:
                     continue
                 try:
                     text = p.read_text(encoding="utf-8")
-                except UnicodeDecodeError:
+                except UnicodeDecodeError as exc:
+                    logger.debug(
+                        "Skipping non-UTF-8 file %s during miss search (%s): %s",
+                        p,
+                        type(exc).__name__,
+                        exc,
+                    )
                     continue
                 if request.missing_symbol in text:
                     resolved_file = str(p.relative_to(repo_root))

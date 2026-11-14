@@ -6,7 +6,7 @@ import logging
 import threading
 from typing import ClassVar
 
-from context_scout.plugins.base import LanguagePlugin, SourceConnectorPlugin
+from context_scout.plugins.base import DomainPlugin, LanguagePlugin, SourceConnectorPlugin
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,7 @@ class PluginRegistry:
     _specialized_plugins: ClassVar[list[tuple[int, LanguagePlugin]]] = []
     _extension_map: ClassVar[dict[str, LanguagePlugin]] = {}
     _connector_plugins: ClassVar[dict[str, SourceConnectorPlugin]] = {}
+    _domain_plugins: ClassVar[dict[str, DomainPlugin]] = {}
     _unregistered_languages: ClassVar[set[str]] = set()
     _initialized: ClassVar[bool] = False
 
@@ -73,6 +74,41 @@ class PluginRegistry:
             key = getattr(plugin, "source_id", getattr(plugin, "source_type", "")).lower()
             cls._connector_plugins[key] = plugin
             logger.debug("Registered connector plugin '%s'", key)
+
+    @classmethod
+    def register_domain(cls, plugin: DomainPlugin) -> None:
+        """Registers a domain plugin for one or more domain identifiers."""
+        with cls._lock:
+            for d_id in plugin.supported_domain_ids():
+                cls._domain_plugins[d_id.lower()] = plugin
+            cls._domain_plugins[plugin.domain_id.lower()] = plugin
+            logger.debug("Registered domain plugin '%s'", plugin.domain_id)
+
+    @classmethod
+    def get_domain_plugin(cls, domain_id: str) -> DomainPlugin | None:
+        """Retrieves a registered domain plugin handling domain_id."""
+        cls._ensure_initialized()
+        with cls._lock:
+            return cls._domain_plugins.get(domain_id.lower())
+
+    @classmethod
+    def get_primary_domain_plugin(cls) -> DomainPlugin | None:
+        """Returns the first registered domain plugin if any."""
+        cls._ensure_initialized()
+        with cls._lock:
+            for plugin in cls._domain_plugins.values():
+                return plugin
+            return None
+
+    @classmethod
+    def list_domain_plugins(cls) -> list[DomainPlugin]:
+        """Returns unique registered domain plugin instances."""
+        cls._ensure_initialized()
+        with cls._lock:
+            seen: dict[int, DomainPlugin] = {}
+            for plugin in cls._domain_plugins.values():
+                seen[id(plugin)] = plugin
+            return list(seen.values())
 
     @classmethod
     def get_language_plugin(cls, language_id: str) -> LanguagePlugin | None:
@@ -151,6 +187,7 @@ class PluginRegistry:
             cls._specialized_plugins.clear()
             cls._extension_map.clear()
             cls._connector_plugins.clear()
+            cls._domain_plugins.clear()
             cls._unregistered_languages.clear()
             cls._initialized = False
 
@@ -223,3 +260,10 @@ class PluginRegistry:
             )
         except ImportError as err:
             logger.debug("GitLabConnectorPlugin not loaded: %s", err)
+
+        try:
+            from context_scout.plugins.domains.finance import FinanceDomainPlugin
+
+            cls.register_domain(FinanceDomainPlugin())
+        except ImportError as err:
+            logger.debug("FinanceDomainPlugin not loaded: %s", err)

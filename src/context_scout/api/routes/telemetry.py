@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -19,6 +20,7 @@ from context_scout.api.schemas import (
 from context_scout.db.repositories import InMemoryRLSRepository
 from context_scout.schemas.contracts import ExecutionTelemetryRecord
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Telemetry"])
 
 
@@ -36,7 +38,13 @@ def get_roi_metrics(
         try:
             with open(m6_path, encoding="utf-8") as f:
                 m6_report = json.load(f)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Failed loading M6 eval report from %s (%s): %s",
+                m6_path,
+                type(exc).__name__,
+                exc,
+            )
             m6_report = None
 
     # Load Milestone 7 QLoRA Benchmark Report
@@ -46,7 +54,13 @@ def get_roi_metrics(
         try:
             with open(m7_path, encoding="utf-8") as f:
                 m7_report = json.load(f)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Failed loading M7 benchmark report from %s (%s): %s",
+                m7_path,
+                type(exc).__name__,
+                exc,
+            )
             m7_report = None
 
     # Retrieve live execution telemetry records (PostgreSQL 17 or InMemoryRLSRepository)
@@ -83,8 +97,12 @@ def get_roi_metrics(
                     pg_pack_tokens = int(row[2])
                     pg_saved_tokens = int(row[3])
                     pg_usd_saved = float(row[4])
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "PostgreSQL telemetry ROI aggregation unavailable, using fallback (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
 
     # Baseline defaults from evaluation benchmarks
     base_queries = 7

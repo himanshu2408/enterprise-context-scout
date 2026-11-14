@@ -485,8 +485,8 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
                             tex_files[member.name] = raw_member.decode("utf-8")
                         except UnicodeDecodeError:
                             tex_files[member.name] = raw_member.decode("latin-1", errors="replace")
-    except (tarfile.TarError, gzip.BadGzipFile, EOFError, OSError, zlib.error):
-        pass
+    except (tarfile.TarError, gzip.BadGzipFile, EOFError, OSError, zlib.error) as exc:
+        logger.debug("Archive is not a valid tar bundle (%s): %s", type(exc).__name__, exc)
 
     # 2. If no tex files found via tar, try standalone gzip decompression
     if not tex_files:
@@ -506,7 +506,12 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
                                     tex_files[member.name] = raw_member.decode(
                                         "latin-1", errors="replace"
                                     )
-            except (tarfile.TarError, OSError, EOFError):
+            except (tarfile.TarError, OSError, EOFError) as exc:
+                logger.debug(
+                    "Gzipped LaTeX payload is not a nested tar archive (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
                 # Single standalone .tex file
                 try:
                     text = decompressed.decode("utf-8")
@@ -514,8 +519,12 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
                     text = decompressed.decode("latin-1", errors="replace")
                 if "\\documentclass" in text or "\\begin{document}" in text or "%" in text:
                     return text
-        except (gzip.BadGzipFile, OSError, UnicodeDecodeError, EOFError, zlib.error):
-            pass
+        except (gzip.BadGzipFile, OSError, UnicodeDecodeError, EOFError, zlib.error) as exc:
+            logger.debug(
+                "Standalone gzip LaTeX decompression skipped (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
 
     if not tex_files:
         # Check if raw_bytes was already uncompressed text
@@ -523,8 +532,8 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
             plain = raw_bytes.decode("utf-8")
             if "\\documentclass" in plain or "\\begin{document}" in plain:
                 return plain
-        except UnicodeDecodeError:
-            pass
+        except UnicodeDecodeError as exc:
+            logger.debug("Raw LaTeX payload is not UTF-8 text (%s): %s", type(exc).__name__, exc)
         return None
 
     # 3. Identify root .tex file (scoring out journal guides/templates in subdirectories)
@@ -631,7 +640,13 @@ def parse_arxiv_atom_feed(xml_text: str, market_scope: MarketRegime) -> list[Har
             pub_date = (
                 date.fromisoformat(pub_text[:10]) if len(pub_text) >= 10 else date(2024, 1, 1)
             )
-        except ValueError:
+        except ValueError as exc:
+            logger.debug(
+                "Invalid arXiv published date %r (%s): %s",
+                pub_text,
+                type(exc).__name__,
+                exc,
+            )
             pub_date = date(2024, 1, 1)
 
         authors: list[str] = []
@@ -693,7 +708,13 @@ def parse_openalex_response(
         pub_date_str = str(item.get("publication_date", ""))
         try:
             pub_date = date.fromisoformat(pub_date_str) if pub_date_str else date(2024, 1, 1)
-        except ValueError:
+        except ValueError as exc:
+            logger.debug(
+                "Invalid OpenAlex publication date %r (%s): %s",
+                pub_date_str,
+                type(exc).__name__,
+                exc,
+            )
             pub_date = date(2024, 1, 1)
 
         authorships = item.get("authorships")
@@ -958,8 +979,13 @@ class HttpPaperHarvesterClient:
                             raw_tex_oa = unpack_latex_archive(data)
                             if raw_tex_oa:
                                 break
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug(
+                            "arXiv e-print fallback failed for %s (%s): %s",
+                            arxiv_id,
+                            type(exc).__name__,
+                            exc,
+                        )
 
                     if not raw_tex_oa and not raw_pdf_oa:
                         try:
@@ -972,8 +998,13 @@ class HttpPaperHarvesterClient:
                                 if data.startswith(b"%PDF"):
                                     raw_pdf_oa = data
                                     break
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug(
+                                "arXiv PDF fallback failed for %s (%s): %s",
+                                arxiv_id,
+                                type(exc).__name__,
+                                exc,
+                            )
 
                 try:
                     req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
@@ -982,7 +1013,13 @@ class HttpPaperHarvesterClient:
                         if pdf_bytes.startswith(b"%PDF"):
                             raw_pdf_oa = pdf_bytes
                             break
-                except Exception:
+                except Exception as exc:
+                    logger.debug(
+                        "Open-access PDF fetch failed for %s (%s): %s",
+                        url,
+                        type(exc).__name__,
+                        exc,
+                    )
                     continue
 
             if raw_tex_oa or raw_pdf_oa:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import sys
 import uuid
@@ -35,19 +36,19 @@ from context_scout.ast_engine.extractor import ASTExtractor
 from context_scout.ast_engine.models import ParsedEdge, ParsedSymbol
 from context_scout.config import ScoutSettings, detect_hardware_profile
 from context_scout.db.repositories import InMemoryRLSRepository
+from context_scout.plugins.registry import PluginRegistry
 from context_scout.schemas.contracts import (
     CodeSlicePointer,
     DocCitationSpan,
     DomainKnowledgeBrief,
-    FrictionVerdict,
     ImplementationContextPack,
-    MarketRegime,
     ModificationIntent,
     PrincipalContext,
-    QuantStrategyBrief,
     RoleType,
 )
 from context_scout.tuning.train_mlx_lora import LocalQLoRATrainer
+
+logger = logging.getLogger(__name__)
 
 
 def cmd_hardware() -> int:
@@ -84,7 +85,10 @@ def cmd_init_domain(
     adapter_dir.mkdir(parents=True, exist_ok=True)
 
     is_code = kind == "code"
-    is_quant = kind == "quant" or domain_id == "quant_research_scout"
+    domain_plugin = PluginRegistry.get_domain_plugin(domain_id)
+    is_quant = kind == "quant" or (
+        domain_plugin is not None and domain_plugin.is_research_domain(domain_id)
+    )
     is_generic_knowledge = kind in ("knowledge", "document")
     resolved_name = display_name or f"{domain_id.replace('_', ' ').title()} ({kind.title()} Scout)"
 
@@ -162,8 +166,13 @@ def _resolve_repo_name_for_path(cf: Path, source_dir: Path, domain_id: str) -> s
             top_dir = source_dir / rel_parts[0]
             if (top_dir / ".git").exists() or (top_dir / "pyproject.toml").exists():
                 return rel_parts[0]
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(
+            "Unable to resolve relative repo name for %s (%s): %s",
+            cf,
+            type(exc).__name__,
+            exc,
+        )
     return domain_id
 
 
@@ -284,7 +293,13 @@ def cmd_distill_custom_domain(
                 if b"\x00" in raw_bytes[:8192]:
                     continue
                 text = raw_bytes.decode("utf-8")
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Skipping unreadable code file %s during distillation (%s): %s",
+                    cf,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
 
             rel = str(cf.relative_to(source_dir)) if cf.is_relative_to(source_dir) else cf.name
@@ -329,7 +344,13 @@ def cmd_distill_custom_domain(
                     language=lang,
                     file_path=repo_rel_path,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "AST extraction failed for %s during distillation (%s): %s",
+                    repo_rel_path,
+                    type(exc).__name__,
+                    exc,
+                )
                 parsed_syms, parsed_edges = [], []
 
             if parsed_syms:
@@ -544,7 +565,13 @@ def cmd_distill_custom_domain(
                 text = extract_document_text(df)
                 raw_doc_bytes = df.read_bytes()
                 doc_blob_sha = hashlib.sha1(raw_doc_bytes).hexdigest()
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Skipping unreadable code file %s during distillation (%s): %s",
+                    cf,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
             if not text.strip():
                 continue
@@ -591,7 +618,7 @@ def cmd_distill_custom_domain(
                     "doc_id": f"{domain_id}:{df.stem}",
                     "doc_title": doc_title,
                     "source_uri": f"urn:{domain_id}:{rel_doc}",
-                    "market_scope": MarketRegime.GLOBAL_MULTI.value,
+                    "market_scope": "GLOBAL_MULTI",
                     "authority_weight": 1.0,
                     "section_heading": section_heading,
                     "contextual_header": f"{doc_title} — {section_heading}",
@@ -613,24 +640,33 @@ def cmd_distill_custom_domain(
                 (f"{domain_id}:{df.stem}", doc_title, section_heading, quote, chk_uuid)
             )
 
-        is_quant_domain = domain_id == "quant_research_scout" or bool(
-            (manifest.get("authority_rules") or {}).get("require_transaction_cost_check")
-            and domain_id.startswith("quant")
+        distill_plugin = (
+            PluginRegistry.get_domain_plugin(domain_id)
+            or PluginRegistry.get_primary_domain_plugin()
         )
-        use_knowledge_contract = manifest.get("output_contract") == "DomainKnowledgeBrief"
 
         for i in range(num_samples):
             doc_id, title, sec_head, quote, chk_id = doc_passages[i % len(doc_passages)]
-            doc_slug = doc_id.split(":")[-1]
-            cit = DocCitationSpan(
-                chunk_id=chk_id,
-                doc_id=doc_id,
-                doc_title=title,
-                source_uri=f"urn:{domain_id}:{doc_slug}",
-                section_heading=sec_head,
-                verbatim_quote=quote,
-            )
-            if use_knowledge_contract:
+            if distill_plugin is not None:
+                user_prompt, assistant_json = distill_plugin.build_distillation_prompt_and_brief(
+                    domain_id=domain_id,
+                    doc_id=doc_id,
+                    title=title,
+                    sec_head=sec_head,
+                    quote=quote,
+                    chk_id=chk_id,
+                    manifest=manifest,
+                )
+            else:
+                doc_slug = doc_id.split(":")[-1]
+                cit = DocCitationSpan(
+                    chunk_id=chk_id,
+                    doc_id=doc_id,
+                    doc_title=title,
+                    source_uri=f"urn:{domain_id}:{doc_slug}",
+                    section_heading=sec_head,
+                    verbatim_quote=quote,
+                )
                 kb_brief = DomainKnowledgeBrief(
                     brief_title=f"{title} — {sec_head}",
                     domain_id=domain_id,
@@ -648,40 +684,11 @@ def cmd_distill_custom_domain(
                     verified_citations=[cit],
                 )
                 assistant_json = kb_brief.model_dump_json(indent=2)
-                strategy_label = kb_brief.brief_title
-            else:
-                brief = QuantStrategyBrief(
-                    strategy_name=f"{title} — {sec_head}",
-                    target_markets=[MarketRegime.GLOBAL_MULTI],
-                    is_intraday_futures=False,
-                    mathematical_signal_latex=r"E[Y \mid X] = \alpha + \beta X",
-                    entry_exit_rules=[quote],
-                    sample_period_years="2020-2026",
-                    reported_sharpe_ratio=1.75 if is_quant_domain else None,
-                    reported_max_drawdown_pct=8.5 if is_quant_domain else None,
-                    transaction_cost_bps_assumed=12.0 if is_quant_domain else None,
-                    friction_verdict=FrictionVerdict.REALISTIC_FRICTION,
-                    market_specific_caveats=[f"Grounded in {doc_id} ({sec_head})"],
-                    known_failure_regimes=["Out-of-distribution domain regime shift"],
-                    verified_citations=[cit],
-                )
-                assistant_json = brief.model_dump_json(indent=2)
-                strategy_label = brief.strategy_name
-
-            if is_quant_domain:
-                user_prompt = (
-                    f"Synthesize a verified research brief for `{title}`.\n"
-                    f"Retrieved Corpus Chunk: [chunk_id={chk_id} | doc_id={doc_id} | "
-                    f"title={title} | uri=urn:{domain_id}:{doc_slug} | section={sec_head} | "
-                    f"strategy={strategy_label} | sharpe=1.75 | mdd=8.5 | bps=12.0 | "
-                    f"quote={json.dumps(quote)}]"
-                )
-            else:
                 user_prompt = (
                     f"Synthesize a verified domain brief for `{title}`.\n"
                     f"Retrieved Corpus Chunk: [chunk_id={chk_id} | doc_id={doc_id} | "
                     f"title={title} | uri=urn:{domain_id}:{doc_slug} | section={sec_head} | "
-                    f"topic={strategy_label} | quote={json.dumps(quote)}]"
+                    f"topic={kb_brief.brief_title} | quote={json.dumps(quote)}]"
                 )
             examples.append(
                 {
@@ -798,8 +805,13 @@ def cmd_query_domain(
                 for sc in cf.get("allowed_scopes", []):
                     if sc not in allowed_scopes:
                         allowed_scopes.append(str(sc))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Failed loading corpus scopes from %s (%s): %s",
+                corpus_index_path,
+                type(exc).__name__,
+                exc,
+            )
 
     registry = DomainRegistry(domains_dir=domains_dir)
     registry.load_all()
@@ -1403,7 +1415,12 @@ def cmd_benchmark_domain(
                             res = res.model_copy(update={"code_slices": reordered})
                     else:
                         qlora_valid = False
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "QLoRA benchmark inference failed (%s): %s",
+                        type(exc).__name__,
+                        exc,
+                    )
                     qlora_ms = round((time.perf_counter() - tq0) * 1000.0, 2)
                     qlora_valid = False
                 qlora_latencies_ms.append(qlora_ms)

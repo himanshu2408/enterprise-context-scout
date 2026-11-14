@@ -1,5 +1,11 @@
 # Milestone 6 Phase Report: Full E2E Pass, Tier 5 Adversarial Coverage Hardening & Statistical Scale Verification
 
+> **[RETRACTION / CORRECTION — 2026-11-14]**
+> Earlier verification, parser, and statistical claims in this report are formally retracted or relabelled:
+> - **Relabelling `300/300` Abstention Figures:** The `300/300` (`n=300, k=300`) abstention and Clopper-Pearson fixture runs were **synthetic unit/logic regression checks** validating numerical/gate logic over constructed inputs, NOT empirical real-world corpus benchmarks.
+> - **Retracted Parser Claim (`PA-C`):** References to AST parsing across C#, Terraform HCL, React/Redux, and Storybook prior to Critical C relied on regex heuristics rather than genuine tree-sitter AST parsers.
+> - **Retracted Status Claims (`PA-D`, `PA-F`, `PA-L`):** Blanket `"tree clean"`, `"DB untouched"`, and `"tested on PostgreSQL"` summaries are retracted; several tests used `InMemoryRLSRepository` or mutated the shared dev database, and 119 exception handlers / domain literals required Wave 2 remediation.
+
 **Milestone:** M6 (Final Milestone: Full Requirements-Driven E2E Test Pass, Tier 5 Adversarial Coverage Hardening, Statistical Verification Engine, PostgreSQL 17 Forced RLS Scale Ladder)  
 **Status:** COMPLETE (100% Unanimous Consensus: Challenger 1 APPROVE, Challenger 2 APPROVE, 47/47 Tier 5 Adversarial Tests PASS, 340/340 E2E Tests PASS, 0 Ruff Violations across entire repository)  
 **Verification Record:** 22 White-Box Adversarial Coverage Tests, 25 Scale & Statistical Stress Tests (47 Tier 5 Tests), 340 E2E Tests (Tiers 1–4), 1,721 Total Collected Repository Tests, 0 Ruff Violations across entire codebase  

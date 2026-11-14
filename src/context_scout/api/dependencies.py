@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import base64
-import datetime
 import hashlib
 import hmac
 import json
@@ -25,13 +24,12 @@ from context_scout.config import ScoutSettings
 from context_scout.db.repositories import (
     ASTSymbolRecord,
     CodeFileRecord,
-    DocChunkRecord,
     InMemoryRLSRepository,
 )
 from context_scout.db.session import RLSConnectionManager
+from context_scout.plugins.registry import PluginRegistry
 from context_scout.schemas.contracts import (
     ImplementationContextPack,
-    MarketRegime,
     PrincipalContext,
     RoleType,
 )
@@ -453,20 +451,32 @@ def _populate_in_memory_repository(repo_root: Path) -> InMemoryRLSRepository:
         role=RoleType.ENGINEER,
         allowed_scopes=["public_eng", "public_quant", "quant_restricted", "audit:compliance"],
     )
+    primary_plugin = PluginRegistry.get_primary_domain_plugin()
+    code_domain_id = (
+        primary_plugin.get_role_domain_ids().get("code", "default")
+        if primary_plugin is not None
+        else "default"
+    )
 
     src_dir = repo_root / "src" / "context_scout"
     if src_dir.exists():
         for py_file in sorted(src_dir.rglob("*.py")):
             try:
                 content = py_file.read_text(encoding="utf-8")
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Skipping unreadable file %s during in-memory bootstrap (%s): %s",
+                    py_file,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
             rel_path = str(py_file.relative_to(repo_root))
             lines = content.splitlines()
             f_id = uuid.uuid4()
             rec = CodeFileRecord(
                 file_id=f_id,
-                domain_id="trading_code_scout",
+                domain_id=code_domain_id,
                 repo_name="enterprise-context-scout",
                 file_path=rel_path,
                 git_commit_sha="c0ffee123456",
@@ -492,7 +502,7 @@ def _populate_in_memory_repository(repo_root: Path) -> InMemoryRLSRepository:
                             ASTSymbolRecord(
                                 symbol_id=uuid.uuid4(),
                                 file_id=f_id,
-                                domain_id="trading_code_scout",
+                                domain_id=code_domain_id,
                                 qualified_name=q_name,
                                 symbol_kind="class",
                                 start_line=node.lineno,
@@ -503,7 +513,13 @@ def _populate_in_memory_repository(repo_root: Path) -> InMemoryRLSRepository:
                                 embedding=[0.05] * 768,
                             ),
                         )
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "AST parse failed for %s, falling back to regex class scan (%s): %s",
+                    rel_path,
+                    type(exc).__name__,
+                    exc,
+                )
                 for idx, line in enumerate(lines, start=1):
                     cls_match = re.match(r"^class\s+([A-Za-z0-9_]+)", line)
                     if cls_match:
@@ -514,7 +530,7 @@ def _populate_in_memory_repository(repo_root: Path) -> InMemoryRLSRepository:
                             ASTSymbolRecord(
                                 symbol_id=uuid.uuid4(),
                                 file_id=f_id,
-                                domain_id="trading_code_scout",
+                                domain_id=code_domain_id,
                                 qualified_name=q_name,
                                 symbol_kind="class",
                                 start_line=idx,
@@ -526,51 +542,10 @@ def _populate_in_memory_repository(repo_root: Path) -> InMemoryRLSRepository:
                             ),
                         )
 
-    # Seed research doc chunks for quant_research_scout
-    repo.insert_doc_chunk(
-        admin_principal,
-        DocChunkRecord(
-            chunk_id=uuid.uuid4(),
-            domain_id="quant_research_scout",
-            doc_id="arxiv:2606.31387",
-            doc_title="Signature-Based Optimal Execution for Statistical Arbitrage",
-            source_uri="urn:arxiv:2606.31387.pdf",
-            market_scope=MarketRegime.US_NYSE_NASDAQ,
-            published_date=datetime.date(2026, 6, 15),
-            authority_weight=1.0,
-            section_heading="Optimal Liquidation Trajectory",
-            contextual_header="Quantitative optimal execution analysis.",
-            verbatim_content=(
-                "Optimal execution requires balancing market impact and inventory risk. "
-                "Order flow imbalance exhibits mean reversion over sub-second horizons."
-            ),
-            metadata_json={},
-            allowed_scopes=["public_eng", "public_quant", "quant_restricted"],
-            embedding=[0.05] * 768,
-        ),
-    )
-    repo.insert_doc_chunk(
-        admin_principal,
-        DocChunkRecord(
-            chunk_id=uuid.uuid4(),
-            domain_id="quant_research_scout",
-            doc_id="arxiv:2607.12944",
-            doc_title="Microstructure Alpha in European Equities and XETRA Order Books",
-            source_uri="urn:arxiv:2607.12944.pdf",
-            market_scope=MarketRegime.GERMANY_XETRA_DAX,
-            published_date=datetime.date(2026, 7, 20),
-            authority_weight=1.0,
-            section_heading="Tick-Level Dynamics",
-            contextual_header="European microstructure alpha modeling.",
-            verbatim_content=(
-                "XETRA continuous trading auctions enforce a minimum round-trip friction floor. "
-                "Statistical arbitrage strategies must clear at least 10 bps to remain profitable."
-            ),
-            metadata_json={},
-            allowed_scopes=["public_eng", "public_quant", "quant_restricted"],
-            embedding=[0.05] * 768,
-        ),
-    )
+    for domain_plugin in PluginRegistry.list_domain_plugins():
+        seed_payload = domain_plugin.get_demo_seed_payloads()
+        for doc_rec in seed_payload.get("doc_chunks", []):
+            repo.insert_doc_chunk(admin_principal, doc_rec)
     return repo
 
 

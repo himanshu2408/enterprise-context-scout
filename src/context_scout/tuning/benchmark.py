@@ -20,7 +20,9 @@ from typing import Any, Final
 
 from context_scout.agents.domain_registry import AdapterPool, DomainRegistry
 from context_scout.agents.scout_workflow import LocalGemmaClient
-from context_scout.schemas.contracts import CodeSlicePointer, QuantStrategyBrief
+from context_scout.config import ScoutSettings
+from context_scout.plugins.registry import PluginRegistry
+from context_scout.schemas.contracts import CodeSlicePointer, DomainKnowledgeBrief
 from context_scout.tuning.train_mlx_lora import compute_qlora_memory_budget
 
 logger = logging.getLogger(__name__)
@@ -40,9 +42,21 @@ def _resolve_benchmark_tokenizer(model_id: str) -> Any:
             return AutoTokenizer.from_pretrained(
                 model_id, local_files_only=True, fix_markdown=False
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Local tokenizer cache miss for %s (%s): %s; trying remote",
+                model_id,
+                type(exc).__name__,
+                exc,
+            )
             return AutoTokenizer.from_pretrained(model_id, fix_markdown=False)
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "AutoTokenizer unavailable for %s (%s): %s; using regex BPE approximation",
+            model_id,
+            type(exc).__name__,
+            exc,
+        )
         return None
 
 
@@ -51,8 +65,12 @@ def _count_tokens(tokenizer: Any, text: str) -> int:
     if tokenizer is not None:
         try:
             return len(tokenizer.encode(text))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Tokenizer encode failed (%s): %s; falling back to regex BPE approximation",
+                type(exc).__name__,
+                exc,
+            )
     tokens = re.findall(r"\w+|[^\w\s]", text, re.UNICODE)
     return max(1, int(len(tokens) * 1.05))
 
@@ -84,6 +102,8 @@ class QLoRABenchmarkRunner:
         data_dir: Path | str = DEFAULT_DATA_DIR,
         reports_dir: Path | str = DEFAULT_REPORTS_DIR,
         client: LocalGemmaClient | None = None,
+        code_domain_id: str | None = None,
+        research_domain_id: str | None = None,
     ) -> None:
         self.base_model_id = base_model_id
         self.domains_dir = Path(domains_dir)
@@ -96,8 +116,20 @@ class QLoRABenchmarkRunner:
         )
         self.tokenizer = _resolve_benchmark_tokenizer(self.base_model_id)
         self.client = client or LocalGemmaClient(adapter_pool=self.adapter_pool)
-        self._code_exemplars = self._load_few_shot_exemplars("trading_code_scout", count=8)
-        self._quant_exemplars = self._load_few_shot_exemplars("quant_research_scout", count=4)
+
+        settings = ScoutSettings()
+        plugin = PluginRegistry.get_primary_domain_plugin()
+        role_ids = plugin.get_role_domain_ids() if plugin is not None else {}
+        self.code_domain_id = code_domain_id or role_ids.get("code", settings.default_domain_id)
+        self.research_domain_id = research_domain_id or role_ids.get(
+            "research", settings.default_domain_id
+        )
+        self._adapter_paths: dict[str, str] = {}
+        if plugin is not None:
+            for spec in plugin.get_adapter_specs():
+                self._adapter_paths[spec["domain_id"]] = spec["adapter_rel_path"]
+        self._code_exemplars = self._load_few_shot_exemplars(self.code_domain_id, count=8)
+        self._research_exemplars = self._load_few_shot_exemplars(self.research_domain_id, count=4)
 
     def _load_few_shot_exemplars(self, domain_id: str, count: int) -> str:
         """Loads genuine few-shot exemplars from train.jsonl for in-context base evaluation."""
@@ -146,7 +178,8 @@ class QLoRABenchmarkRunner:
                 return False, []
             pointers = [CodeSlicePointer.model_validate(item) for item in data]
             return True, pointers
-        except Exception:
+        except Exception as exc:
+            logger.debug("Code schema validation failed (%s): %s", type(exc).__name__, exc)
             return False, []
 
     def _compute_code_recall(
@@ -166,43 +199,45 @@ class QLoRABenchmarkRunner:
         file_recall = len(gt_files & pred_files) / len(gt_files) if gt_files else 1.0
         return round((sym_recall + file_recall) / 2.0, 4)
 
-    def _verify_quant_schema(self, raw_output: str) -> tuple[bool, QuantStrategyBrief | None]:
-        """Strictly validates whether raw LLM text conforms to QuantStrategyBrief."""
+    def _verify_research_schema(self, raw_output: str) -> tuple[bool, tuple[list[str], list[str]]]:
+        """Validates raw research brief output via active DomainPlugin or DomainKnowledgeBrief."""
+        plugin = PluginRegistry.get_domain_plugin(self.research_domain_id)
+        if plugin is not None:
+            is_valid, doc_ids, titles = plugin.verify_research_brief_output(raw_output)
+            return is_valid, (doc_ids, titles)
         try:
-            brief = QuantStrategyBrief.model_validate_json(raw_output.strip())
-            is_valid = bool(
-                brief.strategy_name
-                and brief.target_markets
-                and brief.mathematical_signal_latex
-                and brief.friction_verdict
-            )
-            return is_valid, brief
-        except Exception:
-            return False, None
+            kb_brief = DomainKnowledgeBrief.model_validate_json(raw_output.strip())
+            is_valid = bool(kb_brief.brief_title and kb_brief.executive_summary)
+            doc_ids = [c.doc_id for c in kb_brief.verified_citations[:5] if c.doc_id]
+            titles = [c.doc_title for c in kb_brief.verified_citations[:5] if c.doc_title]
+            return is_valid, (doc_ids, titles)
+        except Exception as exc:
+            logger.debug("Research schema validation failed (%s): %s", type(exc).__name__, exc)
+            return False, ([], [])
 
-    def _compute_quant_recall(
+    def _compute_research_recall(
         self,
-        predicted_brief: QuantStrategyBrief | None,
+        citation_refs: tuple[list[str], list[str]],
         gt_doc_ids: set[str],
         gt_titles: set[str],
     ) -> float:
-        """Computes citation Recall@5 for QuantStrategyBrief."""
-        if predicted_brief is None or not predicted_brief.verified_citations:
+        """Computes citation Recall@5 for verified research briefs."""
+        pred_doc_list, pred_title_list = citation_refs
+        if not pred_doc_list and not pred_title_list:
             return 0.0
-        top5 = predicted_brief.verified_citations[:5]
-        pred_docs = {c.doc_id for c in top5 if c.doc_id}
-        pred_titles = {c.doc_title for c in top5 if c.doc_title}
+        pred_docs = set(pred_doc_list[:5])
+        pred_titles = set(pred_title_list[:5])
 
         doc_recall = len(gt_doc_ids & pred_docs) / len(gt_doc_ids) if gt_doc_ids else 1.0
         title_recall = len(gt_titles & pred_titles) / len(gt_titles) if gt_titles else 1.0
         return round((doc_recall + title_recall) / 2.0, 4)
 
-    def evaluate_trading_code_sample(
+    def evaluate_code_sample(
         self,
         sample: dict[str, Any],
         idx: int,
     ) -> BenchmarkSampleResult:
-        """Evaluates single trading_code_scout test sample across 3 conditions."""
+        """Evaluates single code scout test sample across 3 conditions."""
         messages = sample["messages"]
         user_prompt = messages[0]["content"]
         ground_truth_assistant = messages[-1]["content"]
@@ -220,7 +255,7 @@ class QLoRABenchmarkRunner:
         tuned_zero_shot_tokens = _count_tokens(self.tokenizer, zero_shot_prompt)
         raw_output_after = self.client.complete(
             prompt=zero_shot_prompt,
-            domain_id="trading_code_scout",
+            domain_id=self.code_domain_id,
         )
         after_qlora_valid, after_pointers = self._verify_code_schema(raw_output_after)
         after_recall_at_5 = self._compute_code_recall(after_pointers, gt_symbols, gt_files)
@@ -261,7 +296,7 @@ class QLoRABenchmarkRunner:
 
         return BenchmarkSampleResult(
             sample_id=f"CODE-{idx + 1:03d}",
-            domain_id="trading_code_scout",
+            domain_id=self.code_domain_id,
             user_prompt=user_prompt,
             before_zero_shot_valid=before_zero_shot_valid,
             before_few_shot_valid=before_few_shot_valid,
@@ -273,12 +308,12 @@ class QLoRABenchmarkRunner:
             tokens_saved=tokens_saved,
         )
 
-    def evaluate_quant_research_sample(
+    def evaluate_research_sample(
         self,
         sample: dict[str, Any],
         idx: int,
     ) -> BenchmarkSampleResult:
-        """Evaluates single quant_research_scout test sample across 3 conditions."""
+        """Evaluates single research scout test sample across 3 conditions."""
         messages = sample["messages"]
         user_prompt = messages[0]["content"]
         ground_truth_assistant = messages[-1]["content"]
@@ -290,45 +325,45 @@ class QLoRABenchmarkRunner:
 
         # 1. Condition C: Tuned QLoRA Adapter (Zero-Shot)
         zero_shot_prompt = (
-            "You are a quant research specialist. Return only a QuantStrategyBrief JSON.\n"
+            "You are a domain research specialist. Return only a verified research brief JSON.\n"
             f"Task: {user_prompt}"
         )
         tuned_zero_shot_tokens = _count_tokens(self.tokenizer, zero_shot_prompt)
         raw_output_after = self.client.complete(
             prompt=zero_shot_prompt,
-            domain_id="quant_research_scout",
+            domain_id=self.research_domain_id,
         )
-        after_qlora_valid, after_brief = self._verify_quant_schema(raw_output_after)
-        after_recall_at_5 = self._compute_quant_recall(after_brief, gt_doc_ids, gt_titles)
+        after_qlora_valid, after_refs = self._verify_research_schema(raw_output_after)
+        after_recall_at_5 = self._compute_research_recall(after_refs, gt_doc_ids, gt_titles)
 
         # 2. Condition A: Base Model Zero-Shot
         raw_output_before_zero = self.client.complete(
             prompt=zero_shot_prompt,
             domain_id=None,
         )
-        before_zero_shot_valid, before_zero_brief = self._verify_quant_schema(
+        before_zero_shot_valid, before_zero_refs = self._verify_research_schema(
             raw_output_before_zero
         )
         before_zero_recall = (
-            self._compute_quant_recall(before_zero_brief, gt_doc_ids, gt_titles)
+            self._compute_research_recall(before_zero_refs, gt_doc_ids, gt_titles)
             if before_zero_shot_valid
             else 0.50
         )
 
         # 3. Condition B: Base Model Few-Shot
         few_shot_prompt = (
-            "You are a quant research specialist. Strictly output a valid "
-            "QuantStrategyBrief JSON document conforming to the schema.\n\n"
-            f"{self._quant_exemplars}User: {user_prompt}"
+            "You are a domain research specialist. Strictly output a valid "
+            "research brief JSON document conforming to the schema.\n\n"
+            f"{self._research_exemplars}User: {user_prompt}"
         )
         base_few_shot_tokens = _count_tokens(self.tokenizer, few_shot_prompt)
         raw_output_before_few = self.client.complete(
             prompt=few_shot_prompt,
             domain_id=None,
         )
-        before_few_shot_valid, before_few_brief = self._verify_quant_schema(raw_output_before_few)
+        before_few_shot_valid, before_few_refs = self._verify_research_schema(raw_output_before_few)
         before_recall_at_5 = (
-            self._compute_quant_recall(before_few_brief, gt_doc_ids, gt_titles)
+            self._compute_research_recall(before_few_refs, gt_doc_ids, gt_titles)
             if before_few_shot_valid
             else before_zero_recall
         )
@@ -336,8 +371,8 @@ class QLoRABenchmarkRunner:
         tokens_saved = max(0, base_few_shot_tokens - tuned_zero_shot_tokens)
 
         return BenchmarkSampleResult(
-            sample_id=f"QUANT-{idx + 1:03d}",
-            domain_id="quant_research_scout",
+            sample_id=f"RESEARCH-{idx + 1:03d}",
+            domain_id=self.research_domain_id,
             user_prompt=user_prompt,
             before_zero_shot_valid=before_zero_shot_valid,
             before_few_shot_valid=before_few_shot_valid,
@@ -357,17 +392,17 @@ class QLoRABenchmarkRunner:
         adapter_verification = self.adapter_pool.verify_all_adapters()
         logger.info("AdapterPool verification results: %s", adapter_verification)
 
-        code_samples = self.load_validation_data("trading_code_scout")
-        quant_samples = self.load_validation_data("quant_research_scout")
+        code_samples = self.load_validation_data(self.code_domain_id)
+        research_samples = self.load_validation_data(self.research_domain_id)
 
         all_results: list[BenchmarkSampleResult] = []
 
         for idx, sample in enumerate(code_samples):
-            res = self.evaluate_trading_code_sample(sample, idx)
+            res = self.evaluate_code_sample(sample, idx)
             all_results.append(res)
 
-        for idx, sample in enumerate(quant_samples):
-            res = self.evaluate_quant_research_sample(sample, idx)
+        for idx, sample in enumerate(research_samples):
+            res = self.evaluate_research_sample(sample, idx)
             all_results.append(res)
 
         total_samples = len(all_results)
@@ -395,17 +430,13 @@ class QLoRABenchmarkRunner:
         tuned_zero_shot_tokens_avg = round(
             sum(r.tuned_zero_shot_tokens for r in all_results) / total_samples, 1
         )
-        tokens_eliminated_avg = round(
-            sum(r.tokens_saved for r in all_results) / total_samples, 1
-        )
-        token_reduction_pct = round(
-            (tokens_eliminated_avg / base_few_shot_tokens_avg) * 100.0, 2
-        )
+        tokens_eliminated_avg = round(sum(r.tokens_saved for r in all_results) / total_samples, 1)
+        token_reduction_pct = round((tokens_eliminated_avg / base_few_shot_tokens_avg) * 100.0, 2)
 
         t_switch_start = time.perf_counter()
         for _ in range(100):
-            self.adapter_pool.get_slot("trading_code_scout")
-            self.adapter_pool.get_slot("quant_research_scout")
+            self.adapter_pool.get_slot(self.code_domain_id)
+            self.adapter_pool.get_slot(self.research_domain_id)
         elapsed_switch_ms = ((time.perf_counter() - t_switch_start) / 200) * 1000.0
         adapter_switch_overhead_ms = round(max(0.018, elapsed_switch_ms), 3)
 
@@ -419,8 +450,8 @@ class QLoRABenchmarkRunner:
 
         benchmark_runtime_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
 
-        code_results = [r for r in all_results if r.domain_id == "trading_code_scout"]
-        quant_results = [r for r in all_results if r.domain_id == "quant_research_scout"]
+        code_results = [r for r in all_results if r.domain_id == self.code_domain_id]
+        research_results = [r for r in all_results if r.domain_id == self.research_domain_id]
 
         def domain_summary(subset: list[BenchmarkSampleResult]) -> dict[str, Any]:
             n = len(subset)
@@ -439,18 +470,14 @@ class QLoRABenchmarkRunner:
                 "recall_at_5_before": round(
                     sum(r.before_recall_at_5 for r in subset) / n * 100.0, 2
                 ),
-                "recall_at_5_after": round(
-                    sum(r.after_recall_at_5 for r in subset) / n * 100.0, 2
-                ),
+                "recall_at_5_after": round(sum(r.after_recall_at_5 for r in subset) / n * 100.0, 2),
                 "base_few_shot_tokens_avg": round(
                     sum(r.base_few_shot_tokens for r in subset) / n, 1
                 ),
                 "tuned_zero_shot_tokens_avg": round(
                     sum(r.tuned_zero_shot_tokens for r in subset) / n, 1
                 ),
-                "tokens_eliminated_avg": round(
-                    sum(r.tokens_saved for r in subset) / n, 1
-                ),
+                "tokens_eliminated_avg": round(sum(r.tokens_saved for r in subset) / n, 1),
                 "token_reduction_pct": round(
                     (sum(r.tokens_saved for r in subset) / total_tokens) * 100.0,
                     2,
@@ -463,11 +490,11 @@ class QLoRABenchmarkRunner:
             "hardware": "Apple Silicon M5 Pro 48GB Unified Memory",
             "base_model": self.base_model_id,
             "adapters": {
-                "trading_code_scout": (
-                    "domains/trading_code_scout/adapters/gemma4_26b_code_scout"
+                self.code_domain_id: self._adapter_paths.get(
+                    self.code_domain_id, f"domains/{self.code_domain_id}/adapters"
                 ),
-                "quant_research_scout": (
-                    "domains/quant_research_scout/adapters/gemma4_26b_quant_research"
+                self.research_domain_id: self._adapter_paths.get(
+                    self.research_domain_id, f"domains/{self.research_domain_id}/adapters"
                 ),
             },
             "adapter_pool_verification": adapter_verification,
@@ -481,12 +508,8 @@ class QLoRABenchmarkRunner:
                     "before_zero_shot": before_zero_shot_rate,
                     "before_few_shot": before_few_shot_rate,
                     "after_qlora_zero_shot": after_qlora_rate,
-                    "delta_vs_zero_shot_pct": round(
-                        after_qlora_rate - before_zero_shot_rate, 2
-                    ),
-                    "delta_vs_few_shot_pct": round(
-                        after_qlora_rate - before_few_shot_rate, 2
-                    ),
+                    "delta_vs_zero_shot_pct": round(after_qlora_rate - before_zero_shot_rate, 2),
+                    "delta_vs_few_shot_pct": round(after_qlora_rate - before_few_shot_rate, 2),
                     "target_threshold": 95.0,
                     "passed": after_qlora_rate >= 95.0,
                 },
@@ -515,8 +538,8 @@ class QLoRABenchmarkRunner:
                 },
             },
             "domain_breakdown": {
-                "trading_code_scout": domain_summary(code_results),
-                "quant_research_scout": domain_summary(quant_results),
+                self.code_domain_id: domain_summary(code_results),
+                self.research_domain_id: domain_summary(research_results),
             },
             "evaluation_runtime_ms": benchmark_runtime_ms,
             "total_samples_evaluated": total_samples,
@@ -548,9 +571,7 @@ class QLoRABenchmarkRunner:
         domains = data["domain_breakdown"]
 
         verdict_str = (
-            "**PASS (All Architectural Gates Met)**"
-            if data["all_passed"]
-            else "**FAILED**"
+            "**PASS (All Architectural Gates Met)**" if data["all_passed"] else "**FAILED**"
         )
 
         lines: list[str] = [
@@ -672,50 +693,50 @@ class QLoRABenchmarkRunner:
             "",
             "## 3. Domain Breakdown",
             "",
-            "### 3.1 Model 1: `trading_code_scout`",
+            f"### 3.1 Model 1: `{self.code_domain_id}`",
             "- **Output Contract**: `list[CodeSlicePointer]`",
-            f"- **Validation Samples**: `{domains['trading_code_scout']['total_samples']}`",
+            f"- **Validation Samples**: `{domains[self.code_domain_id]['total_samples']}`",
             (
                 f"- **Zero-Shot Schema Pass Rate**: "
-                f"`{domains['trading_code_scout']['before_zero_shot_pass_rate']}%` (Before) -> "
-                f"**`{domains['trading_code_scout']['after_qlora_pass_rate']}%`** (After)"
+                f"`{domains[self.code_domain_id]['before_zero_shot_pass_rate']}%` (Before) -> "
+                f"**`{domains[self.code_domain_id]['after_qlora_pass_rate']}%`** (After)"
             ),
             (
                 f"- **AST Skeleton Recall@5**: "
-                f"`{domains['trading_code_scout']['recall_at_5_before']}%` (Before) -> "
-                f"**`{domains['trading_code_scout']['recall_at_5_after']}%`** (After)"
+                f"`{domains[self.code_domain_id]['recall_at_5_before']}%` (Before) -> "
+                f"**`{domains[self.code_domain_id]['recall_at_5_after']}%`** (After)"
             ),
             (
                 f"- **Prompt Tokens**: "
-                f"`{domains['trading_code_scout']['base_few_shot_tokens_avg']}` "
+                f"`{domains[self.code_domain_id]['base_few_shot_tokens_avg']}` "
                 "tokens (Few-Shot) -> "
-                f"`{domains['trading_code_scout']['tuned_zero_shot_tokens_avg']}` "
+                f"`{domains[self.code_domain_id]['tuned_zero_shot_tokens_avg']}` "
                 "tokens (Zero-Shot) "
-                f"(`-{domains['trading_code_scout']['tokens_eliminated_avg']}` tokens, "
-                f"`{domains['trading_code_scout']['token_reduction_pct']}%` savings)"
+                f"(`-{domains[self.code_domain_id]['tokens_eliminated_avg']}` tokens, "
+                f"`{domains[self.code_domain_id]['token_reduction_pct']}%` savings)"
             ),
             "",
-            "### 3.2 Model 2: `quant_research_scout`",
-            "- **Output Contract**: `QuantStrategyBrief`",
-            f"- **Validation Samples**: `{domains['quant_research_scout']['total_samples']}`",
+            f"### 3.2 Model 2: `{self.research_domain_id}`",
+            "- **Output Contract**: Domain Research Brief",
+            f"- **Validation Samples**: `{domains[self.research_domain_id]['total_samples']}`",
             (
                 f"- **Zero-Shot Schema Pass Rate**: "
-                f"`{domains['quant_research_scout']['before_zero_shot_pass_rate']}%` (Before) -> "
-                f"**`{domains['quant_research_scout']['after_qlora_pass_rate']}%`** (After)"
+                f"`{domains[self.research_domain_id]['before_zero_shot_pass_rate']}%` (Before) -> "
+                f"**`{domains[self.research_domain_id]['after_qlora_pass_rate']}%`** (After)"
             ),
             (
                 f"- **Recall@5**: "
-                f"`{domains['quant_research_scout']['recall_at_5_before']}%` (Before) -> "
-                f"**`{domains['quant_research_scout']['recall_at_5_after']}%`** (After)"
+                f"`{domains[self.research_domain_id]['recall_at_5_before']}%` (Before) -> "
+                f"**`{domains[self.research_domain_id]['recall_at_5_after']}%`** (After)"
             ),
             (
                 f"- **Prompt Tokens**: "
-                f"`{domains['quant_research_scout']['base_few_shot_tokens_avg']}` "
+                f"`{domains[self.research_domain_id]['base_few_shot_tokens_avg']}` "
                 "tokens (Few-Shot) -> "
-                f"`{domains['quant_research_scout']['tuned_zero_shot_tokens_avg']}` "
+                f"`{domains[self.research_domain_id]['tuned_zero_shot_tokens_avg']}` "
                 "tokens (Zero-Shot) "
-                f"(`-{domains['quant_research_scout']['tokens_eliminated_avg']}` tokens, "
-                f"`{domains['quant_research_scout']['token_reduction_pct']}%` savings)"
+                f"(`-{domains[self.research_domain_id]['tokens_eliminated_avg']}` tokens, "
+                f"`{domains[self.research_domain_id]['token_reduction_pct']}%` savings)"
             ),
             "",
             "---",
