@@ -214,12 +214,38 @@ def _evaluate_query_domain_relevance(
     return None
 
 
+class ModelUnavailableError(RuntimeError):
+    """Raised when local Gemma model (live MLX or in-process) is offline or fails inference.
+
+    Enforces zero-simulation integrity on the production path: on model failure,
+    the scout never fabricates model output or simulates empirical capabilities.
+    """
+
+    def __init__(
+        self,
+        message: str = "Local Gemma model unavailable: MLX server offline or inference failed",
+        domain_id: str | None = None,
+        is_abstention: bool = True,
+        paid_tokens_spent: int = 0,
+        diagnostic: InsufficientContextDiagnostic | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.domain_id = domain_id
+        self.is_abstention = is_abstention
+        self.paid_tokens_spent = paid_tokens_spent
+        self.diagnostic = diagnostic
+
+
+ModelUnavailableException = ModelUnavailableError
+
+
 class LocalGemmaClient:
     """Local inference client for google/gemma-4-26B-A4B-it.
 
     Adheres to HW-01 (--max-kv-size 32768 clamping for Apple Silicon memory safety).
     Integrates with AdapterPool for in-memory LoRA hot-swapping (ARC-02).
-    Provides robust deterministic structured-output fallback when local MLX server is offline.
+    Fails closed with ModelUnavailableError when local MLX server is offline or fails.
     Supports $0 bounce-back remediation loop by resolving missing symbols and citations
     from PreFlightValidator feedback.
     """
@@ -233,6 +259,8 @@ class LocalGemmaClient:
         timeout_seconds: float = 5.0,
         offline_mode: bool = False,
         use_live_mlx: bool = False,
+        completion_fixture: Callable[..., str] | None = None,
+        mock_completion_generator: Callable[..., str] | None = None,
     ) -> None:
         import os
 
@@ -250,6 +278,7 @@ class LocalGemmaClient:
         self.use_live_mlx = (
             use_live_mlx or os.environ.get("CONTEXT_SCOUT_USE_LIVE_MLX", "").strip() == "1"
         )
+        self.completion_fixture = completion_fixture or mock_completion_generator
         self._active_domain_id: str | None = None
         self._mlx_cache: dict[str, tuple[Any, Any]] = {}
 
@@ -318,7 +347,12 @@ class LocalGemmaClient:
         system_instruction: str | None = None,
         max_tokens: int = 1024,
     ) -> str:
-        """Returns raw text completion from live MLX, in-process mlx_lm, or fallback."""
+        """Returns raw text completion from live MLX or in-process mlx_lm.
+
+        Strictly abstains on model failure by raising ModelUnavailableError.
+        Never fabricates model completions or simulates empirical capabilities on
+        the production path. Mock generators may only be injected via test fixtures.
+        """
         if domain_id:
             self.set_active_domain(domain_id)
         if not self.offline_mode and self.use_live_mlx:
@@ -343,13 +377,45 @@ class LocalGemmaClient:
                 )
             except Exception as e:
                 logger.warning(
-                    "Local MLX raw completion failed (%s); using deterministic generator",
+                    "Local MLX raw completion failed (%s)",
                     e,
                 )
-        return self._deterministic_completion_generator(
-            prompt=prompt,
+        if self.completion_fixture is not None:
+            try:
+                return self.completion_fixture(
+                    prompt=prompt,
+                    domain_id=domain_id,
+                    system_instruction=system_instruction,
+                )
+            except TypeError:
+                try:
+                    return self.completion_fixture(prompt=prompt)
+                except TypeError:
+                    return self.completion_fixture(prompt)
+
+        # Fail closed: strictly abstain on production path
+        trace_id = str(uuid.uuid4())
+        active_domain = domain_id or "none"
+        reason = (
+            f"Model unavailable: Local Gemma model ({self.model_id}) is offline or "
+            f"inference failed for domain '{active_domain}'. "
+            "Production scout strictly abstains from simulating completions."
+        )
+        diag = InsufficientContextDiagnostic(
+            trace_id=trace_id,
+            domain_id=active_domain,
+            reason=reason,
+            is_abstention=True,
+            paid_tokens_spent=0,
+            missing_items=["model:local_gemma:unavailable"],
+            failure_check="MODEL_UNAVAILABLE",
+        )
+        raise ModelUnavailableError(
+            message=reason,
             domain_id=domain_id,
-            system_instruction=system_instruction,
+            is_abstention=True,
+            paid_tokens_spent=0,
+            diagnostic=diag,
         )
 
     def _call_in_process_mlx(
@@ -453,224 +519,6 @@ class LocalGemmaClient:
         with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
             body = json.loads(resp.read().decode("utf-8"))
             return str(body["choices"][0]["message"]["content"])
-
-    def _deterministic_completion_generator(
-        self,
-        prompt: str,
-        domain_id: str | None = None,
-        system_instruction: str | None = None,
-    ) -> str:
-        """Authentic deterministic completion generator simulating empirical capabilities."""
-        is_custom_code_domain = (
-            domain_id is not None
-            and domain_id != "quant_research_scout"
-            and (
-                domain_id == "trading_code_scout"
-                or "Retrieved AST Candidate:" in prompt
-                or "code" in domain_id
-            )
-        )
-        if is_custom_code_domain:
-            pointers: list[CodeSlicePointer] = []
-            ast_cand_pat = (
-                r"\[?repo=([^\|\]\s]+)\s*\|\s*file=([^\|\]\s]+)\s*\|\s*"
-                r"symbol=([^\|\]\s]+)\s*\|\s*lines=(\d+)-(\d+)"
-            )
-            for idx_cand, cand_match in enumerate(re.finditer(ast_cand_pat, prompt)):
-                repo_n, f_path, q_sym, s_ln, e_ln = cand_match.groups()
-                pointers.append(
-                    CodeSlicePointer(
-                        repo_name=repo_n.strip(),
-                        file_path=f_path.strip(),
-                        start_line=int(s_ln),
-                        end_line=int(e_ln),
-                        qualified_symbol=q_sym.strip(),
-                        selection_reason=(
-                            f"Target localized from retrieved AST candidate {q_sym.strip()}"
-                        ),
-                        modification_intent=(
-                            ModificationIntent.MODIFY_TARGET
-                            if idx_cand == 0
-                            else ModificationIntent.REFERENCE_ONLY
-                        ),
-                    )
-                )
-            if pointers:
-                return json.dumps([p.model_dump() for p in pointers], indent=2)
-
-            found_files = list(
-                dict.fromkeys(re.findall(r"src/context_scout/[A-Za-z0-9_\-\./]+\.py", prompt))
-            )
-            raw_syms = re.findall(r"`([^`]+)`", prompt)
-            clean_syms = list(dict.fromkeys(s for s in raw_syms if "/" not in s))
-
-            try:
-                from context_scout.config import ScoutSettings
-                from context_scout.db.session import RLSConnectionManager
-                from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
-
-                settings = ScoutSettings()
-                conn_mgr = RLSConnectionManager(settings.db_app_url)
-                adapter = PostgresScoutGraphAdapter(conn_mgr, settings)
-                principal = PrincipalContext(
-                    user_id="local_gemma_worker",
-                    role=RoleType.ENGINEER,
-                    allowed_scopes=[
-                        "public_eng",
-                        "repo:trading_strategies",
-                        "corpus:quant_papers",
-                        "quant_restricted",
-                    ],
-                )
-                syms = adapter.list_visible_ast_symbols(principal, "trading_code_scout")
-                files = adapter.list_visible_code_files(principal, "trading_code_scout")
-                file_by_id = {f.file_id: f for f in files}
-
-                for sym_name in clean_syms:
-                    matched_syms: list[tuple[ASTSymbolRecord, str]] = []
-                    for s_rec in syms:
-                        s_file = file_by_id.get(s_rec.file_id)
-                        f_path = s_file.file_path if s_file else ""
-                        if f_path in found_files and (
-                            s_rec.qualified_name.endswith("." + sym_name)
-                            or s_rec.qualified_name == sym_name
-                        ):
-                            matched_syms.append((s_rec, f_path))
-                    if not matched_syms:
-                        for s_rec in syms:
-                            if (
-                                s_rec.qualified_name.endswith("." + sym_name)
-                                or s_rec.qualified_name == sym_name
-                            ):
-                                s_file = file_by_id.get(s_rec.file_id)
-                                matched_syms.append(
-                                    (
-                                        s_rec,
-                                        s_file.file_path
-                                        if s_file
-                                        else (found_files[0] if found_files else ""),
-                                    )
-                                )
-                    for s_rec, f_path in matched_syms:
-                        pointers.append(
-                            CodeSlicePointer(
-                                repo_name="enterprise-context-scout",
-                                file_path=f_path,
-                                start_line=s_rec.start_line,
-                                end_line=s_rec.end_line,
-                                qualified_symbol=s_rec.qualified_name,
-                                selection_reason=(
-                                    f"Identified symbol {sym_name} for requested inspection"
-                                ),
-                                modification_intent=ModificationIntent.MODIFY_TARGET
-                                if len(pointers) == 0
-                                else ModificationIntent.REFERENCE_ONLY,
-                            )
-                        )
-            except Exception as e:
-                logger.debug("Database AST resolution fallback error: %s", e)
-
-            if not pointers:
-                f_path = found_files[0] if found_files else "src/context_scout/schemas/contracts.py"
-                sym = clean_syms[0] if clean_syms else "CodeSlicePointer"
-                if not sym.startswith("context_scout.") and "src/context_scout/" in f_path:
-                    mod = f_path.replace("src/", "").replace(".py", "").replace("/", ".")
-                    qualified_sym = f"{mod}.{sym}"
-                else:
-                    qualified_sym = sym
-                pointers = [
-                    CodeSlicePointer(
-                        repo_name="enterprise-context-scout",
-                        file_path=f_path,
-                        start_line=10,
-                        end_line=50,
-                        qualified_symbol=qualified_sym,
-                        selection_reason="Target localized by tuned QLoRA adapter",
-                        modification_intent=ModificationIntent.MODIFY_TARGET,
-                    )
-                ]
-                if len(found_files) > 1 and len(clean_syms) > 1:
-                    f2 = found_files[1]
-                    s2 = clean_syms[1]
-                    if not s2.startswith("context_scout.") and "src/context_scout/" in f2:
-                        mod2 = f2.replace("src/", "").replace(".py", "").replace("/", ".")
-                        qs2 = f"{mod2}.{s2}"
-                    else:
-                        qs2 = s2
-                    pointers.append(
-                        CodeSlicePointer(
-                            repo_name="enterprise-context-scout",
-                            file_path=f2,
-                            start_line=20,
-                            end_line=60,
-                            qualified_symbol=qs2,
-                            selection_reason="Secondary dependency localized by tuned adapter",
-                            modification_intent=ModificationIntent.REFERENCE_ONLY,
-                        )
-                    )
-            return json.dumps([p.model_dump() for p in pointers], indent=2)
-
-        if domain_id is not None and not is_custom_code_domain:
-            brief = self.generate_quant_brief(user_prompt=prompt, domain_id=domain_id)
-            chunk_pat = (
-                r"Retrieved Corpus Chunk: \[chunk_id=([^\|]+?) \| doc_id=([^\|]+?) \| "
-                r"title=([^\|]+?) \| uri=([^\|]+?) \| section=([^\|]+?) \| .*?quote=([^\]]+)\]"
-            )
-            retrieved_match = re.search(chunk_pat, prompt)
-            if retrieved_match and brief.verified_citations:
-                cit = brief.verified_citations[0]
-                cit.chunk_id = retrieved_match.group(1).strip()
-                cit.doc_id = retrieved_match.group(2).strip()
-                cit.doc_title = retrieved_match.group(3).strip()
-                cit.source_uri = retrieved_match.group(4).strip()
-                cit.section_heading = retrieved_match.group(5).strip()
-                cit.verbatim_quote = retrieved_match.group(6).strip()
-                return brief.model_dump_json(indent=2)
-            titles = re.findall(r"`([^`]+)`", prompt)
-            if titles:
-                paper_title = titles[0]
-                try:
-                    import psycopg
-
-                    from context_scout.config import ScoutSettings
-
-                    st = ScoutSettings()
-                    with psycopg.connect(st.db_admin_url) as conn:
-                        query = (
-                            "SELECT chunk_id, doc_id, doc_title, source_uri, "
-                            "section_heading, verbatim_content "
-                            "FROM doc_chunks WHERE doc_title = %s OR doc_title ILIKE %s LIMIT 1"
-                        )
-                        row = conn.execute(
-                            query,
-                            (paper_title, f"%{paper_title}%"),
-                        ).fetchone()
-                        if row and brief.verified_citations:
-                            cit = brief.verified_citations[0]
-                            cit.chunk_id = str(row[0])
-                            cit.doc_id = str(row[1])
-                            cit.doc_title = str(row[2])
-                            cit.source_uri = str(row[3])
-                            cit.section_heading = str(row[4])
-                            lines = [
-                                ln.strip()
-                                for ln in str(row[5]).splitlines()
-                                if len(ln.strip()) >= 20
-                            ]
-                            if lines:
-                                cit.verbatim_quote = lines[0]
-                except Exception as e:
-                    logger.debug("Database doc_chunks lookup error: %s", e)
-                    if brief.verified_citations:
-                        brief.verified_citations[0].doc_title = paper_title
-            return brief.model_dump_json(indent=2)
-
-        # Base Model (Untuned, domain_id is None)
-        from context_scout.tuning.mock_gemma_generator import (
-            simulate_untuned_base_model_completion,
-        )
-
-        return simulate_untuned_base_model_completion(prompt)
 
     def generate_code_pointers(
         self,
@@ -1845,7 +1693,7 @@ class ScoutWorkflow:
 
     def __init__(
         self,
-        registry: DomainRegistry,
+        registry: DomainRegistry | None = None,
         repo: Any = None,
         local_client: LocalGemmaClient | None = None,
         validator: PreFlightValidator | None = None,
@@ -1855,6 +1703,10 @@ class ScoutWorkflow:
         auth_gate: DomainAuthorizationGate | None = None,
         max_search_hops: int = 2,
     ) -> None:
+        if registry is None:
+            from context_scout.api.dependencies import get_domain_registry
+
+            registry = get_domain_registry()
         self.registry = registry
         self.repo = repo
         self.slicer = slicer or DeterministicSlicer()
@@ -1868,7 +1720,7 @@ class ScoutWorkflow:
             expander=self.expander,
         )
         self.local_client = local_client or LocalGemmaClient(
-            adapter_pool=self.registry.adapter_pool
+            adapter_pool=self.registry.adapter_pool if self.registry else None
         )
         self.guardrail = guardrail or ShieldGemmaGuardrail()
         self.auth_gate = auth_gate or DomainAuthorizationGate(self.registry)
@@ -1921,6 +1773,50 @@ class ScoutWorkflow:
             return wf_obj
         return None
 
+    def execute(
+        self,
+        user_prompt: str,
+        principal: PrincipalContext,
+        domain_id: str = "trading_code_scout",
+        trace_id: str | None = None,
+        **kwargs: Any,
+    ) -> ImplementationContextPack | InsufficientContextDiagnostic:
+        """Executes the scout workflow DAG, enforcing fail-closed model verification."""
+        active_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
+        try:
+            _ = self.local_client.complete(
+                prompt=user_prompt,
+                domain_id=domain_id,
+            )
+        except ModelUnavailableError as e:
+            tracer = ScoutTelemetryTracer.get_instance()
+            with tracer.trace_workflow(
+                span_name="scout.workflow",
+                domain_id=domain_id,
+                trace_id=active_trace_id,
+                model_id="gemma-4-moe",
+                system="gemma",
+            ) as wf_span:
+                diag = InsufficientContextDiagnostic(
+                    trace_id=active_trace_id,
+                    domain_id=domain_id,
+                    reason=f"Model unavailable: {e}",
+                    is_abstention=True,
+                    paid_tokens_spent=0,
+                    missing_items=["model:local_gemma:unavailable"],
+                    failure_check="MODEL_UNAVAILABLE",
+                )
+                wf_span.record_pack(diag)
+                return diag
+
+        return self.run(
+            user_prompt=user_prompt,
+            principal=principal,
+            domain_id=domain_id,
+            trace_id=active_trace_id,
+            **kwargs,
+        )
+
     def run(
         self,
         user_prompt: str,
@@ -1943,17 +1839,34 @@ class ScoutWorkflow:
             model_id="gemma-4-moe",
             system="gemma",
         ) as wf_span:
-            result = self._run_dag(
-                user_prompt=user_prompt,
-                principal=principal,
-                domain_id=domain_id,
-                active_trace_id=active_trace_id,
-                normalized_rrf_score=normalized_rrf_score,
-                doc_chunks=doc_chunks,
-                supporting_doc_citations=supporting_doc_citations,
-                max_bounce_backs=max_bounce_backs,
-                on_stage_event=on_stage_event,
-            )
+            try:
+                result = self._run_dag(
+                    user_prompt=user_prompt,
+                    principal=principal,
+                    domain_id=domain_id,
+                    active_trace_id=active_trace_id,
+                    normalized_rrf_score=normalized_rrf_score,
+                    doc_chunks=doc_chunks,
+                    supporting_doc_citations=supporting_doc_citations,
+                    max_bounce_backs=max_bounce_backs,
+                    on_stage_event=on_stage_event,
+                )
+            except ModelUnavailableError as e:
+                logger.warning(
+                    "Model unavailable during workflow execution (trace=%s, domain=%s): %s",
+                    active_trace_id,
+                    domain_id,
+                    e,
+                )
+                result = InsufficientContextDiagnostic(
+                    trace_id=active_trace_id,
+                    domain_id=domain_id,
+                    reason=f"Model unavailable: {e}",
+                    is_abstention=True,
+                    paid_tokens_spent=0,
+                    missing_items=["model:local_gemma:unavailable"],
+                    failure_check="MODEL_UNAVAILABLE",
+                )
             wf_span.record_pack(result)
             return result
 
@@ -3010,5 +2923,7 @@ __all__ = [
     "MAX_SAFE_KV_SIZE",
     "FederatedScoutCoordinator",
     "LocalGemmaClient",
+    "ModelUnavailableError",
+    "ModelUnavailableException",
     "ScoutWorkflow",
 ]

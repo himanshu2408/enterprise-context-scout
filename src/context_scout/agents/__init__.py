@@ -18,6 +18,8 @@ from context_scout.agents.scout_workflow import (
     MAX_SAFE_KV_SIZE,
     FederatedScoutCoordinator,
     LocalGemmaClient,
+    ModelUnavailableError,
+    ModelUnavailableException,
     ScoutWorkflow,
 )
 
@@ -35,6 +37,8 @@ __all__ = [
     "GeminiImplementationExecutor",
     "GitWorktreeSandbox",
     "LocalGemmaClient",
+    "ModelUnavailableError",
+    "ModelUnavailableException",
     "PreFlightValidator",
     "ScoutWorkflow",
     "create_insufficient_context_diagnostic",

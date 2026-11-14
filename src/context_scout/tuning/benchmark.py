@@ -83,6 +83,7 @@ class QLoRABenchmarkRunner:
         domains_dir: Path | str = DEFAULT_DOMAINS_DIR,
         data_dir: Path | str = DEFAULT_DATA_DIR,
         reports_dir: Path | str = DEFAULT_REPORTS_DIR,
+        client: LocalGemmaClient | None = None,
     ) -> None:
         self.base_model_id = base_model_id
         self.domains_dir = Path(domains_dir)
@@ -94,7 +95,7 @@ class QLoRABenchmarkRunner:
             adapter_pool=self.adapter_pool,
         )
         self.tokenizer = _resolve_benchmark_tokenizer(self.base_model_id)
-        self.client = LocalGemmaClient(adapter_pool=self.adapter_pool)
+        self.client = client or LocalGemmaClient(adapter_pool=self.adapter_pool)
         self._code_exemplars = self._load_few_shot_exemplars("trading_code_scout", count=8)
         self._quant_exemplars = self._load_few_shot_exemplars("quant_research_scout", count=4)
 

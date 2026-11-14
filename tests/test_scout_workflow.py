@@ -27,6 +27,7 @@ from context_scout.agents.scout_workflow import (
     MAX_SAFE_KV_SIZE,
     FederatedScoutCoordinator,
     LocalGemmaClient,
+    ModelUnavailableError,
     ScoutWorkflow,
 )
 from context_scout.ast_engine.dependency_expander import ASTDependencyExpander
@@ -255,8 +256,16 @@ def test_local_gemma_client_adapter_hot_swapping(domain_registry: DomainRegistry
 def test_local_gemma_client_deterministic_fallback(
     test_repo: InMemoryRLSRepository, principal: PrincipalContext
 ) -> None:
-    """Verifies offline fallback produces genuine schema-conforming CodeSlicePointers."""
+    """Verifies fail-closed model abstention and AST fallback pointer generation."""
+    # 1. Complete fails closed with ModelUnavailableError when offline/unreachable
     client = LocalGemmaClient(offline_mode=True)
+    with pytest.raises(ModelUnavailableError) as exc_info:
+        client.complete("Refactor OrderFlowImbalanceAnalyzer", domain_id="trading_code_scout")
+    assert exc_info.value.is_abstention is True
+    assert exc_info.value.paid_tokens_spent == 0
+    assert "model unavailable" in str(exc_info.value).lower()
+
+    # 2. AST-based code pointer generation functions with in-memory repository
     pointers = client.generate_code_pointers(
         user_prompt="Refactor OrderFlowImbalanceAnalyzer in order_flow_imbalance.py",
         domain_id="trading_code_scout",
