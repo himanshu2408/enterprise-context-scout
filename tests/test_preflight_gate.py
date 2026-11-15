@@ -28,6 +28,8 @@ from context_scout.db.repositories import (
 )
 from context_scout.schemas.contracts import (
     DocCitationSpan,
+    GateAbstentionResult,
+    GatePassResult,
     ImplementationContextPack,
     InsufficientContextDiagnostic,
     MarketRegime,
@@ -203,8 +205,8 @@ class TestPreFlightValidator:
         """Verifies ContextPackValidator alias and clean initialization."""
         assert ContextPackValidator is PreFlightValidator
         validator = PreFlightValidator()
-        assert validator.min_rrf_score == 0.55
-        assert validator.min_citation_overlap == 0.98
+        assert validator.min_rrf_score == 0.65
+        assert validator.min_citation_overlap == 1.0
 
     def test_check_1_symbol_resolution_and_auto_closure(
         self,
@@ -309,7 +311,7 @@ class TestPreFlightValidator:
         assert report.passed is False
         assert "SecretPricingEngine" in str(report.unresolved_symbols)
         assert report.bounce_back_feedback is not None
-        assert "Check 1 (Internal Symbol Resolution)" in report.bounce_back_feedback
+        assert "Check 2 (Internal Symbol Resolution)" in report.bounce_back_feedback
 
     def test_check_2_prompt_identifier_partitioning_val_01(
         self,
@@ -445,11 +447,11 @@ class TestPreFlightValidator:
         assert report_low.normalized_rrf_score == 0.48
         assert "Check 3 (Normalized RRF Score, BLK-01)" in (report_low.bounce_back_feedback or "")
 
-        # 2. At or above 0.55 threshold -> Passes
+        # 2. At or above 0.65 threshold -> Passes
         report_pass = validator.validate(
             code_slices=[target_slice],
             user_prompt="Refactor OrderFlowImbalanceAnalyzer",
-            normalized_rrf_score=0.55,
+            normalized_rrf_score=0.65,
         )
         assert report_pass.passed is True
 
@@ -533,7 +535,7 @@ class TestPreFlightValidator:
         )
         assert report_invalid.passed is False
         assert report_invalid.citations_verified_100_pct is False
-        assert "Check 4 (Verbatim Citation Verification, VAL-02)" in (
+        assert "Check 6 (Citation Verification)" in (
             report_invalid.bounce_back_feedback or ""
         )
 
@@ -669,3 +671,249 @@ class TestPreFlightValidator:
         assert pack.preflight_report.passed is True
         assert pack.preflight_report.auto_attached_ast_slices_count == 1
         assert len(pack.code_slices) == 2
+
+    def test_check_1_fails_on_syntax_error(
+        self,
+        test_repo: InMemoryRLSRepository,
+        principal: PrincipalContext,
+        slicer: DeterministicSlicer,
+    ) -> None:
+        """Check 1: AST syntax check rejects unclosed delimiters or invalid code."""
+        validator = PreFlightValidator(
+            repo=test_repo,
+            slicer=slicer,
+            principal=principal,
+            domain_id=DOMAIN_ID,
+        )
+        malformed_slice = VerbatimCodeSlice(
+            repo_name=REPO_NAME,
+            file_path="src/trading_strategies/order_flow_imbalance.py",
+            start_line=1,
+            end_line=2,
+            qualified_symbol="trading_strategies.broken.BrokenSyntax",
+            selection_reason="Broken slice",
+            modification_intent=ModificationIntent.MODIFY_TARGET,
+            git_commit_sha="commit_ofi_123",
+            git_blob_sha="blob_ofi_456",
+            verbatim_code_with_lines="1 | def unclosed_call(\n2 |     data = [1, 2, 3",
+            auto_expanded_by_ast=False,
+        )
+        report = validator.validate(
+            code_slices=[malformed_slice],
+            user_prompt="Refactor BrokenSyntax",
+            normalized_rrf_score=0.90,
+        )
+        assert report.passed is False
+        assert report.check_results["check_1_syntax"] is False
+        assert len(report.syntax_errors) > 0
+
+    def test_check_5_fails_on_unanchored_git_provenance(
+        self,
+        test_repo: InMemoryRLSRepository,
+        principal: PrincipalContext,
+        slicer: DeterministicSlicer,
+    ) -> None:
+        """Check 5: Rejects slices with placeholder or empty git commit/blob SHAs."""
+        validator = PreFlightValidator(
+            repo=test_repo,
+            slicer=slicer,
+            principal=principal,
+            domain_id=DOMAIN_ID,
+        )
+        file_rec = next(iter(test_repo._files.values()))
+        unanchored_slice = VerbatimCodeSlice(
+            repo_name=REPO_NAME,
+            file_path="src/trading_strategies/order_flow_imbalance.py",
+            start_line=3,
+            end_line=8,
+            qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            selection_reason="Target class",
+            modification_intent=ModificationIntent.MODIFY_TARGET,
+            git_commit_sha="placeholder_sha",
+            git_blob_sha="blob_ofi_456",
+            verbatim_code_with_lines=slicer.slice_lines(file_rec.raw_content, 3, 8),
+            auto_expanded_by_ast=False,
+        )
+        report = validator.validate(
+            code_slices=[unanchored_slice],
+            user_prompt="Refactor OrderFlowImbalanceAnalyzer",
+            normalized_rrf_score=0.90,
+        )
+        assert report.passed is False
+        assert report.check_results["check_5_provenance"] is False
+        assert len(report.unanchored_provenance_items) > 0
+
+    def test_evaluate_gate_returns_gate_pass_and_gate_abstention(
+        self,
+        test_repo: InMemoryRLSRepository,
+        principal: PrincipalContext,
+        slicer: DeterministicSlicer,
+        expander: ASTDependencyExpander,
+    ) -> None:
+        """Verifies evaluate_gate emits GatePassResult or GateAbstentionResult with $0 spend."""
+        validator = PreFlightValidator(
+            repo=test_repo,
+            slicer=slicer,
+            expander=expander,
+            principal=principal,
+            domain_id=DOMAIN_ID,
+        )
+        file_rec = next(iter(test_repo._files.values()))
+        target_slice = VerbatimCodeSlice(
+            repo_name=REPO_NAME,
+            file_path="src/trading_strategies/order_flow_imbalance.py",
+            start_line=3,
+            end_line=8,
+            qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            selection_reason="Target class",
+            modification_intent=ModificationIntent.MODIFY_TARGET,
+            git_commit_sha="commit_ofi_123",
+            git_blob_sha="blob_ofi_456",
+            verbatim_code_with_lines=slicer.slice_lines(file_rec.raw_content, 3, 8),
+            auto_expanded_by_ast=False,
+        )
+
+        # 1. GatePassResult when score is >= 0.65 and all checks pass
+        res_pass = validator.evaluate_gate(
+            code_slices=[target_slice],
+            user_prompt="Refactor OrderFlowImbalanceAnalyzer",
+            normalized_rrf_score=0.85,
+        )
+        assert isinstance(res_pass, GatePassResult)
+        assert res_pass.passed is True
+        assert res_pass.report.passed is True
+
+        # 2. GateAbstentionResult when score is below 0.65 threshold
+        res_fail = validator.evaluate_gate(
+            code_slices=[target_slice],
+            user_prompt="Refactor OrderFlowImbalanceAnalyzer",
+            normalized_rrf_score=0.45,
+        )
+        assert isinstance(res_fail, GateAbstentionResult)
+        assert res_fail.passed is False
+        assert res_fail.diagnostic.paid_tokens_spent == 0
+        assert "Check 3 (Normalized RRF Score" in res_fail.diagnostic.reason
+
+    @pytest.mark.parametrize(
+        "intent",
+        [ModificationIntent.DIRECT_CALLER, ModificationIntent.IMPORTED_TYPE],
+    )
+    def test_check_1_fails_on_unclosed_delimiters_in_partial_windows(
+        self,
+        test_repo: InMemoryRLSRepository,
+        principal: PrincipalContext,
+        slicer: DeterministicSlicer,
+        intent: ModificationIntent,
+    ) -> None:
+        """Check 1: DIRECT_CALLER and IMPORTED_TYPE slices fail when delimiters are unclosed."""
+        validator = PreFlightValidator(
+            repo=test_repo,
+            slicer=slicer,
+            principal=principal,
+            domain_id=DOMAIN_ID,
+        )
+        bad_slice = VerbatimCodeSlice(
+            repo_name=REPO_NAME,
+            file_path="src/trading_strategies/order_flow_imbalance.py",
+            start_line=1,
+            end_line=2,
+            qualified_symbol=f"trading_strategies.test.{intent.value}",
+            selection_reason="Partial slice with unclosed delimiter",
+            modification_intent=intent,
+            git_commit_sha="commit_ofi_123",
+            git_blob_sha="blob_ofi_456",
+            verbatim_code_with_lines="1 | def snippet():\n2 |     data = (1 + 2",
+            auto_expanded_by_ast=False,
+        )
+        # 1. Direct check_ast_syntax call
+        passed, errors, missing = validator.check_ast_syntax([bad_slice])
+        assert passed is False
+        assert len(errors) == 1
+        assert "Unclosed syntax delimiters in code slice" in errors[0]
+        assert any(m.kind == "syntax" for m in missing)
+
+        # 2. End-to-end validate() call
+        report = validator.validate(
+            code_slices=[bad_slice],
+            user_prompt=f"Refactor {bad_slice.qualified_symbol}",
+            normalized_rrf_score=0.90,
+        )
+        assert report.passed is False
+        assert report.check_results["check_1_syntax"] is False
+        assert any("Unclosed syntax delimiters" in e for e in report.syntax_errors)
+
+    @pytest.mark.parametrize(
+        "intent",
+        [ModificationIntent.DIRECT_CALLER, ModificationIntent.IMPORTED_TYPE],
+    )
+    def test_check_1_passes_balanced_partial_windows_without_module_parse_errors(
+        self,
+        test_repo: InMemoryRLSRepository,
+        principal: PrincipalContext,
+        slicer: DeterministicSlicer,
+        intent: ModificationIntent,
+    ) -> None:
+        """Check 1: DIRECT_CALLER and IMPORTED_TYPE pass when delimiters are balanced,
+        even if the partial window is not a valid whole-module AST.
+        """
+        validator = PreFlightValidator(
+            repo=test_repo,
+            slicer=slicer,
+            principal=principal,
+            domain_id=DOMAIN_ID,
+        )
+        # In TypeScript, a lone interface property `readonly x: (number | string);` fails
+        # whole-module TS parser, but is balanced and must pass Check 1 partial window exemption.
+        balanced_slice = VerbatimCodeSlice(
+            repo_name=REPO_NAME,
+            file_path="src/trading_strategies/types.ts",
+            start_line=5,
+            end_line=7,
+            qualified_symbol=f"trading_strategies.types.{intent.value}",
+            selection_reason="Balanced partial window",
+            modification_intent=intent,
+            git_commit_sha="commit_ofi_123",
+            git_blob_sha="blob_ofi_456",
+            verbatim_code_with_lines=(
+                "5 |   readonly x: (number | string);\n6 |   readonly y: boolean;"
+            ),
+            auto_expanded_by_ast=True,
+        )
+        passed, errors, missing = validator.check_ast_syntax([balanced_slice])
+        assert passed is True
+        assert len(errors) == 0
+        assert len(missing) == 0
+
+    def test_check_1_fails_on_nesting_depth_exceeded_in_partial_window(
+        self,
+        test_repo: InMemoryRLSRepository,
+        principal: PrincipalContext,
+        slicer: DeterministicSlicer,
+    ) -> None:
+        """Check 1: DIRECT_CALLER fails when parentheses nesting depth exceeds 10 levels."""
+        validator = PreFlightValidator(
+            repo=test_repo,
+            slicer=slicer,
+            principal=principal,
+            domain_id=DOMAIN_ID,
+        )
+        deep_slice = VerbatimCodeSlice(
+            repo_name=REPO_NAME,
+            file_path="src/trading_strategies/order_flow_imbalance.py",
+            start_line=1,
+            end_line=2,
+            qualified_symbol="trading_strategies.deep.DeepCaller",
+            selection_reason="Deep nesting caller",
+            modification_intent=ModificationIntent.DIRECT_CALLER,
+            git_commit_sha="commit_ofi_123",
+            git_blob_sha="blob_ofi_456",
+            verbatim_code_with_lines=(
+                "1 | def deep_caller():\n2 |     return ((((((((((((42))))))))))))"
+            ),
+            auto_expanded_by_ast=False,
+        )
+        passed, errors, missing = validator.check_ast_syntax([deep_slice])
+        assert passed is False
+        assert len(errors) == 1
+        assert "Nesting depth (12) exceeds maximum limit (10)" in errors[0]
+        assert any(m.kind == "syntax" for m in missing)

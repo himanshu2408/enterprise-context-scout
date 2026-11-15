@@ -362,17 +362,21 @@ class PrincipalContext(BaseModel):
 
 class CodeSlicePointer(BaseModel):
     """Output emitted by the Gemma 4 Scout (never raw re-typed code)."""
+
     repo_name: str
     file_path: str
     start_line: int = Field(ge=1)
     end_line: int = Field(ge=1)
     qualified_symbol: str
     selection_reason: str
-    modification_intent: Literal["modify_target", "imported_type", "direct_caller", "test_fixture", "reference_only"]
+    modification_intent: Literal[
+        "modify_target", "imported_type", "direct_caller", "test_fixture", "reference_only"
+    ]
 
 
 class VerbatimCodeSlice(CodeSlicePointer):
     """Hydrated deterministically by the Python Slicer from Git/Postgres."""
+
     git_commit_sha: str
     git_blob_sha: str
     verbatim_code_with_lines: str
@@ -385,11 +389,14 @@ class DocCitationSpan(BaseModel):
     doc_title: str
     source_uri: str
     section_heading: str
-    verbatim_quote: str = Field(description="Exact substring verified to exist in doc_chunks.verbatim_content")
+    verbatim_quote: str = Field(
+        description="Exact substring verified to exist in doc_chunks.verbatim_content"
+    )
 
 
 class QuantStrategyBrief(BaseModel):
     """Structured extraction contract for Model 2 (Quant Research Scout) with Scepticism Gate."""
+
     strategy_name: str
     target_markets: list[MarketRegime]
     mathematical_signal_latex: str
@@ -398,10 +405,11 @@ class QuantStrategyBrief(BaseModel):
     reported_sharpe_ratio: float | None = None
     reported_max_drawdown_pct: float | None = None
     transaction_cost_bps_assumed: float | None = Field(
-        default=None,
-        description="Null if the paper ignored transaction costs/slippage/taxes."
+        default=None, description="Null if the paper ignored transaction costs/slippage/taxes."
     )
-    friction_verdict: Literal["REALISTIC_FRICTION", "UNVERIFIED_FRICTION_WARNING", "FAILS_AFTER_COSTS"]
+    friction_verdict: Literal[
+        "REALISTIC_FRICTION", "UNVERIFIED_FRICTION_WARNING", "FAILS_AFTER_COSTS"
+    ]
     market_specific_caveats: list[str] = Field(
         description="e.g., India NSE STT/stamp duty impact, German Xetra mid-cap spread, or US PDT/queue position."
     )
@@ -421,6 +429,7 @@ class PreFlightValidationReport(BaseModel):
 
 class ImplementationContextPack(BaseModel):
     """The compiler-complete payload handed to paid Gemini 2.5 / 3.8 Flash."""
+
     trace_id: str
     domain_id: str
     user_task: str

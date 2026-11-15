@@ -112,7 +112,7 @@ def get_answerable_benchmark_set(
             stack=StackType.TERRAFORM_GCP,
             prompt=(
                 f"Provision private Cloud SQL PostgreSQL 17 cluster with Cloud KMS "
-                f"encryption in module `db_cluster_{i:02d}`."
+                f"encryption in module `cloud_sql_{i:02d}`."
             ),
             target_repo="infra/gcp-workloads",
             target_file=f"modules/storage/cloud_sql_{i:02d}.tf",

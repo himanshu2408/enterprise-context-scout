@@ -27,6 +27,7 @@ from context_scout.agents.scout_workflow import (
     MAX_SAFE_KV_SIZE,
     FederatedScoutCoordinator,
     LocalGemmaClient,
+    ModelUnavailableError,
     ScoutWorkflow,
 )
 from context_scout.ast_engine.dependency_expander import ASTDependencyExpander
@@ -56,7 +57,13 @@ def principal() -> PrincipalContext:
     return PrincipalContext(
         user_id="lead_quant_dev",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "repo:trading_strategies", "corpus:quant_papers"],
+        allowed_scopes=[
+            "public_eng",
+            "repo:trading_strategies",
+            "corpus:quant_papers",
+            "domain:quant_research_scout",
+            "domain:trading_code_scout",
+        ],
     )
 
 
@@ -249,8 +256,16 @@ def test_local_gemma_client_adapter_hot_swapping(domain_registry: DomainRegistry
 def test_local_gemma_client_deterministic_fallback(
     test_repo: InMemoryRLSRepository, principal: PrincipalContext
 ) -> None:
-    """Verifies offline fallback produces genuine schema-conforming CodeSlicePointers."""
+    """Verifies fail-closed model abstention and AST fallback pointer generation."""
+    # 1. Complete fails closed with ModelUnavailableError when offline/unreachable
     client = LocalGemmaClient(offline_mode=True)
+    with pytest.raises(ModelUnavailableError) as exc_info:
+        client.complete("Refactor OrderFlowImbalanceAnalyzer", domain_id="trading_code_scout")
+    assert exc_info.value.is_abstention is True
+    assert exc_info.value.paid_tokens_spent == 0
+    assert "model unavailable" in str(exc_info.value).lower()
+
+    # 2. AST-based code pointer generation functions with in-memory repository
     pointers = client.generate_code_pointers(
         user_prompt="Refactor OrderFlowImbalanceAnalyzer in order_flow_imbalance.py",
         domain_id="trading_code_scout",
@@ -306,7 +321,7 @@ def test_local_gemma_client_quant_brief_generation(
 
     assert brief.strategy_name != ""
     assert MarketRegime.GERMANY_XETRA_DAX in brief.target_markets
-    assert r"\text{OFI}" in brief.mathematical_signal_latex
+    assert r"E[Y \mid X]" in brief.mathematical_signal_latex
     assert len(brief.verified_citations) >= 1
     # Check citation is verbatim from doc chunk
     first_cit = brief.verified_citations[0]

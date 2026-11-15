@@ -25,7 +25,9 @@ import json
 import re
 from pathlib import Path
 
-from context_scout.agents.scout_workflow import LocalGemmaClient
+from tests.fixtures.mock_generators import MockLocalGemmaClient
+
+from context_scout.agents.scout_workflow import LocalGemmaClient, ModelUnavailableError
 from context_scout.api.routes import handoff, scout, telemetry
 from context_scout.schemas.contracts import PrincipalContext, RoleType
 
@@ -83,8 +85,11 @@ def test_live_verification_reports_enforce_schema_and_grounding() -> None:
 
 def test_local_gemma_client_supports_use_live_mlx_and_rag_chunk_parsing() -> None:
     """Guard 3: LocalGemmaClient supports use_live_mlx and parses Retrieved Corpus Chunk."""
-    client = LocalGemmaClient(offline_mode=True, use_live_mlx=True)
-    assert client.use_live_mlx is True
+    import pytest
+
+    # 1. Production client fails closed when offline/unreachable
+    prod_client = LocalGemmaClient(offline_mode=True, use_live_mlx=True)
+    assert prod_client.use_live_mlx is True
 
     prompt = (
         "Synthesize a market-friction verified QuantStrategyBrief for `Test Paper` "
@@ -94,7 +99,14 @@ def test_local_gemma_client_supports_use_live_mlx_and_rag_chunk_parsing() -> Non
         "section=Methodology | strategy=DAX Spread Strategy | sharpe=1.9 | "
         'mdd=7.5 | bps=15.0 | quote="Exact empirical quote from methodology section."]'
     )
-    out = client.complete(prompt=prompt, domain_id="quant_research_scout")
+    with pytest.raises(ModelUnavailableError) as exc_info:
+        prod_client.complete(prompt=prompt, domain_id="quant_research_scout")
+    assert exc_info.value.is_abstention is True
+    assert exc_info.value.paid_tokens_spent == 0
+
+    # 2. Test double parses Retrieved Corpus Chunk directly
+    mock_client = MockLocalGemmaClient(offline_mode=True, use_live_mlx=True)
+    out = mock_client.complete(prompt=prompt, domain_id="quant_research_scout")
     parsed = json.loads(out)
     cit = parsed["verified_citations"][0]
     assert cit["chunk_id"] == "chk-999"

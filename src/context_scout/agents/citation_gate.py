@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
+from context_scout.agents.claim_verifier import detect_homoglyph_spoofing
 from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
 from context_scout.db.repositories import DocChunkRecord
 from context_scout.schemas.contracts import (
@@ -86,7 +87,7 @@ class DocumentCitationGate:
     5. Deterministic InsufficientContextDiagnostic generation on failure
     """
 
-    DEFAULT_MIN_OVERLAP_RATIO: Final[float] = 0.98
+    DEFAULT_MIN_OVERLAP_RATIO: Final[float] = 1.0
 
     def __init__(
         self,
@@ -474,6 +475,25 @@ class DocumentCitationGate:
                     )
                 )
                 failed_citations.append((cit, prov_reason))
+                continue
+
+            # Homoglyph Spoofing Check (M4 Requirement 3)
+            is_hg, hg_reason = detect_homoglyph_spoofing(cit.verbatim_quote)
+            if is_hg:
+                reason = (
+                    f"Quote from chunk '{cit.chunk_id}' contains homoglyph spoofing: {hg_reason}"
+                )
+                details.append(
+                    CitationVerificationDetail(
+                        citation=cit,
+                        is_valid=False,
+                        overlap_ratio=0.0,
+                        matched_chunk_id=matched_chunk_id,
+                        error_code=CitationFailureCode.HALLUCINATED_QUOTE,
+                        error_reason=reason,
+                    )
+                )
+                failed_citations.append((cit, reason))
                 continue
 
             # Verbatim Quote Grounding Check (VAL-02)

@@ -1,6 +1,5 @@
 """Byte-exact source line slicer and NFKC quote verification engine (VAL-02)."""
 
-import difflib
 import re
 import unicodedata
 from typing import Final
@@ -21,7 +20,7 @@ from context_scout.schemas.contracts import CodeSlicePointer, DocCitationSpan, V
 class DeterministicSlicer:
     """Byte-exact source line slicer and NFKC quote verification engine (VAL-02)."""
 
-    MIN_QUOTE_OVERLAP_RATIO: Final[float] = 0.98
+    MIN_QUOTE_OVERLAP_RATIO: Final[float] = 1.0
 
     def slice_lines(
         self,
@@ -158,10 +157,7 @@ class DeterministicSlicer:
         if len(method_spans) <= 3:
             return self.slice_lines(raw_content, start_line, end_line, line_number_width)
 
-        q_terms = {
-            w.lower()
-            for w in re.findall(r"[A-Za-z0-9_]{3,}", query_text)
-        }
+        q_terms = {w.lower() for w in re.findall(r"[A-Za-z0-9_]{3,}", query_text)}
         scored_methods: list[tuple[int, str]] = []
         for m_name, m_start, m_end in method_spans:
             if m_name == "__init__":
@@ -212,12 +208,141 @@ class DeterministicSlicer:
         """Deterministic tokenization over words and punctuation."""
         return re.findall(r"\w+|[^\w\s]", text)
 
-    def _has_unclosed_delimiters(self, text: str) -> bool:
+    @staticmethod
+    def _strip_comments_and_strings(code: str, file_path: str = "") -> tuple[str, bool]:
+        """Strips comments and string literals across Python, TypeScript, and C#.
+
+        Returns:
+            (sanitized_code, has_unclosed_quote_or_comment)
+        """
+        ext = file_path.lower()
+        is_hash_comment_lang = not ext.endswith(
+            (".ts", ".tsx", ".js", ".jsx", ".cs", ".java", ".c", ".cpp")
+        )
+
+        chars: list[str] = []
+        i = 0
+        n = len(code)
+        has_unclosed_quote = False
+
+        while i < n:
+            # Python triple-double quotes \"\"\"
+            if code[i : i + 3] == '"""':
+                end = code.find('"""', i + 3)
+                if end == -1:
+                    has_unclosed_quote = True
+                    break
+                i = end + 3
+                chars.append(" ")
+                continue
+            # Python triple-single quotes '''
+            if code[i : i + 3] == "'''":
+                end = code.find("'''", i + 3)
+                if end == -1:
+                    has_unclosed_quote = True
+                    break
+                i = end + 3
+                chars.append(" ")
+                continue
+            # C# / TS / C block comments /* ... */
+            if code[i : i + 2] == "/*":
+                end = code.find("*/", i + 2)
+                if end == -1:
+                    has_unclosed_quote = True
+                    break
+                i = end + 2
+                chars.append(" ")
+                continue
+            # Single-line comment //
+            if code[i : i + 2] == "//":
+                end = code.find("\n", i + 2)
+                if end == -1:
+                    break
+                i = end
+                continue
+            # Single-line comment # (Python, Terraform, Shell)
+            if code[i] == "#" and is_hash_comment_lang:
+                end = code.find("\n", i + 1)
+                if end == -1:
+                    break
+                i = end
+                continue
+            # Double-quoted string literal "..."
+            if code[i] == '"':
+                j = i + 1
+                closed = False
+                while j < n:
+                    if code[j] == "\\":
+                        j += 2
+                        continue
+                    if code[j] == '"':
+                        closed = True
+                        j += 1
+                        break
+                    if code[j] == "\n":
+                        break
+                    j += 1
+                if not closed:
+                    has_unclosed_quote = True
+                    break
+                i = j
+                chars.append(" ")
+                continue
+            # Single-quoted string literal '...'
+            if code[i] == "'":
+                j = i + 1
+                closed = False
+                while j < n:
+                    if code[j] == "\\":
+                        j += 2
+                        continue
+                    if code[j] == "'":
+                        closed = True
+                        j += 1
+                        break
+                    if code[j] == "\n":
+                        break
+                    j += 1
+                if not closed:
+                    has_unclosed_quote = True
+                    break
+                i = j
+                chars.append(" ")
+                continue
+            # Backtick template literal `...`
+            if code[i] == "`":
+                j = i + 1
+                closed = False
+                while j < n:
+                    if code[j] == "\\":
+                        j += 2
+                        continue
+                    if code[j] == "`":
+                        closed = True
+                        j += 1
+                        break
+                    j += 1
+                if not closed:
+                    has_unclosed_quote = True
+                    break
+                i = j
+                chars.append(" ")
+                continue
+
+            chars.append(code[i])
+            i += 1
+
+        return "".join(chars), has_unclosed_quote
+
+    def _has_unclosed_delimiters(self, text: str, file_path: str = "") -> bool:
+        cleaned, unclosed_quote = self._strip_comments_and_strings(text, file_path=file_path)
+        if unclosed_quote:
+            return True
         # Strip standard half-open mathematical interval notation (e.g., "[0, T)", "(0, 1]")
         cleaned = re.sub(
             r"(?:(?:\bin\b|[∈=:])\s*)?[\[\(]\s*[^\]\)\(\[\n,;]{1,20}\s*,\s*[^\]\)\(\[\n,;]{1,20}\s*[\]\)]",
             "",
-            text,
+            cleaned,
         )
         counts = {
             "(": cleaned.count("(") - cleaned.count(")"),
@@ -269,106 +394,39 @@ class DeterministicSlicer:
                 matched_source_segment=norm_quote,
             )
 
-        # 2. Fuzzy token sequence alignment
+        # 2. SequenceMatcher REMOVED (M4 Requirement 3: Zero Tolerance Substring)
+        # Token substitution, omission, negation change, or homoglyph is strictly rejected.
         q_tokens = self.tokenize(norm_quote)
-        s_tokens = self.tokenize(norm_source)
+        s_tokens_set = set(self.tokenize(norm_source))
 
         if not q_tokens:
             raise QuoteVerificationError(
                 SlicerErrorCode.QUOTE_MISMATCH, "No tokens extracted from quote"
             )
 
-        # Find best matching window in source tokens
-        matcher = difflib.SequenceMatcher(None, q_tokens, s_tokens)
-        match = matcher.find_longest_match(0, len(q_tokens), 0, len(s_tokens))
-
-        if match.size == 0:
-            return QuoteVerificationResult(
-                is_valid=False,
-                token_overlap_ratio=0.0,
-                normalized_quote=norm_quote,
-                error_code=SlicerErrorCode.HALLUCINATED_QUOTE,
-                error_reason="Zero matching tokens between quote and source text",
-                unmatched_tokens=q_tokens,
+        absent_tokens = [t for t in q_tokens if t not in s_tokens_set]
+        if absent_tokens:
+            error_reason = (
+                f"Quote failed verification: contains {len(absent_tokens)} hallucinated "
+                f"or substituted tokens not matched in source text: {absent_tokens[:3]}"
+            )
+        else:
+            error_reason = (
+                "Quote failed verification: quote is not an exact contiguous substring of source "
+                "text (tokens exist in source but sequence is altered or contains "
+                "token omission / omitted tokens)"
             )
 
-        # Extract localized window in source tokens
-        window_start = max(0, match.b - 5)
-        window_end = min(len(s_tokens), match.b + len(q_tokens) + 5)
-        source_window = s_tokens[window_start:window_end]
-
-        local_matcher = difflib.SequenceMatcher(None, q_tokens, source_window)
-        matching_tokens_count = sum(block.size for block in local_matcher.get_matching_blocks())
-        overlap_ratio = round(matching_tokens_count / len(q_tokens), 6)
-
-        # Detect tokens in quote that were substituted, inserted, or unaligned in sequence matching
-        unmatched_tokens: list[str] = []
-        omitted_tokens: list[str] = []
-        for tag, i1, i2, j1, j2 in local_matcher.get_opcodes():
-            if tag in ("replace", "delete"):
-                unmatched_tokens.extend(q_tokens[i1:i2])
-            elif tag == "insert" and 0 < i1 < len(q_tokens):
-                # Intra-sentence omission: middle tokens omitted from quote
-                omitted_tokens.extend(source_window[j1:j2])
-
-        # Detect hallucinated tokens completely absent from source window
-        absent_tokens = [t for t in q_tokens if t not in source_window]
-        all_rejected_tokens = list(
-            dict.fromkeys(unmatched_tokens + absent_tokens + omitted_tokens)
-        )
-
-        is_valid = overlap_ratio >= min_overlap_ratio
-        if reject_absent_tokens and all_rejected_tokens:
-            is_valid = False
-
-        error_code = None
-        error_reason = None
-        unmatched: list[str] = []
-
-        if not is_valid:
-            unmatched = all_rejected_tokens if all_rejected_tokens else absent_tokens
-            if all_rejected_tokens:
-                error_code = SlicerErrorCode.HALLUCINATED_QUOTE
-                if omitted_tokens and not unmatched_tokens and not absent_tokens:
-                    error_reason = (
-                        f"Quote failed verification: contains non-contiguous intra-sentence "
-                        f"omission of {len(omitted_tokens)} tokens from source text: "
-                        f"{omitted_tokens[:3]}"
-                    )
-                else:
-                    error_reason = (
-                        f"Quote failed verification: contains {len(all_rejected_tokens)} "
-                        f"hallucinated or substituted tokens not matched in source text: "
-                        f"{all_rejected_tokens[:3]}"
-                    )
-                if strict:
-                    raise HallucinatedQuoteError(error_reason)
-            else:
-                # Check for truncation: quote is a strict prefix of the aligned source segment
-                matched_slice = s_tokens[match.b : match.b + len(q_tokens)]
-                has_trailing_source = (match.b + len(q_tokens)) < len(s_tokens)
-                if has_trailing_source and q_tokens == matched_slice:
-                    error_code = SlicerErrorCode.TRUNCATED_QUOTE
-                    error_reason = "Quote is truncated mid-line"
-                    if strict:
-                        raise TruncatedLineError(error_reason)
-                else:
-                    error_code = SlicerErrorCode.HALLUCINATED_QUOTE
-                    error_reason = (
-                        f"Quote failed verification (overlap {overlap_ratio:.4f} < "
-                        f"{min_overlap_ratio})"
-                    )
-                    if strict:
-                        raise HallucinatedQuoteError(error_reason)
+        if strict:
+            raise HallucinatedQuoteError(error_reason)
 
         return QuoteVerificationResult(
-            is_valid=is_valid,
-            token_overlap_ratio=overlap_ratio,
+            is_valid=False,
+            token_overlap_ratio=0.0,
             normalized_quote=norm_quote,
-            matched_source_segment=" ".join(source_window) if match.size > 0 else None,
-            error_code=error_code,
+            error_code=SlicerErrorCode.HALLUCINATED_QUOTE,
             error_reason=error_reason,
-            unmatched_tokens=unmatched,
+            unmatched_tokens=absent_tokens or q_tokens,
         )
 
     def verify_doc_citation(

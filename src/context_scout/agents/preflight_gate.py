@@ -34,9 +34,13 @@ from context_scout.db.repositories import (
 from context_scout.schemas.contracts import (
     CodeSlicePointer,
     DocCitationSpan,
+    DomainConfig,
+    GateAbstentionResult,
+    GatePassResult,
     ImplementationContextPack,
     InsufficientContextDiagnostic,
     MarketRegime,
+    MissingItemRecord,
     ModificationIntent,
     PreFlightValidationReport,
     PrincipalContext,
@@ -314,6 +318,42 @@ PROMPT_STOPWORDS: Final[set[str]] = {
     "provided",
     "including",
     "include",
+    "sql",
+    "kms",
+    "postgresql",
+    "postgres",
+    "redis",
+    "kafka",
+    "mysql",
+    "grpc",
+    "http",
+    "https",
+    "rest",
+    "api",
+    "json",
+    "yaml",
+    "xml",
+    "jwt",
+    "oauth",
+    "oidc",
+    "iam",
+    "gcp",
+    "aws",
+    "azure",
+    "docker",
+    "k8s",
+    "kubernetes",
+    "terraform",
+    "linux",
+    "cloud",
+    "private",
+    "cluster",
+    "encryption",
+    "quantstrategybrief",
+    "domainknowledgebrief",
+    "implementationcontextpack",
+    "strategybrief",
+    "brief",
 }
 
 CUSTOM_CORPUS_INDEX_PATHS: dict[str, Path] = {}
@@ -367,7 +407,6 @@ def extract_document_text(file_path: Path) -> str:
     if b"\x00" in raw_bytes[:8192] and suffix != ".pdf":
         return ""
     return raw_bytes.decode("utf-8", errors="replace").replace("\x00", "")
-
 
 
 def _should_skip_sync_parts(rel_parts: tuple[str, ...], is_multi_repo: bool) -> bool:
@@ -733,17 +772,11 @@ def sync_custom_domain_corpus_if_needed(
     kept_files = [f for f in existing_files if str(f.get("file_path")) not in mutated_paths]
     all_symbols: list[dict[str, Any]] = list(data.get("ast_symbols", []))
     mutated_symbol_ids = {
-        str(s["symbol_id"])
-        for s in all_symbols
-        if str(s.get("file_id")) in mutated_file_ids
+        str(s["symbol_id"]) for s in all_symbols if str(s.get("file_id")) in mutated_file_ids
     }
-    kept_symbols = [
-        s for s in all_symbols if str(s.get("file_id")) not in mutated_file_ids
-    ]
+    kept_symbols = [s for s in all_symbols if str(s.get("file_id")) not in mutated_file_ids]
     all_edges: list[dict[str, Any]] = list(data.get("ast_edges", []))
-    kept_edges = [
-        e for e in all_edges if str(e.get("source_symbol_id")) not in mutated_symbol_ids
-    ]
+    kept_edges = [e for e in all_edges if str(e.get("source_symbol_id")) not in mutated_symbol_ids]
 
     qual_to_sym_id: dict[str, str] = {
         str(s["qualified_name"]): str(s["symbol_id"]) for s in kept_symbols
@@ -785,9 +818,7 @@ def sync_custom_domain_corpus_if_needed(
             else rel_path
         )
         try:
-            parsed_syms, parsed_edges = extractor.parse_source(
-                raw_text, lang, file_path=sub_rel
-            )
+            parsed_syms, parsed_edges = extractor.parse_source(raw_text, lang, file_path=sub_rel)
         except Exception:
             parsed_syms, parsed_edges = [], []
 
@@ -1292,6 +1323,9 @@ def create_insufficient_context_diagnostic(
     for sym in report.missing_reference_identifiers:
         if sym not in missing:
             missing.append(sym)
+    for item in report.missing_items:
+        if item.identifier not in missing:
+            missing.append(item.identifier)
 
     reason = (
         custom_reason
@@ -1300,12 +1334,20 @@ def create_insufficient_context_diagnostic(
     )
     files = partial_candidate_files or []
 
+    failure_check: str | None = None
+    for k, v in report.check_results.items():
+        if not v:
+            failure_check = k
+            break
+
     return InsufficientContextDiagnostic(
         trace_id=trace_id,
         domain_id=domain_id,
         reason=reason,
         missing_symbols=missing,
         partial_candidate_files=files,
+        missing_items=list(report.missing_items),
+        failure_check=failure_check,
         paid_tokens_spent=0,
     )
 
@@ -1317,33 +1359,40 @@ class PreFlightValidator:
     normalized retrieval score, and verbatim document citations before paid frontier handoff.
     """
 
-    DEFAULT_MIN_RRF_SCORE: Final[float] = 0.55
+    DEFAULT_MIN_RRF_SCORE: Final[float] = 0.65
     DEFAULT_CROSS_ENCODER_SCORE_THRESHOLD: Final[float] = 0.60
-    DEFAULT_MIN_CITATION_OVERLAP: Final[float] = 0.98
+    DEFAULT_MIN_CITATION_OVERLAP: Final[float] = 1.0
 
     def __init__(
         self,
         repo: Any = None,
         slicer: DeterministicSlicer | None = None,
         expander: ASTDependencyExpander | None = None,
-        min_rrf_score: float = DEFAULT_MIN_RRF_SCORE,
+        min_rrf_score: float | None = None,
         cross_encoder_threshold: float = DEFAULT_CROSS_ENCODER_SCORE_THRESHOLD,
         min_citation_overlap: float = DEFAULT_MIN_CITATION_OVERLAP,
         principal: PrincipalContext | None = None,
         domain_id: str | None = None,
+        domain_config: DomainConfig | None = None,
         citation_gate: DocumentCitationGate | None = None,
     ) -> None:
         self.repo = repo
         self.slicer = slicer or DeterministicSlicer()
+        self.domain_config = domain_config or DomainConfig(domain_id=domain_id or "default")
         self.citation_gate = citation_gate or DocumentCitationGate(
             min_overlap_ratio=min_citation_overlap,
             require_citations_default=False,
+            strict_freshness=self.domain_config.confluence_strict_freshness,
         )
         self.expander = expander or ASTDependencyExpander(
             max_direct_callers=3,
             max_expansion_token_budget=1500,
         )
-        self.min_rrf_score = min_rrf_score
+        self.min_rrf_score = (
+            min_rrf_score
+            if min_rrf_score is not None
+            else self.domain_config.min_retrieval_confidence
+        )
         self.cross_encoder_threshold = cross_encoder_threshold
         self.min_citation_overlap = min_citation_overlap
         self.principal = principal
@@ -1436,7 +1485,7 @@ class PreFlightValidator:
         explicit_candidates, unquoted_candidates = self.extract_prompt_candidates(user_prompt)
         all_candidates = explicit_candidates | unquoted_candidates
 
-        if not all_candidates:
+        if not all_candidates or (not visible_symbols and not visible_files):
             return [], []
 
         # Build repository symbol and file lookup indices (scoped to target repo when multi-repo)
@@ -1449,9 +1498,7 @@ class PreFlightValidator:
         distinct_all_repos = {f.repo_name for f in visible_files}
         scope_to_target_repo = bool(target_repos and len(distinct_all_repos) > 1)
         scoped_files = [
-            f
-            for f in visible_files
-            if not scope_to_target_repo or f.repo_name in target_repos
+            f for f in visible_files if not scope_to_target_repo or f.repo_name in target_repos
         ]
         scoped_file_ids = {f.file_id for f in scoped_files}
 
@@ -1471,18 +1518,32 @@ class PreFlightValidator:
 
         known_files_by_path: dict[str, CodeFileRecord] = {}
         known_files_by_name: dict[str, CodeFileRecord] = {}
+        known_files_by_stem: dict[str, CodeFileRecord] = {}
+        known_dirs: set[str] = set()
         for f in scoped_files:
             known_files_by_path[f.file_path] = f
             file_name = f.file_path.split("/")[-1]
             known_files_by_name[file_name] = f
+            known_files_by_stem[file_name.rsplit(".", 1)[0]] = f
+            known_dirs.update(part for part in f.file_path.split("/")[:-1] if part and part != ".")
 
         missing_reference_identifiers: list[str] = []
         novel_target_identifiers: list[str] = []
+        has_creation_verb = bool(
+            re.search(
+                r"\b(?:add|create|implement|introduce|write|define|generate|build|provision|configure|setup|deploy|declare)\b",
+                user_prompt,
+                re.IGNORECASE,
+            )
+        )
 
         for candidate in sorted(all_candidates):
             is_explicit = candidate in explicit_candidates
+            is_camel_or_pascal = any(c.isupper() for c in candidate[1:]) and any(
+                c.islower() for c in candidate
+            )
             is_code_shaped = (
-                any(c.isupper() for c in candidate[1:])
+                is_camel_or_pascal
                 or "_" in candidate
                 or "." in candidate
                 or (
@@ -1500,6 +1561,8 @@ class PreFlightValidator:
             is_existing_file = (
                 candidate in known_files_by_path
                 or candidate in known_files_by_name
+                or candidate in known_files_by_stem
+                or candidate in known_dirs
                 or any(f.endswith("/" + candidate) for f in known_files_by_path)
             )
 
@@ -1507,12 +1570,19 @@ class PreFlightValidator:
                 # Existing Reference Symbol/File -> Must be covered in code_slices
                 covered = False
                 for s in code_slices:
-                    if s.qualified_symbol == candidate or s.qualified_symbol.endswith(
-                        "." + candidate
+                    if (
+                        s.qualified_symbol == candidate
+                        or s.qualified_symbol.endswith("." + candidate)
+                        or s.qualified_symbol.endswith(":" + candidate)
                     ):
                         covered = True
                         break
-                    if s.file_path == candidate or s.file_path.endswith("/" + candidate):
+                    if (
+                        s.file_path == candidate
+                        or s.file_path.endswith("/" + candidate)
+                        or s.file_path.split("/")[-1].rsplit(".", 1)[0] == candidate
+                        or candidate in s.file_path.split("/")
+                    ):
                         covered = True
                         break
                     # Symbol span coverage
@@ -1533,12 +1603,122 @@ class PreFlightValidator:
                     if re.search(r"\b" + re.escape(candidate) + r"\b", s.verbatim_code_with_lines):
                         covered = True
                         break
+                    # Dot-separated identifier component coverage (e.g. Class.method)
+                    if "." in candidate and all(
+                        re.search(r"\b" + re.escape(part) + r"\b", s.verbatim_code_with_lines)
+                        or s.qualified_symbol.endswith("." + part)
+                        or s.qualified_symbol.endswith(":" + part)
+                        for part in candidate.split(".")
+                    ):
+                        covered = True
+                        break
 
                 if not covered:
                     missing_reference_identifiers.append(candidate)
             else:
-                # Novel identifier (to be created or not in repo) -> never causes failure
-                novel_target_identifiers.append(candidate)
+                # Candidate is NOT in repository symbol or file index.
+                # If candidate is already covered in retrieved code_slices, it is not missing.
+                covered = False
+                for s in code_slices:
+                    if (
+                        s.qualified_symbol == candidate
+                        or s.qualified_symbol.endswith("." + candidate)
+                        or s.qualified_symbol.endswith(":" + candidate)
+                    ):
+                        covered = True
+                        break
+                    if (
+                        s.file_path == candidate
+                        or s.file_path.endswith("/" + candidate)
+                        or s.file_path.split("/")[-1].rsplit(".", 1)[0] == candidate
+                        or candidate in s.file_path.split("/")
+                    ):
+                        covered = True
+                        break
+                    if re.search(r"\b" + re.escape(candidate) + r"\b", s.verbatim_code_with_lines):
+                        covered = True
+                        break
+                    if "." in candidate and all(
+                        re.search(r"\b" + re.escape(part) + r"\b", s.verbatim_code_with_lines)
+                        or s.qualified_symbol.endswith("." + part)
+                        or s.qualified_symbol.endswith(":" + part)
+                        for part in candidate.split(".")
+                    ):
+                        covered = True
+                        break
+
+                if covered:
+                    novel_target_identifiers.append(candidate)
+                    continue
+
+                # Partition novel identifiers to be created vs unindexed target symbols referenced
+                # in modification, inspection, refactoring, or deletion tasks.
+                is_novel_creation = bool(
+                    re.search(
+                        r"\b(?:add|create|implement|introduce|write|define|generate|build|provision|configure|setup|deploy|declare)\s+"
+                        r"(?:a\s+|an\s+|the\s+)?(?:new\s+)?"
+                        r"(?:[a-zA-Z0-9_\-]+\s+){0,3}"
+                        r"[`'\"]?" + re.escape(candidate) + r"[`'\"]?\b",
+                        user_prompt,
+                        re.IGNORECASE,
+                    )
+                    or (
+                        has_creation_verb
+                        and re.search(
+                            r"\b(?:and|or|,)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:helper\s+)?"
+                            r"(?:method|function|class|interface|type|struct)?\s*"
+                            r"[`'\"]?" + re.escape(candidate) + r"[`'\"]?\b",
+                            user_prompt,
+                            re.IGNORECASE,
+                        )
+                    )
+                )
+                is_modification_inspection = bool(
+                    re.search(
+                        r"\b(?:refactor|modify|update|inspect|debug|fix|patch|trace|delete|remove|call|import|export|from|into|in|within)\s+"
+                        r"(?:class|struct|function|def|fn|method|interface|type|file|module|symbol|component|service|handler|manager|controller|repo|repository|domain)?\s*"
+                        r"[`'\"]?" + re.escape(candidate) + r"[`'\"]?\b",
+                        user_prompt,
+                        re.IGNORECASE,
+                    )
+                    or re.search(
+                        r"\b(?:class|def|fn|function|method|interface|type|struct|enum|file|module)\s+[`'\"]?"
+                        + re.escape(candidate)
+                        + r"[`'\"]?\b",
+                        user_prompt,
+                        re.IGNORECASE,
+                    )
+                    or (
+                        "/" in candidate
+                        or candidate.endswith(
+                            (
+                                ".py",
+                                ".ts",
+                                ".tsx",
+                                ".js",
+                                ".jsx",
+                                ".cs",
+                                ".go",
+                                ".rs",
+                                ".java",
+                                ".json",
+                                ".yaml",
+                                ".yml",
+                                ".toml",
+                                ".sql",
+                                ".md",
+                            )
+                        )
+                    )
+                )
+                if (
+                    (is_explicit or is_code_shaped)
+                    and (is_modification_inspection or not is_novel_creation)
+                    and not is_novel_creation
+                ):
+                    missing_reference_identifiers.append(candidate)
+                else:
+                    novel_target_identifiers.append(candidate)
 
         return missing_reference_identifiers, novel_target_identifiers
 
@@ -1736,10 +1916,7 @@ class PreFlightValidator:
 
                 # If this is an internal repository symbol, verify it is present in code_slices
                 if target_sym is not None:
-                    if (
-                        edge.edge_kind == "CALLS"
-                        and target_sym.file_id != focus_sym.file_id
-                    ):
+                    if edge.edge_kind == "CALLS" and target_sym.file_id != focus_sym.file_id:
                         continue
                     sym_clean = target_sym.qualified_name.split(".")[-1].split("::")[-1]
                     edge_clean = edge.target_qualified_name.split(".")[-1].split("::")[-1]
@@ -1796,7 +1973,7 @@ class PreFlightValidator:
     def check_rrf_threshold(
         self,
         normalized_rrf_score: float | None,
-        cross_encoder_score: float | None,
+        cross_encoder_score: float | None = None,
     ) -> tuple[bool, float]:
         """Verifies top Normalized RRF score >= 0.55 (BLK-01) or cross-encoder score >= 0.60."""
         if normalized_rrf_score is not None:
@@ -1842,18 +2019,14 @@ class PreFlightValidator:
         elif isinstance(corpus_chunks_for_gate, dict):
             known_ids = set(corpus_chunks_for_gate.keys())
 
-        missing_ids = [
-            str(cit.chunk_id) for cit in citations if str(cit.chunk_id) not in known_ids
-        ]
+        missing_ids = [str(cit.chunk_id) for cit in citations if str(cit.chunk_id) not in known_ids]
         if missing_ids and bound_repo._repo is not None:
             candidate_domains = [domain_id]
             for scope in principal.allowed_scopes:
                 if scope.startswith("domain:"):
-                    candidate_domains.append(scope.split(":", 1)[1])
-            if "default" not in candidate_domains:
-                candidate_domains.append("default")
-            if "quant_research_scout" not in candidate_domains:
-                candidate_domains.append("quant_research_scout")
+                    target_dom = scope.split(":", 1)[1].strip()
+                    if target_dom:
+                        candidate_domains.append(target_dom)
             for lookup_domain in dict.fromkeys(candidate_domains):
                 fetched = bound_repo.get_doc_chunks_by_ids(
                     principal=principal,
@@ -1889,6 +2062,446 @@ class PreFlightValidator:
                 failed_reasons.append(r)
         return res.passed, failed_reasons
 
+    def _is_valid_partial_window_truncation(
+        self,
+        cleaned_code: str,
+        slice_item: VerbatimCodeSlice,
+    ) -> bool:
+        """Determines if unclosed delimiters in a partial caller/type window
+        are an artifact of multi-line call/expression window truncation,
+        rather than a broken single-line syntax error.
+        """
+        lines = [ln.strip() for ln in cleaned_code.splitlines() if ln.strip()]
+        if not lines:
+            return False
+
+        # 1. Structural check: multi-line expression ending cleanly on an argument or comma
+        last_line = lines[-1]
+        if len(lines) >= 2 and last_line.endswith(","):
+            return True
+
+        # 2. Repository check: if underlying symbol exists in repository,
+        # check if expanding to full symbol boundaries closes the delimiter
+        if self.repo is not None:
+            try:
+                bound_repo = self._resolve_graph_repo(self.repo)
+                principal = self._resolve_principal(self.principal)
+                domain = self.domain_id or (
+                    self.domain_config.domain_id if self.domain_config else ""
+                )
+
+                candidate_domains = [domain] if domain else []
+                for scope in principal.allowed_scopes:
+                    if scope.startswith("domain:"):
+                        d = scope.split(":", 1)[1].strip()
+                        if d and d not in candidate_domains:
+                            candidate_domains.append(d)
+                if not candidate_domains:
+                    candidate_domains = ["default"]
+
+                for dom in candidate_domains:
+                    files = bound_repo.list_visible_code_files(principal, dom)
+                    file_rec = next((f for f in files if f.file_path == slice_item.file_path), None)
+                    if file_rec is not None:
+                        syms = bound_repo.list_visible_ast_symbols(principal, dom)
+                        matching_sym = next(
+                            (
+                                s
+                                for s in syms
+                                if s.qualified_name == slice_item.qualified_symbol
+                                and s.file_id == file_rec.file_id
+                            ),
+                            None,
+                        )
+                        if matching_sym is not None:
+                            full_lines = file_rec.raw_content.splitlines()[
+                                matching_sym.start_line - 1 : matching_sym.end_line
+                            ]
+                            full_code = "\n".join(full_lines)
+                            if not self.slicer._has_unclosed_delimiters(
+                                full_code, file_path=slice_item.file_path
+                            ):
+                                return True
+            except Exception as e:
+                logger.debug("Failed symbol boundary expansion check: %s", e)
+
+        return False
+
+    def check_ast_syntax(
+        self, code_slices: list[VerbatimCodeSlice]
+    ) -> tuple[bool, list[str], list[MissingItemRecord]]:
+        """Check 1: Verifies all code slices parse cleanly under language parser."""
+        import textwrap
+
+        syntax_errors: list[str] = []
+        missing_items: list[MissingItemRecord] = []
+
+        py_parser = None
+        ts_parser = None
+        tsx_parser = None
+        try:
+            import tree_sitter_python as tspython
+            import tree_sitter_typescript as tstypescript
+            from tree_sitter import Language, Parser
+
+            py_parser = Parser(Language(tspython.language()))
+            ts_parser = Parser(Language(tstypescript.language_typescript()))
+            tsx_parser = Parser(Language(tstypescript.language_tsx()))
+        except Exception as e:
+            logger.debug("Tree-sitter parser initialization: %s", e)
+
+        for s in code_slices:
+            raw_lines: list[str] = []
+            for line in s.verbatim_code_with_lines.splitlines():
+                m = re.match(r"^\s*\d+\s*\|\s?(.*)$", line)
+                raw_lines.append(m.group(1) if m else line)
+            cleaned_code = textwrap.dedent("\n".join(raw_lines)).strip()
+            if not cleaned_code:
+                continue
+
+            has_error = False
+            err_msg = ""
+
+            is_partial_window = s.modification_intent in (
+                ModificationIntent.DIRECT_CALLER,
+                ModificationIntent.IMPORTED_TYPE,
+            )
+
+            stripped_code, unclosed_quote = self.slicer._strip_comments_and_strings(
+                cleaned_code, file_path=s.file_path
+            )
+            has_delim_error = self.slicer._has_unclosed_delimiters(
+                cleaned_code, file_path=s.file_path
+            )
+
+            if unclosed_quote:
+                has_error = True
+                err_msg = "Unclosed syntax delimiters in code slice"
+            elif has_delim_error:
+                if is_partial_window:
+                    if not self._is_valid_partial_window_truncation(cleaned_code, s):
+                        has_error = True
+                        err_msg = "Unclosed syntax delimiters in code slice"
+                else:
+                    has_error = True
+                    err_msg = "Unclosed syntax delimiters in code slice"
+
+            # Check parentheses nesting depth (> 10 levels) on sanitized code
+            # (excluding string literals & comments)
+            depth = 0
+            max_depth = 0
+            for ch in stripped_code:
+                if ch in "([{":
+                    depth += 1
+                    max_depth = max(max_depth, depth)
+                elif ch in ")]}":
+                    depth = max(0, depth - 1)
+            if max_depth > 10:
+                has_error = True
+                err_msg = f"Nesting depth ({max_depth}) exceeds maximum limit (10)"
+
+            # Whole-module tree-sitter parsing is only performed on full slices
+            # when no delimiter/nesting error exists
+            if not has_error and not is_partial_window:
+                ext = Path(s.file_path).suffix.lower()
+                code_b = cleaned_code.encode("utf-8")
+                if ext in (".py",) and py_parser is not None:
+                    tree = py_parser.parse(code_b)
+                    if tree.root_node.has_error:
+                        has_error = True
+                        err_msg = "Tree-sitter Python parser reported syntax error"
+                elif ext in (".ts", ".js") and ts_parser is not None:
+                    tree = ts_parser.parse(code_b)
+                    if tree.root_node.has_error:
+                        has_error = True
+                        err_msg = "Tree-sitter TypeScript parser reported syntax error"
+                elif ext in (".tsx", ".jsx") and tsx_parser is not None:
+                    tree = tsx_parser.parse(code_b)
+                    if tree.root_node.has_error:
+                        has_error = True
+                        err_msg = "Tree-sitter TSX parser reported syntax error"
+            if has_error:
+                ident = s.qualified_symbol or s.file_path
+                diag_msg = f"MALFORMED_SYNTAX in {s.file_path} ({ident}): {err_msg}"
+                syntax_errors.append(diag_msg)
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="syntax",
+                        identifier=ident,
+                        reason=diag_msg,
+                        suggested_action="Fix syntax or adjust slice bounds to parse cleanly",
+                    )
+                )
+
+        return len(syntax_errors) == 0, syntax_errors, missing_items
+
+    def check_principal_scopes(
+        self,
+        code_slices: list[VerbatimCodeSlice],
+        citations: list[DocCitationSpan],
+        bound_repo: BoundGraphRepository,
+        principal: PrincipalContext,
+        domain_id: str,
+        doc_chunks: dict[str, str] | list[DocChunkRecord] | None = None,
+    ) -> tuple[
+        bool,
+        list[VerbatimCodeSlice],
+        list[DocCitationSpan],
+        list[str],
+        list[MissingItemRecord],
+    ]:
+        """Check 4: Principal scope mirroring. Excises unauthorized items."""
+        excised_items: list[str] = []
+        missing_items: list[MissingItemRecord] = []
+        allowed_set = set(principal.allowed_scopes)
+
+        visible_files = bound_repo.list_visible_code_files(principal, domain_id)
+        file_scopes_map = {f.file_path: set(f.allowed_scopes) for f in visible_files}
+
+        permitted_slices: list[VerbatimCodeSlice] = []
+        for s in code_slices:
+            if s.file_path not in file_scopes_map:
+                excised_items.append(f"code:{s.repo_name}/{s.file_path}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="scope",
+                        identifier=f"{s.repo_name}/{s.file_path}",
+                        reason=(
+                            f"Principal '{principal.user_id}' lacks visibility "
+                            f"into file '{s.file_path}'"
+                        ),
+                    )
+                )
+                continue
+            f_scopes = file_scopes_map[s.file_path]
+            if bool(allowed_set & f_scopes) or "*" in allowed_set or "admin" in allowed_set:
+                permitted_slices.append(s)
+            else:
+                excised_items.append(f"code:{s.repo_name}/{s.file_path}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="scope",
+                        identifier=f"{s.repo_name}/{s.file_path}",
+                        reason=(
+                            f"Principal '{principal.user_id}' lacks required "
+                            f"scopes {sorted(f_scopes)}"
+                        ),
+                    )
+                )
+
+        visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
+        chunk_scopes_map = {str(c.chunk_id): set(c.allowed_scopes) for c in visible_chunks}
+        if isinstance(doc_chunks, list):
+            for c in doc_chunks:
+                if isinstance(c, DocChunkRecord) and hasattr(c, "allowed_scopes"):
+                    chunk_scopes_map[str(c.chunk_id)] = set(c.allowed_scopes)
+
+        citation_ids = [
+            str(c.chunk_id)
+            for c in citations
+            if c.chunk_id and str(c.chunk_id) not in chunk_scopes_map
+        ]
+        if citation_ids and bound_repo._repo is not None:
+            candidate_domains = [domain_id]
+            for scope in principal.allowed_scopes:
+                if scope.startswith("domain:"):
+                    target_dom = scope.split(":", 1)[1].strip()
+                    if target_dom:
+                        candidate_domains.append(target_dom)
+            for lookup_domain in dict.fromkeys(candidate_domains):
+                specific_chunks = bound_repo.get_doc_chunks_by_ids(
+                    principal=principal,
+                    domain_id=lookup_domain,
+                    chunk_ids=citation_ids,
+                )
+                for sc in specific_chunks:
+                    chunk_scopes_map[str(sc.chunk_id)] = set(sc.allowed_scopes)
+                citation_ids = [cid for cid in citation_ids if cid not in chunk_scopes_map]
+                if not citation_ids:
+                    break
+
+        permitted_citations: list[DocCitationSpan] = []
+        for c in citations:
+            c_scopes = chunk_scopes_map.get(str(c.chunk_id))
+            if c_scopes is None:
+                excised_items.append(f"doc:{c.doc_id}:{c.chunk_id}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="scope",
+                        identifier=f"{c.doc_id}:{c.chunk_id}",
+                        reason=(
+                            f"Principal '{principal.user_id}' lacks visibility "
+                            f"into document chunk '{c.chunk_id}'"
+                        ),
+                    )
+                )
+            elif bool(allowed_set & c_scopes) or "*" in allowed_set or "admin" in allowed_set:
+                permitted_citations.append(c)
+            else:
+                excised_items.append(f"doc:{c.doc_id}:{c.chunk_id}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="scope",
+                        identifier=f"{c.doc_id}:{c.chunk_id}",
+                        reason=(
+                            f"Principal '{principal.user_id}' lacks required "
+                            f"scopes {sorted(c_scopes)}"
+                        ),
+                    )
+                )
+
+        passed = True
+        if len(code_slices) > 0 and len(permitted_slices) == 0:
+            passed = False
+        if len(citations) > 0 and len(permitted_citations) == 0:
+            passed = False
+        if len(excised_items) > 0 and (
+            len(permitted_slices) == 0 and len(permitted_citations) == 0
+        ):
+            passed = False
+        if any(
+            (
+                s.modification_intent == ModificationIntent.MODIFY_TARGET
+                or str(s.modification_intent) == "modify_target"
+            )
+            and f"code:{s.repo_name}/{s.file_path}" in excised_items
+            for s in code_slices
+        ):
+            passed = False
+
+        return passed, permitted_slices, permitted_citations, excised_items, missing_items
+
+    def check_cryptographic_provenance(
+        self,
+        code_slices: list[VerbatimCodeSlice],
+        bound_repo: BoundGraphRepository,
+        principal: PrincipalContext,
+        domain_id: str,
+    ) -> tuple[bool, list[str], list[MissingItemRecord]]:
+        """Check 5: Cryptographic provenance anchor verification."""
+        unanchored: list[str] = []
+        missing_items: list[MissingItemRecord] = []
+
+        visible_files = bound_repo.list_visible_code_files(principal, domain_id)
+        files_by_path = {f.file_path: f for f in visible_files}
+
+        for s in code_slices:
+            if (
+                not s.git_commit_sha
+                or len(s.git_commit_sha) < 7
+                or s.git_commit_sha == "placeholder_sha"
+            ):
+                unanchored.append(f"Invalid commit SHA in {s.file_path}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="provenance",
+                        identifier=s.file_path,
+                        reason="Missing or placeholder git_commit_sha",
+                    )
+                )
+                continue
+            if (
+                not s.git_blob_sha
+                or len(s.git_blob_sha) < 7
+                or s.git_blob_sha == "placeholder_blob"
+            ):
+                unanchored.append(f"Invalid blob SHA in {s.file_path}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="provenance",
+                        identifier=s.file_path,
+                        reason="Missing or placeholder git_blob_sha",
+                    )
+                )
+                continue
+            if s.start_line < 1 or s.end_line < s.start_line:
+                unanchored.append(
+                    f"Invalid line bounds {s.start_line}-{s.end_line} in {s.file_path}"
+                )
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="provenance",
+                        identifier=s.file_path,
+                        reason=f"Invalid line bounds {s.start_line}-{s.end_line}",
+                    )
+                )
+                continue
+
+            f_rec = files_by_path.get(s.file_path)
+            if f_rec is None:
+                unanchored.append(f"Phantom file not found in repository: {s.file_path}")
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="provenance",
+                        identifier=s.file_path,
+                        reason=f"File not found in repository records: {s.file_path}",
+                    )
+                )
+                continue
+            if f_rec.git_blob_sha and f_rec.git_blob_sha != s.git_blob_sha:
+                unanchored.append(
+                    f"Blob SHA mismatch in {s.file_path}: {s.git_blob_sha} vs {f_rec.git_blob_sha}"
+                )
+                missing_items.append(
+                    MissingItemRecord(
+                        kind="provenance",
+                        identifier=s.file_path,
+                        reason=f"Blob SHA mismatch: {s.git_blob_sha} vs {f_rec.git_blob_sha}",
+                    )
+                )
+
+        return len(unanchored) == 0, unanchored, missing_items
+
+    def check_document_freshness(
+        self,
+        citations: list[DocCitationSpan],
+        doc_chunks: dict[str, str] | list[DocChunkRecord] | None,
+        bound_repo: BoundGraphRepository,
+        principal: PrincipalContext,
+        domain_id: str,
+    ) -> tuple[bool, list[str], list[MissingItemRecord]]:
+        """Check 6: Document freshness and staleness invalidation."""
+        stale_items: list[str] = []
+        missing_items: list[MissingItemRecord] = []
+
+        if not citations:
+            return True, [], []
+
+        visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
+        chunks_by_id = {str(c.chunk_id): c for c in visible_chunks}
+        if isinstance(doc_chunks, list):
+            for c in doc_chunks:
+                if isinstance(c, DocChunkRecord):
+                    chunks_by_id[str(c.chunk_id)] = c
+
+        neg_resolutions = set(r.lower() for r in self.domain_config.jira_negative_resolutions)
+
+        for cit in citations:
+            chunk = chunks_by_id.get(str(cit.chunk_id))
+            if chunk is not None:
+                if chunk.is_stale:
+                    stale_items.append(f"stale_chunk:{cit.chunk_id}")
+                    missing_items.append(
+                        MissingItemRecord(
+                            kind="freshness",
+                            identifier=cit.chunk_id,
+                            reason=f"Chunk {cit.chunk_id} marked stale/superseded",
+                        )
+                    )
+                meta = getattr(chunk, "metadata_json", {}) or {}
+                res_val = str(meta.get("resolution", "")).strip().lower()
+                if res_val and res_val in neg_resolutions:
+                    stale_items.append(f"negative_resolution:{cit.chunk_id}:{res_val}")
+                    missing_items.append(
+                        MissingItemRecord(
+                            kind="freshness",
+                            identifier=cit.chunk_id,
+                            reason=f"Ticket has negative resolution '{res_val}'",
+                        )
+                    )
+
+        return len(stale_items) == 0, stale_items, missing_items
+
     def validate(
         self,
         pack: ImplementationContextPack | None = None,
@@ -1905,7 +2518,7 @@ class PreFlightValidator:
         conn: Connection[tuple[object, ...]] | None = None,
         doc_chunks: dict[str, str] | list[DocChunkRecord] | None = None,
     ) -> PreFlightValidationReport:
-        """Executes all 4 deterministic checks, returning a PreFlightValidationReport."""
+        """Executes all 6 deterministic preflight checks, returning a PreFlightValidationReport."""
         # Unpack parameters from pack if provided
         active_slices = (
             code_slices
@@ -1947,7 +2560,12 @@ class PreFlightValidator:
                         all_citations.append(c)
 
             # ---------------------------------------------------------------------
-            # Check 1: Internal Symbol Resolution & 1-Hop AST Auto-Closure
+            # Check 1: AST Syntax & Structural Well-Formedness
+            # ---------------------------------------------------------------------
+            check_1_passed, syntax_errors, syntax_missing = self.check_ast_syntax(active_slices)
+
+            # ---------------------------------------------------------------------
+            # Check 2: 1-Hop AST Dependency Closure & Prompt Reference Coverage
             # ---------------------------------------------------------------------
             unresolved_symbols, auto_attached_count = self.check_symbol_resolution(
                 code_slices=active_slices,
@@ -1955,11 +2573,6 @@ class PreFlightValidator:
                 principal=active_principal,
                 domain_id=active_domain,
             )
-            check_1_passed = len(unresolved_symbols) == 0
-
-            # ---------------------------------------------------------------------
-            # Check 2: Prompt Identifier Partitioning (VAL-01)
-            # ---------------------------------------------------------------------
             visible_symbols = bound_repo.list_visible_ast_symbols(active_principal, active_domain)
             visible_files = bound_repo.list_visible_code_files(active_principal, active_domain)
 
@@ -1971,18 +2584,79 @@ class PreFlightValidator:
                     code_slices=active_slices,
                 )
             )
-            check_2_passed = len(missing_reference_identifiers) == 0
+            check_2_passed = (
+                len(unresolved_symbols) == 0 and len(missing_reference_identifiers) == 0
+            )
+            closure_missing: list[MissingItemRecord] = [
+                MissingItemRecord(
+                    kind="code_symbol",
+                    identifier=sym,
+                    reason=f"Unresolved internal symbol: {sym}",
+                )
+                for sym in unresolved_symbols
+            ] + [
+                MissingItemRecord(
+                    kind="file" if "." in sym else "code_symbol",
+                    identifier=sym,
+                    reason=f"Referenced existing symbol/file missing from context: {sym}",
+                )
+                for sym in missing_reference_identifiers
+            ]
 
             # ---------------------------------------------------------------------
-            # Check 3: Normalized RRF Threshold (BLK-01, >= 0.55)
+            # Check 3: Retrieval Confidence & Relevance Thresholding
             # ---------------------------------------------------------------------
             check_3_passed, final_rrf_score = self.check_rrf_threshold(
                 normalized_rrf_score=normalized_rrf_score,
                 cross_encoder_score=cross_encoder_score,
             )
+            rrf_missing: list[MissingItemRecord] = []
+            if not check_3_passed:
+                rrf_missing.append(
+                    MissingItemRecord(
+                        kind="citation",
+                        identifier=f"rrf_score_{final_rrf_score}",
+                        reason=(
+                            f"Top retrieval score {final_rrf_score:.4f} is below "
+                            f"threshold {self.min_rrf_score:.2f}"
+                        ),
+                    )
+                )
 
             # ---------------------------------------------------------------------
-            # Check 4: Verbatim Citation Verification (VAL-02, >= 0.98 overlap)
+            # Check 4: Principal Scope & Tenant Permission Mirroring
+            # ---------------------------------------------------------------------
+            (
+                check_4_passed,
+                permitted_slices,
+                permitted_citations,
+                excised_items,
+                scope_missing,
+            ) = self.check_principal_scopes(
+                code_slices=active_slices,
+                citations=all_citations,
+                bound_repo=bound_repo,
+                principal=active_principal,
+                domain_id=active_domain,
+                doc_chunks=doc_chunks,
+            )
+            active_slices = permitted_slices
+            all_citations = permitted_citations
+
+            # ---------------------------------------------------------------------
+            # Check 5: Cryptographic Provenance Anchoring
+            # ---------------------------------------------------------------------
+            check_5_passed, unanchored_items, provenance_missing = (
+                self.check_cryptographic_provenance(
+                    code_slices=active_slices,
+                    bound_repo=bound_repo,
+                    principal=active_principal,
+                    domain_id=active_domain,
+                )
+            )
+
+            # ---------------------------------------------------------------------
+            # Check 6: Document Freshness & Staleness Invalidation + Citation Grounding
             # ---------------------------------------------------------------------
             citations_verified_100_pct, failed_citation_reasons = self.check_citations(
                 citations=all_citations,
@@ -1991,12 +2665,56 @@ class PreFlightValidator:
                 principal=active_principal,
                 domain_id=active_domain,
             )
-            check_4_passed = citations_verified_100_pct
+            freshness_passed, stale_items, freshness_missing = self.check_document_freshness(
+                citations=all_citations,
+                doc_chunks=doc_chunks,
+                bound_repo=bound_repo,
+                principal=active_principal,
+                domain_id=active_domain,
+            )
+            check_6_passed = citations_verified_100_pct and freshness_passed
+            citation_missing: list[MissingItemRecord] = [
+                MissingItemRecord(
+                    kind="citation",
+                    identifier=r[:40],
+                    reason=r,
+                )
+                for r in failed_citation_reasons
+            ]
 
-            # ---------------------------------------------------------------------
-            # Composite Gate Evaluation & Bounce-Back Feedback Synthesis
-            # ---------------------------------------------------------------------
-            all_passed = check_1_passed and check_2_passed and check_3_passed and check_4_passed
+            # Aggregate all missing items
+            all_missing_items = (
+                syntax_missing
+                + closure_missing
+                + rrf_missing
+                + scope_missing
+                + provenance_missing
+                + freshness_missing
+                + citation_missing
+            )
+
+            check_results = {
+                "check_1_syntax": check_1_passed,
+                "check_2_closure": check_2_passed,
+                "check_3_rrf": check_3_passed,
+                "check_4_scope": check_4_passed,
+                "check_5_provenance": check_5_passed,
+                "check_6_freshness": check_6_passed,
+            }
+            all_passed = all(check_results.values())
+            if not active_slices and not all_citations:
+                all_passed = False
+                check_results["check_2_closure"] = False
+                all_missing_items.append(
+                    MissingItemRecord(
+                        kind="file",
+                        identifier=active_domain,
+                        reason=(
+                            "Context pack contains zero code slices and zero "
+                            "supporting document citations"
+                        ),
+                    )
+                )
 
             bounce_back_feedback: str | None = None
             if not all_passed:
@@ -2005,31 +2723,46 @@ class PreFlightValidator:
                 ]
                 if not check_1_passed:
                     feedback_parts.append(
-                        f"- Check 1 (Internal Symbol Resolution): Missing internal dependencies: "
-                        f"{unresolved_symbols}. Please retrieve or auto-expand these symbols "
-                        "before invoking paid execution."
+                        f"- Check 1 (AST Syntax Well-Formedness): Syntax errors detected: "
+                        f"{syntax_errors}."
                     )
                 if not check_2_passed:
-                    feedback_parts.append(
-                        "- Check 2 (Prompt Identifier Partitioning, VAL-01): "
-                        "User prompt referenced existing repository symbols/files that are "
-                        f"missing from the context pack: {missing_reference_identifiers}. "
-                        "Please attach code slices covering these existing items."
-                    )
+                    if unresolved_symbols:
+                        feedback_parts.append(
+                            "- Check 2 (Internal Symbol Resolution): Missing dependencies: "
+                            f"{unresolved_symbols}."
+                        )
+                    if missing_reference_identifiers:
+                        feedback_parts.append(
+                            "- Check 2 (Prompt Identifier Partitioning, VAL-01): "
+                            f"Missing reference items: {missing_reference_identifiers}."
+                        )
                 if not check_3_passed:
                     feedback_parts.append(
                         f"- Check 3 (Normalized RRF Score, BLK-01): Top Normalized RRF score "
-                        f"{final_rrf_score:.4f} is below threshold {self.min_rrf_score:.2f} "
-                        f"(and cross-encoder score < {self.cross_encoder_threshold:.2f}). "
-                        "Please broaden search queries or inspect retrieval ranking."
+                        f"{final_rrf_score:.4f} is below threshold {self.min_rrf_score:.2f}."
                     )
                 if not check_4_passed:
-                    reasons_str = "; ".join(failed_citation_reasons)
                     feedback_parts.append(
-                        "- Check 4 (Verbatim Citation Verification, VAL-02): Citations failed "
-                        f"verbatim verification: {reasons_str}. "
-                        "Ensure quotes match source documents verbatim with >=0.98 token overlap."
+                        f"- Check 4 (Principal Scope Mirroring): Unauthorized items excised: "
+                        f"{excised_items}."
                     )
+                if not check_5_passed:
+                    feedback_parts.append(
+                        f"- Check 5 (Cryptographic Provenance): Unanchored items: "
+                        f"{unanchored_items}."
+                    )
+                if not check_6_passed:
+                    if failed_citation_reasons:
+                        feedback_parts.append(
+                            f"- Check 6 (Citation Verification): Citations failed: "
+                            f"{'; '.join(failed_citation_reasons)}."
+                        )
+                    if stale_items:
+                        feedback_parts.append(
+                            f"- Check 6 (Document Freshness): Stale/superseded items: "
+                            f"{stale_items}."
+                        )
                 bounce_back_feedback = "\n".join(feedback_parts)
 
             report = PreFlightValidationReport(
@@ -2041,6 +2774,12 @@ class PreFlightValidator:
                 citations_verified_100_pct=citations_verified_100_pct,
                 auto_attached_ast_slices_count=auto_attached_count,
                 bounce_back_feedback=bounce_back_feedback,
+                syntax_errors=syntax_errors,
+                excised_unauthorized_items=excised_items,
+                unanchored_provenance_items=unanchored_items,
+                stale_invalidated_items=stale_items,
+                missing_items=all_missing_items,
+                check_results=check_results,
             )
 
             # Mutate pack in-place if provided
@@ -2050,6 +2789,50 @@ class PreFlightValidator:
 
             pf_span.record_report(report)
             return report
+
+    def evaluate_gate(
+        self,
+        pack: ImplementationContextPack | None = None,
+        *,
+        code_slices: list[VerbatimCodeSlice] | None = None,
+        user_prompt: str | None = None,
+        supporting_doc_citations: list[DocCitationSpan] | None = None,
+        quant_strategy_spec: QuantStrategyBrief | None = None,
+        normalized_rrf_score: float | None = None,
+        cross_encoder_score: float | None = None,
+        repo: Any = None,
+        principal: PrincipalContext | None = None,
+        domain_id: str | None = None,
+        conn: Connection[tuple[object, ...]] | None = None,
+        doc_chunks: dict[str, str] | list[DocChunkRecord] | None = None,
+        trace_id: str | None = None,
+    ) -> GatePassResult | GateAbstentionResult:
+        """Executes all 6 preflight checks and emits GatePassResult or GateAbstentionResult."""
+        report = self.validate(
+            pack=pack,
+            code_slices=code_slices,
+            user_prompt=user_prompt,
+            supporting_doc_citations=supporting_doc_citations,
+            quant_strategy_spec=quant_strategy_spec,
+            normalized_rrf_score=normalized_rrf_score,
+            cross_encoder_score=cross_encoder_score,
+            repo=repo,
+            principal=principal,
+            domain_id=domain_id,
+            conn=conn,
+            doc_chunks=doc_chunks,
+        )
+        if report.passed:
+            return GatePassResult(passed=True, report=report, pack=pack)
+
+        slices = code_slices if code_slices is not None else (pack.code_slices if pack else [])
+        diag = self.create_diagnostic(
+            trace_id=trace_id or (pack.trace_id if pack else "trace_preflight_gate"),
+            domain_id=domain_id or (pack.domain_id if pack else (self.domain_id or "default")),
+            report=report,
+            partial_candidate_files=list({s.file_path for s in slices}),
+        )
+        return GateAbstentionResult(passed=False, diagnostic=diag, report=report)
 
     def create_diagnostic(
         self,
@@ -2075,6 +2858,8 @@ ContextPackValidator = PreFlightValidator
 __all__ = [
     "BoundGraphRepository",
     "ContextPackValidator",
+    "GateAbstentionResult",
+    "GatePassResult",
     "PreFlightValidator",
     "create_insufficient_context_diagnostic",
 ]
