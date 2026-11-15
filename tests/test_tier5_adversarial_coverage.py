@@ -43,6 +43,7 @@ from typing import Final
 from unittest.mock import MagicMock
 
 import pytest
+from opentelemetry.sdk.trace import ReadableSpan
 
 from context_scout.agents.claim_verifier import (
     ClaimFailureCode,
@@ -1009,7 +1010,10 @@ class TestOpenTelemetryAdversarial:
         finished_spans = tracer.exporter.get_finished_spans()
         assert len(finished_spans) == 4
 
-        span_phases = [s.attributes.get(ATTR_SCOUT_PHASE) for s in finished_spans]
+        span_phases = [
+            s.attributes.get(ATTR_SCOUT_PHASE) if s.attributes is not None else None
+            for s in finished_spans
+        ]
         assert span_phases == [
             PHASE_RETRIEVAL,
             PHASE_SLICING,
@@ -1037,6 +1041,7 @@ class TestOpenTelemetryAdversarial:
         finished_spans = tracer.exporter.get_finished_spans()
         assert len(finished_spans) == 1
         span = finished_spans[0]
+        assert span.attributes is not None
 
         # Invariant checks: zero tokens and zero dollars
         assert span.attributes[ATTR_SCOUT_IS_ABSTENTION] is True
@@ -1064,6 +1069,7 @@ class TestOpenTelemetryAdversarial:
             "child_span", context=extracted_context
         ) as child_span:
             # Child span must link to the root span context
+            assert isinstance(child_span, ReadableSpan)
             assert child_span.parent is not None
             assert child_span.parent.span_id == root_span.get_span_context().span_id
 

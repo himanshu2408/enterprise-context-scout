@@ -155,10 +155,10 @@ function helper() {
 """
     _symbols, edges = plugin.extract_ast(code, "src/components/MyComp.tsx")
     dispatches = [e for e in edges if e.edge_kind == "DISPATCHES"]
-    assert len(dispatches) > 0, "DISPATCHES edge missing"
+    assert len(dispatches) == 1, f"Expected 1 DISPATCHES edge, got {dispatches}"
+    assert "doSomething" in dispatches[0].target_qualified_name
     err = (
-        f"Dispatch from standalone function leaked to MyComp: "
-        f"{dispatches[0].source_qualified_name}"
+        f"Dispatch from standalone function leaked to MyComp: {dispatches[0].source_qualified_name}"
     )
     assert not dispatches[0].source_qualified_name.endswith(".MyComp"), err
 
@@ -191,7 +191,7 @@ resource "google_compute_instance" "vm" {
     assert "google_compute_image.debian" in sym_names
 
     call_edges = [e for e in edges if e.edge_kind == "CALLS"]
-    assert len(call_edges) > 0, "CALLS edge missing"
+    assert len(call_edges) == 1, f"Expected 1 CALLS edge, got {call_edges}"
     # DEFECT: Target emitted is 'main.data.google_compute_image' instead of target symbol
     edge_target = call_edges[0].target_qualified_name
     err = f"Data source reference target broken: {edge_target}"

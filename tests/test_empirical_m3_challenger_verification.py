@@ -93,9 +93,8 @@ def _make_brief(
         mathematical_signal_latex=mathematical_signal_latex,
         entry_exit_rules=entry_exit_rules or ["Enter on signal > 0.0", "Exit on signal <= 0.0"],
         sample_period_years=sample_period_years,
-        market_specific_caveats=market_specific_caveats or [
-            "Subject to statutory transaction cost"
-        ],
+        market_specific_caveats=market_specific_caveats
+        or ["Subject to statutory transaction cost"],
         known_failure_regimes=known_failure_regimes or ["Flash crash volatility"],
     )
 
@@ -238,10 +237,7 @@ def test_empirical_3way_rrf_formula_bounds_and_extremes() -> None:
     # 8. Randomized rank monotonicity and strict containment across 1,000 trials
     rng = random.Random(2026)
     for _ in range(1000):
-        ranks: list[int | None] = [
-            rng.choice([None, rng.randint(1, 50_000)])
-            for _ in range(3)
-        ]
+        ranks: list[int | None] = [rng.choice([None, rng.randint(1, 50_000)]) for _ in range(3)]
         s = compute_normalized_rrf(ranks, num_modalities=3, k=60)
         assert 0.0 <= s <= 1.0, f"RRF score {s} outside [0.0, 1.0] for ranks {ranks}"
 
@@ -542,9 +538,7 @@ def test_empirical_scepticism_gate_distorted_and_fabricated_citations() -> None:
     assert res_fab.error_code == SlicerErrorCode.HALLUCINATED_QUOTE
 
     # 4. Truncated quote with unclosed delimiter
-    truncated_quote = (
-        "floor of 15.0 bps for (equity delivery transactions"
-    )
+    truncated_quote = "floor of 15.0 bps for (equity delivery transactions"
     with pytest.raises(TruncatedLineError):
         slicer.verify_quote(truncated_quote, source_text, strict=True)
 

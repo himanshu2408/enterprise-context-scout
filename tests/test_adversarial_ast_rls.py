@@ -398,23 +398,20 @@ def test_adversarial_ast_expansion_token_budget_never_exceeds_1500() -> None:
 # =============================================================================
 
 
-def test_adversarial_live_postgres_rls_isolation(settings: ScoutSettings) -> None:
+def test_adversarial_live_postgres_rls_isolation(
+    settings: ScoutSettings,
+    ephemeral_pg_domain: str,
+) -> None:
     """Live PostgreSQL 17 test on port 5432:
 
     Verifies that an engineer principal (allowed_scopes=['public_eng']) cannot query
     code_files, ast_symbols, or ast_edges tagged with 'quant_restricted'.
     """
     mgr = RLSConnectionManager(settings.db_app_url)
-    admin_mgr = RLSConnectionManager(settings.db_admin_url)
     repo = PostgresRLSRepository()
-    domain_id = "trading_code_scout"
+    domain_id = ephemeral_pg_domain
     repo_name = "adversarial-rls-test"
 
-    admin_principal = PrincipalContext(
-        user_id="db_admin_adv",
-        role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "quant_restricted"],
-    )
     quant_principal = PrincipalContext(
         user_id="adversarial_quant_user",
         role=RoleType.QUANT_RESEARCHER,
@@ -426,22 +423,6 @@ def test_adversarial_live_postgres_rls_isolation(settings: ScoutSettings) -> Non
         allowed_scopes=["public_eng"],
     )
 
-    # Ensure domain pack exists
-    with admin_mgr.scoped_transaction(admin_principal, enable_hnsw_iterative_scan=False) as conn:
-        conn.execute(
-            """
-            INSERT INTO domain_packs (
-                domain_id, display_name, lora_adapter_id,
-                primary_truth_source, freshness_half_life_days, config_json
-            )
-            VALUES (
-                'trading_code_scout', 'Trading Code Scout', 'gemma4_26b_code_scout',
-                'code', 180, '{"test": "adversarial"}'::jsonb
-            )
-            ON CONFLICT (domain_id) DO NOTHING;
-            """
-        )
-
     # Generate test UUIDs
     restricted_file_id = uuid.uuid4()
     restricted_sym_id = uuid.uuid4()
@@ -451,188 +432,172 @@ def test_adversarial_live_postgres_rls_isolation(settings: ScoutSettings) -> Non
     public_sym_id = uuid.uuid4()
     public_edge_id = uuid.uuid4()
 
-    try:
-        # 1. Insert restricted records under quant_principal
-        with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
-            repo.insert_code_file(
-                conn,
-                CodeFileRecord(
-                    file_id=restricted_file_id,
-                    domain_id=domain_id,
-                    repo_name=repo_name,
-                    file_path="src/alpha/adversarial_restricted.py",
-                    git_commit_sha="commit_res",
-                    git_blob_sha="blob_res",
-                    language="python",
-                    allowed_scopes=["quant_restricted"],
-                    raw_content="def secret_alpha(): pass\n",
-                    line_count=1,
-                ),
-            )
-            repo.insert_ast_symbol(
-                conn,
-                ASTSymbolRecord(
-                    symbol_id=restricted_sym_id,
-                    file_id=restricted_file_id,
-                    domain_id=domain_id,
-                    qualified_name="alpha.adversarial_restricted.secret_alpha",
-                    symbol_kind="function",
-                    start_line=1,
-                    end_line=1,
-                    signature_skeleton="def secret_alpha() -> None:",
-                    contextual_summary="Restricted alpha function",
-                    allowed_scopes=["quant_restricted"],
-                    embedding=[0.5] * 768,
-                ),
-            )
-            repo.insert_ast_edge(
-                conn,
-                ASTEdgeRecord(
-                    edge_id=restricted_edge_id,
-                    domain_id=domain_id,
-                    source_symbol_id=restricted_sym_id,
-                    target_qualified_name="alpha.models.SecretWeights",
-                    target_symbol_id=None,
-                    edge_kind="USES_TYPE",
-                    allowed_scopes=["quant_restricted"],
-                ),
-            )
+    # 1. Insert restricted records under quant_principal
+    with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
+        repo.insert_code_file(
+            conn,
+            CodeFileRecord(
+                file_id=restricted_file_id,
+                domain_id=domain_id,
+                repo_name=repo_name,
+                file_path="src/alpha/adversarial_restricted.py",
+                git_commit_sha="commit_res",
+                git_blob_sha="blob_res",
+                language="python",
+                allowed_scopes=["quant_restricted"],
+                raw_content="def secret_alpha(): pass\n",
+                line_count=1,
+            ),
+        )
+        repo.insert_ast_symbol(
+            conn,
+            ASTSymbolRecord(
+                symbol_id=restricted_sym_id,
+                file_id=restricted_file_id,
+                domain_id=domain_id,
+                qualified_name="alpha.adversarial_restricted.secret_alpha",
+                symbol_kind="function",
+                start_line=1,
+                end_line=1,
+                signature_skeleton="def secret_alpha() -> None:",
+                contextual_summary="Restricted alpha function",
+                allowed_scopes=["quant_restricted"],
+                embedding=[0.5] * 768,
+            ),
+        )
+        repo.insert_ast_edge(
+            conn,
+            ASTEdgeRecord(
+                edge_id=restricted_edge_id,
+                domain_id=domain_id,
+                source_symbol_id=restricted_sym_id,
+                target_qualified_name="alpha.models.SecretWeights",
+                target_symbol_id=None,
+                edge_kind="USES_TYPE",
+                allowed_scopes=["quant_restricted"],
+            ),
+        )
 
-        # 2. Insert public records under eng_principal
-        with mgr.scoped_transaction(eng_principal, enable_hnsw_iterative_scan=False) as conn:
-            repo.insert_code_file(
-                conn,
-                CodeFileRecord(
-                    file_id=public_file_id,
-                    domain_id=domain_id,
-                    repo_name=repo_name,
-                    file_path="src/public/adversarial_public.py",
-                    git_commit_sha="commit_pub",
-                    git_blob_sha="blob_pub",
-                    language="python",
-                    allowed_scopes=["public_eng"],
-                    raw_content="def public_utility(): pass\n",
-                    line_count=1,
-                ),
-            )
-            repo.insert_ast_symbol(
-                conn,
-                ASTSymbolRecord(
-                    symbol_id=public_sym_id,
-                    file_id=public_file_id,
-                    domain_id=domain_id,
-                    qualified_name="public.adversarial_public.public_utility",
-                    symbol_kind="function",
-                    start_line=1,
-                    end_line=1,
-                    signature_skeleton="def public_utility() -> None:",
-                    contextual_summary="Public utility function",
-                    allowed_scopes=["public_eng"],
-                    embedding=[-0.5] * 768,
-                ),
-            )
-            repo.insert_ast_edge(
-                conn,
-                ASTEdgeRecord(
-                    edge_id=public_edge_id,
-                    domain_id=domain_id,
-                    source_symbol_id=public_sym_id,
-                    target_qualified_name="public.models.PublicHelper",
-                    target_symbol_id=None,
-                    edge_kind="USES_TYPE",
-                    allowed_scopes=["public_eng"],
-                ),
-            )
+    # 2. Insert public records under eng_principal
+    with mgr.scoped_transaction(eng_principal, enable_hnsw_iterative_scan=False) as conn:
+        repo.insert_code_file(
+            conn,
+            CodeFileRecord(
+                file_id=public_file_id,
+                domain_id=domain_id,
+                repo_name=repo_name,
+                file_path="src/public/adversarial_public.py",
+                git_commit_sha="commit_pub",
+                git_blob_sha="blob_pub",
+                language="python",
+                allowed_scopes=["public_eng"],
+                raw_content="def public_utility(): pass\n",
+                line_count=1,
+            ),
+        )
+        repo.insert_ast_symbol(
+            conn,
+            ASTSymbolRecord(
+                symbol_id=public_sym_id,
+                file_id=public_file_id,
+                domain_id=domain_id,
+                qualified_name="public.adversarial_public.public_utility",
+                symbol_kind="function",
+                start_line=1,
+                end_line=1,
+                signature_skeleton="def public_utility() -> None:",
+                contextual_summary="Public utility function",
+                allowed_scopes=["public_eng"],
+                embedding=[-0.5] * 768,
+            ),
+        )
+        repo.insert_ast_edge(
+            conn,
+            ASTEdgeRecord(
+                edge_id=public_edge_id,
+                domain_id=domain_id,
+                source_symbol_id=public_sym_id,
+                target_qualified_name="public.models.PublicHelper",
+                target_symbol_id=None,
+                edge_kind="USES_TYPE",
+                allowed_scopes=["public_eng"],
+            ),
+        )
 
-        # 3. Query as eng_principal (allowed_scopes=['public_eng'])
-        with mgr.scoped_transaction(eng_principal, enable_hnsw_iterative_scan=False) as conn:
-            # (a) code_files check
-            res_cf = conn.execute(
-                "SELECT file_id, file_path FROM code_files WHERE file_id = %s;",
-                (restricted_file_id,),
-            ).fetchall()
-            assert len(res_cf) == 0, "RLS BREACH: public_eng queried quant_restricted code_file!"
+    # 3. Query as eng_principal (allowed_scopes=['public_eng'])
+    with mgr.scoped_transaction(eng_principal, enable_hnsw_iterative_scan=False) as conn:
+        # (a) code_files check
+        res_cf = conn.execute(
+            "SELECT file_id, file_path FROM code_files WHERE file_id = %s;",
+            (restricted_file_id,),
+        ).fetchall()
+        assert len(res_cf) == 0, "RLS BREACH: public_eng queried quant_restricted code_file!"
 
-            pub_cf = conn.execute(
-                "SELECT file_id, file_path FROM code_files WHERE file_id = %s;",
-                (public_file_id,),
-            ).fetchall()
-            assert len(pub_cf) == 1, "public_eng failed to query public_eng code_file"
+        pub_cf = conn.execute(
+            "SELECT file_id, file_path FROM code_files WHERE file_id = %s;",
+            (public_file_id,),
+        ).fetchall()
+        assert len(pub_cf) == 1, "public_eng failed to query public_eng code_file"
 
-            visible_files = repo.list_visible_code_files(conn, domain_id)
-            assert "src/alpha/adversarial_restricted.py" not in visible_files
-            assert "src/public/adversarial_public.py" in visible_files
+        visible_files = repo.list_visible_code_files(conn, domain_id)
+        assert "src/alpha/adversarial_restricted.py" not in visible_files
+        assert "src/public/adversarial_public.py" in visible_files
 
-            # (b) ast_symbols check
-            res_sym = conn.execute(
-                "SELECT symbol_id, qualified_name FROM ast_symbols WHERE symbol_id = %s;",
-                (restricted_sym_id,),
-            ).fetchall()
-            assert len(res_sym) == 0, "RLS BREACH: public_eng queried quant_restricted ast_symbol!"
+        # (b) ast_symbols check
+        res_sym = conn.execute(
+            "SELECT symbol_id, qualified_name FROM ast_symbols WHERE symbol_id = %s;",
+            (restricted_sym_id,),
+        ).fetchall()
+        assert len(res_sym) == 0, "RLS BREACH: public_eng queried quant_restricted ast_symbol!"
 
-            pub_sym = conn.execute(
-                "SELECT symbol_id, qualified_name FROM ast_symbols WHERE symbol_id = %s;",
-                (public_sym_id,),
-            ).fetchall()
-            assert len(pub_sym) == 1, "public_eng failed to query public_eng ast_symbol"
+        pub_sym = conn.execute(
+            "SELECT symbol_id, qualified_name FROM ast_symbols WHERE symbol_id = %s;",
+            (public_sym_id,),
+        ).fetchall()
+        assert len(pub_sym) == 1, "public_eng failed to query public_eng ast_symbol"
 
-            visible_symbols = repo.list_visible_ast_symbols(conn, domain_id)
-            assert "alpha.adversarial_restricted.secret_alpha" not in visible_symbols
-            assert "public.adversarial_public.public_utility" in visible_symbols
+        visible_symbols = repo.list_visible_ast_symbols(conn, domain_id)
+        assert "alpha.adversarial_restricted.secret_alpha" not in visible_symbols
+        assert "public.adversarial_public.public_utility" in visible_symbols
 
-            # (c) ast_edges check
-            res_edge = conn.execute(
-                "SELECT edge_id, target_qualified_name FROM ast_edges WHERE edge_id = %s;",
-                (restricted_edge_id,),
-            ).fetchall()
-            assert len(res_edge) == 0, "RLS BREACH: public_eng queried quant_restricted ast_edge!"
+        # (c) ast_edges check
+        res_edge = conn.execute(
+            "SELECT edge_id, target_qualified_name FROM ast_edges WHERE edge_id = %s;",
+            (restricted_edge_id,),
+        ).fetchall()
+        assert len(res_edge) == 0, "RLS BREACH: public_eng queried quant_restricted ast_edge!"
 
-            pub_edge = conn.execute(
-                "SELECT edge_id, target_qualified_name FROM ast_edges WHERE edge_id = %s;",
-                (public_edge_id,),
-            ).fetchall()
-            assert len(pub_edge) == 1, "public_eng failed to query public_eng ast_edge"
+        pub_edge = conn.execute(
+            "SELECT edge_id, target_qualified_name FROM ast_edges WHERE edge_id = %s;",
+            (public_edge_id,),
+        ).fetchall()
+        assert len(pub_edge) == 1, "public_eng failed to query public_eng ast_edge"
 
-            visible_edges = repo.list_visible_ast_edges(conn, domain_id)
-            assert "alpha.models.SecretWeights" not in visible_edges
-            assert "public.models.PublicHelper" in visible_edges
+        visible_edges = repo.list_visible_ast_edges(conn, domain_id)
+        assert "alpha.models.SecretWeights" not in visible_edges
+        assert "public.models.PublicHelper" in visible_edges
 
-        # 4. Verify quant_principal CAN see the restricted records and NOT the public ones
-        with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
-            quant_cf = conn.execute(
-                "SELECT file_id FROM code_files WHERE file_id = %s;",
-                (restricted_file_id,),
-            ).fetchall()
-            assert len(quant_cf) == 1, "quant_principal failed to query own restricted code_file"
+    # 4. Verify quant_principal CAN see the restricted records and NOT the public ones
+    with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
+        quant_cf = conn.execute(
+            "SELECT file_id FROM code_files WHERE file_id = %s;",
+            (restricted_file_id,),
+        ).fetchall()
+        assert len(quant_cf) == 1, "quant_principal failed to query own restricted code_file"
 
-            pub_cf_for_quant = conn.execute(
-                "SELECT file_id FROM code_files WHERE file_id = %s;",
-                (public_file_id,),
-            ).fetchall()
-            assert len(pub_cf_for_quant) == 0, (
-                "RLS BREACH: quant_principal saw public_eng code_file without scope!"
-            )
-
-    finally:
-        # Clean up test rows
-        with admin_mgr.scoped_transaction(
-            admin_principal, enable_hnsw_iterative_scan=False
-        ) as conn:
-            conn.execute(
-                "DELETE FROM ast_edges WHERE edge_id IN (%s, %s);",
-                (restricted_edge_id, public_edge_id),
-            )
-            conn.execute(
-                "DELETE FROM ast_symbols WHERE symbol_id IN (%s, %s);",
-                (restricted_sym_id, public_sym_id),
-            )
-            conn.execute(
-                "DELETE FROM code_files WHERE file_id IN (%s, %s);",
-                (restricted_file_id, public_file_id),
-            )
+        pub_cf_for_quant = conn.execute(
+            "SELECT file_id FROM code_files WHERE file_id = %s;",
+            (public_file_id,),
+        ).fetchall()
+        assert len(pub_cf_for_quant) == 0, (
+            "RLS BREACH: quant_principal saw public_eng code_file without scope!"
+        )
 
 
-def test_adversarial_live_pgvector_cosine_with_relaxed_order(settings: ScoutSettings) -> None:
+def test_adversarial_live_pgvector_cosine_with_relaxed_order(
+    settings: ScoutSettings,
+    ephemeral_pg_domain: str,
+) -> None:
     """Live PostgreSQL 17 test on port 5432:
 
     Verifies that pgvector cosine similarity search (<=>) executes with
@@ -641,15 +606,9 @@ def test_adversarial_live_pgvector_cosine_with_relaxed_order(settings: ScoutSett
     public_eng cannot see the row.
     """
     mgr = RLSConnectionManager(settings.db_app_url)
-    admin_mgr = RLSConnectionManager(settings.db_admin_url)
-    domain_id = "trading_code_scout"
+    domain_id = ephemeral_pg_domain
     repo_name = "vector-rls-test"
 
-    admin_principal = PrincipalContext(
-        user_id="db_admin_adv",
-        role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "quant_restricted"],
-    )
     quant_principal = PrincipalContext(
         user_id="adversarial_quant_user",
         role=RoleType.QUANT_RESEARCHER,
@@ -674,148 +633,131 @@ def test_adversarial_live_pgvector_cosine_with_relaxed_order(settings: ScoutSett
     public_fid = uuid.uuid4()
     public_sid = uuid.uuid4()
 
-    try:
-        # Insert restricted symbol with target_vec
-        with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
-            conn.execute(
-                """
-                INSERT INTO code_files (
-                    file_id, domain_id, repo_name, file_path,
-                    git_commit_sha, git_blob_sha, language,
-                    allowed_scopes, raw_content, line_count
-                )
-                VALUES (
-                    %s, %s, %s, 'src/alpha/vec_target.py', 'c1', 'b1', 'python', %s, 'pass\n', 1
-                );
-                """,
-                (restricted_fid, domain_id, repo_name, ["quant_restricted"]),
+    # Insert restricted symbol with target_vec
+    with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
+        conn.execute(
+            """
+            INSERT INTO code_files (
+                file_id, domain_id, repo_name, file_path,
+                git_commit_sha, git_blob_sha, language,
+                allowed_scopes, raw_content, line_count
             )
-            conn.execute(
-                """
-                INSERT INTO ast_symbols (
-                    symbol_id, file_id, domain_id, qualified_name,
-                    symbol_kind, start_line, end_line,
-                    signature_skeleton, contextual_summary,
-                    allowed_scopes, embedding
-                )
-                VALUES (
-                    %s, %s, %s, 'alpha.vec_target.target_func',
-                    'function', 1, 1, 'def target_func():',
-                    'Restricted target', %s, %s::vector
-                );
-                """,
-                (restricted_sid, restricted_fid, domain_id, ["quant_restricted"], target_vec_lit),
+            VALUES (
+                %s, %s, %s, 'src/alpha/vec_target.py', 'c1', 'b1', 'python', %s, 'pass\n', 1
+            );
+            """,
+            (restricted_fid, domain_id, repo_name, ["quant_restricted"]),
+        )
+        conn.execute(
+            """
+            INSERT INTO ast_symbols (
+                symbol_id, file_id, domain_id, qualified_name,
+                symbol_kind, start_line, end_line,
+                signature_skeleton, contextual_summary,
+                allowed_scopes, embedding
             )
+            VALUES (
+                %s, %s, %s, 'alpha.vec_target.target_func',
+                'function', 1, 1, 'def target_func():',
+                'Restricted target', %s, %s::vector
+            );
+            """,
+            (restricted_sid, restricted_fid, domain_id, ["quant_restricted"], target_vec_lit),
+        )
 
-        # Insert public symbol with ortho_vec
-        with mgr.scoped_transaction(eng_principal, enable_hnsw_iterative_scan=False) as conn:
-            conn.execute(
-                """
-                INSERT INTO code_files (
-                    file_id, domain_id, repo_name, file_path,
-                    git_commit_sha, git_blob_sha, language,
-                    allowed_scopes, raw_content, line_count
-                )
-                VALUES (
-                    %s, %s, %s, 'src/public/vec_ortho.py', 'c2', 'b2', 'python', %s, 'pass\n', 1
-                );
-                """,
-                (public_fid, domain_id, repo_name, ["public_eng"]),
+    # Insert public symbol with ortho_vec
+    with mgr.scoped_transaction(eng_principal, enable_hnsw_iterative_scan=False) as conn:
+        conn.execute(
+            """
+            INSERT INTO code_files (
+                file_id, domain_id, repo_name, file_path,
+                git_commit_sha, git_blob_sha, language,
+                allowed_scopes, raw_content, line_count
             )
-            conn.execute(
-                """
-                INSERT INTO ast_symbols (
-                    symbol_id, file_id, domain_id, qualified_name,
-                    symbol_kind, start_line, end_line,
-                    signature_skeleton, contextual_summary,
-                    allowed_scopes, embedding
-                )
-                VALUES (
-                    %s, %s, %s, 'public.vec_ortho.ortho_func',
-                    'function', 1, 1, 'def ortho_func():',
-                    'Public ortho', %s, %s::vector
-                );
-                """,
-                (public_sid, public_fid, domain_id, ["public_eng"], ortho_vec_lit),
+            VALUES (
+                %s, %s, %s, 'src/public/vec_ortho.py', 'c2', 'b2', 'python', %s, 'pass\n', 1
+            );
+            """,
+            (public_fid, domain_id, repo_name, ["public_eng"]),
+        )
+        conn.execute(
+            """
+            INSERT INTO ast_symbols (
+                symbol_id, file_id, domain_id, qualified_name,
+                symbol_kind, start_line, end_line,
+                signature_skeleton, contextual_summary,
+                allowed_scopes, embedding
             )
+            VALUES (
+                %s, %s, %s, 'public.vec_ortho.ortho_func',
+                'function', 1, 1, 'def ortho_func():',
+                'Public ortho', %s, %s::vector
+            );
+            """,
+            (public_sid, public_fid, domain_id, ["public_eng"], ortho_vec_lit),
+        )
 
-        # Execute search as eng_principal with target_vec (matches restricted_sid with dist=0.0)
-        # Enable hnsw.iterative_scan = 'relaxed_order'
-        with mgr.scoped_transaction(eng_principal, enable_hnsw_iterative_scan=True) as conn:
-            # 1. Assert hnsw.iterative_scan is set to relaxed_order
-            scan_mode_row = conn.execute("SHOW hnsw.iterative_scan;").fetchone()
-            assert scan_mode_row is not None
-            assert str(scan_mode_row[0]) == "relaxed_order", (
-                f"Expected hnsw.iterative_scan='relaxed_order', got {scan_mode_row[0]}"
-            )
+    # Execute search as eng_principal with target_vec (matches restricted_sid with dist=0.0)
+    # Enable hnsw.iterative_scan = 'relaxed_order'
+    with mgr.scoped_transaction(eng_principal, enable_hnsw_iterative_scan=True) as conn:
+        # 1. Assert hnsw.iterative_scan is set to relaxed_order
+        scan_mode_row = conn.execute("SHOW hnsw.iterative_scan;").fetchone()
+        assert scan_mode_row is not None
+        assert str(scan_mode_row[0]) == "relaxed_order", (
+            f"Expected hnsw.iterative_scan='relaxed_order', got {scan_mode_row[0]}"
+        )
 
-            # 2. Perform cosine similarity (<=>) search across entire table
-            results: list[tuple[Any, ...]] = conn.execute(
-                """
-                SELECT symbol_id, qualified_name, (embedding <=> %s::vector) AS cosine_dist
-                FROM ast_symbols
-                ORDER BY embedding <=> %s::vector ASC
-                LIMIT 500;
-                """,
-                (target_vec_lit, target_vec_lit),
-            ).fetchall()
+        # 2. Perform cosine similarity (<=>) search across entire table
+        results: list[tuple[Any, ...]] = conn.execute(
+            """
+            SELECT symbol_id, qualified_name, (embedding <=> %s::vector) AS cosine_dist
+            FROM ast_symbols
+            ORDER BY embedding <=> %s::vector ASC
+            LIMIT 500;
+            """,
+            (target_vec_lit, target_vec_lit),
+        ).fetchall()
 
-            result_sids = [r[0] for r in results]
+        result_sids = [r[0] for r in results]
 
-            # 3. Assert RLS prevents the restricted target symbol from leaking
-            assert restricted_sid not in result_sids, (
-                "CRITICAL SECURITY VULNERABILITY: pgvector <=> search bypassed RLS! "
-                "public_eng retrieved quant_restricted symbol!"
-            )
+        # 3. Assert RLS prevents the restricted target symbol from leaking
+        assert restricted_sid not in result_sids, (
+            "CRITICAL SECURITY VULNERABILITY: pgvector <=> search bypassed RLS! "
+            "public_eng retrieved quant_restricted symbol!"
+        )
 
-            # 4. Check explicit pair isolation under vector distance ordering
-            pair_results = conn.execute(
-                """
-                SELECT symbol_id, qualified_name, (embedding <=> %s::vector) AS cosine_dist
-                FROM ast_symbols
-                WHERE symbol_id IN (%s, %s)
-                ORDER BY embedding <=> %s::vector ASC;
-                """,
-                (target_vec_lit, restricted_sid, public_sid, target_vec_lit),
-            ).fetchall()
-            pair_sids = [r[0] for r in pair_results]
-            assert restricted_sid not in pair_sids, "Restricted symbol leaked in pair query"
-            assert public_sid in pair_sids, "Public symbol missing in pair query"
+        # 4. Check explicit pair isolation under vector distance ordering
+        pair_results = conn.execute(
+            """
+            SELECT symbol_id, qualified_name, (embedding <=> %s::vector) AS cosine_dist
+            FROM ast_symbols
+            WHERE symbol_id IN (%s, %s)
+            ORDER BY embedding <=> %s::vector ASC;
+            """,
+            (target_vec_lit, restricted_sid, public_sid, target_vec_lit),
+        ).fetchall()
+        pair_sids = [r[0] for r in pair_results]
+        assert restricted_sid not in pair_sids, "Restricted symbol leaked in pair query"
+        assert public_sid in pair_sids, "Public symbol missing in pair query"
 
-        # Execute same search as quant_principal
-        with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=True) as conn:
-            quant_results: list[tuple[Any, ...]] = conn.execute(
-                """
-                SELECT symbol_id, qualified_name, (embedding <=> %s::vector) AS cosine_dist
-                FROM ast_symbols
-                ORDER BY embedding <=> %s::vector ASC
-                LIMIT 500;
-                """,
-                (target_vec_lit, target_vec_lit),
-            ).fetchall()
+    # Execute same search as quant_principal
+    with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=True) as conn:
+        quant_results: list[tuple[Any, ...]] = conn.execute(
+            """
+            SELECT symbol_id, qualified_name, (embedding <=> %s::vector) AS cosine_dist
+            FROM ast_symbols
+            ORDER BY embedding <=> %s::vector ASC
+            LIMIT 500;
+            """,
+            (target_vec_lit, target_vec_lit),
+        ).fetchall()
 
-            quant_sids = [r[0] for r in quant_results]
-            assert restricted_sid in quant_sids, (
-                "quant_principal failed to retrieve restricted symbol"
-            )
-            assert float(quant_results[0][2]) < 1e-5, (
-                f"Expected ~0.0 cosine distance for target symbol, got {quant_results[0][2]}"
-            )
-            assert public_sid not in quant_sids, "quant_principal saw public symbol without scope"
-
-    finally:
-        # Clean up test rows
-        with admin_mgr.scoped_transaction(
-            admin_principal, enable_hnsw_iterative_scan=False
-        ) as conn:
-            conn.execute(
-                "DELETE FROM ast_symbols WHERE symbol_id IN (%s, %s);",
-                (restricted_sid, public_sid),
-            )
-            conn.execute(
-                "DELETE FROM code_files WHERE file_id IN (%s, %s);",
-                (restricted_fid, public_fid),
-            )
+        quant_sids = [r[0] for r in quant_results]
+        assert restricted_sid in quant_sids, "quant_principal failed to retrieve restricted symbol"
+        assert float(quant_results[0][2]) < 1e-5, (
+            f"Expected ~0.0 cosine distance for target symbol, got {quant_results[0][2]}"
+        )
+        assert public_sid not in quant_sids, "quant_principal saw public symbol without scope"
 
 
 def test_adversarial_ast_boundary_clamping_at_edges() -> None:
@@ -944,18 +886,13 @@ def test_adversarial_ast_boundary_clamping_at_edges() -> None:
 
 def test_adversarial_postgres_rls_tamper_and_delete_resistance(
     settings: ScoutSettings,
+    ephemeral_pg_domain: str,
 ) -> None:
     """Verifies that an engineer principal cannot DELETE or UPDATE quant_restricted rows."""
     mgr = RLSConnectionManager(settings.db_app_url)
-    admin_mgr = RLSConnectionManager(settings.db_admin_url)
-    domain_id = "trading_code_scout"
+    domain_id = ephemeral_pg_domain
     repo_name = "tamper-defense-test"
 
-    admin_principal = PrincipalContext(
-        user_id="db_admin_adv",
-        role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "quant_restricted"],
-    )
     quant_principal = PrincipalContext(
         user_id="adversarial_quant_user",
         role=RoleType.QUANT_RESEARCHER,
@@ -969,51 +906,44 @@ def test_adversarial_postgres_rls_tamper_and_delete_resistance(
 
     restricted_fid = uuid.uuid4()
 
-    try:
-        # Insert restricted file
-        with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
-            conn.execute(
-                """
-                INSERT INTO code_files (
-                    file_id, domain_id, repo_name, file_path,
-                    git_commit_sha, git_blob_sha, language,
-                    allowed_scopes, raw_content, line_count
-                )
-                VALUES (
-                    %s, %s, %s, 'src/alpha/untouchable.py', 'c1', 'b1', 'python',
-                    %s, 'secret_content = 42\n', 1
-                );
-                """,
-                (restricted_fid, domain_id, repo_name, ["quant_restricted"]),
+    # Insert restricted file
+    with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
+        conn.execute(
+            """
+            INSERT INTO code_files (
+                file_id, domain_id, repo_name, file_path,
+                git_commit_sha, git_blob_sha, language,
+                allowed_scopes, raw_content, line_count
             )
+            VALUES (
+                %s, %s, %s, 'src/alpha/untouchable.py', 'c1', 'b1', 'python',
+                %s, 'secret_content = 42\n', 1
+            );
+            """,
+            (restricted_fid, domain_id, repo_name, ["quant_restricted"]),
+        )
 
-        # Attempt DELETE as eng_principal
-        with mgr.scoped_transaction(eng_principal, enable_hnsw_iterative_scan=False) as conn:
-            cur = conn.execute("DELETE FROM code_files WHERE file_id = %s;", (restricted_fid,))
-            assert cur.rowcount == 0, f"RLS TAMPER VULNERABILITY: eng deleted {cur.rowcount} rows!"
+    # Attempt DELETE as eng_principal
+    with mgr.scoped_transaction(eng_principal, enable_hnsw_iterative_scan=False) as conn:
+        cur = conn.execute("DELETE FROM code_files WHERE file_id = %s;", (restricted_fid,))
+        assert cur.rowcount == 0, f"RLS TAMPER VULNERABILITY: eng deleted {cur.rowcount} rows!"
 
-        # Attempt UPDATE as eng_principal to elevate scope
-        with mgr.scoped_transaction(eng_principal, enable_hnsw_iterative_scan=False) as conn:
-            cur = conn.execute(
-                "UPDATE code_files SET allowed_scopes = '{public_eng}' WHERE file_id = %s;",
-                (restricted_fid,),
-            )
-            assert cur.rowcount == 0, f"RLS TAMPER VULNERABILITY: eng updated {cur.rowcount} rows!"
+    # Attempt UPDATE as eng_principal to elevate scope
+    with mgr.scoped_transaction(eng_principal, enable_hnsw_iterative_scan=False) as conn:
+        cur = conn.execute(
+            "UPDATE code_files SET allowed_scopes = '{public_eng}' WHERE file_id = %s;",
+            (restricted_fid,),
+        )
+        assert cur.rowcount == 0, f"RLS TAMPER VULNERABILITY: eng updated {cur.rowcount} rows!"
 
-        # Quant principal verifies file is still intact and restricted
-        with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
-            row = conn.execute(
-                "SELECT file_id, allowed_scopes FROM code_files WHERE file_id = %s;",
-                (restricted_fid,),
-            ).fetchone()
-            assert row is not None, "Restricted file was improperly deleted"
-            assert row[1] == ["quant_restricted"], f"Scope was altered: {row[1]}"
-
-    finally:
-        with admin_mgr.scoped_transaction(
-            admin_principal, enable_hnsw_iterative_scan=False
-        ) as conn:
-            conn.execute("DELETE FROM code_files WHERE file_id = %s;", (restricted_fid,))
+    # Quant principal verifies file is still intact and restricted
+    with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
+        row = conn.execute(
+            "SELECT file_id, allowed_scopes FROM code_files WHERE file_id = %s;",
+            (restricted_fid,),
+        ).fetchone()
+        assert row is not None, "Restricted file was improperly deleted"
+        assert row[1] == ["quant_restricted"], f"Scope was altered: {row[1]}"
 
 
 def test_adversarial_postgres_empty_and_injected_scopes(settings: ScoutSettings) -> None:
@@ -1045,15 +975,11 @@ def test_adversarial_postgres_empty_and_injected_scopes(settings: ScoutSettings)
     with mgr.scoped_transaction(unauthorized_principal, enable_hnsw_iterative_scan=False) as conn:
         cf_rows = conn.execute("SELECT count(*) FROM code_files;").fetchone()
         assert cf_rows is not None
-        assert cf_rows[0] == 0, (
-            f"Unauthorized scope leaked {cf_rows[0]} code_files rows!"
-        )
+        assert cf_rows[0] == 0, f"Unauthorized scope leaked {cf_rows[0]} code_files rows!"
 
         sym_rows = conn.execute("SELECT count(*) FROM ast_symbols;").fetchone()
         assert sym_rows is not None
-        assert sym_rows[0] == 0, (
-            f"Unauthorized scope leaked {sym_rows[0]} ast_symbols rows!"
-        )
+        assert sym_rows[0] == 0, f"Unauthorized scope leaked {sym_rows[0]} ast_symbols rows!"
 
     # 3. Raw connection without set_config (NULL setting) sees 0 rows due to Forced RLS
     import psycopg

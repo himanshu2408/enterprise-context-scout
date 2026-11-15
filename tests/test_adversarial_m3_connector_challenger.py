@@ -19,10 +19,8 @@ from context_scout.agents.citation_gate import (
     CitationFailureCode,
     DocumentCitationGate,
 )
-from context_scout.ast_engine.deterministic_slicer import (
-    DeterministicSlicer,
-    SlicerErrorCode,
-)
+from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
+from context_scout.ast_engine.models import SlicerErrorCode
 from context_scout.db.repositories import (
     ASTEdgeRecord,
     ASTSymbolRecord,
@@ -38,6 +36,7 @@ from context_scout.schemas.contracts import (
     DocCitationSpan,
     MarketRegime,
     PrincipalContext,
+    RoleType,
 )
 
 
@@ -486,7 +485,7 @@ def test_challenger_cascading_inward_ast_edges_set_null_no_dangling_foreign_keys
     repo = InMemoryRLSRepository()
     principal = PrincipalContext(
         user_id="alice",
-        role="engineer",
+        role=RoleType.ENGINEER,
         allowed_scopes=["eng"],
         session_budget_tokens=10000,
     )
@@ -683,6 +682,7 @@ def test_challenger_confluence_version_freshness_matrix() -> None:
 
     for canon_v, meta, cite_v, expect_pass, exp_err in cases:
         cid = str(uuid.uuid4())
+        meta_obj: dict[str, object] = dict(meta) if meta is not None else {}
         chunk = DocChunkRecord(
             chunk_id=uuid.UUID(cid),
             domain_id="default",
@@ -695,7 +695,7 @@ def test_challenger_confluence_version_freshness_matrix() -> None:
             section_heading="Security",
             contextual_header="Security Header",
             verbatim_content=body,
-            metadata_json=meta,
+            metadata_json=meta_obj,
             allowed_scopes=["eng"],
             embedding=[0.0] * 768,
             source_type="confluence",
@@ -898,4 +898,3 @@ def test_challenger_deterministic_slicer_quote_tampering_adversarial_matrix() ->
         assert gate_res.details[0].error_code == CitationFailureCode.HALLUCINATED_QUOTE, (
             f"Attack '{attack_name}' failed with {gate_res.details[0].error_code}"
         )
-

@@ -363,9 +363,7 @@ resource "google_dns_managed_zone" "zone" {
     assert "multi_heredoc_node" in sym_names, f"multi_heredoc_node missing: {sym_names}"
     assert "zone" in sym_names, f"zone missing (swallowed?): {sym_names}"
 
-    sa_edges = [
-        e.target_qualified_name for e in edges if e.edge_kind == "BINDS_SERVICE_ACCOUNT"
-    ]
+    sa_edges = [e.target_qualified_name for e in edges if e.edge_kind == "BINDS_SERVICE_ACCOUNT"]
     assert any("sa_one" in t for t in sa_edges), f"sa_one binding missing: {sa_edges}"
     assert any("sa_two" in t for t in sa_edges), f"sa_two binding missing: {sa_edges}"
 
@@ -571,6 +569,4 @@ export const OrderDashboard = () => {
     dashboard_edges = edge_map.get("OrderDashboard", [])
     assert ("CALLS", "useOrderPage") in dashboard_edges
     # Strict isolation: OrderDashboard must NOT contain leaked transitive edges
-    assert len(dashboard_edges) == 1, (
-        f"OrderDashboard has leaked edges: {dashboard_edges}"
-    )
+    assert len(dashboard_edges) == 1, f"OrderDashboard has leaked edges: {dashboard_edges}"

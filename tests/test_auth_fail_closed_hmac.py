@@ -542,10 +542,11 @@ class TestExplicitSecretKeyAndMutationProofs:
         """Proves that replacing ContextVar with global variable causes cross-task leakage."""
         mutated_global_principal = None
 
+        from collections.abc import Iterator
         from contextlib import contextmanager
 
         @contextmanager
-        def mutated_bind(principal_id: str):
+        def mutated_bind(principal_id: str) -> Iterator[None]:
             nonlocal mutated_global_principal
             old = mutated_global_principal
             mutated_global_principal = principal_id

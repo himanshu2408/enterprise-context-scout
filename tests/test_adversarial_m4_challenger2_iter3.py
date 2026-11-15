@@ -18,10 +18,10 @@ Empirical verification and stress testing of:
 from __future__ import annotations
 
 import contextlib
-import os
 import threading
 import time
 import uuid
+from collections.abc import Generator
 
 import psycopg
 import pytest
@@ -44,11 +44,9 @@ from context_scout.schemas.contracts import PrincipalContext, RoleType
 
 
 @pytest.fixture(scope="module")
-def postgres_admin_conn():
+def postgres_admin_conn() -> Generator[psycopg.Connection, None, None]:
     """Provides a live PostgreSQL 17 admin connection for test verification."""
     if not is_postgres_reachable():
-        if os.environ.get("SCOUT_EVAL_IN_MEMORY_ONLY") == "1":
-            pytest.skip("Skipping PostgreSQL live harness tests under SCOUT_EVAL_IN_MEMORY_ONLY=1")
         pytest.fail("Live PostgreSQL 17 instance is unreachable at db_admin_url!")
 
     st = ScoutSettings()
@@ -86,7 +84,7 @@ class TestConcurrentCanaryIsolation:
             benchmark_errors: list[Exception] = []
             benchmark_query_counts = {"queries": 0, "visible_files": 0, "eshop_files": 0}
 
-            def benchmark_query_worker():
+            def benchmark_query_worker() -> None:
                 try:
                     with psycopg.connect(st.db_admin_url) as q_conn:
                         while not stop_event.is_set():
@@ -96,7 +94,9 @@ class TestConcurrentCanaryIsolation:
                                     "SELECT COUNT(*) FROM code_files WHERE domain_id = %s;",
                                     (session_domain,),
                                 )
-                                total = cur.fetchone()[0]
+                                total_row = cur.fetchone()
+                                assert total_row is not None
+                                total = total_row[0]
                                 # 300 public_eng + 1 billing + 1 vault = 302 total files
                                 assert total == 302, f"Expected 302 total files, got {total}"
 
@@ -105,7 +105,9 @@ class TestConcurrentCanaryIsolation:
                                     "WHERE domain_id = %s AND repo_name = 'dotnet/eShop';",
                                     (session_domain,),
                                 )
-                                eshop_cnt = cur.fetchone()[0]
+                                eshop_row = cur.fetchone()
+                                assert eshop_row is not None
+                                eshop_cnt = eshop_row[0]
                                 assert eshop_cnt == 75, f"Expected 75 eShop files, got {eshop_cnt}"
 
                             # 2. Adapter check via RLS (public_eng sees 300 files)
@@ -125,7 +127,7 @@ class TestConcurrentCanaryIsolation:
             canary_errors: list[Exception] = []
             canary_cycles_completed = [0]
 
-            def canary_mutation_worker():
+            def canary_mutation_worker() -> None:
                 try:
                     with psycopg.connect(st.db_admin_url) as c_conn:
                         for _ in range(15):
@@ -176,7 +178,9 @@ class TestConcurrentCanaryIsolation:
                                         "SELECT COUNT(*) FROM code_files WHERE domain_id = %s;",
                                         (canary_domain,),
                                     )
-                                    cnt = cur.fetchone()[0]
+                                    cnt_row = cur.fetchone()
+                                    assert cnt_row is not None
+                                    cnt = cnt_row[0]
                                     assert cnt == 0, f"Flawed teardown failed: {cnt}"
 
                                 canary_cycles_completed[0] += 1
@@ -284,7 +288,9 @@ class TestConcurrentCanaryIsolation:
                         "SELECT COUNT(*) FROM code_files WHERE repo_name = %s;",
                         (unscoped_repo,),
                     )
-                    cnt_before = cur.fetchone()[0]
+                    before_row = cur.fetchone()
+                    assert before_row is not None
+                    cnt_before = before_row[0]
                     assert cnt_before == 76
 
                 # Flawed teardown deleting by unscoped repo_name
@@ -297,7 +303,9 @@ class TestConcurrentCanaryIsolation:
                         "SELECT COUNT(*) FROM code_files WHERE domain_id = %s AND repo_name = %s;",
                         (session_domain, unscoped_repo),
                     )
-                    cnt_benchmark_after = cur.fetchone()[0]
+                    after_row = cur.fetchone()
+                    assert after_row is not None
+                    cnt_benchmark_after = after_row[0]
                     # Proves that unscoped flawed teardown wipes out benchmark rows!
                     assert cnt_benchmark_after == 0, (
                         "Expected unscoped flawed teardown to wipe out benchmark files, "
@@ -371,7 +379,9 @@ class TestTransactionRollbackUnderAbortFaultInjection:
                         f"SELECT COUNT(*) FROM {tbl} WHERE domain_id = %s;",
                         (canary_domain,),
                     )
-                    cnt = cur.fetchone()[0]
+                    row = cur.fetchone()
+                    assert row is not None
+                    cnt = row[0]
                     assert cnt == 0, f"Residual rows found in {tbl} for {canary_domain}: {cnt}"
 
     def test_omitting_rollback_on_aborted_transaction_raises_in_failed_sql_transaction(
@@ -416,7 +426,9 @@ class TestDatabaseZeroResidualRowAudit:
                     f"SELECT COUNT(*) FROM {tbl} "
                     "WHERE domain_id LIKE 'eval_synthetic_%' OR domain_id LIKE 'canary_%';"
                 )
-                cnt = cur.fetchone()[0]
+                row = cur.fetchone()
+                assert row is not None
+                cnt = row[0]
                 residual_counts[tbl] = cnt
 
             for tbl, cnt in residual_counts.items():

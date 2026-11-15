@@ -102,7 +102,8 @@ Post-estimation diagnostic tests confirm factor orthogonality across sample year
     # Invariant: Giant equation MUST NOT be split across chunks
     assert "\\begin{equation}" in giant_chunk.verbatim_content
     assert "\\end{equation}" in giant_chunk.verbatim_content
-    assert len(giant_chunk.formulas_latex) >= 1
+    assert len(giant_chunk.formulas_latex) == 1
+    assert "\\begin{equation}" in giant_chunk.formulas_latex[0]
     # Chunk token count must reflect the giant size (>1000 tokens) despite max_chunk_tokens=300
     assert giant_chunk.token_count_approx > 1000
 
@@ -430,9 +431,9 @@ def test_markdown_table_chunker_trailing_whitespace_extraction() -> None:
         markdown_content=md_content,
     )
 
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     # chunk.tables_markdown must contain the entire table
-    assert len(chunks[0].tables_markdown) >= 1
+    assert len(chunks[0].tables_markdown) == 1
     table_extracted = chunks[0].tables_markdown[0]
     assert "| NIFTY |" in table_extracted
     assert "| BANKNIFTY |" in table_extracted

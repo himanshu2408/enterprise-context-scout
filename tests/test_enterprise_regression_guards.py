@@ -212,7 +212,7 @@ def test_scout_workflow_hydrates_quant_strategy_spec_for_quant_domain() -> None:
     )
     assert isinstance(res, ImplementationContextPack)
     assert res.quant_strategy_spec is not None
-    assert len(res.supporting_doc_citations) >= 1
+    assert any("order flow" in c.verbatim_quote.lower() for c in res.supporting_doc_citations)
 
 
 def test_scout_route_matches_hyphenated_bounce_back_prompts() -> None:
@@ -305,7 +305,10 @@ def test_indian_stock_market_momentum_quant_query_and_citation_inspector_auto_ta
     assert "Momentum" in res.quant_strategy_spec.strategy_name
     assert res.quant_strategy_spec.transaction_cost_bps_assumed is not None
     assert res.quant_strategy_spec.transaction_cost_bps_assumed >= 15.0
-    assert len(res.supporting_doc_citations) >= 1
+    assert any(
+        "momentum" in c.verbatim_quote.lower() or "nse" in c.verbatim_quote.lower()
+        for c in res.supporting_doc_citations
+    )
 
     inspector_tsx = Path("web-ui/src/components/CitationInspector.tsx").read_text(encoding="utf-8")
     assert 'setActiveTab("quant")' in inspector_tsx
@@ -517,7 +520,7 @@ def test_custom_biology_and_bioinformatics_domain_end_to_end(tmp_path: Path) -> 
     )
     assert isinstance(code_pack, ImplementationContextPack)
     assert code_pack.preflight_report.passed is True
-    assert len(code_pack.code_slices) >= 1
+    assert any("SmithWatermanScorer" in s.qualified_symbol for s in code_pack.code_slices)
     assert "SmithWatermanScorer" in code_pack.code_slices[0].qualified_symbol
     assert "score_alignment" in code_pack.code_slices[0].verbatim_code_with_lines
 
@@ -662,9 +665,7 @@ def test_readme_schema_and_contract_alignment_guard() -> None:
         if target.startswith(("http://", "https://", "#")):
             continue
         clean_target = target.split("#", 1)[0]
-        assert Path(clean_target).exists(), (
-            f"Broken relative link in README.md: {clean_target}"
-        )
+        assert Path(clean_target).exists(), f"Broken relative link in README.md: {clean_target}"
         if clean_target.startswith("reports/"):
             assert clean_target.endswith(".md"), (
                 f"README.md report link must use human-readable .md format, got: {clean_target}"
@@ -1136,24 +1137,13 @@ def test_enterprise_production_class_state_cross_file_dto_and_caller_anti_starva
             "    return raw_id.strip().upper()",
         ]
     )
-    dto_code = (
-        "class CreateOrderDTO(BaseAuthenticatedDTO):\n"
-        "    symbol: str\n"
-        "    qty: int\n"
-    )
-    base_dto_code = (
-        "class BaseAuthenticatedDTO:\n"
-        "    tenant_id: str\n"
-        "    idempotency_key: str\n"
-    )
+    dto_code = "class CreateOrderDTO(BaseAuthenticatedDTO):\n    symbol: str\n    qty: int\n"
+    base_dto_code = "class BaseAuthenticatedDTO:\n    tenant_id: str\n    idempotency_key: str\n"
     caller_code = (
         "def handle_http_post(svc: OrderExecutionService, payload: CreateOrderDTO) -> str:\n"
         "    return svc.submit_order(payload)\n"
     )
-    other_repo_test_code = (
-        "def test_submit_order() -> None:\n"
-        "    assert True\n"
-    )
+    other_repo_test_code = "def test_submit_order() -> None:\n    assert True\n"
 
     files = [
         CodeFileRecord(
@@ -1612,8 +1602,3 @@ def test_multi_domain_knowledge_pdf_sync_mcp_benchmark_and_handoff_guard(
             assert quote_data["verified"] is True
 
     asyncio.run(_exercise_doc_mcp())
-
-
-
-
-

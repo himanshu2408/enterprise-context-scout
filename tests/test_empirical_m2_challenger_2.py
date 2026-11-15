@@ -14,7 +14,7 @@ import time
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any, Final
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -85,16 +85,10 @@ def teardown_empirical_m2_test_repos(
     conn.commit()
 
 
-@pytest.fixture(autouse=True)
-def clean_empirical_m2_test_repos() -> Generator[None, None, None]:
-    yield
-    settings = ScoutSettings()
-    try:
-        with psycopg.connect(settings.db_admin_url) as conn:
-            teardown_empirical_m2_test_repos(conn, domain_id="trading_code_scout")
-    except Exception:
-        # Non-fatal if database is unreachable during unit testing
-        pass
+@pytest.fixture
+def clean_empirical_m2_test_repos(ephemeral_pg_domain: str) -> Generator[str, None, None]:
+    """Provide an isolated ephemeral domain for empirical M2 tests with guaranteed cleanup."""
+    yield ephemeral_pg_domain
 
 
 @pytest.fixture
@@ -426,13 +420,15 @@ def test_empirical_cross_repo_symbol_collision_disambiguation_n100(
         assert not match_symbol_identifier(q_alpha, q_beta)
 
 
-def test_empirical_cross_repo_symbol_collision_live_postgres_n100() -> None:
+def test_empirical_cross_repo_symbol_collision_live_postgres_n100(
+    ephemeral_pg_domain: str,
+) -> None:
     """Live PostgreSQL 17 test inserting N=100 identical symbol pairs across 2 repos."""
     settings = ScoutSettings()
     app_mgr = RLSConnectionManager(settings.db_app_url)
     pg_repo = PostgresRLSRepository()
 
-    domain_id = "trading_code_scout"
+    domain_id = ephemeral_pg_domain
     scopes = ["public_eng"]
     principal = PrincipalContext(
         user_id="collision_pg_tester",
@@ -543,7 +539,9 @@ def test_empirical_cross_repo_symbol_collision_live_postgres_n100() -> None:
 # ==============================================================================
 
 
-def test_empirical_multi_tenant_forced_rls_isolation_cross_repo_links() -> None:
+def test_empirical_multi_tenant_forced_rls_isolation_cross_repo_links(
+    ephemeral_pg_domain: str,
+) -> None:
     """Stress-tests multi-tenant Forced RLS isolation on cross-repo references.
 
     Principal A (authorized for repo_alpha only) must receive strictly 0 rows and
@@ -555,7 +553,7 @@ def test_empirical_multi_tenant_forced_rls_isolation_cross_repo_links() -> None:
     pg_repo = PostgresRLSRepository()
     indexer = GitMerkleIndexer()
 
-    domain_id = "trading_code_scout"
+    domain_id = ephemeral_pg_domain
     scope_alpha = "tenant_alpha_scope"
     scope_beta = "tenant_beta_scope"
 
@@ -1003,13 +1001,14 @@ def test_empirical_inward_edge_preservation_on_file_modification_and_deletion(
 
 def test_empirical_inward_edge_preservation_live_postgres(
     indexer: GitMerkleIndexer,
+    ephemeral_pg_domain: str,
 ) -> None:
     """Stress-tests inward edge preservation on live PostgreSQL 17 under Forced RLS."""
     settings = ScoutSettings()
     app_mgr = RLSConnectionManager(settings.db_app_url)
     pg_repo = PostgresRLSRepository()
 
-    domain_id = "trading_code_scout"
+    domain_id = ephemeral_pg_domain
     scopes = ["public_eng"]
     principal = PrincipalContext(
         user_id="inward_edge_pg_tester",
@@ -1057,6 +1056,7 @@ def test_empirical_inward_edge_preservation_live_postgres(
                 (domain_id, f"{repo_name}::caller::invoke_ops"),
             ).fetchone()
             assert sym_caller is not None
+            assert isinstance(sym_caller[0], UUID)
             caller_sym_id = sym_caller[0]
 
             sym_a_v1 = conn.execute(
@@ -1067,6 +1067,7 @@ def test_empirical_inward_edge_preservation_live_postgres(
                 (domain_id, f"{repo_name}::service::op_a"),
             ).fetchone()
             assert sym_a_v1 is not None
+            assert isinstance(sym_a_v1[0], UUID)
             sym_a_v1_id = sym_a_v1[0]
 
             sym_b_v1 = conn.execute(
@@ -1077,6 +1078,7 @@ def test_empirical_inward_edge_preservation_live_postgres(
                 (domain_id, f"{repo_name}::service::op_b"),
             ).fetchone()
             assert sym_b_v1 is not None
+            assert isinstance(sym_b_v1[0], UUID)
             sym_b_v1_id = sym_b_v1[0]
 
             # Insert inward edges from caller to op_a and op_b
@@ -1222,10 +1224,13 @@ def test_empirical_merkle_diff_100_files_bulk_stress(
 class TestEmpiricalM2TeardownCanaryIsolation:
     """Verifies that teardown_empirical_m2_test_repos strictly scopes deletions."""
 
-    def test_teardown_preserves_canary_repo_in_same_domain(self) -> None:
+    def test_teardown_preserves_canary_repo_in_same_domain(
+        self,
+        ephemeral_pg_domain: str,
+    ) -> None:
         """Proves real teardown function removes test rows and leaves canary rows intact."""
         settings = ScoutSettings()
-        domain_id = "trading_code_scout"
+        domain_id = ephemeral_pg_domain
         canary_repo = "canary-preservation-repo"
         victim_repo = f"{EMPIRICAL_M2_REPO_PREFIX}victim-{uuid4().hex[:8]}"
 
@@ -1272,13 +1277,17 @@ class TestEmpiricalM2TeardownCanaryIsolation:
                     "SELECT COUNT(*) FROM code_files WHERE domain_id = %s AND repo_name = %s;",
                     (domain_id, canary_repo),
                 )
-                assert cur.fetchone()[0] == 1, "Canary repo was wiped by teardown!"
+                canary_row = cur.fetchone()
+                assert canary_row is not None
+                assert canary_row[0] == 1, "Canary repo was wiped by teardown!"
 
                 cur.execute(
                     "SELECT COUNT(*) FROM code_files WHERE domain_id = %s AND repo_name = %s;",
                     (domain_id, victim_repo),
                 )
-                assert cur.fetchone()[0] == 0, "Test victim repo was not deleted by teardown!"
+                victim_row = cur.fetchone()
+                assert victim_row is not None
+                assert victim_row[0] == 0, "Test victim repo was not deleted by teardown!"
             finally:
                 # Cleanup canary
                 cur.execute(
@@ -1287,10 +1296,13 @@ class TestEmpiricalM2TeardownCanaryIsolation:
                 )
                 conn.commit()
 
-    def test_teardown_mutation_proof_flawed_negative_predicate_destroys_canary(self) -> None:
+    def test_teardown_mutation_proof_flawed_negative_predicate_destroys_canary(
+        self,
+        ephemeral_pg_domain: str,
+    ) -> None:
         """Mutation proof: Proves that flawed 'repo_name != ...' predicate destroys canary."""
         settings = ScoutSettings()
-        domain_id = "trading_code_scout"
+        domain_id = ephemeral_pg_domain
         canary_repo = "canary-mutation-victim-repo"
 
         with psycopg.connect(settings.db_admin_url) as conn:
@@ -1312,21 +1324,25 @@ class TestEmpiricalM2TeardownCanaryIsolation:
             conn.commit()
 
             try:
-                # Defective mutated teardown (the c0d7166 bug)
-                def defective_teardown(c: psycopg.Connection[Any]) -> None:
+                # Defective mutated teardown (lacks prefix predicate inside domain)
+                def defective_teardown(c: psycopg.Connection[Any], target_domain: str) -> None:
                     with c.cursor() as cur_def:
                         cur_def.execute(
-                            "DELETE FROM code_files WHERE repo_name != 'enterprise-context-scout';"
+                            "DELETE FROM code_files "
+                            "WHERE domain_id = %s AND repo_name != 'enterprise-context-scout';",
+                            (target_domain,),
                         )
                     c.commit()
 
-                defective_teardown(conn)
+                defective_teardown(conn, domain_id)
 
                 cur.execute(
                     "SELECT COUNT(*) FROM code_files WHERE domain_id = %s AND repo_name = %s;",
                     (domain_id, canary_repo),
                 )
-                canary_count = cur.fetchone()[0]
+                canary_count_row = cur.fetchone()
+                assert canary_count_row is not None
+                canary_count = canary_count_row[0]
 
                 # Canary must be 0, proving mutation caught the bug
                 assert canary_count == 0, (

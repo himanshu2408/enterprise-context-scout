@@ -292,9 +292,7 @@ class TestOutOfBandPrincipalSpoofing:
         data = response.json()
         assert "Invalid principal role" in data["detail"]
 
-    def test_whitespace_principal_role_rejected_http_400(
-        self, unauthed_client: TestClient
-    ) -> None:
+    def test_whitespace_principal_role_rejected_http_400(self, unauthed_client: TestClient) -> None:
         """Verifies whitespace-only role header returns HTTP 400."""
         headers = {
             "X-Principal-User-Id": "attacker",

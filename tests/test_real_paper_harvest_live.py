@@ -118,9 +118,7 @@ def test_pdf_fulltext_extraction_fallback() -> None:
 
         parsed_sections = parser.parse_pdf(real_pdf_bytes)
         assert len(parsed_sections) >= 1
-        assert any(
-            sec.heading for sec in parsed_sections
-        )
+        assert any(sec.heading for sec in parsed_sections)
 
         chunks = parser.chunk_pdf(
             doc_id="test_pdf_doc",
@@ -135,6 +133,7 @@ def test_pdf_fulltext_extraction_fallback() -> None:
             assert len(chunk.verbatim_content) > 0
 
 
+@pytest.mark.live
 def test_openalex_live_query_syntax() -> None:
     """Verifies that build_openalex_query_url executes against OpenAlex API returning HTTP 200."""
     for market in [
@@ -201,6 +200,7 @@ def test_openalex_live_query_syntax() -> None:
             pytest.skip(f"Network timeout reaching OpenAlex: {err}")
 
 
+@pytest.mark.live
 def test_arxiv_live_atom_feed() -> None:
     """Verifies that build_arxiv_query_url returns valid Atom XML with papers."""
     query = MARKET_QUERY_PRESETS[MarketRegime.INDIA_NSE_BSE]
@@ -354,10 +354,17 @@ def test_postgres_scepticism_gate_against_persisted_corpus(settings: ScoutSettin
             verbatim_quote=quote,
         )
 
+        assert sample_chunk.market_scope is not None
+        sample_market = (
+            sample_chunk.market_scope
+            if isinstance(sample_chunk.market_scope, MarketRegime)
+            else MarketRegime(sample_chunk.market_scope)
+        )
+
         # Valid strategy brief matching friction floor
         valid_brief = QuantStrategyBrief(
             strategy_name="Institutional Liquidity Alpha",
-            target_markets=[MarketRegime(sample_chunk.market_scope)],
+            target_markets=[sample_market],
             is_intraday_futures=False,
             mathematical_signal_latex=r"\alpha_t = \frac{P_t - \text{VWAP}_t}{\sigma_t}",
             entry_exit_rules=["Enter when alpha > 1.5", "Exit when alpha < 0.2"],
@@ -382,7 +389,7 @@ def test_postgres_scepticism_gate_against_persisted_corpus(settings: ScoutSettin
         # Deficient strategy brief assuming 0 bps transaction costs
         zero_cost_brief = QuantStrategyBrief(
             strategy_name="Deficient Zero Friction Strategy",
-            target_markets=[MarketRegime(sample_chunk.market_scope)],
+            target_markets=[sample_market],
             is_intraday_futures=False,
             mathematical_signal_latex=r"\alpha_t = \text{Momentum}(t, 20)",
             entry_exit_rules=["Enter on 20-day breakout", "Exit on 5-day reversal"],

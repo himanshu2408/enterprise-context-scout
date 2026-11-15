@@ -11,6 +11,7 @@ Verifies citation gating across:
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from context_scout.agents.citation_gate import (
     CitationFailureCode,
@@ -34,7 +35,7 @@ def _make_chunk(
     content: str,
     source_uri: str,
     section: str = "Overview",
-    metadata: dict | None = None,
+    metadata: dict[str, Any] | None = None,
     is_stale: bool = False,
 ) -> DocumentChunk:
     meta = dict(metadata or {})
@@ -62,9 +63,7 @@ def _make_chunk(
 
 def test_confluence_valid_citation() -> None:
     gate = DocumentCitationGate()
-    quote = (
-        "All microservices must implement OAuth 2.0 PKCE flow with 15-minute token rotation."
-    )
+    quote = "All microservices must implement OAuth 2.0 PKCE flow with 15-minute token rotation."
     chunk = _make_chunk(
         doc_id="10928374",
         title="Authentication Architecture RFC-82",

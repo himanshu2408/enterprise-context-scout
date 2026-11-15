@@ -162,7 +162,14 @@ def test_domains_endpoint_manifest_and_adapter_pool(client: TestClient) -> None:
             "quant_research_scout",
             "polyglot_unseen_v2",
         )
-        assert len(manifest["display_name"]) > 0
+        assert isinstance(manifest["display_name"], str)
+        assert manifest["display_name"].strip() == manifest["display_name"]
+        expected_name_tokens = {
+            "trading_code_scout": "Scout",
+            "quant_research_scout": "Specialist",
+            "polyglot_unseen_v2": "Unseen",
+        }
+        assert expected_name_tokens[manifest["domain_id"]] in manifest["display_name"]
         assert manifest["authority_rules"]["primary_truth_source"] in ("code", "document")
 
         # Adapter verification
@@ -363,12 +370,13 @@ def test_scout_query_single_domain_success(client: TestClient) -> None:
 
     assert data["passed"] is True
     assert data["domain_id"] == "trading_code_scout"
-    assert len(data["trace_id"]) > 0
+    assert data["trace_id"].startswith("trace_")
+    assert int(data["trace_id"].removeprefix("trace_"), 16) >= 0
 
     # ContextPack assertions
     pack = data["context_pack"]
     assert pack is not None
-    assert len(pack["code_slices"]) > 0
+    assert any("volatility_garch.py" in s["file_path"] for s in pack["code_slices"])
     first_slice = pack["code_slices"][0]
     assert "file_path" in first_slice
     assert "git_commit_sha" in first_slice
@@ -411,9 +419,9 @@ def test_scout_query_federated_all_success(client: TestClient) -> None:
     assert data["quant_strategy_spec"] is not None
 
     spec = data["quant_strategy_spec"]
-    assert len(spec["target_markets"]) > 0
-    assert any(m in [regime.value for regime in MarketRegime] for m in spec["target_markets"])
-    assert len(spec["mathematical_signal_latex"]) > 0
+    valid_regimes = {regime.value for regime in MarketRegime}
+    assert any(m in valid_regimes for m in spec["target_markets"])
+    assert any(tok in spec["mathematical_signal_latex"] for tok in ("=", "\\", "E[", "_"))
 
 
 def test_scout_query_unknown_domain_http_404(client: TestClient) -> None:
@@ -524,8 +532,8 @@ def test_handoff_preview_mode_and_token_generation(
     assert data["requires_human_confirmation"] is True
     assert data["confirmation_token"].startswith("tok_")
     assert data["model_id"] == "gemini-3.8-flash"
-    assert len(data["patch_diff"]) > 0
-    assert len(data["target_files"]) > 0
+    assert "--- " in data["patch_diff"] and "+++ " in data["patch_diff"]
+    assert set(data["target_files"]) == {s.file_path for s in sample_pack.code_slices}
     assert data["expires_in_seconds"] == 3600
     assert data["estimated_paid_cost_usd"] > 0.0
 
@@ -709,6 +717,4 @@ def test_repository_hygiene_zero_prohibited_terms() -> None:
         text=True,
     )
     # git grep returns code 1 when no matches are found
-    assert result.returncode == 1, (
-        f"Found prohibited paths/secrets in repository:\n{result.stdout}"
-    )
+    assert result.returncode == 1, f"Found prohibited paths/secrets in repository:\n{result.stdout}"

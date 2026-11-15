@@ -6,7 +6,11 @@ scope leaks, and AST extraction correctness across C#, React/Redux, Storybook, a
 
 from __future__ import annotations
 
+from typing import Any
+
 from context_scout.ast_engine.extractor import ASTExtractor
+from context_scout.ast_engine.models import ParsedEdge, ParsedSymbol
+from context_scout.plugins.base import DependencyEdge
 from context_scout.plugins.languages.csharp import CSharpPlugin
 from context_scout.plugins.languages.react_redux import ReactReduxPlugin
 from context_scout.plugins.languages.storybook import StorybookPlugin
@@ -66,12 +70,8 @@ class WebhookHandler:
         file_path="backend/webhook.py",
     )
     symbol_names = [s.name for s in symbols]
-    assert "WebhookHandler" in symbol_names, (
-        f"WebhookHandler missing from symbols: {symbol_names}"
-    )
-    assert "handle_event" in symbol_names, (
-        f"handle_event missing from symbols: {symbol_names}"
-    )
+    assert "WebhookHandler" in symbol_names, f"WebhookHandler missing from symbols: {symbol_names}"
+    assert "handle_event" in symbol_names, f"handle_event missing from symbols: {symbol_names}"
 
 
 def test_registry_unregister_before_initialization() -> None:
@@ -120,8 +120,7 @@ export function useUserData(userId: string) {
 """
     _symbols, edges = plugin.extract_ast(code, "src/hooks/useUserData.ts")
     self_calls = [
-        e for e in edges
-        if e.edge_kind == "CALLS" and e.target_qualified_name == "useUserData"
+        e for e in edges if e.edge_kind == "CALLS" and e.target_qualified_name == "useUserData"
     ]
     assert len(self_calls) == 0, f"Found self-referencing CALLS edge: {self_calls}"
 
@@ -355,9 +354,7 @@ resource "google_storage_bucket" "backup" {
     symbols, _ = plugin.extract_ast(code, "main.tf")
     names = [s.name for s in symbols]
     assert "app_server" in names, f"app_server missing: {names}"
-    assert "backup" in names, (
-        f"backup resource was swallowed by app_server: {names}"
-    )
+    assert "backup" in names, f"backup resource was swallowed by app_server: {names}"
 
 
 def test_terraform_dynamic_blocks_and_provider_versions() -> None:
@@ -677,9 +674,7 @@ resource "google_cloud_run_v2_service" "api" {
 """
     _symbols, edges = plugin.extract_ast(code, "main.tf")
     phantom_edges = [
-        e
-        for e in edges
-        if e.edge_kind == "CALLS" and "internal_gateway" in e.target_qualified_name
+        e for e in edges if e.edge_kind == "CALLS" and "internal_gateway" in e.target_qualified_name
     ]
     assert len(phantom_edges) == 0, (
         f"Phantom CALLS edge emitted from interpolated URL: {phantom_edges}"
@@ -728,10 +723,12 @@ def test_adversarial_registry_dynamic_reregistration_and_priority_override() -> 
         def can_handle(self, file_path: str) -> bool:
             return file_path.endswith(".cs")
 
-        def extract_ast(self, *args, **kwargs):
+        def extract_ast(
+            self, *args: Any, **kwargs: Any
+        ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
             return [], []
 
-        def extract_manifest_dependencies(self, *args, **kwargs):
+        def extract_manifest_dependencies(self, *args: Any, **kwargs: Any) -> list[DependencyEdge]:
             return []
 
     PluginRegistry.reset()

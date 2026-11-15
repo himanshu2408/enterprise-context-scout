@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 
 import opentelemetry.trace as trace
 import pytest
+from opentelemetry.sdk.trace import ReadableSpan
 
 from context_scout.agents.domain_registry import DomainRegistry
 from context_scout.agents.scout_workflow import ScoutWorkflow
@@ -381,7 +382,7 @@ class TestZeroSpendAbstentionInvariantOnTraces:
         self, isolated_tracer: ScoutTelemetryTracer
     ) -> None:
         tracer = isolated_tracer
-        missing_items = [
+        missing_items: list[MissingItemRecord | str] = [
             MissingItemRecord(
                 kind="code_symbol",
                 identifier="OrderBook.cancel",
@@ -639,8 +640,8 @@ class TestW3CContextPropagationBoundaryStressing:
             traceparent = carrier["traceparent"]
             assert traceparent.startswith("00-")
 
-            expected_trace_hex = trace.format_trace_id(root.context.trace_id)
-            expected_span_hex = trace.format_span_id(root.context.span_id)
+            expected_trace_hex = trace.format_trace_id(root.get_span_context().trace_id)
+            expected_span_hex = trace.format_span_id(root.get_span_context().span_id)
             assert f"00-{expected_trace_hex}-{expected_span_hex}-" in traceparent
 
         # Extract context from carrier in independent consumer context
@@ -672,7 +673,7 @@ class TestW3CContextPropagationBoundaryStressing:
             assert c2["Authorization"] == "Bearer signed_jwt_token"
             assert c2["X-Principal-User-Id"] == "trader_99"
             assert "traceparent" in c2
-            assert trace.format_span_id(span.context.span_id) in c2["traceparent"]
+            assert trace.format_span_id(span.get_span_context().span_id) in c2["traceparent"]
 
     @pytest.mark.parametrize(
         "corrupted_header",
@@ -704,9 +705,12 @@ class TestW3CContextPropagationBoundaryStressing:
 
         # Must gracefully fall back to a fresh root span
         with tracer.tracer.start_as_current_span("fallback_span", context=extracted_ctx) as s:
+            assert isinstance(s, ReadableSpan)
             assert s.parent is None, f"Expected None parent for '{corrupted_header}'"
-            assert s.context.trace_id != 0, f"Expected non-zero trace ID for '{corrupted_header}'"
-            trace_id_hex = trace.format_trace_id(s.context.trace_id)
+            assert s.get_span_context().trace_id != 0, (
+                f"Expected non-zero trace ID for '{corrupted_header}'"
+            )
+            trace_id_hex = trace.format_trace_id(s.get_span_context().trace_id)
             assert len(trace_id_hex) == 32
             int(trace_id_hex, 16)
 
@@ -718,8 +722,9 @@ class TestW3CContextPropagationBoundaryStressing:
         with tracer.tracer.start_as_current_span(
             "fallback_empty_carrier", context=extracted_ctx
         ) as s:
+            assert isinstance(s, ReadableSpan)
             assert s.parent is None
-            assert s.context.trace_id != 0
+            assert s.get_span_context().trace_id != 0
 
     def test_multithreaded_context_propagation_isolation(
         self, isolated_tracer: ScoutTelemetryTracer
@@ -733,8 +738,10 @@ class TestW3CContextPropagationBoundaryStressing:
             extracted = extract_trace_context(carrier)
 
             with tracer.tracer.start_as_current_span(f"worker_{idx}", context=extracted) as s:
-                extracted_parent = trace.format_span_id(s.parent.span_id)  # type: ignore[union-attr]
-                extracted_trace = trace.format_trace_id(s.context.trace_id)
+                assert isinstance(s, ReadableSpan)
+                assert s.parent is not None
+                extracted_parent = trace.format_span_id(s.parent.span_id)
+                extracted_trace = trace.format_trace_id(s.get_span_context().trace_id)
                 assert extracted_parent == span_id_hex
                 assert extracted_trace == trace_id_hex
             return True

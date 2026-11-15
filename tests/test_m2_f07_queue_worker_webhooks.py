@@ -147,7 +147,9 @@ def test_f07_indexing_worker_run_once(in_memory_queue: InMemoryTaskQueue) -> Non
 
 
 def test_f07_webhook_endpoints_hmac_and_ingress(
-    app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    ephemeral_pg_domain: str,
 ) -> None:
     """Verifies webhook ingress routes with constant-time HMAC validation."""
     gitlab_secret = "test_gitlab_secret_key"
@@ -157,7 +159,7 @@ def test_f07_webhook_endpoints_hmac_and_ingress(
 
     payload = {
         "event_type": "push",
-        "domain_id": "trading_code_scout",
+        "domain_id": ephemeral_pg_domain,
         "repository": {"name": "routing-engine"},
         "before": "0" * 40,
         "after": "c" * 40,
@@ -183,7 +185,7 @@ def test_f07_webhook_endpoints_hmac_and_ingress(
     assert "task_id" in data
 
     # 3. GitHub Webhook - HMAC-SHA256 signature verification
-    raw_body = b'{"ref": "refs/heads/main", "domain_id": "trading_code_scout"}'
+    raw_body = f'{{"ref": "refs/heads/main", "domain_id": "{ephemeral_pg_domain}"}}'.encode()
     valid_sig = "sha256=" + hmac.new(github_secret.encode(), raw_body, hashlib.sha256).hexdigest()
 
     resp_gh = app_client.post(
@@ -210,11 +212,11 @@ def test_f07_webhook_endpoints_hmac_and_ingress(
     assert resp_gh_bad.status_code == 401
 
 
-def test_f07_live_postgres_task_queue() -> None:
+def test_f07_live_postgres_task_queue(ephemeral_pg_domain: str) -> None:
     """Verifies PostgreSQL 17 SKIP LOCKED atomic claims on live database."""
     settings = ScoutSettings()
     pg_queue = PostgresTaskQueue(db_url=settings.db_app_url)
-    domain_id = "trading_code_scout"
+    domain_id = ephemeral_pg_domain
 
     # Enqueue task
     t_id = pg_queue.enqueue_task(

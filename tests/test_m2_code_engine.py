@@ -238,11 +238,14 @@ def test_git_merkle_indexer_two_pass_edge_resolution(
     )
 
     visible_edges = repo.list_visible_ast_edges(principal, domain_id)
-    assert len(visible_edges) > 0
+    assert len(visible_edges) >= 100
 
-    # Check that at least some internal call/inherits/type edges have target_symbol_id resolved
+    # Check that internal call/inherits/type edges have target_symbol_id resolved
     resolved_edges = [e for e in visible_edges if e.target_symbol_id is not None]
-    assert len(resolved_edges) > 0
+    assert len(resolved_edges) >= 10
+    assert {e.edge_kind for e in resolved_edges}.issubset(
+        {"CALLS", "IMPORTS", "USES_TYPE", "INHERITS", "TESTED_BY"}
+    )
     for edge in resolved_edges:
         assert edge.target_symbol_id is not None
         assert edge.source_symbol_id is not None

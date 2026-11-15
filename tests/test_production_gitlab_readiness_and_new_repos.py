@@ -211,13 +211,11 @@ def test_git_working_tree_live_uncommitted_edits_and_auto_workflow_sync() -> Non
         legacy_file = pkg_dir / "legacy_batch.py"
 
         settlement_file.write_text(
-            "def settle_wire_transfer(amount_usd: float) -> bool:\n"
-            "    return amount_usd > 0.0\n",
+            "def settle_wire_transfer(amount_usd: float) -> bool:\n    return amount_usd > 0.0\n",
             encoding="utf-8",
         )
         legacy_file.write_text(
-            "def run_legacy_batch() -> int:\n"
-            "    return 42\n",
+            "def run_legacy_batch() -> int:\n    return 42\n",
             encoding="utf-8",
         )
         subprocess.run(["git", "add", "."], cwd=tmp_dir, check=True, capture_output=True)
@@ -445,10 +443,12 @@ async def test_mcp_assemble_verified_context_pack_and_sec04_guard() -> None:
 
 def test_unseen_repo_three_previously_missed_tasks_now_hit_top5_symbol_recall() -> None:
     """Verify HTTPX-04, CLICK-01, and CLICK-14 all achieve Top-5 File & Symbol Recall."""
-    httpx_dir = Path("data/unseen_repos/httpx")
-    click_dir = Path("data/unseen_repos/click")
+    from tests.fixtures.corpus_paths import resolve_local_data_dir
+
+    httpx_dir = resolve_local_data_dir("data/unseen_repos/httpx")
+    click_dir = resolve_local_data_dir("data/unseen_repos/click")
     if not httpx_dir.exists() or not click_dir.exists():
-        pytest.skip("Unseen repositories not cloned locally")
+        pytest.fail("Unseen repositories not cloned locally")
 
     suite = build_unseen_repo_suite()
     principal = PrincipalContext(
@@ -527,9 +527,7 @@ def test_benchmark_domain_cli_on_polyglot_multi_repo_corpus() -> None:
             encoding="utf-8",
         )
         (r2 / "main.tf").write_text(
-            'resource "google_SQL_database_instance" "rls_primary" {\n'
-            '  name = "rls-primary"\n'
-            "}\n",
+            'resource "google_SQL_database_instance" "rls_primary" {\n  name = "rls-primary"\n}\n',
             encoding="utf-8",
         )
 

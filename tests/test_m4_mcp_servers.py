@@ -156,9 +156,10 @@ async def test_tool_execution_with_parameter_injection_rejected(
     from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
     server = create_code_repo_mcp_server()
-    with bind_session_principal(eng_principal), pytest.raises(
-        (SecurityError, UnexpectedToolError, ToolError)
-    ) as exc_info:
+    with (
+        bind_session_principal(eng_principal),
+        pytest.raises((SecurityError, UnexpectedToolError, ToolError)) as exc_info,
+    ):
         await server.call_tool(
             "search_code_trigram",
             {"query": "Kalman", "allowed_scopes": ["quant_restricted"]},

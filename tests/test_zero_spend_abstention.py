@@ -43,9 +43,10 @@ import contextlib
 import os
 import urllib.request
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 import pytest
@@ -135,14 +136,14 @@ def paid_spy() -> PaidExecutionSpy:
 
 
 @pytest.fixture(scope="module", autouse=True)
-def guard_paid_network_and_models(paid_spy: PaidExecutionSpy):
+def guard_paid_network_and_models(paid_spy: PaidExecutionSpy) -> Iterator[PaidExecutionSpy]:
     """Installs mechanical interception across all paid execution and external network pathways."""
     mp = pytest.MonkeyPatch()
 
-    def spy_execute(self, *args: Any, **kwargs: Any):
+    def spy_execute(self: object, *args: Any, **kwargs: Any) -> None:
         paid_spy.record_call("GeminiImplementationExecutor.execute_implementation", *args, **kwargs)
 
-    def spy_patch(self, *args: Any, **kwargs: Any):
+    def spy_patch(self: object, *args: Any, **kwargs: Any) -> None:
         paid_spy.record_call("GeminiImplementationExecutor._generate_gemini_patch", *args, **kwargs)
 
     mp.setattr(GeminiImplementationExecutor, "execute_implementation", spy_execute)
@@ -161,7 +162,7 @@ def guard_paid_network_and_models(paid_spy: PaidExecutionSpy):
 
     orig_urlopen = urllib.request.urlopen
 
-    def spy_urlopen(url_or_req, *args, **kwargs):
+    def spy_urlopen(url_or_req: Any, *args: Any, **kwargs: Any) -> Any:
         target_url = str(getattr(url_or_req, "full_url", url_or_req))
         if any(cloud in target_url for cloud in ("googleapis.com", "anthropic.com", "openai.com")):
             paid_spy.record_call(f"urllib.request.urlopen({target_url})")
@@ -589,7 +590,9 @@ def teardown_synthetic_benchmark_repo(conn: psycopg.Connection, domain_id: str) 
     with conn.cursor() as cur:
         for tbl in ("doc_chunks", "ast_symbols", "code_files", "domain_packs"):
             cur.execute(f"SELECT COUNT(*) FROM {tbl} WHERE domain_id = %s;", (domain_id,))
-            cnt = cur.fetchone()[0]
+            cnt_row = cur.fetchone()
+            assert cnt_row is not None
+            cnt = cnt_row[0]
             assert cnt == 0, f"Teardown failure: {tbl} still contains {cnt} rows for {domain_id}!"
 
 
@@ -618,7 +621,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
 
         conn_mgr = RLSConnectionManager(st.db_app_url)
         adapter = PostgresScoutGraphAdapter(conn_mgr, st)
-        adapter.benchmark_domain_id = domain_id
+        cast(Any, adapter).benchmark_domain_id = domain_id
         try:
             yield adapter
         finally:
@@ -627,7 +630,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
         return
 
     if os.environ.get("SCOUT_EVAL_IN_MEMORY_ONLY") == "1":
-        in_mem_repo.benchmark_domain_id = domain_id
+        cast(Any, in_mem_repo).benchmark_domain_id = domain_id
         yield in_mem_repo
         return
 
@@ -1033,8 +1036,6 @@ class TestStorageParityAndNeutralScopes:
     ) -> None:
         """Verifies RLS scope intersections strictly mirror database permissions."""
         if not is_postgres_reachable():
-            if os.environ.get("SCOUT_EVAL_IN_MEMORY_ONLY") == "1":
-                pytest.skip("Skipping PostgreSQL parity test under SCOUT_EVAL_IN_MEMORY_ONLY=1")
             pytest.fail(
                 "Live PostgreSQL 17 is required for store parity verification but is unreachable!"
             )
@@ -1067,8 +1068,6 @@ class TestStorageParityAndNeutralScopes:
     def test_fixture_cannot_touch_rows_of_another_domain(self) -> None:
         """Proves benchmark teardown isolates by domain_id and cannot touch other domains."""
         if not is_postgres_reachable():
-            if os.environ.get("SCOUT_EVAL_IN_MEMORY_ONLY") == "1":
-                pytest.skip("Skipping canary test under explicit SCOUT_EVAL_IN_MEMORY_ONLY=1")
             pytest.fail("Live PostgreSQL 17 is required for canary test but is unreachable!")
 
         import psycopg
@@ -1077,6 +1076,7 @@ class TestStorageParityAndNeutralScopes:
 
         st = ScoutSettings()
         canary_domain = f"canary_verification_domain_{uuid.uuid4().hex[:8]}"
+        canary_repo_name = f"canary/repo-{uuid.uuid4().hex[:8]}"
         canary_fid = uuid.uuid4()
         session_domain = f"eval_synthetic_{uuid.uuid4().hex[:12]}"
 
@@ -1099,7 +1099,7 @@ class TestStorageParityAndNeutralScopes:
                 CodeFileRecord(
                     file_id=canary_fid,
                     domain_id=canary_domain,
-                    repo_name="canary/repo",
+                    repo_name=canary_repo_name,
                     file_path="src/canary.py",
                     git_commit_sha="1111222233334444555566667777888899990000",
                     git_blob_sha="2222333344445555666677778888999900001111",
@@ -1122,7 +1122,9 @@ class TestStorageParityAndNeutralScopes:
                         "SELECT COUNT(*) FROM code_files WHERE domain_id = %s;",
                         (canary_domain,),
                     )
-                    row_count = cur.fetchone()[0]
+                    row_count_rec = cur.fetchone()
+                    assert row_count_rec is not None
+                    row_count = row_count_rec[0]
                     assert row_count == 1, f"Canary row in {canary_domain} was deleted or touched!"
 
                     for tbl in ("code_files", "ast_symbols", "doc_chunks", "domain_packs"):
@@ -1130,23 +1132,27 @@ class TestStorageParityAndNeutralScopes:
                             f"SELECT COUNT(*) FROM {tbl} WHERE domain_id = %s;",
                             (session_domain,),
                         )
-                        cnt = cur.fetchone()[0]
+                        tbl_row = cur.fetchone()
+                        assert tbl_row is not None
+                        cnt = tbl_row[0]
                         assert cnt == 0, (
                             f"Session domain {session_domain} still has {cnt} rows in {tbl}!"
                         )
 
                 # 4. Mutation proof: verify that breaking teardown predicate deletes canary
-                def flawed_teardown(c: psycopg.Connection) -> None:
-                    # Flawed predicate deletes by repo without domain_id isolation
-                    c.execute("DELETE FROM code_files WHERE repo_name = 'canary/repo';")
+                def flawed_teardown(c: psycopg.Connection, target_repo: str) -> None:
+                    # Flawed predicate deletes by unique test repo without domain_id isolation
+                    c.execute("DELETE FROM code_files WHERE repo_name = %s;", (target_repo,))
 
-                flawed_teardown(conn)
+                flawed_teardown(conn, canary_repo_name)
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT COUNT(*) FROM code_files WHERE domain_id = %s;",
                         (canary_domain,),
                     )
-                    mutated_count = cur.fetchone()[0]
+                    mutated_row = cur.fetchone()
+                    assert mutated_row is not None
+                    mutated_count = mutated_row[0]
                     assert mutated_count == 0, (
                         "Flawed teardown mutation did not delete canary row as expected!"
                     )

@@ -136,8 +136,7 @@ def test_storybook_plugin_extraction() -> None:
     assert any(s.name == "Meta" for s in syms)
     assert any(s.name == "Primary" for s in syms)
     assert any(
-        e.edge_kind == "DOCUMENTS_COMPONENT" and e.target_qualified_name == "Button"
-        for e in edges
+        e.edge_kind == "DOCUMENTS_COMPONENT" and e.target_qualified_name == "Button" for e in edges
     )
 
     # Test MDX story extraction
@@ -212,9 +211,7 @@ def test_extractor_delegates_to_registered_plugins() -> None:
 
     # C# delegation
     cs_code = "namespace App; public class Worker { public void Run() {} }"
-    cs_syms, _ = extractor.parse_source(
-        cs_code, "csharp", "src/App/Worker.cs", repo_name="my-app"
-    )
+    cs_syms, _ = extractor.parse_source(cs_code, "csharp", "src/App/Worker.cs", repo_name="my-app")
     assert any(s.name == "Worker" for s in cs_syms)
     assert any(s.name == "Run" for s in cs_syms)
 

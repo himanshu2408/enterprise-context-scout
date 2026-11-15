@@ -297,6 +297,8 @@ class TestFastApiHttpConcurrencyUnderFailureAndExceptions:
                 if isinstance(r, Exception):
                     crash_count += 1
                     continue
+                if isinstance(r, BaseException):
+                    raise r
                 req_type, status, observed_uid = r
                 if req_type == "alice":
                     assert status == 200

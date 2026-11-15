@@ -147,10 +147,11 @@ def test_empirical_m2_challenge_01_in_memory_queue_10_worker_race_100_tasks() ->
 
 def test_empirical_m2_challenge_01_postgres_queue_10_worker_race_100_tasks(
     settings: ScoutSettings,
+    ephemeral_pg_domain: str,
 ) -> None:
     """Stress test: 10 worker threads claiming 100 queued tasks in live PostgreSQL 17."""
     pg_queue = PostgresTaskQueue(db_url=settings.db_app_url)
-    domain_id = "trading_code_scout"
+    domain_id = ephemeral_pg_domain
     num_tasks = 100
     num_workers = 10
 
@@ -221,9 +222,7 @@ def test_empirical_m2_challenge_02_jitter_mathematical_bounds_empirical_distribu
         for max_d in max_delays:
             for attempt in range(1, 6):
                 delays = [
-                    compute_backoff_delay(
-                        attempt, base_delay_seconds=base, max_delay_seconds=max_d
-                    )
+                    compute_backoff_delay(attempt, base_delay_seconds=base, max_delay_seconds=max_d)
                     for _ in range(trials_per_config)
                 ]
                 delay_cap = min(max_d, base * (2 ** (attempt - 1)))
@@ -317,10 +316,11 @@ def test_empirical_m2_challenge_02_dlq_exhaustion_in_memory(
 
 def test_empirical_m2_challenge_02_dlq_exhaustion_live_postgres(
     settings: ScoutSettings,
+    ephemeral_pg_domain: str,
 ) -> None:
     """Stress test: Verify automatic DLQ routing on retry exhaustion in live PostgreSQL 17."""
     pg_queue = PostgresTaskQueue(db_url=settings.db_app_url)
-    domain_id = "trading_code_scout"
+    domain_id = ephemeral_pg_domain
     max_attempts = 2
 
     task_id = pg_queue.enqueue_task(
@@ -771,9 +771,10 @@ def test_empirical_m2_challenge_05_cyclic_dependency_graph_in_memory(
     duration_ms = (time.perf_counter() - t_start) * 1000.0
 
     assert duration_ms < 10.0, f"InMemory traversal exceeded 10ms SLA: {duration_ms:.2f}ms"
-    assert len(neighborhood) > 0
-
     result_sym_ids = [rec.symbol.symbol_id for rec in neighborhood]
+    assert set(result_sym_ids) == {sym_b, sym_c}, (
+        f"Expected neighbors {{sym_b, sym_c}}, got {result_sym_ids}"
+    )
     assert len(result_sym_ids) == len(set(result_sym_ids)), "Neighborhood has duplicate symbols!"
     assert sym_a not in result_sym_ids
 
@@ -782,12 +783,14 @@ def test_empirical_m2_challenge_05_cyclic_dependency_graph_in_memory(
 
 
 def test_empirical_m2_challenge_05_cyclic_dependency_graph_live_postgres_cte(
-    settings: ScoutSettings, principal_tester: PrincipalContext
+    settings: ScoutSettings,
+    principal_tester: PrincipalContext,
+    ephemeral_pg_domain: str,
 ) -> None:
     """Stress test: Circular graph cycle safety in PostgreSQL 17 Recursive CTE."""
     mgr = RLSConnectionManager(settings.db_app_url)
     repo = PostgresRLSRepository()
-    domain_id = "trading_code_scout"
+    domain_id = ephemeral_pg_domain
     scopes = ["public_eng"]
 
     file_a = uuid4()
@@ -884,7 +887,10 @@ def test_empirical_m2_challenge_05_cyclic_dependency_graph_live_postgres_cte(
             f"PostgreSQL Recursive CTE exceeded 10ms SLA: min={min_duration_ms:.2f}ms "
             f"(all runs: {[f'{d:.2f}ms' for d in durations]})"
         )
-        assert len(results) > 0
+        assert {r.symbol.symbol_id for r in results} == {sym_a, sym_b, sym_c}, (
+            f"Expected exact cycle nodes {{sym_a, sym_b, sym_c}}, got "
+            f"{[r.symbol.symbol_id for r in results]}"
+        )
 
         sym_role_pairs = [(r.symbol.symbol_id, r.intent_role) for r in results]
         assert len(sym_role_pairs) == len(set(sym_role_pairs)), (
@@ -893,22 +899,6 @@ def test_empirical_m2_challenge_05_cyclic_dependency_graph_live_postgres_cte(
 
         for r in results:
             assert r.depth in (1, 2)
-
-        conn.execute(
-            "DELETE FROM ast_edges WHERE domain_id = %s "
-            "AND source_symbol_id IN (%s, %s, %s);",
-            (domain_id, sym_a, sym_b, sym_c),
-        )
-        conn.execute(
-            "DELETE FROM ast_symbols WHERE domain_id = %s "
-            "AND symbol_id IN (%s, %s, %s);",
-            (domain_id, sym_a, sym_b, sym_c),
-        )
-        conn.execute(
-            "DELETE FROM code_files WHERE domain_id = %s "
-            "AND file_id IN (%s, %s, %s);",
-            (domain_id, file_a, file_b, file_c),
-        )
 
 
 def test_empirical_m2_challenge_05_dense_clique_graph_scale(
