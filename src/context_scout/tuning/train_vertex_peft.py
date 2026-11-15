@@ -19,8 +19,17 @@ from typing import Any, Final
 from pydantic import BaseModel, Field
 
 from context_scout.config import ScoutSettings, validate_google_model_id
+from context_scout.plugins.registry import PluginRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_default_domain_id(settings: ScoutSettings) -> str:
+    plugin = PluginRegistry.get_primary_domain_plugin()
+    if plugin is not None:
+        return plugin.get_role_domain_ids().get("code", settings.default_domain_id)
+    return settings.default_domain_id
+
 
 DEFAULT_VERTEX_BASE_MODEL: Final[str] = "google/gemma-4-26B-A4B-it"
 DEFAULT_GCP_PROJECT: Final[str] = "enterprise-context-scout-prod"
@@ -122,7 +131,9 @@ class VertexPEFTTrainer:
         config: VertexPEFTConfig | None = None,
     ) -> None:
         self.settings = settings or ScoutSettings()
-        self.config = config or VertexPEFTConfig(domain_id="trading_code_scout")
+        self.config = config or VertexPEFTConfig(
+            domain_id=_resolve_default_domain_id(self.settings)
+        )
 
         # Enforce Google model whitelist
         self.config.base_model_id = validate_google_model_id(self.config.base_model_id)
@@ -235,8 +246,7 @@ class VertexPEFTTrainer:
         scaling = self.config.lora_alpha / self.config.r
         if abs(scaling - 2.0) > 0.01:
             issues.append(
-                f"Non-standard LoRA scaling alpha/r = {scaling:.2f}. "
-                "Expected 2.0 (alpha=32, r=16)."
+                f"Non-standard LoRA scaling alpha/r = {scaling:.2f}. Expected 2.0 (alpha=32, r=16)."
             )
 
         # 2. Router gate freezing validation
@@ -329,9 +339,7 @@ class VertexPEFTTrainer:
         if not validation.is_valid:
             raise ValueError(f"Vertex AI PEFT job validation failed: {validation.issues}")
 
-        output_uri = (
-            validation.vertex_job_spec["jobSpec"]["baseOutputDirectory"]["outputUriPrefix"]
-        )
+        output_uri = validation.vertex_job_spec["jobSpec"]["baseOutputDirectory"]["outputUriPrefix"]
 
         if dry_run:
             logger.info(

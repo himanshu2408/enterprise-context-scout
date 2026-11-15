@@ -1,5 +1,7 @@
 """Core Pydantic v2 contracts and deterministic scoring/friction validators."""
 
+import json
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Final, Literal
@@ -7,7 +9,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from context_scout.config import validate_google_model_id
+from context_scout.config import (
+    ClaimVerificationPolicy,
+    ClaimVerifierConfig,
+    DomainConfig,
+    ScoutConfig,
+    validate_google_model_id,
+)
 
 
 class RoleType(StrEnum):
@@ -48,7 +56,8 @@ class FrictionVerdict(StrEnum):
 MARKET_MIN_FRICTION_BPS: Final[dict[MarketRegime, float]] = {
     MarketRegime.INDIA_NSE_BSE: 15.0,
     MarketRegime.GERMANY_XETRA_DAX: 10.0,
-    MarketRegime.US_NYSE_NASDAQ: 5.0, MarketRegime.GLOBAL_MULTI: 10.0,
+    MarketRegime.US_NYSE_NASDAQ: 5.0,
+    MarketRegime.GLOBAL_MULTI: 10.0,
     MarketRegime.INTERNAL_ADR: 0.0,
 }
 
@@ -106,7 +115,18 @@ class PrincipalContext(BaseModel):
     user_id: str = Field(min_length=1)
     role: RoleType
     allowed_scopes: list[str] = Field(min_length=1)
-    max_session_paid_tokens: int = Field(default=16_000, ge=1_000, le=100_000)
+    session_budget_tokens: int = Field(default=64_000, ge=1_000, le=500_000)
+    max_session_paid_tokens: int = Field(default=64_000, ge=1_000, le=500_000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _unify_budget_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "session_budget_tokens" in data and "max_session_paid_tokens" not in data:
+                data["max_session_paid_tokens"] = data["session_budget_tokens"]
+            elif "max_session_paid_tokens" in data and "session_budget_tokens" not in data:
+                data["session_budget_tokens"] = data["max_session_paid_tokens"]
+        return data
 
     @field_validator("allowed_scopes")
     @classmethod
@@ -166,6 +186,11 @@ class CodeSlicePointer(BaseModel):
     qualified_symbol: str = Field(min_length=1)
     selection_reason: str = Field(min_length=1)
     modification_intent: ModificationIntent
+    git_commit_sha: str | None = Field(
+        default=None,
+        min_length=7,
+        description="Optional at pointer stage, mandatory upon hydration into VerbatimCodeSlice",
+    )
 
     @model_validator(mode="after")
     def _validate_line_order(self) -> "CodeSlicePointer":
@@ -179,10 +204,55 @@ class CodeSlicePointer(BaseModel):
 class VerbatimCodeSlice(CodeSlicePointer):
     """Hydrated deterministically by the Python Slicer from Git/PostgreSQL."""
 
-    git_commit_sha: str = Field(min_length=7)
+    git_commit_sha: str = Field(min_length=7, description="Full or abbreviated Git commit SHA")
     git_blob_sha: str = Field(min_length=7)
     verbatim_code_with_lines: str = Field(min_length=1)
     auto_expanded_by_ast: bool = False
+
+
+class StageConfidence(BaseModel):
+    """Calibrated confidence telemetry for one of the 4 Scout pipeline stages."""
+
+    stage: int = Field(ge=1, le=4)
+    stage_name: str
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    confidence_band: Literal["high", "medium", "low"]
+    signals: dict[str, float | int | str | bool] = Field(default_factory=dict)
+    summary: str = ""
+
+    @classmethod
+    def from_score(
+        cls,
+        *,
+        stage: int,
+        stage_name: str,
+        score: float,
+        signals: dict[str, float | int | str | bool] | None = None,
+        summary: str = "",
+    ) -> "StageConfidence":
+        clamped = max(0.0, min(1.0, round(float(score), 4)))
+        band: Literal["high", "medium", "low"] = (
+            "high" if clamped >= 0.80 else ("medium" if clamped >= 0.55 else "low")
+        )
+        return cls(
+            stage=stage,
+            stage_name=stage_name,
+            confidence_score=clamped,
+            confidence_band=band,
+            signals=signals or {},
+            summary=summary,
+        )
+
+
+class QueryFacetCoverage(BaseModel):
+    """Per-facet grounding status for multi-part, comparison, or Top-N queries."""
+
+    facet_id: str
+    facet_query: str
+    status: Literal["grounded", "partial", "not_found"]
+    matched_sources: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    explanation: str = ""
 
 
 class DocCitationSpan(BaseModel):
@@ -192,6 +262,30 @@ class DocCitationSpan(BaseModel):
     source_uri: str = Field(min_length=1)
     section_heading: str = Field(min_length=1)
     verbatim_quote: str = Field(min_length=1)
+    full_section_content: str = ""
+    version: str = Field(
+        default="1.0",
+        min_length=1,
+        description="Document version, revision ID, or commit hash",
+    )
+    page_id: str | None = Field(
+        default=None,
+        description="Confluence page ID if retrieved from Confluence",
+    )
+    ticket_key: str | None = Field(
+        default=None,
+        description="Jira ticket key (e.g. 'CORE-101') if retrieved from Jira",
+    )
+
+    @model_validator(mode="after")
+    def _validate_enterprise_provenance(self) -> "DocCitationSpan":
+        # If source_uri indicates Confluence, page_id is expected
+        if "confluence" in self.source_uri.lower() and not self.page_id and self.doc_id.isdigit():
+            self.page_id = self.doc_id
+        # If source_uri indicates Jira, ticket_key is expected
+        if "jira" in self.source_uri.lower() and not self.ticket_key and "-" in self.doc_id:
+            self.ticket_key = self.doc_id
+        return self
 
 
 class DomainKnowledgeBrief(BaseModel):
@@ -206,6 +300,90 @@ class DomainKnowledgeBrief(BaseModel):
     known_risks_and_failure_modes: list[str] = Field(min_length=1)
     structured_metadata: dict[str, str | float | int | bool] = Field(default_factory=dict)
     verified_citations: list[DocCitationSpan] = Field(min_length=1)
+    query_facets: list[QueryFacetCoverage] = Field(default_factory=list)
+    missing_or_unverified_aspects: list[str] = Field(default_factory=list)
+    completeness_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
+    synthesis_mode: Literal["live_qlora_json", "deterministic_extractive_fallback"] = (
+        "deterministic_extractive_fallback"
+    )
+
+
+def build_domain_knowledge_brief_prompt(
+    user_prompt: str,
+    domain_id: str,
+    chunk_lines: list[str],
+) -> str:
+    """Builds canonical train/inference prompt for DomainKnowledgeBrief synthesis."""
+    return (
+        f"{user_prompt.strip()}\n"
+        f"Domain: {domain_id}. Return ONLY a valid DomainKnowledgeBrief JSON object with "
+        "keys: brief_title (str), domain_id (str), executive_summary (str), "
+        "formal_expression_or_rule (str or null), core_findings_and_rules (list[str]), "
+        "domain_constraints_and_caveats (list[str]), known_risks_and_failure_modes (list[str]), "
+        "structured_metadata (dict[str, str|float|int|bool], scalar values only), "
+        "verified_citations (list[dict] copying chunk_id, doc_id, doc_title, source_uri, "
+        "section_heading, and verbatim_quote verbatim from the retrieved chunks below).\n"
+        + "\n".join(chunk_lines)
+    )
+
+
+def parse_domain_knowledge_brief_json(
+    raw_text: str,
+    *,
+    domain_id: str | None = None,
+    normalize_scalars: bool = True,
+) -> tuple[DomainKnowledgeBrief | None, bool]:
+    """Parses DomainKnowledgeBrief JSON with raw_decode; returns (brief, strict_raw_valid)."""
+    cleaned = raw_text.replace("<turn|>", "").replace("<eos>", "").strip()
+    cleaned = re.sub(r"```(?:json)?\s*\n?(.*?)```", r"\1", cleaned, flags=re.DOTALL).strip()
+    first_brace = cleaned.find("{")
+    if first_brace == -1:
+        return None, False
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(cleaned[first_brace:])
+    except json.JSONDecodeError:
+        return None, False
+    if not isinstance(obj, dict):
+        return None, False
+
+    try:
+        return DomainKnowledgeBrief.model_validate(obj), True
+    except Exception:
+        if not normalize_scalars:
+            return None, False
+
+    normalized: dict[str, Any] = dict(obj)
+    if not normalized.get("domain_id") and domain_id:
+        normalized["domain_id"] = domain_id
+
+    raw_meta = normalized.get("structured_metadata")
+    if isinstance(raw_meta, dict):
+        clean_meta: dict[str, str | float | int | bool] = {}
+        for k, v in raw_meta.items():
+            key_s = str(k)
+            if isinstance(v, (str, float, int, bool)):
+                clean_meta[key_s] = v
+            elif isinstance(v, (list, tuple)):
+                clean_meta[key_s] = ", ".join(str(item) for item in v if item is not None)
+        normalized["structured_metadata"] = clean_meta
+
+    raw_cits = normalized.get("verified_citations")
+    if isinstance(raw_cits, list):
+        clean_cits: list[Any] = []
+        for vc in raw_cits:
+            if isinstance(vc, dict):
+                vc_copy = dict(vc)
+                if not vc_copy.get("version"):
+                    vc_copy["version"] = "1.0"
+                clean_cits.append(vc_copy)
+            else:
+                clean_cits.append(vc)
+        normalized["verified_citations"] = clean_cits
+
+    try:
+        return DomainKnowledgeBrief.model_validate(normalized), False
+    except Exception:
+        return None, False
 
 
 class QuantStrategyBrief(BaseModel):
@@ -247,6 +425,103 @@ class QuantStrategyBrief(BaseModel):
         return self
 
 
+class MissingItemRecord(BaseModel):
+    """Structured record of a missing or invalid dependency/provenance/permission item."""
+
+    kind: Literal[
+        "code_symbol",
+        "file",
+        "document",
+        "citation",
+        "scope",
+        "provenance",
+        "freshness",
+        "syntax",
+    ]
+    identifier: str = Field(min_length=1)
+    reason: str = ""
+    suggested_action: str = ""
+
+
+class CodeSpanPointer(BaseModel):
+    """Extractive code span pointer emitted by local Gemma 4 Scout (M4 Requirement 4).
+
+    Zero re-typed code from LLM memory. Line bounds are 1-indexed, inclusive, and
+    line_end >= line_start. Cryptographically anchored to commit_sha and blob_sha.
+    """
+
+    repo_name: str = Field(min_length=1, description="Repository identifier")
+    file_path: str = Field(min_length=1, description="Relative file path within repository")
+    commit_sha: str = Field(min_length=7, description="Full or abbreviated Git commit SHA")
+    blob_sha: str = Field(min_length=7, description="Git blob SHA of the target file")
+    line_start: int = Field(ge=1, description="1-indexed starting line number")
+    line_end: int = Field(ge=1, description="1-indexed ending line number")
+    symbol_id: str | None = Field(default=None, description="Optional qualified AST symbol name")
+    modification_intent: ModificationIntent | None = Field(
+        default=None, description="Intended edit or context role"
+    )
+
+    @model_validator(mode="after")
+    def _validate_line_bounds(self) -> "CodeSpanPointer":
+        if self.line_end < self.line_start:
+            raise ValueError(
+                f"line_end ({self.line_end}) must be >= line_start ({self.line_start})"
+            )
+        return self
+
+
+class DocSpanPointer(BaseModel):
+    """Extractive document span pointer with enterprise provenance and verbatim quote."""
+
+    source_type: Literal["confluence", "jira", "git_doc", "local_doc", "spec", "general"] = Field(
+        default="confluence", description="Source enterprise repository type"
+    )
+    item_id: str = Field(min_length=1, description="Confluence page ID, Jira issue key, or doc ID")
+    version_or_status: str = Field(
+        min_length=1, description="Confluence page version or Jira issue status"
+    )
+    verbatim_quote: str = Field(
+        min_length=1, description="Exact verbatim quote from the source document"
+    )
+    section_heading: str | None = Field(default=None, description="Section heading or title")
+    chunk_id: str | None = Field(default=None, description="Internal chunk identifier")
+
+
+class RawQuoteItem(BaseModel):
+    """Verbatim text snippet extracted from source context."""
+
+    quote: str = Field(min_length=1, description="Verbatim text snippet")
+    source_id: str = Field(min_length=1, description="Identifier of source document or file")
+    source_type: Literal["code", "document"] = Field(
+        default="document", description="'code' or 'document'"
+    )
+    line_number: int | None = Field(default=None, ge=1, description="Line number if from code")
+
+
+class ExtractiveDiscoveryPack(BaseModel):
+    """Strictly extractive discovery output emitted by local Gemma 4 Scout (M4 Requirement 4).
+
+    Contains ONLY pointers and verbatim quotes.
+    `non_evidence_scratchpad` is strictly for local chain-of-thought and MUST NEVER be passed
+    to paid frontier models.
+    """
+
+    query_id: str = Field(min_length=1, description="Unique query identifier")
+    code_pointers: list[CodeSpanPointer] = Field(
+        default_factory=list, description="Extractive code span pointers"
+    )
+    doc_pointers: list[DocSpanPointer] = Field(
+        default_factory=list, description="Extractive document span pointers"
+    )
+    raw_quotes: list[RawQuoteItem] = Field(
+        default_factory=list, description="Verbatim quotes extracted from source corpus"
+    )
+    non_evidence_scratchpad: str = Field(
+        default="",
+        description="Local reasoning scratchpad. NEVER passed to paid frontier models.",
+    )
+
+
 class PreFlightValidationReport(BaseModel):
     passed: bool
     unresolved_symbols: list[str] = Field(default_factory=list)
@@ -256,6 +531,12 @@ class PreFlightValidationReport(BaseModel):
     citations_verified_100_pct: bool
     auto_attached_ast_slices_count: int = Field(default=0, ge=0)
     bounce_back_feedback: str | None = None
+    syntax_errors: list[str] = Field(default_factory=list)
+    excised_unauthorized_items: list[str] = Field(default_factory=list)
+    unanchored_provenance_items: list[str] = Field(default_factory=list)
+    stale_invalidated_items: list[str] = Field(default_factory=list)
+    missing_items: list[MissingItemRecord] = Field(default_factory=list)
+    check_results: dict[str, bool] = Field(default_factory=dict)
 
 
 class InsufficientContextDiagnostic(BaseModel):
@@ -264,9 +545,53 @@ class InsufficientContextDiagnostic(BaseModel):
     trace_id: str
     domain_id: str
     reason: str
-    missing_symbols: list[str]
-    partial_candidate_files: list[str]
+    is_abstention: Literal[True] = True
+    missing_symbols: list[str] = Field(default_factory=list)
+    partial_candidate_files: list[str] = Field(default_factory=list)
+    missing_items: list[MissingItemRecord | str] = Field(default_factory=list)
+    failure_check: str | None = None
     paid_tokens_spent: Literal[0] = 0
+    query_facets: list[QueryFacetCoverage] = Field(default_factory=list)
+    missing_or_unverified_aspects: list[str] = Field(default_factory=list)
+    stage_confidences: list[StageConfidence] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _sync_missing_items_and_symbols(self) -> "InsufficientContextDiagnostic":
+        if self.missing_items and not self.missing_symbols:
+            syms: list[str] = []
+            for item in self.missing_items:
+                if isinstance(item, MissingItemRecord):
+                    syms.append(item.identifier)
+                else:
+                    syms.append(str(item))
+            object.__setattr__(self, "missing_symbols", syms)
+        elif self.missing_symbols and not self.missing_items:
+            items: list[MissingItemRecord | str] = [
+                MissingItemRecord(
+                    kind="code_symbol",
+                    identifier=s,
+                    reason=f"Missing symbol {s}",
+                )
+                for s in self.missing_symbols
+            ]
+            object.__setattr__(self, "missing_items", items)
+        return self
+
+
+class GatePassResult(BaseModel):
+    """Deterministic result when context passes all 6 preflight checks."""
+
+    passed: Literal[True] = True
+    report: PreFlightValidationReport
+    pack: Any | None = None
+
+
+class GateAbstentionResult(BaseModel):
+    """Deterministic result when context fails preflight check and triggers abstention."""
+
+    passed: Literal[False] = False
+    diagnostic: InsufficientContextDiagnostic
+    report: PreFlightValidationReport
 
 
 class ImplementationContextPack(BaseModel):
@@ -276,6 +601,7 @@ class ImplementationContextPack(BaseModel):
     domain_id: str = Field(min_length=1)
     user_task: str = Field(min_length=1)
     architectural_execution_plan: list[str] = Field(min_length=1)
+    is_abstention: Literal[False] = False
     doc_vs_code_conflicts_detected: list[str] = Field(default_factory=list)
     code_slices: list[VerbatimCodeSlice] = Field(default_factory=list)
     supporting_doc_citations: list[DocCitationSpan] = Field(default_factory=list)
@@ -284,6 +610,46 @@ class ImplementationContextPack(BaseModel):
     preflight_report: PreFlightValidationReport
     local_tokens_consumed: int = Field(ge=0)
     pack_token_count: int = Field(ge=1)
+    query_facets: list[QueryFacetCoverage] = Field(default_factory=list)
+    missing_or_unverified_aspects: list[str] = Field(default_factory=list)
+    completeness_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
+    synthesis_mode: Literal[
+        "live_qlora_json",
+        "deterministic_extractive_fallback",
+        "ast_extractive",
+        "hybrid_federated",
+    ] = "ast_extractive"
+    stage_confidences: list[StageConfidence] = Field(default_factory=list)
+
+    @field_validator("code_slices")
+    @classmethod
+    def _validate_code_slices_provenance(
+        cls, slices: list[VerbatimCodeSlice]
+    ) -> list[VerbatimCodeSlice]:
+        for s in slices:
+            if not s.repo_name or not s.git_commit_sha or not s.file_path:
+                raise ValueError(
+                    f"Code slice rejected: incomplete provenance (repo={s.repo_name}, "
+                    f"commit={s.git_commit_sha}, path={s.file_path})"
+                )
+            if s.start_line < 1 or s.end_line < s.start_line:
+                raise ValueError(
+                    f"Code slice rejected: invalid line bounds {s.start_line}-{s.end_line}"
+                )
+        return slices
+
+    @field_validator("supporting_doc_citations")
+    @classmethod
+    def _validate_citations_provenance(
+        cls, citations: list[DocCitationSpan]
+    ) -> list[DocCitationSpan]:
+        for c in citations:
+            if not c.doc_id or not c.version or not c.source_uri or not c.section_heading:
+                raise ValueError(
+                    f"Doc citation rejected: missing core provenance fields (doc_id={c.doc_id}, "
+                    f"version={c.version}, uri={c.source_uri}, heading={c.section_heading})"
+                )
+        return citations
 
 
 class MissingContextRequest(BaseModel):
@@ -341,3 +707,42 @@ class PatchExecutionResult(BaseModel):
     confirmed: bool = False
     details: str = ""
 
+
+__all__ = [
+    "MARKET_MIN_FRICTION_BPS",
+    "ClaimVerificationPolicy",
+    "ClaimVerifierConfig",
+    "CodeSlicePointer",
+    "CodeSpanPointer",
+    "ContextMissEvent",
+    "DocCitationSpan",
+    "DocSpanPointer",
+    "DomainConfig",
+    "DomainKnowledgeBrief",
+    "ExecutionMode",
+    "ExecutionTelemetryRecord",
+    "ExtractiveDiscoveryPack",
+    "FrictionVerdict",
+    "GateAbstentionResult",
+    "GatePassResult",
+    "ImplementationContextPack",
+    "InsufficientContextDiagnostic",
+    "MarketRegime",
+    "MissingContextRequest",
+    "MissingItemRecord",
+    "ModificationIntent",
+    "PatchExecutionResult",
+    "PreFlightValidationReport",
+    "PrincipalContext",
+    "QuantStrategyBrief",
+    "QueryFacetCoverage",
+    "RawQuoteItem",
+    "RoleType",
+    "ScoutConfig",
+    "StageConfidence",
+    "VerbatimCodeSlice",
+    "build_domain_knowledge_brief_prompt",
+    "compute_normalized_rrf",
+    "evaluate_market_friction_floor",
+    "parse_domain_knowledge_brief_json",
+]

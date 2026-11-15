@@ -27,6 +27,7 @@ from context_scout.agents.scout_workflow import (
     MAX_SAFE_KV_SIZE,
     FederatedScoutCoordinator,
     LocalGemmaClient,
+    ModelUnavailableError,
     ScoutWorkflow,
 )
 from context_scout.ast_engine.dependency_expander import ASTDependencyExpander
@@ -56,7 +57,13 @@ def principal() -> PrincipalContext:
     return PrincipalContext(
         user_id="lead_quant_dev",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "repo:trading_strategies", "corpus:quant_papers"],
+        allowed_scopes=[
+            "public_eng",
+            "repo:trading_strategies",
+            "corpus:quant_papers",
+            "domain:quant_research_scout",
+            "domain:trading_code_scout",
+        ],
     )
 
 
@@ -249,15 +256,26 @@ def test_local_gemma_client_adapter_hot_swapping(domain_registry: DomainRegistry
 def test_local_gemma_client_deterministic_fallback(
     test_repo: InMemoryRLSRepository, principal: PrincipalContext
 ) -> None:
-    """Verifies offline fallback produces genuine schema-conforming CodeSlicePointers."""
+    """Verifies fail-closed model abstention and AST fallback pointer generation."""
+    # 1. Complete fails closed with ModelUnavailableError when offline/unreachable
     client = LocalGemmaClient(offline_mode=True)
+    with pytest.raises(ModelUnavailableError) as exc_info:
+        client.complete("Refactor OrderFlowImbalanceAnalyzer", domain_id="trading_code_scout")
+    assert exc_info.value.is_abstention is True
+    assert exc_info.value.paid_tokens_spent == 0
+    assert "model unavailable" in str(exc_info.value).lower()
+
+    # 2. AST-based code pointer generation functions with in-memory repository
     pointers = client.generate_code_pointers(
         user_prompt="Refactor OrderFlowImbalanceAnalyzer in order_flow_imbalance.py",
         domain_id="trading_code_scout",
         repo=test_repo,
         principal=principal,
     )
-    assert len(pointers) >= 1
+    assert [p.qualified_symbol for p in pointers] == [
+        "trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+        "trading_strategies.models.OrderBookSnapshot",
+    ]
     target = pointers[0]
     assert "OrderFlowImbalanceAnalyzer" in target.qualified_symbol
     assert target.start_line == 3
@@ -288,7 +306,7 @@ def test_local_gemma_client_bounce_back_remediation(
     symbols_covered = [p.qualified_symbol for p in remediated]
     assert any("OrderBookSnapshot" in s for s in symbols_covered)
     remediated_slices = [p for p in remediated if "OrderBookSnapshot" in p.qualified_symbol]
-    assert len(remediated_slices) > 0
+    assert len(remediated_slices) == 1
     assert "Remediated via $0 bounce-back feedback" in remediated_slices[0].selection_reason
 
 
@@ -303,11 +321,14 @@ def test_local_gemma_client_quant_brief_generation(
         repo=test_repo,
         principal=principal,
     )
+    assert brief is not None
 
     assert brief.strategy_name != ""
     assert MarketRegime.GERMANY_XETRA_DAX in brief.target_markets
-    assert r"\text{OFI}" in brief.mathematical_signal_latex
-    assert len(brief.verified_citations) >= 1
+    assert r"E[Y \mid X]" in brief.mathematical_signal_latex
+    assert any(
+        "Order flow imbalance exhibits" in c.verbatim_quote for c in brief.verified_citations
+    )
     # Check citation is verbatim from doc chunk
     first_cit = brief.verified_citations[0]
     assert "Order flow imbalance exhibits" in first_cit.verbatim_quote
@@ -452,8 +473,11 @@ def test_federated_scout_coordinator_2stage_dag(
         FrictionVerdict.REALISTIC_FRICTION,
         FrictionVerdict.UNVERIFIED_FRICTION_WARNING,
     )
-    assert len(result.supporting_doc_citations) >= 1
-    assert len(result.code_slices) >= 1
+    assert any(
+        "order flow" in c.verbatim_quote.lower() or "xetra" in c.verbatim_quote.lower()
+        for c in result.supporting_doc_citations
+    )
+    assert any(s.file_path.endswith(".py") for s in result.code_slices)
     assert result.preflight_report.passed is True
     assert result.preflight_report.citations_verified_100_pct is True
 

@@ -8,6 +8,18 @@ from context_scout.security.guardrails import (
     ShieldGemmaGuardrail,
     frame_untrusted_content,
 )
+from context_scout.security.permission_mirror import (
+    CachedPermissionMirrorService,
+    ConfluencePermission,
+    ConfluenceSpaceMembership,
+    EnterpriseIdentityProfile,
+    GitLabProjectMembership,
+    GitLabRole,
+    JiraPermission,
+    JiraProjectMembership,
+    PermissionMirror,
+    sanitize_scope_identifier,
+)
 from context_scout.security.rbac import (
     FORBIDDEN_TOOL_ARGUMENTS,
     AuthenticationRequiredError,
@@ -26,8 +38,17 @@ from context_scout.security.rbac import (
 __all__ = [
     "FORBIDDEN_TOOL_ARGUMENTS",
     "AuthenticationRequiredError",
+    "CachedPermissionMirrorService",
+    "ConfluencePermission",
+    "ConfluenceSpaceMembership",
     "DomainAuthorizationGate",
     "DomainToolAccessDeniedError",
+    "EnterpriseIdentityProfile",
+    "GitLabProjectMembership",
+    "GitLabRole",
+    "JiraPermission",
+    "JiraProjectMembership",
+    "PermissionMirror",
     "PromptInjectionSanitizer",
     "SafetyCategory",
     "ScopeAccessDeniedError",
@@ -40,6 +61,7 @@ __all__ = [
     "get_current_principal",
     "has_bound_principal",
     "require_scope",
+    "sanitize_scope_identifier",
     "scoped_db_session",
     "validate_tool_call_arguments",
 ]

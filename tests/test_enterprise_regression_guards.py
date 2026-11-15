@@ -25,7 +25,9 @@ import json
 import re
 from pathlib import Path
 
-from context_scout.agents.scout_workflow import LocalGemmaClient
+from tests.fixtures.mock_generators import MockLocalGemmaClient
+
+from context_scout.agents.scout_workflow import LocalGemmaClient, ModelUnavailableError
 from context_scout.api.routes import handoff, scout, telemetry
 from context_scout.schemas.contracts import PrincipalContext, RoleType
 
@@ -83,8 +85,11 @@ def test_live_verification_reports_enforce_schema_and_grounding() -> None:
 
 def test_local_gemma_client_supports_use_live_mlx_and_rag_chunk_parsing() -> None:
     """Guard 3: LocalGemmaClient supports use_live_mlx and parses Retrieved Corpus Chunk."""
-    client = LocalGemmaClient(offline_mode=True, use_live_mlx=True)
-    assert client.use_live_mlx is True
+    import pytest
+
+    # 1. Production client fails closed when offline/unreachable
+    prod_client = LocalGemmaClient(offline_mode=True, use_live_mlx=True)
+    assert prod_client.use_live_mlx is True
 
     prompt = (
         "Synthesize a market-friction verified QuantStrategyBrief for `Test Paper` "
@@ -94,7 +99,14 @@ def test_local_gemma_client_supports_use_live_mlx_and_rag_chunk_parsing() -> Non
         "section=Methodology | strategy=DAX Spread Strategy | sharpe=1.9 | "
         'mdd=7.5 | bps=15.0 | quote="Exact empirical quote from methodology section."]'
     )
-    out = client.complete(prompt=prompt, domain_id="quant_research_scout")
+    with pytest.raises(ModelUnavailableError) as exc_info:
+        prod_client.complete(prompt=prompt, domain_id="quant_research_scout")
+    assert exc_info.value.is_abstention is True
+    assert exc_info.value.paid_tokens_spent == 0
+
+    # 2. Test double parses Retrieved Corpus Chunk directly
+    mock_client = MockLocalGemmaClient(offline_mode=True, use_live_mlx=True)
+    out = mock_client.complete(prompt=prompt, domain_id="quant_research_scout")
     parsed = json.loads(out)
     cit = parsed["verified_citations"][0]
     assert cit["chunk_id"] == "chk-999"
@@ -107,7 +119,8 @@ def test_handoff_route_uses_real_ruff_and_pytest_commands_not_sys_exit_0() -> No
     """Guard 4: handoff.py must never use dummy sys.exit(0) sandbox commands."""
     src = inspect.getsource(handoff)
     assert "sys.exit(0)" not in src
-    assert "_generate_gemini_patch" in src
+    assert "_generate_deterministic_patch" in src
+    assert "execute_implementation" in src
     assert '"ruff"' in src
     assert '"pytest"' in src
 
@@ -199,7 +212,7 @@ def test_scout_workflow_hydrates_quant_strategy_spec_for_quant_domain() -> None:
     )
     assert isinstance(res, ImplementationContextPack)
     assert res.quant_strategy_spec is not None
-    assert len(res.supporting_doc_citations) >= 1
+    assert any("order flow" in c.verbatim_quote.lower() for c in res.supporting_doc_citations)
 
 
 def test_scout_route_matches_hyphenated_bounce_back_prompts() -> None:
@@ -292,7 +305,10 @@ def test_indian_stock_market_momentum_quant_query_and_citation_inspector_auto_ta
     assert "Momentum" in res.quant_strategy_spec.strategy_name
     assert res.quant_strategy_spec.transaction_cost_bps_assumed is not None
     assert res.quant_strategy_spec.transaction_cost_bps_assumed >= 15.0
-    assert len(res.supporting_doc_citations) >= 1
+    assert any(
+        "momentum" in c.verbatim_quote.lower() or "nse" in c.verbatim_quote.lower()
+        for c in res.supporting_doc_citations
+    )
 
     inspector_tsx = Path("web-ui/src/components/CitationInspector.tsx").read_text(encoding="utf-8")
     assert 'setActiveTab("quant")' in inspector_tsx
@@ -385,6 +401,11 @@ def test_auto_quant_intent_routing_and_executive_answer_ui() -> None:
 
 def test_custom_biology_and_bioinformatics_domain_end_to_end(tmp_path: Path) -> None:
     """Guard 19: Custom non-finance domains (Biology research & Bioinformatics code) work E2E."""
+    from uuid import uuid4
+
+    from psycopg import connect
+
+    from context_scout.agents import preflight_gate
     from context_scout.agents.domain_registry import DomainRegistry
     from context_scout.agents.scout_workflow import ScoutWorkflow
     from context_scout.cli import (
@@ -392,8 +413,21 @@ def test_custom_biology_and_bioinformatics_domain_end_to_end(tmp_path: Path) -> 
         cmd_init_domain,
         cmd_train_domain,
     )
+    from context_scout.config import ScoutSettings
     from context_scout.schemas.contracts import ImplementationContextPack
 
+    # Negative guard: verify corpus_index.json RAM caches remain purged from preflight_gate
+    for purged_attr in (
+        "_CUSTOM_CORPUS_MEM_CACHE",
+        "_CUSTOM_CORPUS_PARSED_CACHE",
+        "_load_custom_domain_corpus",
+    ):
+        assert not hasattr(preflight_gate, purged_attr), (
+            f"Regression: {purged_attr} must remain purged; custom domains live in PG17."
+        )
+
+    crispr_domain_id = f"eval_crispr_{uuid4().hex[:8]}"
+    bio_domain_id = f"eval_bio_{uuid4().hex[:8]}"
     domains_dir = tmp_path / "domains"
     data_dir = tmp_path / "data" / "tuning"
     bio_docs_dir = tmp_path / "bio_corpus"
@@ -401,112 +435,144 @@ def test_custom_biology_and_bioinformatics_domain_end_to_end(tmp_path: Path) -> 
     bio_docs_dir.mkdir(parents=True, exist_ok=True)
     bio_code_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Create a realistic CRISPR-Cas9 molecular biology paper
-    (bio_docs_dir / "crispr_cas9_kinetics.md").write_text(
-        "# CRISPR-Cas9 Guide RNA Specificity and Cleavage Kinetics\n\n"
-        "## 2. Thermodynamic Mismatch Penalty Model\n\n"
-        "Cas9 endonuclease cleavage rate decreases exponentially as PAM-proximal seed "
-        "region mismatches destabilize R-loop formation.\n"
-        "The empirical cleavage rate follows $k_{\\text{cleave}} = k_{\\max} \\cdot "
-        "\\exp(-\\Delta G_{\\text{mismatch}} / RT)$ across in-vitro human HEK293T assays.\n"
-        "Experimental assays require 10 mM Mg2+ cofactor concentration and 37C physiological "
-        "temperature control to maintain catalytic HNH domain conformation.\n"
-        "Severe off-target cleavage failure occurs when PAM-distal mismatches at positions "
-        "18-20 fail to trigger conformational R-loop collapse.\n",
-        encoding="utf-8",
-    )
+    try:
+        # 1. Create a realistic CRISPR-Cas9 molecular biology paper
+        (bio_docs_dir / "crispr_cas9_kinetics.md").write_text(
+            "# CRISPR-Cas9 Guide RNA Specificity and Cleavage Kinetics\n\n"
+            "## 2. Thermodynamic Mismatch Penalty Model\n\n"
+            "Cas9 endonuclease cleavage rate decreases exponentially as PAM-proximal seed "
+            "region mismatches destabilize R-loop formation.\n"
+            "The empirical cleavage rate follows $k_{\\text{cleave}} = k_{\\max} \\cdot "
+            "\\exp(-\\Delta G_{\\text{mismatch}} / RT)$ across in-vitro human HEK293T assays.\n"
+            "Experimental assays require 10 mM Mg2+ cofactor concentration and 37C physiological "
+            "temperature control to maintain catalytic HNH domain conformation.\n"
+            "Severe off-target cleavage failure occurs when PAM-distal mismatches at positions "
+            "18-20 fail to trigger conformational R-loop collapse.\n",
+            encoding="utf-8",
+        )
 
-    # 2. Scaffold, distill, and train the custom `crispr_biology_scout` research domain
-    cmd_init_domain(
-        domain_id="crispr_biology_scout",
-        kind="research",
-        display_name="CRISPR & Molecular Biology Research Scout",
-        domains_dir=domains_dir,
-    )
-    distill_res = cmd_distill_custom_domain(
-        domain_id="crispr_biology_scout",
-        source_dir=bio_docs_dir,
-        num_samples=10,
-        domains_dir=domains_dir,
-        data_dir=data_dir,
-    )
-    assert distill_res["train_samples"] >= 8
-    assert (domains_dir / "crispr_biology_scout" / "corpus_index.json").exists()
+        # 2. Scaffold, distill, and train the custom CRISPR research domain
+        cmd_init_domain(
+            domain_id=crispr_domain_id,
+            kind="research",
+            display_name="CRISPR & Molecular Biology Research Scout",
+            domains_dir=domains_dir,
+        )
+        distill_res = cmd_distill_custom_domain(
+            domain_id=crispr_domain_id,
+            source_dir=bio_docs_dir,
+            num_samples=10,
+            domains_dir=domains_dir,
+            data_dir=data_dir,
+        )
+        assert distill_res["train_samples"] >= 8
+        bio_manifest_path = domains_dir / crispr_domain_id / "sync_manifest.json"
+        assert bio_manifest_path.exists()
+        assert not (domains_dir / crispr_domain_id / "corpus_index.json").exists()
+        bio_manifest = json.loads(bio_manifest_path.read_text(encoding="utf-8"))
+        assert bio_manifest["storage_backend"] == "postgresql_17_rls"
 
-    train_res = cmd_train_domain(
-        domain_id="crispr_biology_scout",
-        steps=4,
-        domains_dir=domains_dir,
-        data_dir=data_dir,
-    )
-    assert train_res["adapter_verified"] is True
+        train_res = cmd_train_domain(
+            domain_id=crispr_domain_id,
+            steps=4,
+            domains_dir=domains_dir,
+            data_dir=data_dir,
+        )
+        assert train_res["adapter_verified"] is True
 
-    # 3. Query `crispr_biology_scout` with a natural-language biology question
-    registry = DomainRegistry(domains_dir=domains_dir)
-    wf = ScoutWorkflow(registry=registry, repo=None)
-    principal = PrincipalContext(
-        user_id="bio_researcher",
-        role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "public_quant"],
-    )
-    bio_pack = wf.run(
-        user_prompt=(
-            "How does Cas9 guide RNA mismatch affect off-target cleavage kinetics "
-            "in CRISPR gene editing?"
-        ),
-        principal=principal,
-        domain_id="crispr_biology_scout",
-    )
-    assert isinstance(bio_pack, ImplementationContextPack)
-    assert bio_pack.preflight_report.passed is True
-    assert len(bio_pack.code_slices) == 0
-    assert bio_pack.quant_strategy_spec is not None
-    assert bio_pack.domain_knowledge_brief is not None
-    assert bio_pack.quant_strategy_spec.reported_sharpe_ratio is None
-    assert bio_pack.quant_strategy_spec.reported_max_drawdown_pct is None
-    assert bio_pack.quant_strategy_spec.transaction_cost_bps_assumed is None
-    assert "CRISPR-Cas9 Guide RNA Specificity" in bio_pack.quant_strategy_spec.strategy_name
-    assert "CRISPR-Cas9 Guide RNA Specificity" in bio_pack.domain_knowledge_brief.brief_title
-    assert "Order Flow Imbalance" not in bio_pack.quant_strategy_spec.strategy_name
-    assert "k_{\\text{cleave}}" in bio_pack.quant_strategy_spec.mathematical_signal_latex
-    assert any("Cas9" in r or "R-loop" in r for r in bio_pack.quant_strategy_spec.entry_exit_rules)
-    assert any("Mg2+" in c for c in bio_pack.quant_strategy_spec.market_specific_caveats)
-    assert any("off-target" in f for f in bio_pack.quant_strategy_spec.known_failure_regimes)
+        # 3. Query CRISPR domain with a natural-language biology question
+        registry = DomainRegistry(domains_dir=domains_dir)
+        wf = ScoutWorkflow(registry=registry, repo=None)
+        principal = PrincipalContext(
+            user_id="bio_researcher",
+            role=RoleType.ENGINEER,
+            allowed_scopes=["public_eng", "public_quant"],
+        )
+        bio_pack = wf.run(
+            user_prompt=(
+                "How does Cas9 guide RNA mismatch affect off-target cleavage kinetics "
+                "in CRISPR gene editing?"
+            ),
+            principal=principal,
+            domain_id=crispr_domain_id,
+        )
+        assert isinstance(bio_pack, ImplementationContextPack)
+        assert bio_pack.preflight_report.passed is True
+        assert len(bio_pack.code_slices) == 0
+        assert bio_pack.quant_strategy_spec is not None
+        assert bio_pack.domain_knowledge_brief is not None
+        assert bio_pack.quant_strategy_spec.reported_sharpe_ratio is None
+        assert bio_pack.quant_strategy_spec.reported_max_drawdown_pct is None
+        assert bio_pack.quant_strategy_spec.transaction_cost_bps_assumed is None
+        assert "CRISPR-Cas9 Guide RNA Specificity" in bio_pack.quant_strategy_spec.strategy_name
+        assert "CRISPR-Cas9 Guide RNA Specificity" in bio_pack.domain_knowledge_brief.brief_title
+        assert "Order Flow Imbalance" not in bio_pack.quant_strategy_spec.strategy_name
+        assert "k_{\\text{cleave}}" in bio_pack.quant_strategy_spec.mathematical_signal_latex
+        assert any(
+            "Cas9" in r or "R-loop" in r for r in bio_pack.quant_strategy_spec.entry_exit_rules
+        )
+        assert any("Mg2+" in c for c in bio_pack.quant_strategy_spec.market_specific_caveats)
+        assert any("off-target" in f for f in bio_pack.quant_strategy_spec.known_failure_regimes)
 
-    # 4. Scaffold, distill, and query a custom `bioinformatics_code_scout` code domain
-    (bio_code_dir / "alignment.py").write_text(
-        "class SmithWatermanScorer:\n"
-        '    """Local biological sequence alignment with affine gap penalties."""\n\n'
-        "    def score_alignment(self, seq_a: str, seq_b: str, gap_open: float = -10.0) -> float:\n"
-        "        matches = sum(1 for a, b in zip(seq_a, seq_b, strict=False) if a == b)\n"
-        "        return float(matches * 2.0 + gap_open)\n",
-        encoding="utf-8",
-    )
-    cmd_init_domain(
-        domain_id="bioinformatics_code_scout",
-        kind="code",
-        display_name="Bioinformatics Sequence Alignment Code Scout",
-        domains_dir=domains_dir,
-    )
-    cmd_distill_custom_domain(
-        domain_id="bioinformatics_code_scout",
-        source_dir=bio_code_dir,
-        num_samples=8,
-        domains_dir=domains_dir,
-        data_dir=data_dir,
-    )
-    code_pack = wf.run(
-        user_prompt=(
-            "How do we score local sequence alignment affine gap penalties in SmithWatermanScorer?"
-        ),
-        principal=principal,
-        domain_id="bioinformatics_code_scout",
-    )
-    assert isinstance(code_pack, ImplementationContextPack)
-    assert code_pack.preflight_report.passed is True
-    assert len(code_pack.code_slices) >= 1
-    assert "SmithWatermanScorer" in code_pack.code_slices[0].qualified_symbol
-    assert "score_alignment" in code_pack.code_slices[0].verbatim_code_with_lines
+        # 4. Scaffold, distill, and query a custom bioinformatics code domain
+        (bio_code_dir / "alignment.py").write_text(
+            "class SmithWatermanScorer:\n"
+            '    """Local biological sequence alignment with affine gap penalties."""\n\n'
+            "    def score_alignment(\n"
+            "        self, seq_a: str, seq_b: str, gap_open: float = -10.0\n"
+            "    ) -> float:\n"
+            "        matches = sum(1 for a, b in zip(seq_a, seq_b, strict=False) if a == b)\n"
+            "        return float(matches * 2.0 + gap_open)\n",
+            encoding="utf-8",
+        )
+        cmd_init_domain(
+            domain_id=bio_domain_id,
+            kind="code",
+            display_name="Bioinformatics Sequence Alignment Code Scout",
+            domains_dir=domains_dir,
+        )
+        cmd_distill_custom_domain(
+            domain_id=bio_domain_id,
+            source_dir=bio_code_dir,
+            num_samples=8,
+            domains_dir=domains_dir,
+            data_dir=data_dir,
+        )
+        assert (domains_dir / bio_domain_id / "sync_manifest.json").exists()
+        assert not (domains_dir / bio_domain_id / "corpus_index.json").exists()
+        code_pack = wf.run(
+            user_prompt=(
+                "How do we score local sequence alignment affine gap penalties "
+                "in SmithWatermanScorer?"
+            ),
+            principal=principal,
+            domain_id=bio_domain_id,
+        )
+        assert isinstance(code_pack, ImplementationContextPack)
+        assert code_pack.preflight_report.passed is True
+        assert any("SmithWatermanScorer" in s.qualified_symbol for s in code_pack.code_slices)
+        assert "SmithWatermanScorer" in code_pack.code_slices[0].qualified_symbol
+        assert "score_alignment" in code_pack.code_slices[0].verbatim_code_with_lines
+    finally:
+        with connect(ScoutSettings().db_admin_url) as conn:
+            for tbl in (
+                "ast_edges",
+                "ast_symbols",
+                "code_files",
+                "repositories",
+                "confluence_pages",
+                "jira_issues",
+                "doc_chunks",
+                "indexing_queue",
+                "indexing_dead_letter",
+                "execution_telemetry",
+                "domain_packs",
+            ):
+                conn.execute(
+                    f"DELETE FROM {tbl} WHERE domain_id = ANY(%s)",
+                    ([crispr_domain_id, bio_domain_id],),
+                )
+            conn.commit()
 
 
 def test_conversational_and_unrelated_queries_rejected_across_all_domains() -> None:
@@ -649,9 +715,7 @@ def test_readme_schema_and_contract_alignment_guard() -> None:
         if target.startswith(("http://", "https://", "#")):
             continue
         clean_target = target.split("#", 1)[0]
-        assert Path(clean_target).exists(), (
-            f"Broken relative link in README.md: {clean_target}"
-        )
+        assert Path(clean_target).exists(), f"Broken relative link in README.md: {clean_target}"
         if clean_target.startswith("reports/"):
             assert clean_target.endswith(".md"), (
                 f"README.md report link must use human-readable .md format, got: {clean_target}"
@@ -1123,24 +1187,13 @@ def test_enterprise_production_class_state_cross_file_dto_and_caller_anti_starva
             "    return raw_id.strip().upper()",
         ]
     )
-    dto_code = (
-        "class CreateOrderDTO(BaseAuthenticatedDTO):\n"
-        "    symbol: str\n"
-        "    qty: int\n"
-    )
-    base_dto_code = (
-        "class BaseAuthenticatedDTO:\n"
-        "    tenant_id: str\n"
-        "    idempotency_key: str\n"
-    )
+    dto_code = "class CreateOrderDTO(BaseAuthenticatedDTO):\n    symbol: str\n    qty: int\n"
+    base_dto_code = "class BaseAuthenticatedDTO:\n    tenant_id: str\n    idempotency_key: str\n"
     caller_code = (
         "def handle_http_post(svc: OrderExecutionService, payload: CreateOrderDTO) -> str:\n"
         "    return svc.submit_order(payload)\n"
     )
-    other_repo_test_code = (
-        "def test_submit_order() -> None:\n"
-        "    assert True\n"
-    )
+    other_repo_test_code = "def test_submit_order() -> None:\n    assert True\n"
 
     files = [
         CodeFileRecord(
@@ -1408,6 +1461,9 @@ def test_multi_domain_knowledge_pdf_sync_mcp_benchmark_and_handoff_guard(
     """Guard 23: Verifies multi-domain knowledge decoupling, doc sync, MCP, benchmark & handoff."""
     import asyncio
     import json
+    from uuid import uuid4
+
+    from psycopg import connect
 
     from context_scout.agents.domain_registry import DomainRegistry
     from context_scout.agents.gemini_executor import GeminiImplementationExecutor
@@ -1418,189 +1474,721 @@ def test_multi_domain_knowledge_pdf_sync_mcp_benchmark_and_handoff_guard(
         cmd_query_domain,
         cmd_sync_domain,
     )
+    from context_scout.config import ScoutSettings
     from context_scout.mcp_servers.doc_corpus_mcp import create_doc_corpus_mcp_server
     from context_scout.schemas.contracts import ImplementationContextPack
     from context_scout.security.rbac import bind_session_principal
 
+    oncology_domain_id = f"eval_oncology_{uuid4().hex[:8]}"
     domains_dir = tmp_path / "domains"
     data_dir = tmp_path / "data"
     med_docs_dir = tmp_path / "clinical_oncology_docs"
     med_docs_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Multi-format document corpus (.md + .json + .html) containing words like
-    # "optimization", "variance", and "agent" that previously triggered finance templates
-    (med_docs_dir / "car_t_dosing_protocol.md").write_text(
-        "# CAR-T Immunotherapy Cytokine Release Syndrome Protocol\n\n"
-        "## 1. Tocilizumab Agent Dose Optimization and Variance Control\n\n"
-        "Clinical therapeutic agent optimization requires intravenous tocilizumab at 8 mg/kg "
-        "when Grade 2 cytokine release syndrome fever exceeds 38.5C.\n"
-        "Pharmacokinetic clearance follows $C(t) = C_0 \\cdot \\exp(-k_{el} \\cdot t)$ "
-        "across adult lymphoma cohorts.\n"
-        "Clinicians must monitor serum ferritin variance and C-reactive protein every 12 hours "
-        "to constrain neurotoxicity risk.\n"
-        "Severe immune effector cell-associated neurotoxicity syndrome failure occurs when "
-        "blood-brain barrier endothelial activation goes untreated.\n",
-        encoding="utf-8",
+    try:
+        # 1. Multi-format document corpus (.md + .json + .html) containing words like
+        # "optimization", "variance", and "agent" that previously triggered finance templates
+        (med_docs_dir / "car_t_dosing_protocol.md").write_text(
+            "# CAR-T Immunotherapy Cytokine Release Syndrome Protocol\n\n"
+            "## 1. Tocilizumab Agent Dose Optimization and Variance Control\n\n"
+            "Clinical therapeutic agent optimization requires intravenous tocilizumab at 8 mg/kg "
+            "when Grade 2 cytokine release syndrome fever exceeds 38.5C.\n"
+            "Pharmacokinetic clearance follows $C(t) = C_0 \\cdot \\exp(-k_{el} \\cdot t)$ "
+            "across adult lymphoma cohorts.\n"
+            "Clinicians must monitor serum ferritin variance and C-reactive protein every 12 hours "
+            "to constrain neurotoxicity risk.\n"
+            "Severe immune effector cell-associated neurotoxicity syndrome failure occurs when "
+            "blood-brain barrier endothelial activation goes untreated.\n",
+            encoding="utf-8",
+        )
+        (med_docs_dir / "trial_endpoints.json").write_text(
+            json.dumps(
+                {
+                    "protocol_id": "ONCO-2026-09",
+                    "primary_endpoint": (
+                        "Complete remission rate at day 28 post CAR-T infusion under "
+                        "tocilizumab prophylaxis."
+                    ),
+                    "safety_constraint": (
+                        "Hold lymphodepleting fludarabine if absolute neutrophil count "
+                        "drops below 500 cells/uL."
+                    ),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        # 2. Scaffold `kind="knowledge"` -> verify DomainKnowledgeBrief contract & no cost floor
+        init_res = cmd_init_domain(
+            domain_id=oncology_domain_id,
+            kind="knowledge",
+            display_name="Clinical Oncology & Immunotherapy Knowledge Scout",
+            domains_dir=domains_dir,
+        )
+        assert Path(str(init_res["manifest_path"])).exists()
+        registry = DomainRegistry(domains_dir=domains_dir)
+        manifest = registry.get(oncology_domain_id)
+        assert manifest.output_contract == "DomainKnowledgeBrief"
+        assert manifest.authority_rules.require_transaction_cost_check is False
+
+        # 3. Distill custom knowledge domain -> verify zero fake finance metrics in train.jsonl
+        distill_res = cmd_distill_custom_domain(
+            domain_id=oncology_domain_id,
+            source_dir=med_docs_dir,
+            num_samples=8,
+            domains_dir=domains_dir,
+            data_dir=data_dir,
+        )
+        assert distill_res["train_samples"] >= 6
+        train_lines = (
+            (data_dir / oncology_domain_id / "train.jsonl")
+            .read_text(encoding="utf-8")
+            .strip()
+            .splitlines()
+        )
+        for line in train_lines:
+            row = json.loads(line)
+            payload = json.loads(row["messages"][-1]["content"])
+            assert "sharpe" not in payload
+            assert "mdd" not in payload
+            assert "bps" not in payload
+            assert "brief_title" in payload
+            assert "verified_citations" in payload
+
+        # 4. Query with "optimization", "variance", and "agent" -> must NOT hijack into finance!
+        q_res = cmd_query_domain(
+            domain_id=oncology_domain_id,
+            prompt=(
+                "How does tocilizumab agent dose optimization control serum ferritin variance "
+                "in CAR-T cytokine release syndrome?"
+            ),
+            domains_dir=domains_dir,
+        )
+        assert q_res["result_type"] == "ImplementationContextPack"
+        assert q_res["preflight_report"]["passed"] is True
+        assert q_res["domain_knowledge_brief"] is not None
+        assert q_res["domain_knowledge_brief"]["domain_id"] == oncology_domain_id
+        assert (
+            "CAR-T Immunotherapy" in q_res["domain_knowledge_brief"]["brief_title"]
+            or "Tocilizumab" in q_res["domain_knowledge_brief"]["brief_title"]
+        )
+        assert q_res["quant_strategy_spec"]["reported_sharpe_ratio"] is None
+        assert q_res["quant_strategy_spec"]["reported_max_drawdown_pct"] is None
+        assert q_res["quant_strategy_spec"]["transaction_cost_bps_assumed"] is None
+
+        # 5. Live working-tree incremental sync on a knowledge domain when a new doc is added
+        (med_docs_dir / "renal_adjustment_guideline.html").write_text(
+            "<html><body><h1>Renal Creatinine Clearance Adjustment</h1>"
+            "<p>Reduce fludarabine dosage by 20 percent when Cockcroft-Gault creatinine clearance "
+            "is between 30 and 70 mL/min to prevent acute tubular necrosis.</p></body></html>",
+            encoding="utf-8",
+        )
+        sync_res = cmd_sync_domain(
+            domain_id=oncology_domain_id,
+            domains_dir=domains_dir,
+        )
+        assert sync_res["synced"] is True
+        assert sync_res["added"] >= 1
+
+        # 6. Benchmark custom knowledge domain (0 code files, multiple doc chunks)
+        bench_res = cmd_benchmark_domain(
+            domain_id=oncology_domain_id,
+            max_queries=6,
+            domains_dir=domains_dir,
+        )
+        assert bench_res["kind"] == "knowledge"
+        assert bench_res["preflight_pass_pct"] == 100.0
+        assert bench_res["file_recall_at_5_pct"] == 100.0
+        assert bench_res["verbatim_faithfulness_pct"] == 100.0
+
+        # 7. Document-only GeminiImplementationExecutor deterministic patch handoff (no IndexError)
+        from context_scout.agents.scout_workflow import ScoutWorkflow
+
+        wf = ScoutWorkflow(registry=registry, repo=None)
+        principal = PrincipalContext(
+            user_id="oncology_fellow",
+            role=RoleType.ENGINEER,
+            allowed_scopes=["public_eng", "public_quant"],
+        )
+        doc_pack = wf.run(
+            user_prompt="How does tocilizumab agent dose optimization control CAR-T CRS?",
+            principal=principal,
+            domain_id=oncology_domain_id,
+        )
+        assert isinstance(doc_pack, ImplementationContextPack)
+        assert len(doc_pack.code_slices) == 0
+        assert doc_pack.domain_knowledge_brief is not None
+
+        executor = GeminiImplementationExecutor()
+        diff_text = executor._generate_deterministic_patch(doc_pack, repo_root=med_docs_dir)
+        assert "--- a/" in diff_text
+        assert "+++ b/" in diff_text
+        assert "Context Scout Grounded Synthesis" in diff_text
+
+        # 8. Domain-agnostic Document Corpus MCP Server verification
+        mcp_server = create_doc_corpus_mcp_server(domains_dir=domains_dir)
+
+        async def _exercise_doc_mcp() -> None:
+            with bind_session_principal(principal):
+                search_res = await mcp_server.call_tool(
+                    "search_hybrid_rrf",
+                    {
+                        "domain_id": oncology_domain_id,
+                        "query": "tocilizumab 8 mg/kg dose optimization",
+                        "top_k": 5,
+                    },
+                )
+                payload_data = getattr(search_res, "structured_content", None)
+                assert isinstance(payload_data, dict)
+                assert payload_data["count"] >= 1
+                assert payload_data["domain_id"] == oncology_domain_id
+                first_chunk_id = payload_data["hits"][0]["chunk_id"]
+
+                quote_res = await mcp_server.call_tool(
+                    "verify_citation_quote",
+                    {
+                        "domain_id": oncology_domain_id,
+                        "chunk_id": first_chunk_id,
+                        "verbatim_quote": "intravenous tocilizumab at 8 mg/kg",
+                    },
+                )
+                quote_data = getattr(quote_res, "structured_content", None)
+                assert isinstance(quote_data, dict)
+                assert quote_data["verified"] is True
+
+        asyncio.run(_exercise_doc_mcp())
+    finally:
+        with connect(ScoutSettings().db_admin_url) as conn:
+            for tbl in (
+                "ast_edges",
+                "ast_symbols",
+                "code_files",
+                "repositories",
+                "confluence_pages",
+                "jira_issues",
+                "doc_chunks",
+                "indexing_queue",
+                "indexing_dead_letter",
+                "execution_telemetry",
+                "domain_packs",
+            ):
+                conn.execute(
+                    f"DELETE FROM {tbl} WHERE domain_id = %s",
+                    (oncology_domain_id,),
+                )
+            conn.commit()
+
+
+def test_local_gemma_mlx_cache_is_process_shared_and_bounded_to_single_slot() -> None:
+    """Guard: Process MLX weight cache must be shared across clients and bounded to 1 slot."""
+    import sys
+    import types
+
+    import pytest
+
+    from context_scout.agents import scout_workflow
+
+    scout_src = inspect.getsource(LocalGemmaClient._get_or_load_mlx_model)
+    assert "_PROCESS_MLX_CACHE.clear()" in scout_src
+    assert "_release_metal_cache()" in scout_src
+    assert scout_workflow.MAX_LOADED_MLX_MODELS == 1
+
+    clear_calls: list[str] = []
+    fake_mx = types.ModuleType("mlx.core")
+    fake_mx.clear_cache = lambda: clear_calls.append("clear")  # type: ignore[attr-defined]
+    fake_mlx = types.ModuleType("mlx")
+    fake_mlx.core = fake_mx  # type: ignore[attr-defined]
+
+    load_keys: list[str] = []
+
+    def fake_loader(model_id: str, adapter_path: str | None = None) -> tuple[object, object]:
+        load_keys.append(f"{model_id}:{adapter_path or 'none'}")
+        return (object(), object())
+
+    LocalGemmaClient.clear_mlx_cache()
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setitem(sys.modules, "mlx", fake_mlx)
+        mp.setitem(sys.modules, "mlx.core", fake_mx)
+
+        client_a = LocalGemmaClient(offline_mode=True)
+        client_b = LocalGemmaClient(offline_mode=True)
+        assert client_a._mlx_cache is client_b._mlx_cache
+
+        m1, _ = client_a._get_or_load_mlx_model(
+            "mlx-community/gemma-4-26b-a4b-it-4bit",
+            "trading_code_scout:none",
+            None,
+            loader_fn=fake_loader,
+        )
+        # Second independent client instance reuses warm cache instead of allocating +15 GB.
+        m2, _ = client_b._get_or_load_mlx_model(
+            "mlx-community/gemma-4-26b-a4b-it-4bit",
+            "trading_code_scout:none",
+            None,
+            loader_fn=fake_loader,
+        )
+        assert m1 is m2
+        assert len(load_keys) == 1
+        assert len(scout_workflow._PROCESS_MLX_CACHE) == 1
+
+        # Loading a different domain evicts the previous slot and invokes Metal clear_cache first.
+        _ = client_b._get_or_load_mlx_model(
+            "mlx-community/gemma-4-26b-a4b-it-4bit",
+            "quant_research_scout:none",
+            None,
+            loader_fn=fake_loader,
+        )
+        assert len(load_keys) == 2
+        assert len(scout_workflow._PROCESS_MLX_CACHE) == 1
+        assert "trading_code_scout:none" not in scout_workflow._PROCESS_MLX_CACHE
+        assert "quant_research_scout:none" in scout_workflow._PROCESS_MLX_CACHE
+        assert len(clear_calls) == 1
+
+        evicted = LocalGemmaClient.clear_mlx_cache()
+        assert evicted == 1
+        assert len(scout_workflow._PROCESS_MLX_CACHE) == 0
+        assert len(clear_calls) == 2
+    finally:
+        LocalGemmaClient.clear_mlx_cache()
+        mp.undo()
+
+
+def test_makefile_test_full_kills_entire_process_group_on_timeout() -> None:
+    """Guard: Makefile test-full runner must isolate process groups and killpg on timeout."""
+    import contextlib
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    makefile_src = Path("Makefile").read_text(encoding="utf-8")
+    assert "start_new_session=True" in makefile_src
+    assert "os.killpg" in makefile_src
+    assert "subprocess.TimeoutExpired" in makefile_src
+
+    child_script = (
+        "import subprocess, sys, time; "
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+        "print(p.pid, flush=True); "
+        "time.sleep(30)"
     )
-    (med_docs_dir / "trial_endpoints.json").write_text(
-        json.dumps(
-            {
-                "protocol_id": "ONCO-2026-09",
-                "primary_endpoint": (
-                    "Complete remission rate at day 28 post CAR-T infusion under "
-                    "tocilizumab prophylaxis."
-                ),
-                "safety_constraint": (
-                    "Hold lymphodepleting fludarabine if absolute neutrophil count "
-                    "drops below 500 cells/uL."
-                ),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child_script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    grandchild_pid: int | None = None
+    try:
+        assert proc.stdout is not None
+        pid_line = proc.stdout.readline().strip()
+        grandchild_pid = int(pid_line)
+        # Negative control precondition: grandchild is actively running before timeout kill.
+        os.kill(grandchild_pid, 0)
+
+        with_timeout_hit = False
+        try:
+            proc.communicate(timeout=0.3)
+        except subprocess.TimeoutExpired:
+            with_timeout_hit = True
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+
+        assert with_timeout_hit is True
+        # Grandchild must not survive as an orphan after process-group killpg.
+        deadline = time.monotonic() + 2.0
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            time.sleep(0.05)
+        assert alive is False, f"Orphan grandchild PID {grandchild_pid} survived killpg"
+    finally:
+        if proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+        if grandchild_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(grandchild_pid, signal.SIGKILL)
+
+
+def test_hybrid_doc_citation_extraction_populates_provenance_and_skips_closed_tickets() -> None:
+    """Guard: Hybrid doc citations preserve Confluence page_id/version and skip closed Jira."""
+    import uuid
+
+    from context_scout.agents.domain_registry import DomainRegistry
+    from context_scout.agents.preflight_gate import PreFlightValidator
+    from context_scout.agents.scout_workflow import ScoutWorkflow, _extract_hybrid_doc_citations
+    from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
+    from context_scout.db.repositories import (
+        ASTSymbolRecord,
+        CodeFileRecord,
+        DocChunkRecord,
+        InMemoryRLSRepository,
+    )
+    from context_scout.schemas.contracts import (
+        ImplementationContextPack,
+        InsufficientContextDiagnostic,
     )
 
-    # 2. Scaffold `kind="knowledge"` domain -> verify DomainKnowledgeBrief contract & no cost floor
-    init_res = cmd_init_domain(
-        domain_id="clinical_oncology_scout",
-        kind="knowledge",
-        display_name="Clinical Oncology & Immunotherapy Knowledge Scout",
-        domains_dir=domains_dir,
-    )
-    assert Path(str(init_res["manifest_path"])).exists()
-    registry = DomainRegistry(domains_dir=domains_dir)
-    manifest = registry.get("clinical_oncology_scout")
-    assert manifest.output_contract == "DomainKnowledgeBrief"
-    assert manifest.authority_rules.require_transaction_cost_check is False
+    domain_id = f"test_hybrid_prov_{uuid.uuid4().hex[:8]}"
+    reg = DomainRegistry(Path("domains"))
+    reg.load_all()
+    base_manifest = reg.get("trading_code_scout")
+    reg.register(base_manifest.model_copy(update={"domain_id": domain_id}))
 
-    # 3. Distill custom knowledge domain -> verify zero fake finance metrics in train.jsonl
-    distill_res = cmd_distill_custom_domain(
-        domain_id="clinical_oncology_scout",
-        source_dir=med_docs_dir,
-        num_samples=8,
-        domains_dir=domains_dir,
-        data_dir=data_dir,
-    )
-    assert distill_res["train_samples"] >= 6
-    train_lines = (
-        (data_dir / "clinical_oncology_scout" / "train.jsonl")
-        .read_text(encoding="utf-8")
-        .strip()
-        .splitlines()
-    )
-    for line in train_lines:
-        row = json.loads(line)
-        payload = json.loads(row["messages"][-1]["content"])
-        assert "sharpe" not in payload
-        assert "mdd" not in payload
-        assert "bps" not in payload
-        assert "brief_title" in payload
-        assert "verified_citations" in payload
-
-    # 4. Query with "optimization", "variance", and "agent" -> must NOT hijack into finance!
-    q_res = cmd_query_domain(
-        domain_id="clinical_oncology_scout",
-        prompt=(
-            "How does tocilizumab agent dose optimization control serum ferritin variance "
-            "in CAR-T cytokine release syndrome?"
-        ),
-        domains_dir=domains_dir,
-    )
-    assert q_res["result_type"] == "ImplementationContextPack"
-    assert q_res["preflight_report"]["passed"] is True
-    assert q_res["domain_knowledge_brief"] is not None
-    assert q_res["domain_knowledge_brief"]["domain_id"] == "clinical_oncology_scout"
-    assert (
-        "CAR-T Immunotherapy" in q_res["domain_knowledge_brief"]["brief_title"]
-        or "Tocilizumab" in q_res["domain_knowledge_brief"]["brief_title"]
-    )
-    assert q_res["quant_strategy_spec"]["reported_sharpe_ratio"] is None
-    assert q_res["quant_strategy_spec"]["reported_max_drawdown_pct"] is None
-    assert q_res["quant_strategy_spec"]["transaction_cost_bps_assumed"] is None
-
-    # 5. Live working-tree incremental sync on a knowledge domain when a new doc is added
-    (med_docs_dir / "renal_adjustment_guideline.html").write_text(
-        "<html><body><h1>Renal Creatinine Clearance Adjustment</h1>"
-        "<p>Reduce fludarabine dosage by 20 percent when Cockcroft-Gault creatinine clearance "
-        "is between 30 and 70 mL/min to prevent acute tubular necrosis.</p></body></html>",
-        encoding="utf-8",
-    )
-    sync_res = cmd_sync_domain(
-        domain_id="clinical_oncology_scout",
-        domains_dir=domains_dir,
-    )
-    assert sync_res["synced"] is True
-    assert sync_res["added"] >= 1
-
-    # 6. Benchmark custom knowledge domain (0 code files, multiple doc chunks)
-    bench_res = cmd_benchmark_domain(
-        domain_id="clinical_oncology_scout",
-        max_queries=6,
-        domains_dir=domains_dir,
-    )
-    assert bench_res["kind"] == "knowledge"
-    assert bench_res["preflight_pass_pct"] == 100.0
-    assert bench_res["file_recall_at_5_pct"] == 100.0
-    assert bench_res["verbatim_faithfulness_pct"] == 100.0
-
-    # 7. Document-only GeminiImplementationExecutor deterministic patch handoff (no IndexError)
-    from context_scout.agents.scout_workflow import ScoutWorkflow
-
-    wf = ScoutWorkflow(registry=registry, repo=None)
+    repo = InMemoryRLSRepository()
+    admin = PrincipalContext(user_id="admin", role=RoleType.ENGINEER, allowed_scopes=["public_eng"])
     principal = PrincipalContext(
-        user_id="oncology_fellow",
+        user_id="eng_hybrid",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "public_quant"],
+        allowed_scopes=["public_eng", "repo:backend/gateway-service", "repo:dotnet/eShop"],
     )
-    doc_pack = wf.run(
-        user_prompt="How does tocilizumab agent dose optimization control CAR-T CRS?",
+
+    code_src = (
+        '"""Gateway proxy."""\n\n'
+        "class FastAPIProxy_00:\n"
+        "    def dispatch(self, key: str) -> bool:\n"
+        "        return bool(key)\n"
+    )
+    fid = uuid.uuid4()
+    repo.insert_code_file(
+        admin,
+        CodeFileRecord(
+            file_id=fid,
+            domain_id=domain_id,
+            repo_name="backend/gateway-service",
+            file_path="src/gateway/proxy_00.py",
+            git_commit_sha="1111222233334444555566667777888899990000",
+            git_blob_sha="aaaa222233334444555566667777888899990000",
+            language="python",
+            allowed_scopes=["public_eng", "repo:backend/gateway-service"],
+            raw_content=code_src,
+            line_count=len(code_src.splitlines()),
+        ),
+    )
+    repo.insert_ast_symbol(
+        admin,
+        ASTSymbolRecord(
+            symbol_id=uuid.uuid4(),
+            file_id=fid,
+            domain_id=domain_id,
+            qualified_name="backend/gateway-service::src/gateway/proxy_00.py::FastAPIProxy_00",
+            symbol_kind="class",
+            start_line=3,
+            end_line=5,
+            signature_skeleton="class FastAPIProxy_00:",
+            contextual_summary="Gateway dispatcher enforcing Redis token bucket rate limiting.",
+            allowed_scopes=["public_eng", "repo:backend/gateway-service"],
+            embedding=[0.1] * 768,
+        ),
+    )
+
+    conf_chunk = DocChunkRecord(
+        chunk_id=uuid.uuid4(),
+        domain_id=domain_id,
+        doc_id="conf_eshop_ordering_architecture_v3",
+        doc_title="eShop Ordering Architecture",
+        source_uri="confluence://spaces/ORDER/pages/1001?v=3",
+        market_scope="GLOBAL",
+        published_date=None,
+        authority_weight=1.0,
+        section_heading="Architecture Overview",
+        contextual_header="eShop Ordering Architecture — Overview",
+        verbatim_content=(
+            "Orders must enforce Polly exponential backoff policies across database mutations."
+        ),
+        metadata_json={"version": "3", "is_stale": False},
+        allowed_scopes=["public_eng", "repo:dotnet/eShop"],
+        embedding=[0.2] * 768,
+        is_stale=False,
+    )
+    closed_jira_chunk = DocChunkRecord(
+        chunk_id=uuid.uuid4(),
+        domain_id=domain_id,
+        doc_id="jira_GATEWAY_100",
+        doc_title="Jira Ticket GATEWAY-100",
+        source_uri="jira://projects/GATEWAY/issues/GATEWAY-100",
+        market_scope="GLOBAL",
+        published_date=None,
+        authority_weight=1.0,
+        section_heading="Rate Limiting",
+        contextual_header="Jira GATEWAY-100 — Rate Limiting",
+        verbatim_content="Token bucket rate limiter requires strict Redis cluster atomicity.",
+        metadata_json={"resolution": "Resolved", "status": "Closed"},
+        allowed_scopes=["public_eng", "repo:backend/gateway-service"],
+        embedding=[0.3] * 768,
+        is_stale=False,
+    )
+    repo.insert_doc_chunk(admin, conf_chunk)
+    repo.insert_doc_chunk(admin, closed_jira_chunk)
+
+    slicer = DeterministicSlicer()
+    validator = PreFlightValidator(repo=repo, slicer=slicer)
+
+    conf_cits = _extract_hybrid_doc_citations(
+        user_prompt="Add Polly exponential backoff ordering policy",
+        doc_chunks=[conf_chunk],
+        slicer=slicer,
+        validator=validator,
+    )
+    assert len(conf_cits) == 1
+    assert conf_cits[0].page_id == "1001"
+    assert conf_cits[0].version == "3"
+
+    jira_cits = _extract_hybrid_doc_citations(
+        user_prompt="Redis token bucket rate limiter atomicity",
+        doc_chunks=[closed_jira_chunk],
+        slicer=slicer,
+        validator=validator,
+    )
+    assert jira_cits == [], "Closed Jira background chunk must not trigger Check 6 failure"
+
+    wf = ScoutWorkflow(registry=reg, repo=repo)
+    valid_res = wf.run(
+        user_prompt="Implement idempotent Redis token bucket rate limiting on `FastAPIProxy_00`.",
         principal=principal,
-        domain_id="clinical_oncology_scout",
+        domain_id=domain_id,
     )
-    assert isinstance(doc_pack, ImplementationContextPack)
-    assert len(doc_pack.code_slices) == 0
-    assert doc_pack.domain_knowledge_brief is not None
+    assert isinstance(valid_res, ImplementationContextPack)
+    assert len(valid_res.code_slices) >= 1
+    assert valid_res.preflight_report.check_results["check_6_freshness"] is True
 
-    executor = GeminiImplementationExecutor()
-    diff_text = executor._generate_deterministic_patch(doc_pack, repo_root=med_docs_dir)
-    assert "--- a/" in diff_text
-    assert "+++ b/" in diff_text
-    assert "Context Scout Grounded Synthesis" in diff_text
+    conf_only_res = wf.run(
+        user_prompt="Inspect FastAPIProxy_00 Polly exponential backoff ordering policy",
+        principal=principal,
+        domain_id=domain_id,
+    )
+    assert isinstance(conf_only_res, ImplementationContextPack)
+    assert len(conf_only_res.supporting_doc_citations) == 1
+    assert conf_only_res.supporting_doc_citations[0].page_id == "1001"
+    assert conf_only_res.supporting_doc_citations[0].version == "3"
 
-    # 8. Domain-agnostic Document Corpus MCP Server verification
-    mcp_server = create_doc_corpus_mcp_server(domains_dir=domains_dir)
+    unans_res = wf.run(
+        user_prompt=(
+            "Refactor `NonExistentSymbol_V999Handler` Polly exponential backoff ordering policy"
+        ),
+        principal=principal,
+        domain_id=domain_id,
+    )
+    assert isinstance(unans_res, InsufficientContextDiagnostic)
+    assert unans_res.paid_tokens_spent == 0
 
-    async def _exercise_doc_mcp() -> None:
-        with bind_session_principal(principal):
-            search_res = await mcp_server.call_tool(
-                "search_hybrid_rrf",
-                {
-                    "domain_id": "clinical_oncology_scout",
-                    "query": "tocilizumab 8 mg/kg dose optimization",
-                    "top_k": 5,
-                },
+
+def test_in_memory_workflow_skips_custom_domain_pg_sync_guard(
+    monkeypatch: object,
+) -> None:
+    """Guard: In-memory ScoutWorkflow never calls PG sync_custom_domain_corpus_if_needed."""
+    import time
+    import uuid
+
+    import pytest
+
+    from context_scout.agents.domain_registry import DomainRegistry
+    from context_scout.agents.scout_workflow import ScoutWorkflow
+    from context_scout.db.repositories import (
+        ASTSymbolRecord,
+        CodeFileRecord,
+        InMemoryRLSRepository,
+    )
+    from context_scout.schemas.contracts import InsufficientContextDiagnostic
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    repo = InMemoryRLSRepository()
+    admin = PrincipalContext(
+        user_id="guard_admin",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng"],
+    )
+    fid = uuid.uuid4()
+    src = "def sample_helper(x: int) -> int:\n    return x + 1\n"
+    repo.insert_code_file(
+        admin,
+        CodeFileRecord(
+            file_id=fid,
+            domain_id="polyglot_unseen_v2",
+            repo_name="dummy_repo",
+            file_path="src/sample.py",
+            git_commit_sha="a" * 40,
+            git_blob_sha="b" * 40,
+            language="python",
+            allowed_scopes=["public_eng"],
+            raw_content=src,
+            line_count=2,
+        ),
+    )
+    repo.insert_ast_symbol(
+        admin,
+        ASTSymbolRecord(
+            symbol_id=uuid.uuid4(),
+            file_id=fid,
+            domain_id="polyglot_unseen_v2",
+            qualified_name="sample.sample_helper",
+            symbol_kind="function",
+            start_line=1,
+            end_line=2,
+            signature_skeleton="def sample_helper(x: int) -> int:",
+            contextual_summary="Increment helper.",
+            allowed_scopes=["public_eng"],
+            embedding=[0.1] * 768,
+        ),
+    )
+
+    sync_calls: list[str] = []
+
+    def _spy_sync(domain_id: str, **_kwargs: object) -> None:
+        sync_calls.append(domain_id)
+
+    monkeypatch.setattr(
+        "context_scout.agents.preflight_gate.sync_custom_domain_corpus_if_needed",
+        _spy_sync,
+    )
+
+    reg = DomainRegistry(Path("domains"))
+    reg.load_all()
+    wf = ScoutWorkflow(registry=reg, repo=repo)
+
+    t0 = time.perf_counter()
+    res = wf.run(
+        user_prompt="Refactor MissingNonexistentFunctionV99 in polyglot_unseen_v2",
+        principal=admin,
+        domain_id="polyglot_unseen_v2",
+    )
+    elapsed = time.perf_counter() - t0
+
+    assert isinstance(res, InsufficientContextDiagnostic)
+    assert res.paid_tokens_spent == 0
+    assert len(sync_calls) == 0, f"Expected 0 PG sync calls, got {sync_calls}"
+    assert elapsed < 2.0, f"In-memory workflow took too long: {elapsed:.2f}s"
+
+
+def test_bound_graph_repo_populated_in_memory_never_falls_back_to_pg_guard(
+    monkeypatch: object,
+) -> None:
+    """Guard: Populated InMemoryRLSRepository never falls back to PG on empty filtered query."""
+    import uuid
+
+    import pytest
+
+    from context_scout.agents.preflight_gate import BoundGraphRepository
+    from context_scout.db.repositories import DocChunkRecord, InMemoryRLSRepository
+    from context_scout.schemas.contracts import MarketRegime
+
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    domain_id = f"eval_mem_guard_{uuid.uuid4().hex[:8]}"
+    repo = InMemoryRLSRepository()
+    admin = PrincipalContext(
+        user_id="guard_admin",
+        role=RoleType.QUANT_RESEARCHER,
+        allowed_scopes=["public_quant"],
+    )
+    repo.insert_doc_chunk(
+        admin,
+        DocChunkRecord(
+            chunk_id=uuid.uuid4(),
+            domain_id=domain_id,
+            doc_id="us_doc_1",
+            doc_title="US Market Microstructure",
+            source_uri="arxiv:2401.00001",
+            market_scope=MarketRegime.US_NYSE_NASDAQ,
+            published_date=None,
+            authority_weight=1.0,
+            section_heading="1. Intro",
+            contextual_header="US Microstructure header",
+            verbatim_content="Order book imbalance impacts short-horizon US equity returns.",
+            metadata_json={},
+            allowed_scopes=["public_quant"],
+            embedding=[0.1] * 768,
+        ),
+    )
+
+    bound = BoundGraphRepository(repo)
+    pg_calls: list[str] = []
+
+    def _spy_pg_doc_chunks(
+        _self: BoundGraphRepository,
+        _principal: PrincipalContext,
+        dom_id: str,
+        **_kwargs: object,
+    ) -> list[DocChunkRecord]:
+        pg_calls.append(dom_id)
+        return []
+
+    monkeypatch.setattr(BoundGraphRepository, "_query_pg_doc_chunks", _spy_pg_doc_chunks)
+
+    in_nse_chunks = bound.list_visible_doc_chunks(
+        admin, domain_id, market_scope=MarketRegime.INDIA_NSE_BSE
+    )
+    assert in_nse_chunks == []
+
+    unauth_principal = PrincipalContext(
+        user_id="unauth_user",
+        role=RoleType.PRODUCT_MANAGER,
+        allowed_scopes=["public_pm"],
+    )
+    unauth_chunks = bound.list_visible_doc_chunks(unauth_principal, domain_id)
+    assert unauth_chunks == []
+    assert len(pg_calls) == 0, f"Expected 0 PG fallback calls, got {pg_calls}"
+
+
+def test_seed_code_corpus_syncs_ast_symbols_and_federated_eval_passes_in_memory_and_pg() -> None:
+    """Guard: PG17 ast_symbols has fresh symbols and FED-01..03 pass in-memory and PG17."""
+    import psycopg
+
+    from context_scout.agents.scout_workflow import FederatedScoutCoordinator
+    from context_scout.config import ScoutSettings
+    from context_scout.evals.golden_dataset import get_default_golden_suite
+    from context_scout.evals.harness import EvaluationHarness
+    from context_scout.schemas.contracts import ImplementationContextPack
+
+    suite = get_default_golden_suite()
+    assert len(suite.federated_tasks) == 3
+
+    with psycopg.connect(ScoutSettings().db_admin_url) as conn:
+        stale_rows = conn.execute(
+            """
+            SELECT qualified_name FROM ast_symbols
+            WHERE domain_id = 'trading_code_scout'
+              AND (
+                  qualified_name LIKE '%%distill_quant_research_scout%%'
+                  OR qualified_name LIKE '%%evaluate_quant_research_sample%%'
+              );
+            """
+        ).fetchall()
+        fresh_rows = conn.execute(
+            """
+            SELECT qualified_name FROM ast_symbols
+            WHERE domain_id = 'trading_code_scout'
+              AND qualified_name LIKE '%%TeacherDistiller.distill_research_domain%%';
+            """
+        ).fetchall()
+    assert stale_rows == [], f"Stale symbols found in PG17: {stale_rows}"
+    assert len(fresh_rows) >= 1, "Expected TeacherDistiller.distill_research_domain in PG17"
+
+    for require_pg, force_mem in ((False, True), (True, False)):
+        harness = EvaluationHarness(require_postgres=require_pg, force_in_memory=force_mem)
+        coordinator = FederatedScoutCoordinator(registry=harness.registry, repo=harness.repo)
+        for task in suite.federated_tasks:
+            principal = PrincipalContext(
+                user_id=f"fed_guard_{task.task_id}",
+                role=RoleType.ENGINEER,
+                allowed_scopes=[
+                    "public_eng",
+                    "public_quant",
+                    f"domain:{harness.research_domain_id}",
+                ],
+                session_budget_tokens=200_000,
+                max_session_paid_tokens=200_000,
             )
-            payload_data = getattr(search_res, "structured_content", None)
-            assert isinstance(payload_data, dict)
-            assert payload_data["count"] >= 1
-            assert payload_data["domain_id"] == "clinical_oncology_scout"
-            first_chunk_id = payload_data["hits"][0]["chunk_id"]
-
-            quote_res = await mcp_server.call_tool(
-                "verify_citation_quote",
-                {
-                    "domain_id": "clinical_oncology_scout",
-                    "chunk_id": first_chunk_id,
-                    "verbatim_quote": "intravenous tocilizumab at 8 mg/kg",
-                },
+            pack = coordinator.run(user_prompt=task.user_prompt, principal=principal)
+            assert isinstance(pack, ImplementationContextPack), (
+                f"{task.task_id} failed (require_postgres={require_pg}): {pack}"
             )
-            quote_data = getattr(quote_res, "structured_content", None)
-            assert isinstance(quote_data, dict)
-            assert quote_data["verified"] is True
-
-    asyncio.run(_exercise_doc_mcp())
-
-
-
-
-

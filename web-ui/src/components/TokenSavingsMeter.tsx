@@ -1,160 +1,231 @@
-import React from "react";
+import React, { useState } from "react";
 import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
   Coins,
-  TrendingDown,
-  Layers,
-  Zap,
-  Gauge,
+  Database,
   Sparkles,
-  DollarSign,
 } from "lucide-react";
-import { ROIMetricsResponse, SSEContextPackReadyData } from "../types/contracts";
-import { MOCK_ROI_METRICS } from "../api/client";
+import {
+  ROIMetricsResponse,
+  ScoutTokenSavingsBreakdown,
+} from "../types/contracts";
 
 export interface TokenSavingsMeterProps {
-  telemetry?: SSEContextPackReadyData["telemetry"] | null;
-  aggregatedMetrics?: ROIMetricsResponse | null;
+  currentQuerySavings: ScoutTokenSavingsBreakdown | null;
+  roiMetrics: ROIMetricsResponse | null;
+  roiLoading?: boolean;
+  roiError?: string | null;
+  defaultExpanded?: boolean;
 }
 
-export const TokenSavingsMeter: React.FC<TokenSavingsMeterProps> = ({
-  telemetry,
-  aggregatedMetrics = MOCK_ROI_METRICS,
-}) => {
-  const currentLocalTokens = telemetry?.local_tokens_consumed ?? 14850;
-  const currentSentTokens = telemetry?.frontier_tokens_sent ?? 348;
-  const currentSavedTokens = telemetry?.frontier_tokens_saved ?? 14502;
-  const currentRatio = telemetry?.savings_ratio_pct ?? 97.65;
-  const currentUsdSaved = telemetry?.estimated_usd_saved ?? 0.29;
+interface FrontierRateCard {
+  name: string;
+  inputUsdPer1M: number;
+}
 
-  const summary =
-    aggregatedMetrics?.summary ??
-    aggregatedMetrics?.aggregated_telemetry ??
-    MOCK_ROI_METRICS.summary ??
-    MOCK_ROI_METRICS.aggregated_telemetry;
-  const agg = summary;
+const OCT_2026_FRONTIER_RATES: FrontierRateCard[] = [
+  { name: "Gemini 3.8 Flash", inputUsdPer1M: 0.75 },
+  { name: "Gemini 4 Argon", inputUsdPer1M: 2.0 },
+  { name: "Claude Opus 5.5", inputUsdPer1M: 4.0 },
+  { name: "GPT-5.6 Sol", inputUsdPer1M: 4.0 },
+];
+
+export const TokenSavingsMeter: React.FC<TokenSavingsMeterProps> = ({
+  currentQuerySavings,
+  roiMetrics,
+  roiLoading = false,
+  roiError = null,
+  defaultExpanded = true,
+}) => {
+  const [expanded, setExpanded] = useState<boolean>(defaultExpanded);
+
+  const ratioPct = currentQuerySavings
+    ? Math.min(100, Math.max(0, currentQuerySavings.frontier_savings_ratio_pct))
+    : 0;
+
+  const summary = roiMetrics?.summary ?? null;
 
   return (
-    <div className="card token-savings-meter-card" data-testid="token-savings-meter">
-      <div className="card-header">
-        <div className="card-title">
-          <Coins className="icon icon-emerald" size={18} />
-          <span>Real-Time Frontier Token Savings & ROI Meter (ARC-04)</span>
-        </div>
-        <div className="badge badge-emerald">
-          <Sparkles size={12} className="mr-1" />
-          Zero-Touch Sufficiency: 91.2%
-        </div>
-      </div>
+    <section
+      className="telemetry-strip-panel"
+      data-testid="token-savings-meter"
+    >
+      <div className="telemetry-strip-row">
+        <div className="telemetry-strip-left">
+          <div className="scope-section-title">
+            <Coins size={15} className="icon-accent" />
+            <h2 className="section-heading">Pack Size &amp; Cost</h2>
+          </div>
 
-      <div className="roi-metrics-grid">
-        {/* Metric 1: Frontier Savings Ratio */}
-        <div className="roi-stat-card roi-stat-highlight">
-          <div className="roi-stat-header">
-            <span className="roi-stat-title">Frontier Token Savings Ratio</span>
-            <Gauge size={16} className="icon-emerald" />
-          </div>
-          <div
-            className="roi-stat-value text-emerald font-mono"
-            data-testid="frontier-savings-ratio"
-          >
-            {currentRatio.toFixed(2)}%
-          </div>
-          <div className="roi-stat-subtitle">
-            Local open-weights triage ratio over paid frontier APIs
-          </div>
-          <div className="progress-bar-bg mt-2">
+          {summary && (
+            <span
+              className="status-tag status-tag-info"
+              data-testid="telemetry-source-badge"
+            >
+              <Database size={11} />
+              {summary.telemetry_source === "postgresql_live"
+                ? "PG17 Live Ledger"
+                : summary.telemetry_source}
+            </span>
+          )}
+
+          {roiError ? (
             <div
-              className="progress-bar-fill"
-              style={{ width: `${Math.max(0, Math.min(currentRatio, 100))}%` }}
-            />
-          </div>
+              className="inline-alert inline-alert-danger inline-alert-compact"
+              data-testid="roi-error-banner"
+            >
+              <AlertTriangle size={13} />
+              <span>Cumulative ROI unavailable: {roiError}</span>
+            </div>
+          ) : roiLoading && !summary ? (
+            <span className="roi-loading-inline">
+              Loading cumulative PostgreSQL ROI...
+            </span>
+          ) : summary ? (
+            <div
+              className="cumulative-roi-pill"
+              data-testid="cumulative-roi-card"
+            >
+              <span>
+                Cumulative ({summary.total_queries} queries):{" "}
+                <strong>
+                  ${summary.total_estimated_usd_saved.toFixed(2)} saved
+                </strong>
+                {", "}
+                {summary.total_paid_tokens_saved.toLocaleString()} paid tokens
+                avoided ({summary.frontier_savings_ratio_pct.toFixed(1)}% avg)
+              </span>
+            </div>
+          ) : null}
         </div>
 
-        {/* Metric 2: Local Tokens Explored ($0.00) */}
-        <div className="roi-stat-card">
-          <div className="roi-stat-header">
-            <span className="roi-stat-title">Local Gemma 4 Explored</span>
-            <span className="badge badge-emerald text-xs">$0.00 Cost</span>
-          </div>
-          <div
-            className="roi-stat-value text-sky font-mono"
-            data-testid="local-tokens-explored"
-          >
-            {currentLocalTokens.toLocaleString()}
-          </div>
-          <div className="roi-stat-subtitle">
-            Tokens processed locally on Apple Silicon Unified Memory
-          </div>
-        </div>
-
-        {/* Metric 3: Compressed ContextPack Sent */}
-        <div className="roi-stat-card">
-          <div className="roi-stat-header">
-            <span className="roi-stat-title">Frontier Tokens Sent</span>
-            <Layers size={16} className="icon-sky" />
-          </div>
-          <div
-            className="roi-stat-value text-zinc-100 font-mono"
-            data-testid="frontier-tokens-sent"
-          >
-            {currentSentTokens.toLocaleString()}
-          </div>
-          <div className="roi-stat-subtitle">
-            Compiler-complete ContextPack handed to Gemini 3.8 / 4 Argon
-          </div>
-        </div>
-
-        {/* Metric 4: QLoRA Few-Shot Overhead Eliminated */}
-        <div className="roi-stat-card">
-          <div className="roi-stat-header">
-            <span className="roi-stat-title">QLoRA Overhead Eliminated</span>
-            <TrendingDown size={16} className="icon-purple" />
-          </div>
-          <div
-            className="roi-stat-value text-purple font-mono"
-            data-testid="qlora-overhead-eliminated"
-          >
-            -{(agg?.qlora_few_shot_tokens_eliminated_avg ?? agg?.qlora_overhead_eliminated_per_query ?? 1634.0).toFixed(1)}
-          </div>
-          <div className="roi-stat-subtitle">
-            Tokens/call saved by baking domain schemas into adapter weights
-          </div>
-        </div>
-
-        {/* Metric 5: Estimated USD Saved */}
-        <div className="roi-stat-card">
-          <div className="roi-stat-header">
-            <span className="roi-stat-title">Estimated Cost Avoided</span>
-            <DollarSign size={16} className="icon-emerald" />
-          </div>
-          <div
-            className="roi-stat-value text-emerald font-mono"
-            data-testid="usd-saved"
-          >
-            ${currentUsdSaved.toFixed(2)}
-          </div>
-          <div className="roi-stat-subtitle">
-            Total Saved: ${(agg?.total_usd_saved ?? agg?.total_estimated_usd_saved ?? 360.33).toFixed(2)} USD ({currentSavedTokens.toLocaleString()} tokens saved)
-          </div>
-        </div>
-
-        {/* Metric 6: Hot-Swap Adapter Latency */}
-        <div className="roi-stat-card">
-          <div className="roi-stat-header">
-            <span className="roi-stat-title">Hot-Swap Adapter Latency</span>
-            <Zap size={16} className="icon-amber" />
-          </div>
-          <div
-            className="roi-stat-value text-amber font-mono"
-            data-testid="adapter-swap-latency"
-          >
-            {agg?.hot_swap_latency_ms ?? 0.018} ms
-          </div>
-          <div className="roi-stat-subtitle">
-            Multi-LoRA zero-downtime pointer swap in MLX GPU cache
-          </div>
-        </div>
+        <button
+          type="button"
+          className="btn-quiet-toggle"
+          onClick={() => setExpanded((prev) => !prev)}
+          aria-expanded={expanded}
+          data-testid="toggle-telemetry-strip-btn"
+        >
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          <span>
+            {expanded ? "Hide Frontier Rates" : "Compare Frontier Rates"}
+          </span>
+        </button>
       </div>
-    </div>
+
+      <div className="telemetry-strip-metrics">
+        {currentQuerySavings ? (
+          <div className="savings-strip-summary">
+            <div className="savings-strip-ratio-wrap">
+              <span className="savings-label">Current Query Reduction</span>
+              <span
+                className="savings-pct-value tabular-num"
+                data-testid="frontier-savings-ratio"
+              >
+                {currentQuerySavings.frontier_savings_ratio_pct.toFixed(1)}%
+              </span>
+              <div
+                className="progress-track"
+                aria-label="Frontier token reduction"
+              >
+                <div
+                  className="progress-bar-fill"
+                  style={{ width: `${ratioPct}%` }}
+                />
+              </div>
+            </div>
+
+            <div className="savings-strip-stats">
+              <div className="stat-inline">
+                <span className="stat-label">Local Explored</span>
+                <span
+                  className="stat-value tabular-num"
+                  data-testid="local-tokens-explored"
+                >
+                  {currentQuerySavings.local_tokens_explored.toLocaleString()}
+                </span>
+              </div>
+              <div className="stat-inline">
+                <span className="stat-label">Pack Tokens</span>
+                <span
+                  className="stat-value tabular-num"
+                  data-testid="frontier-tokens-sent"
+                >
+                  {currentQuerySavings.pack_tokens_sent.toLocaleString()}
+                </span>
+              </div>
+              <div className="stat-inline">
+                <span className="stat-label">QLoRA Overhead Saved</span>
+                <span
+                  className="stat-value tabular-num"
+                  data-testid="qlora-overhead-eliminated"
+                >
+                  {currentQuerySavings.qlora_overhead_eliminated_tokens.toLocaleString()}{" "}
+                  tok
+                </span>
+              </div>
+              <div className="stat-inline">
+                <span className="stat-label">Est. USD Avoided</span>
+                <span
+                  className="stat-value stat-value-accent tabular-num"
+                  data-testid="usd-saved"
+                >
+                  ${currentQuerySavings.estimated_usd_saved.toFixed(4)}
+                </span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div
+            className="empty-telemetry-inline"
+            data-testid="empty-query-savings"
+          >
+            <Sparkles size={13} className="icon-muted" />
+            <span>
+              Run a query to measure live local corpus tokens filtered vs.
+              frontier context pack size.
+            </span>
+          </div>
+        )}
+      </div>
+
+      {expanded && (
+        <div
+          className="frontier-rates-drawer"
+          data-testid="frontier-rates-drawer"
+        >
+          <span className="field-label">
+            Frontier Input Comparison (Oct 2026 Verified List Rates)
+          </span>
+          <div className="rates-table-horizontal">
+            {OCT_2026_FRONTIER_RATES.map((model) => {
+              const naiveUsd = currentQuerySavings
+                ? (currentQuerySavings.local_tokens_explored / 1_000_000) *
+                  model.inputUsdPer1M
+                : null;
+              const scoutUsd = currentQuerySavings
+                ? (currentQuerySavings.pack_tokens_sent / 1_000_000) *
+                  model.inputUsdPer1M
+                : null;
+              return (
+                <div key={model.name} className="rate-row">
+                  <span className="rate-model">{model.name}</span>
+                  <span className="rate-price tabular-num">
+                    ${model.inputUsdPer1M.toFixed(2)}/1M
+                  </span>
+                  <span className="rate-delta tabular-num">
+                    {naiveUsd !== null && scoutUsd !== null
+                      ? `$${naiveUsd.toFixed(4)} vs $${scoutUsd.toFixed(4)}`
+                      : "Run query"}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </section>
   );
 };

@@ -3,8 +3,8 @@
 Covers:
 1. Uncommitted Git working-tree overlay (modified, untracked, deleted files) and automatic
    pre-query sync inside ScoutWorkflow._run_dag with zero manual sync commands.
-2. Custom-domain corpus_index.json incremental Git-blob SHA-1 Merkle sync and automatic
-   _CUSTOM_CORPUS_MEM_CACHE invalidation (`context-scout sync` and auto-sync on query).
+2. Custom-domain PG17 + sync_manifest.json incremental Git-blob SHA-1 Merkle sync and
+   epoch-based cache invalidation (`context-scout sync` and auto-sync on query).
 3. Symbol-level embedding cache (`_SYMBOL_EMBEDDING_CACHE` keyed by `(blob_sha, qualified_name)`)
    with `use_semantic_embeddings=True` enabled by default.
 4. Polyglot enterprise GitLab AST/structure extraction across Python, TypeScript/TSX, JavaScript,
@@ -26,7 +26,6 @@ import pytest
 
 from context_scout.agents.domain_registry import DomainRegistry
 from context_scout.agents.preflight_gate import (
-    _CUSTOM_CORPUS_MEM_CACHE,
     BoundGraphRepository,
     invalidate_custom_corpus_cache,
     sync_custom_domain_corpus_if_needed,
@@ -211,13 +210,11 @@ def test_git_working_tree_live_uncommitted_edits_and_auto_workflow_sync() -> Non
         legacy_file = pkg_dir / "legacy_batch.py"
 
         settlement_file.write_text(
-            "def settle_wire_transfer(amount_usd: float) -> bool:\n"
-            "    return amount_usd > 0.0\n",
+            "def settle_wire_transfer(amount_usd: float) -> bool:\n    return amount_usd > 0.0\n",
             encoding="utf-8",
         )
         legacy_file.write_text(
-            "def run_legacy_batch() -> int:\n"
-            "    return 42\n",
+            "def run_legacy_batch() -> int:\n    return 42\n",
             encoding="utf-8",
         )
         subprocess.run(["git", "add", "."], cwd=tmp_dir, check=True, capture_output=True)
@@ -298,7 +295,14 @@ def test_git_working_tree_live_uncommitted_edits_and_auto_workflow_sync() -> Non
 
 
 def test_custom_domain_corpus_incremental_sync_and_cache_invalidation() -> None:
-    """Verify custom domain corpus_index.json incrementally syncs and invalidates cache."""
+    """Verify custom domain PG17 incremental sync and sync_manifest.json tracking."""
+    import json
+
+    from psycopg import connect
+
+    from context_scout.config import ScoutSettings
+    from context_scout.db.repositories import PostgresRLSRepository
+
     tmp_root = Path(tempfile.mkdtemp(prefix="scout_custom_sync_"))
     try:
         src_dir = tmp_root / "workspace_repos"
@@ -329,10 +333,16 @@ def test_custom_domain_corpus_incremental_sync_and_cache_invalidation() -> None:
             data_dir=data_dir,
         )
         assert distill_res["files_indexed"] == 1
+        manifest_path = domains_dir / "gitlab_billing_scout" / "sync_manifest.json"
+        assert manifest_path.exists()
+        assert not (domains_dir / "gitlab_billing_scout" / "corpus_index.json").exists()
+        manifest1 = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest1["storage_backend"] == "postgresql_17_rls"
+        assert manifest1["code_files_indexed"] == 1
 
         registry = DomainRegistry(domains_dir=domains_dir)
         registry.load_all()
-        bound_repo = BoundGraphRepository(InMemoryRLSRepository())
+        bound_repo = BoundGraphRepository(PostgresRLSRepository())
         workflow = ScoutWorkflow(registry=registry, repo=bound_repo)
         principal = PrincipalContext(
             user_id="billing_eng",
@@ -340,14 +350,14 @@ def test_custom_domain_corpus_incremental_sync_and_cache_invalidation() -> None:
             allowed_scopes=["public_eng", "repo:gitlab_billing_scout"],
         )
 
-        # Warm the in-memory custom corpus cache
+        # Query initial PG17-backed custom domain
         pack1 = workflow.run(
             user_prompt="Inspect `compute_vat_invoice` in `billing/invoice_engine.py`.",
             principal=principal,
             domain_id="gitlab_billing_scout",
         )
         assert isinstance(pack1, ImplementationContextPack)
-        assert "gitlab_billing_scout" in _CUSTOM_CORPUS_MEM_CACHE
+        assert any("compute_vat_invoice" in s.qualified_symbol for s in pack1.code_slices)
 
         # Now add a new SQL schema file and modify invoice_engine.py on disk
         ledger_sql = src_dir / "billing" / "vat_ledger.sql"
@@ -364,16 +374,19 @@ def test_custom_domain_corpus_incremental_sync_and_cache_invalidation() -> None:
             encoding="utf-8",
         )
 
-        # Force check via sync_custom_domain_corpus_if_needed
+        # Force check via sync_custom_domain_corpus_if_needed -> PG17 upsert + sync_manifest.json
         sync_stats = sync_custom_domain_corpus_if_needed(
             "gitlab_billing_scout",
-            index_path=domains_dir / "gitlab_billing_scout" / "corpus_index.json",
+            index_path=manifest_path,
             force=True,
         )
         assert sync_stats is not None
         assert sync_stats["synced"] is True
         assert sync_stats["added"] == 1
         assert sync_stats["modified"] == 1
+        assert not (domains_dir / "gitlab_billing_scout" / "corpus_index.json").exists()
+        manifest2 = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest2["code_files_indexed"] == 2
 
         # Query the new SQL table symbol and modified Python function
         pack2 = workflow.run(
@@ -390,6 +403,20 @@ def test_custom_domain_corpus_incremental_sync_and_cache_invalidation() -> None:
         assert any("compute_vat_invoice" in s for s in syms2)
     finally:
         invalidate_custom_corpus_cache("gitlab_billing_scout")
+        with connect(ScoutSettings().db_admin_url) as conn:
+            for tbl in (
+                "ast_edges",
+                "ast_symbols",
+                "code_files",
+                "repositories",
+                "doc_chunks",
+                "domain_packs",
+            ):
+                conn.execute(
+                    f"DELETE FROM {tbl} WHERE domain_id = %s",
+                    ("gitlab_billing_scout",),
+                )
+            conn.commit()
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
@@ -445,10 +472,12 @@ async def test_mcp_assemble_verified_context_pack_and_sec04_guard() -> None:
 
 def test_unseen_repo_three_previously_missed_tasks_now_hit_top5_symbol_recall() -> None:
     """Verify HTTPX-04, CLICK-01, and CLICK-14 all achieve Top-5 File & Symbol Recall."""
-    httpx_dir = Path("data/unseen_repos/httpx")
-    click_dir = Path("data/unseen_repos/click")
+    from tests.fixtures.corpus_paths import resolve_local_data_dir
+
+    httpx_dir = resolve_local_data_dir("data/unseen_repos/httpx")
+    click_dir = resolve_local_data_dir("data/unseen_repos/click")
     if not httpx_dir.exists() or not click_dir.exists():
-        pytest.skip("Unseen repositories not cloned locally")
+        pytest.fail("Unseen repositories not cloned locally")
 
     suite = build_unseen_repo_suite()
     principal = PrincipalContext(
@@ -527,9 +556,7 @@ def test_benchmark_domain_cli_on_polyglot_multi_repo_corpus() -> None:
             encoding="utf-8",
         )
         (r2 / "main.tf").write_text(
-            'resource "google_SQL_database_instance" "rls_primary" {\n'
-            '  name = "rls-primary"\n'
-            "}\n",
+            'resource "google_SQL_database_instance" "rls_primary" {\n  name = "rls-primary"\n}\n',
             encoding="utf-8",
         )
 
@@ -570,6 +597,24 @@ def test_benchmark_domain_cli_on_polyglot_multi_repo_corpus() -> None:
         assert bench["prompt_injection_blocked"] is True
     finally:
         invalidate_custom_corpus_cache("multi_repo_polyglot_test")
+        from psycopg import connect
+
+        from context_scout.config import ScoutSettings
+
+        with connect(ScoutSettings().db_admin_url) as conn:
+            for tbl in (
+                "ast_edges",
+                "ast_symbols",
+                "code_files",
+                "repositories",
+                "doc_chunks",
+                "domain_packs",
+            ):
+                conn.execute(
+                    f"DELETE FROM {tbl} WHERE domain_id = %s",
+                    ("multi_repo_polyglot_test",),
+                )
+            conn.commit()
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 

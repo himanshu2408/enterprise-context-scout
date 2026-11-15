@@ -63,33 +63,14 @@ def test_live_forced_row_level_security_catalog(settings: ScoutSettings) -> None
             assert relforcerowsecurity is True, f"Table {relname} does not have FORCE RLS"
 
 
-def test_live_rls_isolation_between_principals(settings: ScoutSettings) -> None:
+def test_live_rls_isolation_between_principals(
+    settings: ScoutSettings,
+    ephemeral_pg_domain: str,
+) -> None:
     """Verifies that scout_app_user cannot read rows across tenant/scope boundaries."""
     mgr = RLSConnectionManager(settings.db_app_url)
 
-    # 1. Setup prerequisite domain pack
-    admin_mgr = RLSConnectionManager(settings.db_admin_url)
-    admin_principal = PrincipalContext(
-        user_id="db_admin",
-        role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "quant_restricted"],
-    )
-    with admin_mgr.scoped_transaction(admin_principal, enable_hnsw_iterative_scan=False) as conn:
-        conn.execute(
-            """
-            INSERT INTO domain_packs (
-                domain_id, display_name, lora_adapter_id,
-                primary_truth_source, freshness_half_life_days, config_json
-            )
-            VALUES (
-                'trading_code_scout', 'Trading Code Scout', 'gemma4_26b_code_scout',
-                'code', 180, '{"test": true}'::jsonb
-            )
-            ON CONFLICT (domain_id) DO NOTHING;
-            """
-        )
-
-    # 2. Insert restricted code file using quant_restricted principal
+    # 1. Insert restricted code file using quant_restricted principal
     quant_principal = PrincipalContext(
         user_id="quant_dev_1",
         role=RoleType.QUANT_RESEARCHER,
@@ -105,48 +86,42 @@ def test_live_rls_isolation_between_principals(settings: ScoutSettings) -> None:
                 git_commit_sha, git_blob_sha, language,
                 allowed_scopes, raw_content, line_count
             )
-            VALUES (%s, 'trading_code_scout', 'strat-core', 'src/alpha/secret_arb.py',
+            VALUES (%s, %s, 'strat-core', 'src/alpha/secret_arb.py',
                     'commit123', 'blob456', 'python',
                     %s, 'def proprietary_alpha(): return 42\n', 1);
             """,
-            (file_id, ["quant_restricted"]),
+            (file_id, ephemeral_pg_domain, ["quant_restricted"]),
         )
 
-    try:
-        # 3. Product Manager with only public_eng scope must see ZERO rows
-        pm_principal = PrincipalContext(
-            user_id="pm_user_1",
-            role=RoleType.PRODUCT_MANAGER,
-            allowed_scopes=["public_eng"],
-        )
-        with mgr.scoped_transaction(pm_principal, enable_hnsw_iterative_scan=False) as conn:
-            pm_results = conn.execute(
-                "SELECT file_id, file_path FROM code_files WHERE file_id = %s;",
-                (file_id,),
-            ).fetchall()
-            assert len(pm_results) == 0, "RLS Security Violation: PM saw quant_restricted file!"
+    # 2. Product Manager with only public_eng scope must see ZERO rows
+    pm_principal = PrincipalContext(
+        user_id="pm_user_1",
+        role=RoleType.PRODUCT_MANAGER,
+        allowed_scopes=["public_eng"],
+    )
+    with mgr.scoped_transaction(pm_principal, enable_hnsw_iterative_scan=False) as conn:
+        pm_results = conn.execute(
+            "SELECT file_id, file_path FROM code_files WHERE file_id = %s;",
+            (file_id,),
+        ).fetchall()
+        assert len(pm_results) == 0, "RLS Security Violation: PM saw quant_restricted file!"
 
-        # 4. Quant principal MUST see the row
-        with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
-            quant_results = conn.execute(
-                "SELECT file_id, file_path FROM code_files WHERE file_id = %s;",
-                (file_id,),
-            ).fetchall()
-            assert len(quant_results) == 1, "Quant principal failed to see authorized file"
-            assert quant_results[0][1] == "src/alpha/secret_arb.py"
-
-    finally:
-        # 5. Clean up test row
-        with admin_mgr.scoped_transaction(
-            admin_principal, enable_hnsw_iterative_scan=False
-        ) as conn:
-            conn.execute("DELETE FROM code_files WHERE file_id = %s;", (file_id,))
+    # 3. Quant principal MUST see the row
+    with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
+        quant_results = conn.execute(
+            "SELECT file_id, file_path FROM code_files WHERE file_id = %s;",
+            (file_id,),
+        ).fetchall()
+        assert len(quant_results) == 1, "Quant principal failed to see authorized file"
+        assert quant_results[0][1] == "src/alpha/secret_arb.py"
 
 
-def test_live_pgvector_cosine_distance_query(settings: ScoutSettings) -> None:
+def test_live_pgvector_cosine_distance_query(
+    settings: ScoutSettings,
+    ephemeral_pg_domain: str,
+) -> None:
     """Verifies live pgvector 768-dim similarity search and HNSW iterative scan setting."""
     mgr = RLSConnectionManager(settings.db_app_url)
-    admin_mgr = RLSConnectionManager(settings.db_admin_url)
 
     principal = PrincipalContext(
         user_id="quant_dev_2",
@@ -159,7 +134,7 @@ def test_live_pgvector_cosine_distance_query(settings: ScoutSettings) -> None:
     test_vec = [1.0] + [0.0] * 767
     vec_literal = f"[{','.join(str(x) for x in test_vec)}]"
 
-    # Setup parent file
+    # Setup parent file inside ephemeral eval_ domain
     with mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn:
         conn.execute(
             """
@@ -168,11 +143,11 @@ def test_live_pgvector_cosine_distance_query(settings: ScoutSettings) -> None:
                 git_commit_sha, git_blob_sha, language,
                 allowed_scopes, raw_content, line_count
             )
-            VALUES (%s, 'trading_code_scout', 'strat-core', 'src/vector_test.py',
+            VALUES (%s, %s, 'strat-core', 'src/vector_test.py',
                     'commit_vec', 'blob_vec', 'python',
                     %s, 'def test_vec(): pass\n', 1);
             """,
-            (file_id, ["public_eng"]),
+            (file_id, ephemeral_pg_domain, ["public_eng"]),
         )
         conn.execute(
             """
@@ -181,31 +156,25 @@ def test_live_pgvector_cosine_distance_query(settings: ScoutSettings) -> None:
                 symbol_kind, start_line, end_line, signature_skeleton,
                 contextual_summary, allowed_scopes, embedding
             )
-            VALUES (%s, %s, 'trading_code_scout', 'strat.vector_test.test_vec',
+            VALUES (%s, %s, %s, 'strat.vector_test.test_vec',
                     'function', 1, 1, 'def test_vec() -> None:',
                     'Vector similarity test fixture', %s, %s::vector);
             """,
-            (sym_id, file_id, ["public_eng"], vec_literal),
+            (sym_id, file_id, ephemeral_pg_domain, ["public_eng"], vec_literal),
         )
 
-    try:
-        # Test vector search with HNSW relaxed_order iterative scan
-        with mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=True) as conn:
-            query_vec_literal = f"[{','.join(str(x) for x in test_vec)}]"
-            hit: tuple[Any, ...] | None = conn.execute(
-                """
-                SELECT symbol_id, qualified_name, (embedding <=> %s::vector) AS cosine_dist
-                FROM ast_symbols
-                WHERE symbol_id = %s;
-                """,
-                (query_vec_literal, sym_id),
-            ).fetchone()
+    # Test vector search with HNSW relaxed_order iterative scan
+    with mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=True) as conn:
+        query_vec_literal = f"[{','.join(str(x) for x in test_vec)}]"
+        hit: tuple[Any, ...] | None = conn.execute(
+            """
+            SELECT symbol_id, qualified_name, (embedding <=> %s::vector) AS cosine_dist
+            FROM ast_symbols
+            WHERE symbol_id = %s;
+            """,
+            (query_vec_literal, sym_id),
+        ).fetchone()
 
-            assert hit is not None
-            assert hit[1] == "strat.vector_test.test_vec"
-            assert float(hit[2]) < 1e-5, f"Expected ~0.0 cosine distance, got {hit[2]}"
-
-    finally:
-        with admin_mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn:
-            conn.execute("DELETE FROM ast_symbols WHERE symbol_id = %s;", (sym_id,))
-            conn.execute("DELETE FROM code_files WHERE file_id = %s;", (file_id,))
+        assert hit is not None
+        assert hit[1] == "strat.vector_test.test_vec"
+        assert float(hit[2]) < 1e-5, f"Expected ~0.0 cosine distance, got {hit[2]}"

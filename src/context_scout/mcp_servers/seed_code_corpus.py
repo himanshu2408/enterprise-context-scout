@@ -8,10 +8,11 @@ import logging
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final
 from uuid import UUID, uuid4, uuid5
 
 from context_scout.ast_engine.extractor import ASTExtractor
+from context_scout.ast_engine.models import ParsedEdge
 from context_scout.config import ScoutSettings
 from context_scout.db.repositories import (
     ASTEdgeRecord,
@@ -218,15 +219,12 @@ def seed_trading_codebase_and_issues(
                 emb = generate_deterministic_embedding(
                     parsed_sym.signature_skeleton + " " + parsed_sym.docstring
                 )
-                kind: Literal["function", "class", "method", "interface", "type_alias"] = (
-                    parsed_sym.symbol_kind
-                )
                 sym_rec = ASTSymbolRecord(
                     symbol_id=sym_id,
                     file_id=file_id,
                     domain_id=domain_id,
                     qualified_name=parsed_sym.qualified_name,
-                    symbol_kind=kind,
+                    symbol_kind=parsed_sym.symbol_kind,
                     start_line=parsed_sym.start_line,
                     end_line=parsed_sym.end_line,
                     signature_skeleton=parsed_sym.signature_skeleton,
@@ -322,13 +320,67 @@ def seed_trading_codebase_and_issues(
             )
             total_issues += 1
 
-        # 5. Keep all src/context_scout/*.py files in code_files synchronized with disk
-        for extra_py in sorted((root / "src" / "context_scout").rglob("*.py")):
+        # 5. Keep all src/context_scout/*.py files and AST symbols/edges synced with disk
+        existing_file_rows = conn.execute(
+            """
+            SELECT file_id, file_path, git_blob_sha
+            FROM code_files
+            WHERE domain_id = %s AND repo_name = %s;
+            """,
+            (domain_id, repo_name),
+        ).fetchall()
+        existing_files: dict[str, tuple[UUID, str]] = {
+            str(r[1]): (UUID(str(r[0])), str(r[2])) for r in existing_file_rows
+        }
+
+        existing_sym_rows = conn.execute(
+            """
+            SELECT symbol_id, file_id, qualified_name, start_line, end_line
+            FROM ast_symbols
+            WHERE domain_id = %s;
+            """,
+            (domain_id,),
+        ).fetchall()
+        existing_sym_tuples_by_file: dict[UUID, set[tuple[str, int, int]]] = defaultdict(set)
+        existing_syms_by_file: dict[UUID, list[tuple[UUID, str, str]]] = defaultdict(list)
+        for r in existing_sym_rows:
+            sym_id = UUID(str(r[0]))
+            fid = UUID(str(r[1]))
+            qname = str(r[2])
+            sline = int(str(r[3]))
+            eline = int(str(r[4]))
+            short = qname.rsplit(".", 1)[-1]
+            existing_sym_tuples_by_file[fid].add((qname, sline, eline))
+            existing_syms_by_file[fid].append((sym_id, qname, short))
+            if qname not in global_symbol_map:
+                global_symbol_map[qname] = sym_id
+            if sym_id not in short_name_map[short]:
+                short_name_map[short].append(sym_id)
+
+        extra_edges_pending: list[tuple[list[ParsedEdge], dict[str, UUID]]] = []
+        extra_py_candidates = list(sorted((root / "src" / "context_scout").rglob("*.py")))
+        has_non_src_files = any(not fp.startswith("src/") for fp in existing_files)
+        if not has_non_src_files and (root / "tests").is_dir():
+            extra_py_candidates.extend(sorted((root / "tests").rglob("*.py")))
+        for extra_py in extra_py_candidates:
             rel_p = extra_py.relative_to(root).as_posix()
             if rel_p.startswith("src/context_scout/trading_strategies/"):
                 continue
             raw_c = extra_py.read_text(encoding="utf-8")
-            conn.execute(
+            new_blob = _git_blob_sha(raw_c)
+            symbols, edges = extractor.parse_source(raw_c, "python", file_path=rel_p)
+            parsed_sym_tuples = {(ps.qualified_name, ps.start_line, ps.end_line) for ps in symbols}
+            existing_entry = existing_files.get(rel_p)
+            existing_fid = existing_entry[0] if existing_entry else None
+            existing_blob = existing_entry[1] if existing_entry else None
+            if (
+                existing_fid is not None
+                and existing_blob == new_blob
+                and existing_sym_tuples_by_file.get(existing_fid, set()) == parsed_sym_tuples
+            ):
+                continue
+
+            row_fid = conn.execute(
                 """
                 INSERT INTO code_files (
                     file_id, domain_id, repo_name, file_path,
@@ -341,7 +393,8 @@ def seed_trading_codebase_and_issues(
                     git_blob_sha = EXCLUDED.git_blob_sha,
                     raw_content = EXCLUDED.raw_content,
                     line_count = EXCLUDED.line_count,
-                    indexed_at = NOW();
+                    indexed_at = NOW()
+                RETURNING file_id;
                 """,
                 (
                     uuid4(),
@@ -349,43 +402,239 @@ def seed_trading_codebase_and_issues(
                     repo_name,
                     rel_p,
                     rev_cmd,
-                    _git_blob_sha(raw_c),
+                    new_blob,
                     ["public_eng"],
                     raw_c,
                     len(raw_c.splitlines()),
                 ),
+            ).fetchone()
+            if row_fid is None:
+                continue
+            actual_file_id = UUID(str(row_fid[0]))
+
+            for old_sym_id, old_qname, old_short in existing_syms_by_file.get(actual_file_id, []):
+                if global_symbol_map.get(old_qname) == old_sym_id:
+                    global_symbol_map.pop(old_qname, None)
+                if old_sym_id in short_name_map.get(old_short, []):
+                    short_name_map[old_short] = [
+                        sid for sid in short_name_map[old_short] if sid != old_sym_id
+                    ]
+
+            conn.execute(
+                """
+                DELETE FROM ast_edges
+                WHERE domain_id = %s
+                  AND (
+                      source_symbol_id IN (SELECT symbol_id FROM ast_symbols WHERE file_id = %s)
+                      OR target_symbol_id IN (SELECT symbol_id FROM ast_symbols WHERE file_id = %s)
+                  );
+                """,
+                (domain_id, actual_file_id, actual_file_id),
+            )
+            conn.execute(
+                "DELETE FROM ast_symbols WHERE domain_id = %s AND file_id = %s;",
+                (domain_id, actual_file_id),
             )
 
-    # 6. Ensure at least 1 public_quant doc_chunks row exists on fresh CI databases
+            file_sym_map = {}
+            for parsed_sym in symbols:
+                sym_id = uuid4()
+                emb = generate_deterministic_embedding(
+                    parsed_sym.signature_skeleton + " " + parsed_sym.docstring
+                )
+                sym_rec = ASTSymbolRecord(
+                    symbol_id=sym_id,
+                    file_id=actual_file_id,
+                    domain_id=domain_id,
+                    qualified_name=parsed_sym.qualified_name,
+                    symbol_kind=parsed_sym.symbol_kind,
+                    start_line=parsed_sym.start_line,
+                    end_line=parsed_sym.end_line,
+                    signature_skeleton=parsed_sym.signature_skeleton,
+                    contextual_summary=parsed_sym.contextual_summary,
+                    allowed_scopes=["public_eng"],
+                    embedding=emb,
+                )
+                repo.insert_ast_symbol(conn, sym_rec)
+                file_sym_map[parsed_sym.qualified_name] = sym_id
+                global_symbol_map[parsed_sym.qualified_name] = sym_id
+                short_name_map[parsed_sym.name].append(sym_id)
+                total_symbols += 1
+
+            extra_edges_pending.append((edges, file_sym_map))
+
+        for edges, file_sym_map in extra_edges_pending:
+            for edge in edges:
+                src_id = file_sym_map.get(edge.source_qualified_name)
+                if not src_id:
+                    src_id = global_symbol_map.get(edge.source_qualified_name)
+                if not src_id:
+                    continue
+
+                target_id = global_symbol_map.get(edge.target_qualified_name)
+                if not target_id:
+                    target_short = edge.target_qualified_name.split(".")[-1]
+                    matches = short_name_map.get(target_short, [])
+                    if len(matches) == 1:
+                        target_id = matches[0]
+
+                edge_rec = ASTEdgeRecord(
+                    edge_id=uuid4(),
+                    domain_id=domain_id,
+                    source_symbol_id=src_id,
+                    target_qualified_name=edge.target_qualified_name,
+                    target_symbol_id=target_id,
+                    edge_kind=edge.edge_kind,
+                    allowed_scopes=["public_eng"],
+                )
+                repo.insert_ast_edge(conn, edge_rec)
+                total_edges += 1
+
+    # 6. Ensure public_quant arXiv baseline chunks exist on fresh CI databases (no-op when seeded)
     quant_seed_principal = PrincipalContext(
         user_id="seed_quant_corpus_indexer",
         role=RoleType.QUANT_RESEARCHER,
         allowed_scopes=["public_quant"],
     )
+    quant_seed_docs: list[tuple[str, str, str, str, date, str, str]] = [
+        (
+            "arxiv:1310.7514",
+            "The Price Impact of Order Book Events",
+            "https://arxiv.org/abs/1310.7514",
+            "US_EQUITY",
+            date(2026, 10, 15),
+            "1. Introduction",
+            (
+                "Order flow imbalance explains short-horizon price changes with linear market "
+                "impact across limit order book levels in US equities."
+            ),
+        ),
+        (
+            "arxiv:2606.31387",
+            (
+                "Signature-Based Optimal Execution for Statistical Arbitrage "
+                "with Path-Dependent Trading Signals"
+            ),
+            "https://arxiv.org/pdf/2606.31387v2",
+            "US_EQUITY",
+            date(2026, 6, 30),
+            "Introduction",
+            (
+                "Statistical-arbitrage strategies depend not only on predictive signals, "
+                "but also on optimal execution under temporary market impact, inventory "
+                "risk, and CME E-mini futures path-dependent trading dynamics clearing a "
+                "5 bps US equity friction floor."
+            ),
+        ),
+        (
+            "arxiv:2502.07393",
+            "FinRL-DeepSeek: LLM-Infused Risk-Sensitive Reinforcement Learning for Trading Agents",
+            "https://arxiv.org/pdf/2502.07393v1",
+            "US_EQUITY",
+            date(2025, 2, 11),
+            "Preamble / Abstract",
+            (
+                "This paper presents a risk-sensitive deep reinforcement learning actor-critic "
+                "trading agent extending Conditional Value-at-Risk Proximal Policy Optimization "
+                "(CPPO) and FinRL benchmarks on US equity Nasdaq-100 markets above 5 bps costs."
+            ),
+        ),
+        (
+            "arxiv:2302.13245",
+            "Physical Momentum in the Indian Stock Market",
+            "https://arxiv.org/abs/2302.13245",
+            "IN_NSE",
+            date(2024, 1, 1),
+            "Preamble / Abstract",
+            (
+                "Our study determines abnormal returns for physical and cross-sectional momentum "
+                "strategy portfolios in the Indian stock market across National Stock Exchange "
+                "(NSE) NIFTY 500 constituents after accounting for >= 18 bps STT and brokerage "
+                "round-trip liquidity friction."
+            ),
+        ),
+        (
+            "arxiv:2211.07080",
+            "Designing Efficient Pair-Trading and Intraday Momentum Strategies on NSE Nifty 50",
+            "https://arxiv.org/abs/2211.07080",
+            "IN_NSE",
+            date(2024, 1, 1),
+            "Abstract",
+            (
+                "High-frequency intraday momentum, order flow, and cointegration pair-trading "
+                "strategies across five sectors of the National Stock Exchange of India (NSE) "
+                "Nifty 50 constituents require >= 18 bps round-trip execution friction assumptions."
+            ),
+        ),
+        (
+            "arxiv:2202.02728",
+            "Hierarchical Risk Parity and Minimum Variance Portfolio Design on NIFTY 50 Stocks",
+            "https://arxiv.org/abs/2202.02728",
+            "IN_NSE",
+            date(2024, 1, 1),
+            "Abstract",
+            (
+                "This paper compares Hierarchical Risk Parity (HRP) and critical-line minimum "
+                "variance portfolio optimization across eight Indian NIFTY sectors on the National "
+                "Stock Exchange (NSE), evaluating out-of-sample Sharpe ratios under >= 16 bps "
+                "Indian equity rebalance friction."
+            ),
+        ),
+        (
+            "arxiv:2607.18001",
+            (
+                "High-Dimensional Factor Statistical Arbitrage and "
+                "Market-Neutral Portfolios on XETRA DAX"
+            ),
+            "https://arxiv.org/pdf/2607.18001v1",
+            "DE_XETRA",
+            date(2026, 7, 20),
+            "Empirical Evaluation",
+            (
+                "Dynamic high-dimensional PCA factor statistical arbitrage and order book "
+                "liquidity herding models on Deutsche Boerse XETRA DAX European equities "
+                "clear a 12 bps continuous-auction round-trip transaction cost floor."
+            ),
+        ),
+    ]
     with mgr.scoped_transaction(quant_seed_principal, enable_hnsw_iterative_scan=False) as q_conn:
-        row_qc = q_conn.execute("SELECT count(*) FROM doc_chunks;").fetchone()
+        row_qc = q_conn.execute(
+            "SELECT count(*) FROM doc_chunks WHERE domain_id = 'quant_research_scout';"
+        ).fetchone()
         if row_qc is not None and int(str(row_qc[0])) == 0:
-            q_emb = generate_deterministic_embedding("Order Flow Imbalance market impact")
-            q_vec = "[" + ",".join(f"{v:.6f}" for v in q_emb) + "]"
-            q_conn.execute(
-                """
-                INSERT INTO doc_chunks (
-                    chunk_id, domain_id, doc_id, doc_title, source_uri,
-                    market_scope, published_date, authority_weight,
-                    section_heading, contextual_header, verbatim_content,
-                    metadata_json, allowed_scopes, embedding
+            for q_doc_id, q_title, q_uri, q_scope, q_date, q_sec, q_body in quant_seed_docs:
+                q_emb = generate_deterministic_embedding(f"{q_title} {q_sec} {q_body}")
+                q_vec = "[" + ",".join(f"{v:.6f}" for v in q_emb) + "]"
+                q_conn.execute(
+                    """
+                    INSERT INTO doc_chunks (
+                        chunk_id, domain_id, doc_id, doc_title, source_uri,
+                        market_scope, published_date, authority_weight,
+                        section_heading, contextual_header, verbatim_content,
+                        metadata_json, allowed_scopes, embedding
+                    )
+                    VALUES (
+                        %s, 'quant_research_scout', %s,
+                        %s,
+                        %s, %s, %s, 1.0,
+                        %s, 'Quant Seed [quant_research_scout]',
+                        %s,
+                        '{}'::jsonb, %s, %s::vector
+                    );
+                    """,
+                    (
+                        uuid4(),
+                        q_doc_id,
+                        q_title,
+                        q_uri,
+                        q_scope,
+                        q_date,
+                        q_sec,
+                        q_body,
+                        ["public_quant"],
+                        q_vec,
+                    ),
                 )
-                VALUES (
-                    %s, 'quant_research_scout', 'arxiv:1310.7514',
-                    'The Price Impact of Order Book Events',
-                    'https://arxiv.org/abs/1310.7514', 'US_EQUITY', %s, 1.0,
-                    '1. Introduction', 'Quant Seed [quant_research_scout]',
-                    'Order flow imbalance explains short-horizon price changes with linear impact.',
-                    '{}'::jsonb, %s, %s::vector
-                );
-                """,
-                (uuid4(), date(2026, 10, 15), ["public_quant"], q_vec),
-            )
 
     return {
         "files_indexed": total_files,

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import ast
 import base64
-import datetime
 import hashlib
 import hmac
 import json
@@ -15,22 +15,24 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Final
+from typing import TYPE_CHECKING, Annotated, Any, Final
 
 from fastapi import Header, HTTPException
+
+if TYPE_CHECKING:
+    from context_scout.agents.scout_workflow import LocalGemmaClient
 
 from context_scout.agents.domain_registry import DomainRegistry
 from context_scout.config import ScoutSettings
 from context_scout.db.repositories import (
     ASTSymbolRecord,
     CodeFileRecord,
-    DocChunkRecord,
     InMemoryRLSRepository,
 )
 from context_scout.db.session import RLSConnectionManager
+from context_scout.plugins.registry import PluginRegistry
 from context_scout.schemas.contracts import (
     ImplementationContextPack,
-    MarketRegime,
     PrincipalContext,
     RoleType,
 )
@@ -54,10 +56,132 @@ DEFAULT_ROLE_SCOPES: Final[dict[RoleType, list[str]]] = {
 
 DEFAULT_AUTH_HMAC_SECRET: Final[str] = "scout-dev-hmac-secret-override-in-prod-sec04"
 
+INSECURE_DEFAULT_SECRETS: Final[frozenset[str]] = frozenset(
+    {
+        "scout-dev-hmac-secret-override-in-prod-sec04",
+        "scout-dev-secret-key-change-in-production",
+        "changeme",
+        "secret",
+        "dev-secret",
+        "insecure-default-secret",
+    }
+)
+
+
+def is_production_environment() -> bool:
+    """Detects whether context-scout is operating in a production or staging environment."""
+    env = (
+        (
+            os.environ.get("SCOUT_ENV")
+            or os.environ.get("ENVIRONMENT")
+            or os.environ.get("ENV")
+            or ""
+        )
+        .strip()
+        .lower()
+    )
+    return env in {"production", "prod", "staging"}
+
 
 def _resolve_auth_secret(secret_key: str | None = None) -> bytes:
-    raw = secret_key or os.environ.get("SCOUT_AUTH_HMAC_SECRET") or DEFAULT_AUTH_HMAC_SECRET
-    return raw.encode("utf-8")
+    """Resolves HMAC secret key with absolute fail-closed safety enforcement.
+
+    Implements SEC-VULN-01 / Critical B fail-closed authentication.
+
+    Fails closed by default:
+    - In production (is_production_environment() is True), SCOUT_ALLOW_INSECURE_DEV_SECRET
+      is strictly IGNORED. Any unset secret, secret in INSECURE_DEFAULT_SECRETS, or
+      secret shorter than 32 characters (whether from SCOUT_AUTH_HMAC_SECRET or an
+      explicit secret_key) unconditionally raises a fatal RuntimeError.
+    - In non-production environments:
+      - If an explicit non-empty secret_key argument is passed (e.g., for testing or
+        crafting adversarial test tokens), it is accepted directly and logs a warning
+        when matching INSECURE_DEFAULT_SECRETS.
+      - Otherwise, SCOUT_AUTH_HMAC_SECRET must be >=32 characters and not in
+        INSECURE_DEFAULT_SECRETS; if unset, empty, weak (<32 characters), or in
+        INSECURE_DEFAULT_SECRETS, it raises RuntimeError unless
+        SCOUT_ALLOW_INSECURE_DEV_SECRET is explicitly set to 'true' ('1', 'true', 'yes').
+    """
+    is_prod = is_production_environment()
+    allow_insecure = not is_prod and os.environ.get(
+        "SCOUT_ALLOW_INSECURE_DEV_SECRET", "false"
+    ).strip().lower() in {"1", "true", "yes"}
+
+    # 1. Caller passed an explicit secret_key (e.g. testing or programmatic injection)
+    if secret_key is not None and len(secret_key) > 0:
+        raw_key = secret_key
+        if is_prod and (raw_key in INSECURE_DEFAULT_SECRETS or len(raw_key) < 32):
+            raise RuntimeError(
+                "Insecure default or weak HMAC secret detected in production environment. "
+                "A cryptographically secure SCOUT_AUTH_HMAC_SECRET (minimum 32 characters) "
+                "must be configured in production (SEC-VULN-01)."
+            )
+        if raw_key in INSECURE_DEFAULT_SECRETS:
+            logger.warning(
+                "Using known insecure development HMAC secret key. "
+                "This is insecure and strictly prohibited in production environments."
+            )
+        return raw_key.encode("utf-8")
+
+    # 2. Check environment variable SCOUT_AUTH_HMAC_SECRET
+    env_secret = os.environ.get("SCOUT_AUTH_HMAC_SECRET")
+    if env_secret is None or not env_secret.strip():
+        # In production, dev override is banned: unconditionally fail closed
+        if is_prod:
+            raise RuntimeError(
+                "Insecure default or weak HMAC secret detected in production environment. "
+                "A cryptographically secure SCOUT_AUTH_HMAC_SECRET (minimum 32 characters) "
+                "must be configured in production (SEC-VULN-01)."
+            )
+        # In non-production, allow insecure dev secret only if explicitly opted in
+        if allow_insecure:
+            logger.warning(
+                "Using default development HMAC secret for SCOUT_AUTH_HMAC_SECRET because "
+                "SCOUT_ALLOW_INSECURE_DEV_SECRET is explicitly set. "
+                "This is insecure and strictly prohibited in production environments."
+            )
+            return DEFAULT_AUTH_HMAC_SECRET.encode("utf-8")
+
+        raise RuntimeError(
+            "SCOUT_AUTH_HMAC_SECRET is unset or empty. Context Scout enforces fail-closed "
+            "authentication: you must configure a cryptographically secure secret "
+            "(minimum 32 characters) via SCOUT_AUTH_HMAC_SECRET, or explicitly set "
+            "SCOUT_ALLOW_INSECURE_DEV_SECRET='true' for local development."
+        )
+
+    # 3. Environment secret is present: validate length and insecurity
+    raw_env = env_secret.strip()
+    if is_prod and (raw_env in INSECURE_DEFAULT_SECRETS or len(raw_env) < 32):
+        raise RuntimeError(
+            "Insecure default or weak HMAC secret detected in production environment. "
+            "A cryptographically secure SCOUT_AUTH_HMAC_SECRET (minimum 32 characters) "
+            "must be configured in production (SEC-VULN-01)."
+        )
+
+    if (
+        not is_prod
+        and not allow_insecure
+        and (raw_env in INSECURE_DEFAULT_SECRETS or len(raw_env) < 32)
+    ):
+        raise RuntimeError(
+            "Insecure or weak HMAC secret detected in SCOUT_AUTH_HMAC_SECRET "
+            "(minimum 32 characters). Context Scout enforces fail-closed "
+            "authentication unless SCOUT_ALLOW_INSECURE_DEV_SECRET='true' "
+            "is explicitly configured."
+        )
+
+    if raw_env in INSECURE_DEFAULT_SECRETS:
+        logger.warning(
+            "Using default development HMAC secret for SCOUT_AUTH_HMAC_SECRET. "
+            "This is insecure and strictly prohibited in production environments."
+        )
+
+    return raw_env.encode("utf-8")
+
+
+def validate_auth_secret() -> bytes:
+    """Validates application HMAC authentication configuration fail-closed on startup."""
+    return _resolve_auth_secret()
 
 
 def create_signed_principal_token(
@@ -156,11 +280,19 @@ def get_principal_context(
     authorization: Annotated[str | None, Header()] = None,
 ) -> PrincipalContext:
     """Extracts immutable PrincipalContext out-of-band from signed token or headers (SEC-04)."""
-    require_signed = os.environ.get("SCOUT_REQUIRE_SIGNED_AUTH", "false").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    raw_require = os.environ.get("SCOUT_REQUIRE_SIGNED_AUTH")
+    if raw_require is None or not raw_require.strip():
+        require_signed = True
+    else:
+        require_signed = raw_require.strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+            "disable",
+            "disabled",
+        }
+
     if authorization and authorization.strip():
         auth_val = authorization.strip()
         if not auth_val.lower().startswith("bearer "):
@@ -176,10 +308,7 @@ def get_principal_context(
     if require_signed:
         raise HTTPException(
             status_code=401,
-            detail=(
-                "Signed Authorization Bearer token is required when "
-                "SCOUT_REQUIRE_SIGNED_AUTH=true (SEC-04)."
-            ),
+            detail="Signed Authorization Bearer token is required.",
         )
 
     user_id = (x_principal_user_id or "demo_engineer").strip()
@@ -209,6 +338,14 @@ def get_principal_context(
     # Bind out-of-band contextvar
     _CURRENT_PRINCIPAL.set(principal)
     return principal
+
+
+def reset_current_principal(token: Any = None) -> None:
+    """Explicitly resets the session principal ContextVar (SEC-04)."""
+    if token is not None:
+        _CURRENT_PRINCIPAL.reset(token)
+    else:
+        _CURRENT_PRINCIPAL.set(None)
 
 
 @dataclass
@@ -321,20 +458,32 @@ def _populate_in_memory_repository(repo_root: Path) -> InMemoryRLSRepository:
         role=RoleType.ENGINEER,
         allowed_scopes=["public_eng", "public_quant", "quant_restricted", "audit:compliance"],
     )
+    primary_plugin = PluginRegistry.get_primary_domain_plugin()
+    code_domain_id = (
+        primary_plugin.get_role_domain_ids().get("code", "default")
+        if primary_plugin is not None
+        else "default"
+    )
 
     src_dir = repo_root / "src" / "context_scout"
     if src_dir.exists():
         for py_file in sorted(src_dir.rglob("*.py")):
             try:
                 content = py_file.read_text(encoding="utf-8")
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Skipping unreadable file %s during in-memory bootstrap (%s): %s",
+                    py_file,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
             rel_path = str(py_file.relative_to(repo_root))
             lines = content.splitlines()
             f_id = uuid.uuid4()
             rec = CodeFileRecord(
                 file_id=f_id,
-                domain_id="trading_code_scout",
+                domain_id=code_domain_id,
                 repo_name="enterprise-context-scout",
                 file_path=rel_path,
                 git_commit_sha="c0ffee123456",
@@ -349,73 +498,61 @@ def _populate_in_memory_repository(repo_root: Path) -> InMemoryRLSRepository:
             module_parts = py_file.relative_to(repo_root / "src").with_suffix("").parts
             mod_dotted = ".".join(module_parts)
 
-            for idx, line in enumerate(lines, start=1):
-                cls_match = re.match(r"^class\s+([A-Za-z0-9_]+)", line)
-                if cls_match:
-                    cls_name = cls_match.group(1)
-                    q_name = f"{mod_dotted}.{cls_name}"
-                    repo.insert_ast_symbol(
-                        admin_principal,
-                        ASTSymbolRecord(
-                            symbol_id=uuid.uuid4(),
-                            file_id=f_id,
-                            domain_id="trading_code_scout",
-                            qualified_name=q_name,
-                            symbol_kind="class",
-                            start_line=idx,
-                            end_line=min(idx + 50, len(lines)),
-                            signature_skeleton=f"class {cls_name}:",
-                            contextual_summary=f"Class definition for {cls_name}",
-                            allowed_scopes=["public_eng"],
-                            embedding=[0.05] * 768,
-                        ),
-                    )
+            try:
+                tree = ast.parse(content)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ClassDef):
+                        cls_name = node.name
+                        q_name = f"{mod_dotted}.{cls_name}"
+                        repo.insert_ast_symbol(
+                            admin_principal,
+                            ASTSymbolRecord(
+                                symbol_id=uuid.uuid4(),
+                                file_id=f_id,
+                                domain_id=code_domain_id,
+                                qualified_name=q_name,
+                                symbol_kind="class",
+                                start_line=node.lineno,
+                                end_line=node.end_lineno or min(node.lineno + 50, len(lines)),
+                                signature_skeleton=f"class {cls_name}:",
+                                contextual_summary=f"Class definition for {cls_name}",
+                                allowed_scopes=["public_eng"],
+                                embedding=[0.05] * 768,
+                            ),
+                        )
+            except Exception as exc:
+                logger.debug(
+                    "AST parse failed for %s, falling back to regex class scan (%s): %s",
+                    rel_path,
+                    type(exc).__name__,
+                    exc,
+                )
+                for idx, line in enumerate(lines, start=1):
+                    cls_match = re.match(r"^class\s+([A-Za-z0-9_]+)", line)
+                    if cls_match:
+                        cls_name = cls_match.group(1)
+                        q_name = f"{mod_dotted}.{cls_name}"
+                        repo.insert_ast_symbol(
+                            admin_principal,
+                            ASTSymbolRecord(
+                                symbol_id=uuid.uuid4(),
+                                file_id=f_id,
+                                domain_id=code_domain_id,
+                                qualified_name=q_name,
+                                symbol_kind="class",
+                                start_line=idx,
+                                end_line=min(idx + 50, len(lines)),
+                                signature_skeleton=f"class {cls_name}:",
+                                contextual_summary=f"Class definition for {cls_name}",
+                                allowed_scopes=["public_eng"],
+                                embedding=[0.05] * 768,
+                            ),
+                        )
 
-    # Seed research doc chunks for quant_research_scout
-    repo.insert_doc_chunk(
-        admin_principal,
-        DocChunkRecord(
-            chunk_id=uuid.uuid4(),
-            domain_id="quant_research_scout",
-            doc_id="arxiv:2606.31387",
-            doc_title="Signature-Based Optimal Execution for Statistical Arbitrage",
-            source_uri="urn:arxiv:2606.31387.pdf",
-            market_scope=MarketRegime.US_NYSE_NASDAQ,
-            published_date=datetime.date(2026, 6, 15),
-            authority_weight=1.0,
-            section_heading="Optimal Liquidation Trajectory",
-            contextual_header="Quantitative optimal execution analysis.",
-            verbatim_content=(
-                "Optimal execution requires balancing market impact and inventory risk. "
-                "Order flow imbalance exhibits mean reversion over sub-second horizons."
-            ),
-            metadata_json={},
-            allowed_scopes=["public_eng", "public_quant", "quant_restricted"],
-            embedding=[0.05] * 768,
-        ),
-    )
-    repo.insert_doc_chunk(
-        admin_principal,
-        DocChunkRecord(
-            chunk_id=uuid.uuid4(),
-            domain_id="quant_research_scout",
-            doc_id="arxiv:2607.12944",
-            doc_title="Microstructure Alpha in European Equities and XETRA Order Books",
-            source_uri="urn:arxiv:2607.12944.pdf",
-            market_scope=MarketRegime.GERMANY_XETRA_DAX,
-            published_date=datetime.date(2026, 7, 20),
-            authority_weight=1.0,
-            section_heading="Tick-Level Dynamics",
-            contextual_header="European microstructure alpha modeling.",
-            verbatim_content=(
-                "XETRA continuous trading auctions enforce a minimum round-trip friction floor. "
-                "Statistical arbitrage strategies must clear at least 10 bps to remain profitable."
-            ),
-            metadata_json={},
-            allowed_scopes=["public_eng", "public_quant", "quant_restricted"],
-            embedding=[0.05] * 768,
-        ),
-    )
+    for domain_plugin in PluginRegistry.list_domain_plugins():
+        seed_payload = domain_plugin.get_demo_seed_payloads()
+        for doc_rec in seed_payload.get("doc_chunks", []):
+            repo.insert_doc_chunk(admin_principal, doc_rec)
     return repo
 
 
@@ -453,3 +590,20 @@ def get_repository() -> Any:
 def get_telemetry_tracer() -> ScoutTelemetryTracer:
     """Provides ScoutTelemetryTracer singleton."""
     return ScoutTelemetryTracer.get_instance()
+
+
+_local_gemma_client: LocalGemmaClient | None = None
+_local_gemma_lock = threading.Lock()
+
+
+def get_local_gemma_client() -> LocalGemmaClient:
+    """Provides a shared LocalGemmaClient so loaded MLX weights stay warm across requests."""
+    global _local_gemma_client
+    if _local_gemma_client is None:
+        with _local_gemma_lock:
+            if _local_gemma_client is None:
+                from context_scout.agents.scout_workflow import LocalGemmaClient
+
+                registry = get_domain_registry()
+                _local_gemma_client = LocalGemmaClient(adapter_pool=registry.adapter_pool)
+    return _local_gemma_client

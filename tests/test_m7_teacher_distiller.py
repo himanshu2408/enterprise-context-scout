@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from context_scout.config import ScoutSettings
+from context_scout.db.repositories import CodeFileRecord
+from context_scout.db.schema import ASTSymbolRecord
 from context_scout.schemas.contracts import (
     CodeSlicePointer,
     ModificationIntent,
@@ -201,9 +204,60 @@ class TestTeacherDistillerPipeline:
         assert quant_valid_file.is_file()
 
         # Zero leakage checks
-        assert TeacherDistiller.verify_zero_leakage(
-            code_train_file, code_valid_file, domain_id="trading_code_scout"
-        ) is True
-        assert TeacherDistiller.verify_zero_leakage(
-            quant_train_file, quant_valid_file, domain_id="quant_research_scout"
-        ) is True
+        assert (
+            TeacherDistiller.verify_zero_leakage(
+                code_train_file, code_valid_file, domain_id="trading_code_scout"
+            )
+            is True
+        )
+        assert (
+            TeacherDistiller.verify_zero_leakage(
+                quant_train_file, quant_valid_file, domain_id="quant_research_scout"
+            )
+            is True
+        )
+
+    def test_bounded_loop_protection_in_generate_code_split(
+        self, distiller: TeacherDistiller
+    ) -> None:
+        """Regression test for BUG-TD-01.
+
+        Verifies that TeacherDistiller._generate_code_split terminates cleanly
+        within bounded attempts when candidates fail validation or have line_count < 1,
+        preventing infinite process hangs.
+        """
+        f_id = uuid4()
+        f_rec = CodeFileRecord(
+            file_id=f_id,
+            domain_id="trading_code_scout",
+            repo_name="repo",
+            file_path="empty.py",
+            language="python",
+            raw_content="",
+            line_count=0,
+            git_commit_sha="1111111",
+            git_blob_sha="2222222",
+            allowed_scopes=["public_eng"],
+        )
+        sym = ASTSymbolRecord(
+            symbol_id=uuid4(),
+            file_id=f_id,
+            domain_id="trading_code_scout",
+            qualified_name="empty.FOO",
+            symbol_kind="variable",
+            start_line=1,
+            end_line=1,
+            signature_skeleton="FOO = 1",
+            contextual_summary="Constant",
+            allowed_scopes=["public_eng"],
+        )
+        # target_count is 10, but the symbol has line_count=0 (fails boundary check).
+        # Without bounded loop guard, this would hang indefinitely.
+        examples = distiller._generate_code_split(
+            pool_symbols=[sym],
+            all_edges=[],
+            files_by_id={f_id: f_rec},
+            target_count=10,
+            target_bounce_backs=0,
+        )
+        assert len(examples) == 0

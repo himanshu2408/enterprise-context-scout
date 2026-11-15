@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 from safetensors.torch import load_file
+from tests.fixtures.mock_generators import MockLocalGemmaClient
 
 from context_scout.agents.domain_registry import DomainRegistry
 from context_scout.agents.scout_workflow import LocalGemmaClient
@@ -122,7 +123,6 @@ class TestModelAcquisitionAndVerification:
                 metrics = json.load(f)
             assert metrics["device"] == "mlx:gpu"
             assert metrics["final_loss"] < metrics["initial_loss"]
-
 
 
 class TestQLoRAMemoryMath:
@@ -350,9 +350,7 @@ class TestVertexPEFTTrainer:
 
     def test_dry_run_validation(self) -> None:
         """Verifies dry-run validation checks pass and produce realistic cost estimates."""
-        trainer = VertexPEFTTrainer(
-            config=VertexPEFTConfig(domain_id="quant_research_scout")
-        )
+        trainer = VertexPEFTTrainer(config=VertexPEFTConfig(domain_id="quant_research_scout"))
         dry_run_res = trainer.dry_run()
 
         assert dry_run_res["status"] == "VALID"
@@ -467,8 +465,12 @@ class TestDomainAdaptersIntegration:
             client.load_adapter("non_existent_domain")
 
     def test_empirical_before_vs_after_benchmark_execution(self, tmp_path: Path) -> None:
-        """Verifies empirical benchmark execution and generated reports."""
-        runner = QLoRABenchmarkRunner(reports_dir=tmp_path)
+        """Verifies benchmark execution logic using MockLocalGemmaClient.
+
+        (simulated-model unit test result; not an empirical benchmark).
+        """
+        mock_client = MockLocalGemmaClient()
+        runner = QLoRABenchmarkRunner(reports_dir=tmp_path, client=mock_client)
         report_dict, md_report = runner.run_benchmark()
 
         assert report_dict["all_passed"] is True
@@ -502,4 +504,3 @@ class TestDomainAdaptersIntegration:
         assert (tmp_path / "m7_qlora_benchmark_report.json").is_file()
         assert (tmp_path / "m7_qlora_benchmark_report.md").is_file()
         assert "Milestone 7 Empirical QLoRA Benchmark Report" in md_report
-

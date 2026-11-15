@@ -18,15 +18,17 @@ dependencies = [
     "tree-sitter>=0.24.0,<0.27.0",
     "tree-sitter-python>=0.23.0,<0.26.0",
     "tree-sitter-typescript>=0.23.0,<0.25.0",
+    "tree-sitter-c-sharp>=0.23.0,<0.25.0",
+    "tree-sitter-hcl>=1.2.0,<2.0.0",
     "pypdf>=5.0.0,<7.0.0",
-    "sentence-transformers>=6.1.0",
-    "torch>=2.0.0",
-    "pillow>=13.0.0",
-    "torchvision>=0.29.2",
-    "fonttools>=4.68.0",
+    "sentence-transformers>=6.1.0,<7.0.0",
+    "torch>=2.0.0,<3.0.0",
+    "pillow>=13.0.0,<14.0.0",
+    "torchvision>=0.29.2,<0.30.0",
+    "fonttools>=4.68.0,<5.0.0",
     "mcp>=2.3.0,<3.0.0",
-    "google-adk>=2.12.0",
-    "google-genai>=2.31.0",
+    "google-adk>=2.12.0,<3.0.0",
+    "google-genai>=2.31.0,<3.0.0",
     "opentelemetry-api>=1.30.0,<2.0.0",
     "opentelemetry-sdk>=1.30.0,<2.0.0",
     "opentelemetry-semantic-conventions>=0.47b0,<1.0.0",
@@ -58,11 +60,11 @@ dev = [
     "mypy>=1.13.0,<2.0.0",
     "types-PyYAML>=6.0.12,<7.0.0",
     "httpx>=0.28.0,<1.0.0",
-    "trustme>=1.2.1",
-    "chardet>=5.2.0",
-    "trio>=0.27.0",
-    "zstandard>=0.23.0",
-    "brotli>=1.1.0",
+    "trustme>=1.2.1,<2.0.0",
+    "chardet>=5.2.0,<8.0.0",
+    "trio>=0.27.0,<1.0.0",
+    "zstandard>=0.23.0,<1.0.0",
+    "brotli>=1.1.0,<2.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -81,6 +83,7 @@ python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+explicit_package_bases = true
 mypy_path = "src"
 packages = ["context_scout"]
 
@@ -89,6 +92,8 @@ module = [
     "tree_sitter",
     "tree_sitter_python",
     "tree_sitter_typescript",
+    "tree_sitter_c_sharp",
+    "tree_sitter_hcl",
     "scipy",
     "scipy.optimize",
     "mlx",
@@ -100,10 +105,12 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 asyncio_mode = "auto"
 addopts = "-q --strict-markers"
 markers = [
     "postgres: Live PostgreSQL 17 database integration tests",
     "live: Live external API / service integration tests",
+    "benchmark: Performance benchmark tests measuring latencies and SLAs",
 ]
 

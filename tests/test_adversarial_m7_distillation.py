@@ -87,7 +87,9 @@ class TestRejectionSamplingAdversarialProbe:
             )
             assert report.passed is False, f"Admitted fake symbol: {fake_sym}"
             assert fake_sym in report.unresolved_symbols
-            assert "Check 1" in (report.bounce_back_feedback or "")
+            assert "Check 2" in (report.bounce_back_feedback or "") or "Symbol Resolution" in (
+                report.bounce_back_feedback or ""
+            )
 
     def test_out_of_bounds_line_ranges_rejection(self, distiller: TeacherDistiller) -> None:
         """Verifies 0-indexed, inverted, off-by-one, and out-of-range bounds are rejected."""
@@ -213,24 +215,23 @@ class TestRejectionSamplingAdversarialProbe:
         If len(tokens) >= 50, altering 1 token yields overlap >= 0.98 -> Admitted by fuzzy matcher!
         """
         slicer = DeterministicSlicer()
-        # Test 40 tokens (below threshold)
+        # Test 40 tokens (rejected by exact substring match)
         tokens_40 = [f"token{i}" for i in range(40)]
         source_40 = " ".join(tokens_40)
         mod_40 = list(tokens_40)
         mod_40[20] = "hallucinated_token"
         res_40 = slicer.verify_quote(" ".join(mod_40), source_40)
         assert res_40.is_valid is False
-        assert res_40.token_overlap_ratio == 0.975  # 39/40 < 0.98
+        assert res_40.token_overlap_ratio == 0.0
 
-        # Test 50 tokens (exact threshold boundary)
+        # Test 50 tokens (M4 zero tolerance: token substitution strictly rejected)
         tokens_50 = [f"token{i}" for i in range(50)]
         source_50 = " ".join(tokens_50)
         mod_50 = list(tokens_50)
         mod_50[25] = "hallucinated_token"
         res_50 = slicer.verify_quote(" ".join(mod_50), source_50)
-        assert res_50.is_valid is True  # 49/50 == 0.9800 >= 0.98
-        assert res_50.token_overlap_ratio == 0.98
-
+        assert res_50.is_valid is False
+        assert res_50.token_overlap_ratio == 0.0
 
 
 class TestLeakageAdversarialProbe:

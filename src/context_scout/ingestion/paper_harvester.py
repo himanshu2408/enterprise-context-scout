@@ -435,7 +435,7 @@ def resolve_latex_includes(
 
     def replace_directive(match: re.Match[str]) -> str:
         target = match.group(1).strip()
-        target = target.strip('"\'{} ')
+        target = target.strip("\"'{} ")
         candidates = [
             target,
             f"{target}.tex",
@@ -485,8 +485,8 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
                             tex_files[member.name] = raw_member.decode("utf-8")
                         except UnicodeDecodeError:
                             tex_files[member.name] = raw_member.decode("latin-1", errors="replace")
-    except (tarfile.TarError, gzip.BadGzipFile, EOFError, OSError, zlib.error):
-        pass
+    except (tarfile.TarError, gzip.BadGzipFile, EOFError, OSError, zlib.error) as exc:
+        logger.debug("Archive is not a valid tar bundle (%s): %s", type(exc).__name__, exc)
 
     # 2. If no tex files found via tar, try standalone gzip decompression
     if not tex_files:
@@ -506,7 +506,12 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
                                     tex_files[member.name] = raw_member.decode(
                                         "latin-1", errors="replace"
                                     )
-            except (tarfile.TarError, OSError, EOFError):
+            except (tarfile.TarError, OSError, EOFError) as exc:
+                logger.debug(
+                    "Gzipped LaTeX payload is not a nested tar archive (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
                 # Single standalone .tex file
                 try:
                     text = decompressed.decode("utf-8")
@@ -514,8 +519,12 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
                     text = decompressed.decode("latin-1", errors="replace")
                 if "\\documentclass" in text or "\\begin{document}" in text or "%" in text:
                     return text
-        except (gzip.BadGzipFile, OSError, UnicodeDecodeError, EOFError, zlib.error):
-            pass
+        except (gzip.BadGzipFile, OSError, UnicodeDecodeError, EOFError, zlib.error) as exc:
+            logger.debug(
+                "Standalone gzip LaTeX decompression skipped (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
 
     if not tex_files:
         # Check if raw_bytes was already uncompressed text
@@ -523,8 +532,8 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
             plain = raw_bytes.decode("utf-8")
             if "\\documentclass" in plain or "\\begin{document}" in plain:
                 return plain
-        except UnicodeDecodeError:
-            pass
+        except UnicodeDecodeError as exc:
+            logger.debug("Raw LaTeX payload is not UTF-8 text (%s): %s", type(exc).__name__, exc)
         return None
 
     # 3. Identify root .tex file (scoring out journal guides/templates in subdirectories)
@@ -550,9 +559,7 @@ def unpack_latex_archive(raw_bytes: bytes) -> str | None:
     return resolve_latex_includes(root_candidate, tex_files)
 
 
-def extract_tex_title_and_abstract(
-    tex_content: str, fallback_title: str
-) -> tuple[str, str]:
+def extract_tex_title_and_abstract(tex_content: str, fallback_title: str) -> tuple[str, str]:
     """Extracts clean academic title and abstract from raw LaTeX manuscript source."""
     clean = re.sub(r"(?<!\\)%.*", "", tex_content)
     title = ""
@@ -631,7 +638,13 @@ def parse_arxiv_atom_feed(xml_text: str, market_scope: MarketRegime) -> list[Har
             pub_date = (
                 date.fromisoformat(pub_text[:10]) if len(pub_text) >= 10 else date(2024, 1, 1)
             )
-        except ValueError:
+        except ValueError as exc:
+            logger.debug(
+                "Invalid arXiv published date %r (%s): %s",
+                pub_text,
+                type(exc).__name__,
+                exc,
+            )
             pub_date = date(2024, 1, 1)
 
         authors: list[str] = []
@@ -693,7 +706,13 @@ def parse_openalex_response(
         pub_date_str = str(item.get("publication_date", ""))
         try:
             pub_date = date.fromisoformat(pub_date_str) if pub_date_str else date(2024, 1, 1)
-        except ValueError:
+        except ValueError as exc:
+            logger.debug(
+                "Invalid OpenAlex publication date %r (%s): %s",
+                pub_date_str,
+                type(exc).__name__,
+                exc,
+            )
             pub_date = date(2024, 1, 1)
 
         authorships = item.get("authorships")
@@ -711,9 +730,7 @@ def parse_openalex_response(
         abstract = ""
         if isinstance(raw_inv, dict):
             typed_inv: dict[str, list[int]] = {
-                str(k): [int(p) for p in v]
-                for k, v in raw_inv.items()
-                if isinstance(v, list)
+                str(k): [int(p) for p in v] for k, v in raw_inv.items() if isinstance(v, list)
             }
             abstract = _reconstruct_openalex_abstract(typed_inv)
 
@@ -958,8 +975,13 @@ class HttpPaperHarvesterClient:
                             raw_tex_oa = unpack_latex_archive(data)
                             if raw_tex_oa:
                                 break
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug(
+                            "arXiv e-print fallback failed for %s (%s): %s",
+                            arxiv_id,
+                            type(exc).__name__,
+                            exc,
+                        )
 
                     if not raw_tex_oa and not raw_pdf_oa:
                         try:
@@ -972,8 +994,13 @@ class HttpPaperHarvesterClient:
                                 if data.startswith(b"%PDF"):
                                     raw_pdf_oa = data
                                     break
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug(
+                                "arXiv PDF fallback failed for %s (%s): %s",
+                                arxiv_id,
+                                type(exc).__name__,
+                                exc,
+                            )
 
                 try:
                     req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
@@ -982,7 +1009,13 @@ class HttpPaperHarvesterClient:
                         if pdf_bytes.startswith(b"%PDF"):
                             raw_pdf_oa = pdf_bytes
                             break
-                except Exception:
+                except Exception as exc:
+                    logger.debug(
+                        "Open-access PDF fetch failed for %s (%s): %s",
+                        url,
+                        type(exc).__name__,
+                        exc,
+                    )
                     continue
 
             if raw_tex_oa or raw_pdf_oa:
@@ -1010,8 +1043,7 @@ FIXTURE_PAPERS: Final[dict[MarketRegime, list[HarvestedPaper]]] = {
             doc_id="arxiv:2403.01182",
             source=HarvesterSource.ARXIV,
             title=(
-                "Momentum and Reversal Dynamics in Indian Equities with "
-                "Securities Transaction Tax"
+                "Momentum and Reversal Dynamics in Indian Equities with Securities Transaction Tax"
             ),
             authors=["Arjun Sharma", "Priya Venkatesh"],
             published_date=date(2024, 3, 15),
@@ -1114,8 +1146,7 @@ Total round-trip rebalancing friction on DAX constituents averages 10 bps.
             doc_id="arxiv:2401.05432",
             source=HarvesterSource.ARXIV,
             title=(
-                "High-Frequency Limit Order Book Imbalance and Optimal Execution "
-                "in US Equities"
+                "High-Frequency Limit Order Book Imbalance and Optimal Execution in US Equities"
             ),
             authors=["David Chen", "Sarah Jenkins"],
             published_date=date(2024, 1, 10),
@@ -1150,7 +1181,6 @@ C_{\text{US}} = \text{HalfSpread} + \tau_{\text{SEC}} + \tau_{\text{FINRA}} \ge 
         )
     ],
 }
-
 
 
 class MockPaperHarvesterClient:

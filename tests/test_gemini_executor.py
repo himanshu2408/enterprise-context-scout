@@ -24,7 +24,6 @@ from context_scout.agents.gemini_executor import (
     FAST_EXEC_COST_PER_MILLION_INPUT,
     FRONTIER_COST_PER_MILLION_INPUT,
     FRONTIER_REASONING_MODEL_ID,
-    BudgetExceededError,
     GeminiImplementationExecutor,
     GitWorktreeSandbox,
 )
@@ -42,6 +41,7 @@ from context_scout.schemas.contracts import (
     RoleType,
     VerbatimCodeSlice,
 )
+from context_scout.telemetry.cost_governance import BudgetExceededError
 
 DOMAIN_ID: Final[str] = "trading_code_scout"
 REPO_NAME: Final[str] = "trading-engine"
@@ -188,7 +188,9 @@ def test_principal_budget_enforcement_prevents_paid_call(
         executor.check_principal_budget(principal, sample_context_pack, repo=repo)
 
     assert "exceeded session token budget" in str(exc_info.value)
-    assert "consumed 14000 + requested 4000 > cap 16000" in str(exc_info.value)
+    assert "consumed 14000 + projected 8096 (prompt: 4000, max_output: 4096) > cap 16000" in str(
+        exc_info.value
+    )
 
     # Full execution also aborts at the budget gate
     with pytest.raises(BudgetExceededError):
@@ -309,9 +311,9 @@ def test_git_worktree_sandbox_lifecycle_and_patch_application(
     assert not sandbox.worktree_dir.exists()
 
     # Original repo remains untouched on main branch
-    orig_content = (
-        temp_git_repo / "src" / "trading_strategies" / "order_manager.py"
-    ).read_text(encoding="utf-8")
+    orig_content = (temp_git_repo / "src" / "trading_strategies" / "order_manager.py").read_text(
+        encoding="utf-8"
+    )
     assert "# Added parameter doc" not in orig_content
 
 
@@ -322,7 +324,7 @@ def test_git_worktree_sandbox_invalid_patch_handling(temp_git_repo: Path) -> Non
     with GitWorktreeSandbox(repo_root=temp_git_repo) as sandbox:
         ok, err = sandbox.apply_patch(invalid_patch)
         assert ok is False
-        assert len(err) > 0
+        assert "no valid patches" in err.lower() or "unrecognized input" in err.lower()
 
 
 def test_human_confirmation_gate_blocks_merge_until_approved(
@@ -386,6 +388,7 @@ def test_live_postgres_execution_telemetry_persistence(
     principal: PrincipalContext,
     sample_context_pack: ImplementationContextPack,
     temp_git_repo: Path,
+    ephemeral_pg_domain: str,
 ) -> None:
     """Integration test persisting telemetry directly into PostgreSQL 17 execution_telemetry."""
     settings = ScoutSettings()
@@ -396,11 +399,12 @@ def test_live_postgres_execution_telemetry_persistence(
         allowed_scopes=list(principal.allowed_scopes),
         max_session_paid_tokens=principal.max_session_paid_tokens,
     )
+    isolated_pack = sample_context_pack.model_copy(update={"domain_id": ephemeral_pg_domain})
 
     with conn_mgr.scoped_transaction(live_principal) as conn:
         executor = GeminiImplementationExecutor(api_key=None)
         result, telemetry = executor.execute_implementation(
-            pack=sample_context_pack,
+            pack=isolated_pack,
             principal=live_principal,
             repo_root=temp_git_repo,
             conn=conn,
@@ -414,6 +418,67 @@ def test_live_postgres_execution_telemetry_persistence(
         retrieved = pg_repo.get_execution_telemetry(conn, telemetry.trace_id)
         assert retrieved is not None
         assert retrieved.trace_id == telemetry.trace_id
-        assert retrieved.domain_id == DOMAIN_ID
+        assert retrieved.domain_id == ephemeral_pg_domain
         assert retrieved.paid_tokens_saved == telemetry.paid_tokens_saved
         assert retrieved.estimated_usd_saved == telemetry.estimated_usd_saved
+
+
+def test_worst_case_output_projection_prevents_mid_stream_budget_breach(
+    temp_git_repo: Path,
+) -> None:
+    """Regression test for Miss 9: Worst-case max_output_tokens projection in budget check.
+
+    A principal with session_budget_tokens=1000, prompt tokens=800, and max_output_tokens=4096.
+    While 800 <= 1000, 800 + 4096 = 4896 > 1000, so calling execute_implementation
+    (or check_principal_budget) MUST raise BudgetExceededError.
+    """
+    principal = PrincipalContext(
+        user_id="budget_constrained_engineer",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng", "repo:trading_strategies"],
+        session_budget_tokens=1000,
+    )
+    slice1 = VerbatimCodeSlice(
+        repo_name=REPO_NAME,
+        file_path="src/trading_strategies/order_manager.py",
+        start_line=1,
+        end_line=5,
+        qualified_symbol="OrderManager.submit_order",
+        selection_reason="Target method",
+        modification_intent=ModificationIntent.MODIFY_TARGET,
+        git_commit_sha="abc1234",
+        git_blob_sha="def5678",
+        verbatim_code_with_lines="   1 | class OrderManager:\n",
+    )
+    pack = ImplementationContextPack(
+        trace_id=str(uuid.uuid4()),
+        domain_id=DOMAIN_ID,
+        user_task="Test worst case budget projection",
+        architectural_execution_plan=["Plan"],
+        code_slices=[slice1],
+        preflight_report=PreFlightValidationReport(
+            passed=True, normalized_rrf_score=0.9, citations_verified_100_pct=True
+        ),
+        local_tokens_consumed=5000,
+        pack_token_count=800,
+    )
+    executor = GeminiImplementationExecutor(api_key=None, require_confirmation=False)
+    repo = InMemoryRLSRepository()
+
+    # 1. check_principal_budget directly raises BudgetExceededError
+    with pytest.raises(BudgetExceededError) as exc_info:
+        executor.check_principal_budget(principal, pack, max_output_tokens=4096, repo=repo)
+    assert "exceeded session token budget" in str(exc_info.value)
+    assert "projected 4896 (prompt: 800, max_output: 4096) > cap 1000" in str(exc_info.value)
+
+    # 2. execute_implementation raises BudgetExceededError upfront before generation
+    with pytest.raises(BudgetExceededError) as exc_info_exec:
+        executor.execute_implementation(
+            pack=pack,
+            principal=principal,
+            repo_root=temp_git_repo,
+            repo=repo,
+            max_output_tokens=4096,
+        )
+    assert "exceeded session token budget" in str(exc_info_exec.value)
+    assert "projected 4896 (prompt: 800, max_output: 4096) > cap 1000" in str(exc_info_exec.value)

@@ -28,7 +28,8 @@ from context_scout.api.schemas import (
     HandoffPreviewResponse,
 )
 from context_scout.config import validate_google_model_id
-from context_scout.schemas.contracts import PrincipalContext
+from context_scout.schemas.contracts import PrincipalContext, RoleType
+from context_scout.telemetry.cost_governance import PaidComputeCostEstimator
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,11 @@ def preview_handoff(
     token_store: Annotated[ConfirmationTokenStore, Depends(get_confirmation_token_store)],
 ) -> HandoffPreviewResponse:
     """Generates patch preview and confirmation token without mutating repository files."""
+    if principal.role != RoleType.ENGINEER:
+        raise HTTPException(
+            status_code=403,
+            detail="Sandboxed patch handoff is restricted to Engineer principals (SEC-04).",
+        )
     repo_root = get_repo_root()
 
     # 1. Validate model ID (e.g. gemini-3.8-flash or gemini-4-argon)
@@ -82,21 +88,20 @@ def preview_handoff(
     except BudgetExceededError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
-    # 3. Generate patch diff (custom, live Gemini API if key set, or deterministic synthesis)
+    # 3. Generate patch diff for preview (custom or deterministic synthesis without paid compute)
     if request.custom_patch is not None:
         patch_diff = request.custom_patch
-    elif executor.api_key:
-        patch_diff = executor._generate_gemini_patch(request.pack, repo_root)
     else:
         patch_diff = executor._generate_deterministic_patch(request.pack, repo_root)
 
     # 4. Extract target files
     target_files = executor._extract_target_files(patch_diff, request.pack)
 
-    # 5. Calculate token & cost telemetry
+    # 5. Calculate token & cost telemetry using October 2026 cost estimator
     pack_tokens = request.pack.pack_token_count
     local_tokens = request.pack.local_tokens_consumed
-    cost_usd = round((pack_tokens / 1_000_000.0) * 0.75, 6)
+    cost_report = PaidComputeCostEstimator().calculate_cost_estimate(validated_model, pack_tokens)
+    cost_usd = cost_report.cost_expected_usd
     savings_usd = round(max(0.0, (local_tokens / 1_000_000.0) * 4.00 - cost_usd), 4)
 
     # 6. Save preview record in token store
@@ -120,6 +125,10 @@ def preview_handoff(
         pack_token_count=pack_tokens,
         estimated_paid_cost_usd=cost_usd,
         estimated_paid_savings_usd=savings_usd,
+        cost_low_usd=cost_report.cost_low_usd,
+        cost_expected_usd=cost_report.cost_expected_usd,
+        cost_high_usd=cost_report.cost_high_usd,
+        pricing_source=cost_report.pricing_source,
         requires_human_confirmation=True,
         expires_in_seconds=3600,
         created_at=datetime.now(UTC).isoformat(),
@@ -134,6 +143,11 @@ def apply_handoff(
     token_store: Annotated[ConfirmationTokenStore, Depends(get_confirmation_token_store)],
 ) -> HandoffApplyResponse:
     """Applies and verifies patch in worktree sandbox after explicit human confirmation."""
+    if principal.role != RoleType.ENGINEER:
+        raise HTTPException(
+            status_code=403,
+            detail="Sandboxed patch handoff is restricted to Engineer principals (SEC-04).",
+        )
     repo_root = get_repo_root()
 
     # 1. Enforce explicit human confirmation

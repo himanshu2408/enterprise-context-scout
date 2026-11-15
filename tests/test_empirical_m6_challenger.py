@@ -527,9 +527,7 @@ class TestGate3VerbatimCitationFaithfulness:
         """Alters start_line by +1 and asserts faithfulness fails."""
         rel_path = "src/context_scout/trading_strategies/volatility_garch.py"
         raw_content = (harness.repo_root / rel_path).read_text(encoding="utf-8")
-        exact_slice = harness.slicer.slice_lines(
-            raw_content=raw_content, start_line=1, end_line=20
-        )
+        exact_slice = harness.slicer.slice_lines(raw_content=raw_content, start_line=1, end_line=20)
 
         off_by_one_slice = VerbatimCodeSlice(
             repo_name="enterprise-context-scout",
@@ -611,9 +609,7 @@ class TestGate3VerbatimCitationFaithfulness:
         # Baseline: Valid quote matches verbatim
         rel_path = "src/context_scout/trading_strategies/volatility_garch.py"
         raw_code = (harness.repo_root / rel_path).read_text(encoding="utf-8")
-        exact_slice = harness.slicer.slice_lines(
-            raw_content=raw_code, start_line=1, end_line=20
-        )
+        exact_slice = harness.slicer.slice_lines(raw_content=raw_code, start_line=1, end_line=20)
         real_slice = VerbatimCodeSlice(
             repo_name="enterprise-context-scout",
             file_path=rel_path,

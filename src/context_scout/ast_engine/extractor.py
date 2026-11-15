@@ -1,13 +1,317 @@
-"""Multi-language Tree-Sitter AST extractor for Python and TypeScript/TSX."""
+"""Multi-language Tree-Sitter AST extractor for Python, TypeScript/TSX, and HCL."""
 
+import logging
 import re
+from dataclasses import dataclass
 from typing import Final, Literal
 
+import tree_sitter_hcl as tshcl
 import tree_sitter_python as tspython
 import tree_sitter_typescript as tstypescript
 from tree_sitter import Language, Node, Parser, Tree
 
 from context_scout.ast_engine.models import ParsedEdge, ParsedSymbol
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ParseDiagnostics:
+    """Structured diagnostics recorded for every AST extraction attempt."""
+
+    parser_backend: str
+    has_parse_error: bool = False
+    abstained: bool = False
+    low_confidence_fallback: bool = False
+    error_node_count: int = 0
+    missing_node_count: int = 0
+    reason: str = ""
+
+
+def inspect_tree_errors(root_node: Node) -> tuple[bool, int, int]:
+    """Counts ERROR and MISSING nodes in a tree-sitter AST iteratively.
+
+    Returns ``(has_error, error_node_count, missing_node_count)``.
+    """
+    error_count = 0
+    missing_count = 0
+    stack: list[Node] = [root_node]
+    while stack:
+        node = stack.pop()
+        if node.is_error or node.type == "ERROR":
+            error_count += 1
+        if node.is_missing:
+            missing_count += 1
+        stack.extend(reversed(node.children))
+    has_error = bool(root_node.has_error or error_count > 0 or missing_count > 0)
+    return has_error, error_count, missing_count
+
+
+_HCL_PARSER: Parser | None = None
+
+
+def _get_hcl_parser() -> Parser:
+    global _HCL_PARSER
+    if _HCL_PARSER is None:
+        _HCL_PARSER = Parser(Language(tshcl.language()))
+    return _HCL_PARSER
+
+
+def _unquote_hcl_string(node: Node, code_bytes: bytes) -> str:
+    for child in node.children:
+        if child.type == "template_literal":
+            return _node_text(child, code_bytes)
+    text = _node_text(node, code_bytes).strip()
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        return text[1:-1]
+    return text
+
+
+def _collect_hcl_attr_chains(node: Node, code_bytes: bytes) -> list[list[str]]:
+    """Extracts identifier chains (e.g. ['var', 'region'] or ['data', 'img', 'debian']) from AST."""
+    chains: list[list[str]] = []
+
+    def _walk(curr: Node) -> None:
+        if curr.type == "expression":
+            children = [c for c in curr.children if c.is_named]
+            if children and children[0].type == "variable_expr":
+                ident = _node_text(children[0], code_bytes).strip()
+                parts = [ident]
+                for sibling in children[1:]:
+                    if sibling.type == "get_attr":
+                        attr_id = next(
+                            (gc for gc in sibling.children if gc.type == "identifier"),
+                            None,
+                        )
+                        if attr_id is not None:
+                            parts.append(_node_text(attr_id, code_bytes).strip())
+                    else:
+                        break
+                if len(parts) >= 2:
+                    chains.append(parts)
+                # Still inspect any remaining non-chain children (e.g. index expressions)
+                for sibling in children[len(parts) :]:
+                    _walk(sibling)
+                return
+        for child in curr.children:
+            _walk(child)
+
+    _walk(node)
+    return chains
+
+
+def parse_hcl_ast(
+    code: str,
+    file_path: str = "",
+    repo_name: str = "",
+    module_prefix: str = "",
+    *,
+    module_symbol_kind: Literal["class", "interface"] = "class",
+) -> tuple[list[ParsedSymbol], list[ParsedEdge], ParseDiagnostics]:
+    """Parses Terraform HCL using tree-sitter-hcl and fails closed on syntax errors."""
+    code_bytes = code.encode("utf-8")
+    tree = _get_hcl_parser().parse(code_bytes)
+    has_err, err_cnt, miss_cnt = inspect_tree_errors(tree.root_node)
+    if has_err:
+        reason = (
+            f"Partial/invalid HCL syntax in '{file_path or '<memory>'}': "
+            f"error_nodes={err_cnt}, missing_nodes={miss_cnt}"
+        )
+        logger.warning("%s; abstaining from partial AST extraction", reason)
+        return (
+            [],
+            [],
+            ParseDiagnostics(
+                parser_backend="tree-sitter-hcl",
+                has_parse_error=True,
+                abstained=True,
+                low_confidence_fallback=False,
+                error_node_count=err_cnt,
+                missing_node_count=miss_cnt,
+                reason=reason,
+            ),
+        )
+
+    symbols: list[ParsedSymbol] = []
+    edges: list[ParsedEdge] = []
+    top_body = next((c for c in tree.root_node.children if c.type == "body"), None)
+    if top_body is None:
+        return symbols, edges, ParseDiagnostics(parser_backend="tree-sitter-hcl")
+
+    def _qualify(bare_name: str) -> str:
+        if repo_name:
+            return f"{repo_name}::{module_prefix}::{bare_name}"
+        return f"{module_prefix}.{bare_name}" if module_prefix else bare_name
+
+    for block in top_body.children:
+        if block.type != "block":
+            continue
+        block_type_node = next((c for c in block.children if c.type == "identifier"), None)
+        if block_type_node is None:
+            continue
+        block_type = _node_text(block_type_node, code_bytes).strip()
+        if block_type not in ("resource", "data", "module", "variable", "output", "provider"):
+            continue
+
+        labels: list[str] = []
+        for child in block.children:
+            if child.type == "block_start":
+                break
+            if child.type == "string_lit":
+                labels.append(_unquote_hcl_string(child, code_bytes))
+            elif child.type == "identifier" and child is not block_type_node:
+                labels.append(_node_text(child, code_bytes).strip())
+
+        if not labels:
+            continue
+        first_label = labels[0]
+        second_label = labels[1] if len(labels) > 1 else None
+
+        if block_type in ("resource", "data"):
+            bare = f"{first_label}.{second_label}" if second_label else first_label
+            sym_display = second_label or first_label
+            sym_kind: Literal["function", "class", "method", "interface", "type_alias"] = "class"
+        elif block_type == "module":
+            bare = f"module.{first_label}"
+            sym_display = first_label
+            sym_kind = module_symbol_kind
+        elif block_type in ("variable", "output"):
+            bare = first_label
+            sym_display = first_label
+            sym_kind = "type_alias"
+        else:  # provider
+            bare = f"provider.{first_label}"
+            sym_display = first_label
+            sym_kind = "interface"
+
+        repo_qual = _qualify(bare)
+        start_line = block.start_point[0] + 1
+        end_line = block.end_point[0] + 1
+        block_text = _node_text(block, code_bytes)
+        sig_line = block_text.splitlines()[0].strip() if block_text else f"{block_type} {bare}"
+
+        symbols.append(
+            ParsedSymbol(
+                name=sym_display,
+                qualified_name=repo_qual,
+                symbol_kind=sym_kind,
+                start_line=start_line,
+                end_line=end_line,
+                start_byte=block.start_byte,
+                end_byte=block.end_byte,
+                signature=sig_line,
+                signature_skeleton=f"{block_type} {bare}",
+                contextual_summary=(
+                    f"Terraform {block_type} '{bare}' in {file_path}"
+                    if file_path
+                    else f"Terraform {block_type} {bare}: {sig_line}"
+                ),
+                repo_name=repo_name,
+                repo_qualified_id=repo_qual if repo_name else None,
+                bare_name=bare,
+            )
+        )
+
+        body_node = next((c for c in block.children if c.type == "body"), None)
+        if body_node is None:
+            continue
+
+        def _visit_body(
+            b_node: Node,
+            source_qual: str = repo_qual,
+            self_bare: str = bare,
+        ) -> None:
+            for item in b_node.children:
+                if item.type == "attribute":
+                    attr_id_node = next((c for c in item.children if c.type == "identifier"), None)
+                    attr_name = _node_text(attr_id_node, code_bytes).strip()
+                    expr_node = next((c for c in item.children if c.type == "expression"), None)
+                    if expr_node is None:
+                        continue
+                    chains = _collect_hcl_attr_chains(expr_node, code_bytes)
+                    if attr_name == "depends_on":
+                        for parts in chains:
+                            dep_bare = ".".join(parts[:2]) if len(parts) >= 2 else parts[0]
+                            edges.append(
+                                ParsedEdge(
+                                    source_qualified_name=source_qual,
+                                    target_qualified_name=_qualify(dep_bare),
+                                    edge_kind="PROVISIONED_BY",
+                                )
+                            )
+                        continue
+
+                    for parts in chains:
+                        head = parts[0]
+                        if head == "var" and len(parts) >= 2:
+                            edges.append(
+                                ParsedEdge(
+                                    source_qualified_name=source_qual,
+                                    target_qualified_name=_qualify(parts[1]),
+                                    edge_kind="USES_TYPE",
+                                )
+                            )
+                        elif head == "data" and len(parts) >= 3:
+                            d_bare = f"{parts[1]}.{parts[2]}"
+                            if d_bare != self_bare:
+                                edges.append(
+                                    ParsedEdge(
+                                        source_qualified_name=source_qual,
+                                        target_qualified_name=_qualify(d_bare),
+                                        edge_kind="CALLS",
+                                    )
+                                )
+                        elif head == "module" and len(parts) >= 2:
+                            m_bare = f"module.{parts[1]}"
+                            if m_bare != self_bare:
+                                edges.append(
+                                    ParsedEdge(
+                                        source_qualified_name=source_qual,
+                                        target_qualified_name=_qualify(m_bare),
+                                        edge_kind="CALLS",
+                                    )
+                                )
+                        elif (
+                            head
+                            not in (
+                                "var",
+                                "local",
+                                "count",
+                                "each",
+                                "true",
+                                "false",
+                                "null",
+                                "self",
+                                "path",
+                                "terraform",
+                                "data",
+                            )
+                            and len(parts) >= 2
+                            and "_" in head
+                        ):
+                            t_bare = f"{head}.{parts[1]}"
+                            if t_bare != self_bare:
+                                edge_kind = "CALLS"
+                                if "service_account" in head:
+                                    edge_kind = "BINDS_SERVICE_ACCOUNT"
+                                elif "secret" in head:
+                                    edge_kind = "ACCESSES_SECRET"
+                                edges.append(
+                                    ParsedEdge(
+                                        source_qualified_name=source_qual,
+                                        target_qualified_name=_qualify(t_bare),
+                                        edge_kind=edge_kind,
+                                    )
+                                )
+                elif item.type == "block":
+                    nested_body = next((c for c in item.children if c.type == "body"), None)
+                    if nested_body is not None:
+                        _visit_body(nested_body, source_qual, self_bare)
+
+        _visit_body(body_node, repo_qual, bare)
+
+    return symbols, edges, ParseDiagnostics(parser_backend="tree-sitter-hcl")
+
 
 PY_PRIMITIVES: Final[set[str]] = {
     "int",
@@ -120,6 +424,7 @@ class ASTExtractor:
         self.ts_parser = Parser(self.ts_lang)
         self.tsx_parser = Parser(self.tsx_lang)
         self._active_tree: Tree | None = None
+        self.last_parse_diagnostics: ParseDiagnostics | None = None
 
     def parse_source(
         self,
@@ -127,59 +432,177 @@ class ASTExtractor:
         language: str,
         file_path: str = "",
         module_prefix: str = "",
+        repo_name: str = "",
     ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
         """Parses source code into symbols and directed edges."""
         if not module_prefix and file_path:
             module_prefix = _derive_module_prefix(file_path)
 
+        self.last_parse_diagnostics = None
+
+        # ---------------------------------------------------------------------
+        # F10 Integration Bridge: Check Declarative PluginRegistry First
+        # ---------------------------------------------------------------------
+        try:
+            from context_scout.plugins.registry import PluginRegistry
+
+            plugin = None
+            if file_path:
+                plugin = PluginRegistry.get_plugin_for_file(file_path)
+            if plugin is None and language:
+                plugin = PluginRegistry.get_language_plugin(language)
+
+            if plugin is not None and plugin.language_id == "react_redux":
+                lang_norm = language.lower()
+                if lang_norm in ("typescript", "ts", "javascript", "js") and not (
+                    file_path.lower().endswith((".tsx", ".jsx"))
+                ):
+                    react_redux_markers = (
+                        "createSlice",
+                        "createSelector",
+                        "useSelector",
+                        "useAppSelector",
+                        "useDispatch",
+                        "useAppDispatch",
+                        "from 'react'",
+                        'from "react"',
+                        "react-redux",
+                        "@reduxjs/toolkit",
+                    )
+                    if not any(marker in code for marker in react_redux_markers):
+                        plugin = None
+
+            if plugin is not None:
+                symbols, edges = plugin.extract_ast(
+                    code=code,
+                    file_path=file_path,
+                    repo_name=repo_name,
+                    module_prefix=module_prefix,
+                )
+                self.last_parse_diagnostics = getattr(plugin, "last_parse_diagnostics", None)
+                return symbols, edges
+        except Exception as bridge_exc:
+            logger.warning(
+                "Plugin delegation for '%s' (%s) fell through to built-in: %s",
+                file_path,
+                language,
+                bridge_exc,
+            )
+
         code_bytes = code.encode("utf-8")
         lang_lower = language.lower()
 
+        raw_symbols: list[ParsedSymbol]
+        raw_edges: list[ParsedEdge]
+
         if lang_lower in ("python", "py"):
             self._active_tree = self.py_parser.parse(code_bytes)
-            return self._extract_python(
+            raw_symbols, raw_edges = self._extract_python(
                 self._active_tree.root_node, code_bytes, module_prefix, file_path
             )
         elif lang_lower in ("typescript", "ts", "javascript", "js", "mjs", "cjs"):
             self._active_tree = self.ts_parser.parse(code_bytes)
-            return self._extract_typescript(
+            raw_symbols, raw_edges = self._extract_typescript(
                 self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=False
             )
         elif lang_lower in ("tsx", "jsx"):
             self._active_tree = self.tsx_parser.parse(code_bytes)
-            return self._extract_typescript(
+            raw_symbols, raw_edges = self._extract_typescript(
                 self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=True
             )
         elif lang_lower == "sql" or file_path.endswith(".sql"):
-            return self._extract_sql(code, code_bytes, module_prefix)
+            raw_symbols, raw_edges = self._extract_sql(code, code_bytes, module_prefix)
         elif lang_lower in ("yaml", "yml") or file_path.endswith((".yaml", ".yml")):
-            return self._extract_yaml(code, code_bytes, module_prefix, file_path)
+            raw_symbols, raw_edges = self._extract_yaml(code, code_bytes, module_prefix, file_path)
         elif lang_lower in ("terraform", "hcl", "tf") or file_path.endswith(".tf"):
-            return self._extract_terraform(code, code_bytes, module_prefix)
+            raw_symbols, raw_edges = self._extract_terraform(code, code_bytes, module_prefix)
         elif lang_lower in ("go", "golang") or file_path.endswith(".go"):
-            return self._extract_compiled_lang(code, code_bytes, module_prefix, "go")
+            raw_symbols, raw_edges = self._extract_compiled_lang(
+                code, code_bytes, module_prefix, "go"
+            )
         elif lang_lower in ("rust", "rs") or file_path.endswith(".rs"):
-            return self._extract_compiled_lang(code, code_bytes, module_prefix, "rust")
+            raw_symbols, raw_edges = self._extract_compiled_lang(
+                code, code_bytes, module_prefix, "rust"
+            )
         elif lang_lower == "java" or file_path.endswith(".java"):
-            return self._extract_compiled_lang(code, code_bytes, module_prefix, "java")
+            raw_symbols, raw_edges = self._extract_compiled_lang(
+                code, code_bytes, module_prefix, "java"
+            )
         elif lang_lower in ("markdown", "md") or file_path.endswith(".md"):
-            return self._extract_markdown(code, code_bytes, module_prefix)
+            raw_symbols, raw_edges = self._extract_markdown(code, code_bytes, module_prefix)
         else:
             if file_path.endswith(".py"):
                 self._active_tree = self.py_parser.parse(code_bytes)
-                return self._extract_python(
+                raw_symbols, raw_edges = self._extract_python(
                     self._active_tree.root_node, code_bytes, module_prefix, file_path
                 )
             elif file_path.endswith((".tsx", ".jsx")):
                 self._active_tree = self.tsx_parser.parse(code_bytes)
-                return self._extract_typescript(
+                raw_symbols, raw_edges = self._extract_typescript(
                     self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=True
                 )
             else:
                 self._active_tree = self.ts_parser.parse(code_bytes)
-                return self._extract_typescript(
+                raw_symbols, raw_edges = self._extract_typescript(
                     self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=False
                 )
+
+        if not repo_name:
+            return raw_symbols, raw_edges
+
+        # Repo-qualify symbols and edges (F09)
+        mod = module_prefix if module_prefix else _derive_module_prefix(file_path) or "root"
+        qual_map: dict[str, str] = {}
+        new_symbols: list[ParsedSymbol] = []
+        for s in raw_symbols:
+            bare = s.name
+            if module_prefix and s.qualified_name.startswith(module_prefix):
+                suffix = s.qualified_name[len(module_prefix) :].lstrip(".")
+                bare = suffix or s.name
+            elif "." in s.qualified_name:
+                bare = s.qualified_name.split(".")[-1]
+
+            repo_qual_id = f"{repo_name}::{mod}::{bare}"
+            qual_map[s.qualified_name] = repo_qual_id
+            new_symbols.append(
+                ParsedSymbol(
+                    name=s.name,
+                    qualified_name=repo_qual_id,
+                    symbol_kind=s.symbol_kind,
+                    start_line=s.start_line,
+                    end_line=s.end_line,
+                    start_byte=s.start_byte,
+                    end_byte=s.end_byte,
+                    signature=s.signature,
+                    signature_skeleton=s.signature_skeleton,
+                    docstring=s.docstring,
+                    contextual_summary=s.contextual_summary,
+                    repo_name=repo_name,
+                    repo_qualified_id=repo_qual_id,
+                    bare_name=bare,
+                )
+            )
+
+        new_edges: list[ParsedEdge] = []
+        for e in raw_edges:
+            src_qual = qual_map.get(
+                e.source_qualified_name, f"{repo_name}::{mod}::{e.source_qualified_name}"
+            )
+            tgt_qual = qual_map.get(e.target_qualified_name, e.target_qualified_name)
+            is_cross = e.is_cross_repo or (
+                "::" in tgt_qual and not tgt_qual.startswith(f"{repo_name}::")
+            )
+            new_edges.append(
+                ParsedEdge(
+                    source_qualified_name=src_qual,
+                    target_qualified_name=tgt_qual,
+                    edge_kind=e.edge_kind,
+                    target_repo_qualified_id=qual_map.get(e.target_qualified_name),
+                    is_cross_repo=is_cross,
+                )
+            )
+
+        return new_symbols, new_edges
 
     def _extract_python(
         self,
@@ -269,11 +692,7 @@ class ASTExtractor:
         if not left_node or not right_node or left_node.type != "identifier":
             return
         var_name = _node_text(left_node, code_bytes).strip()
-        if (
-            len(var_name) < 3
-            or var_name.startswith("__")
-            or var_name.lower() in {"logger", "log"}
-        ):
+        if len(var_name) < 3 or var_name.startswith("__") or var_name.lower() in {"logger", "log"}:
             return
 
         right_text = _node_text(right_node, code_bytes).strip()
@@ -302,9 +721,11 @@ class ASTExtractor:
         ):
             dispatch_key, target_ident = pair_match.group(1), pair_match.group(2)
             for sym in symbols:
-                if sym.name == target_ident or sym.qualified_name.endswith(
-                    f".{target_ident}.__init__"
-                ) or sym.qualified_name.startswith(f"{module_prefix}.{target_ident}."):
+                if (
+                    sym.name == target_ident
+                    or sym.qualified_name.endswith(f".{target_ident}.__init__")
+                    or sym.qualified_name.startswith(f"{module_prefix}.{target_ident}.")
+                ):
                     tag = f"[dispatch {var_name}: {dispatch_key}]"
                     if tag not in sym.contextual_summary:
                         sym.contextual_summary = f"{sym.contextual_summary} {tag}".strip()
@@ -1175,9 +1596,7 @@ class ASTExtractor:
                 top_keys.append((km.group(1), idx + 1))
 
         for k_idx, (key_name, start_line) in enumerate(top_keys):
-            end_line = (
-                top_keys[k_idx + 1][1] - 1 if k_idx + 1 < len(top_keys) else len(lines)
-            )
+            end_line = top_keys[k_idx + 1][1] - 1 if k_idx + 1 < len(top_keys) else len(lines)
             while end_line > start_line and not lines[end_line - 1].strip():
                 end_line -= 1
             block_lines = lines[start_line - 1 : end_line]
@@ -1223,70 +1642,14 @@ class ASTExtractor:
         code_bytes: bytes,
         module_prefix: str,
     ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
-        """Extracts Terraform/HCL resource, module, variable, output, and data blocks."""
+        """Extract Terraform/HCL resource, module, variable, output, and data blocks."""
         _ = code_bytes
-        symbols: list[ParsedSymbol] = []
-        edges: list[ParsedEdge] = []
-        lines = code.splitlines()
-        line_offsets: list[int] = [0]
-        for ln in lines:
-            line_offsets.append(line_offsets[-1] + len(ln.encode("utf-8")) + 1)
-
-        tf_re = re.compile(
-            r'^\s*(resource|data|module|variable|output)\s+"([^"]+)"(?:\s+"([^"]+)")?\s*\{'
+        symbols, edges, diag = parse_hcl_ast(
+            code=code,
+            module_prefix=module_prefix,
+            module_symbol_kind="interface",
         )
-        i = 0
-        total_lines = len(lines)
-        while i < total_lines:
-            m = tf_re.match(lines[i])
-            if not m:
-                i += 1
-                continue
-            block_kind = m.group(1)
-            first_label = m.group(2)
-            second_label = m.group(3)
-            sym_name = f"{first_label}.{second_label}" if second_label else first_label
-            qual = f"{module_prefix}.{sym_name}" if module_prefix else sym_name
-            start_line = i + 1
-            brace_depth = lines[i].count("{") - lines[i].count("}")
-            end_idx = i
-            while end_idx + 1 < total_lines and brace_depth > 0:
-                end_idx += 1
-                brace_depth += lines[end_idx].count("{") - lines[end_idx].count("}")
-            end_line = end_idx + 1
-            block_text = "\n".join(lines[i:end_line])
-            sig = lines[i].strip()
-            sym_kind: Literal["function", "class", "method", "interface", "type_alias"] = (
-                "class"
-                if block_kind == "resource"
-                else ("interface" if block_kind == "module" else "type_alias")
-            )
-            symbols.append(
-                ParsedSymbol(
-                    name=second_label or first_label,
-                    qualified_name=qual,
-                    symbol_kind=sym_kind,
-                    start_line=start_line,
-                    end_line=end_line,
-                    start_byte=line_offsets[start_line - 1],
-                    end_byte=line_offsets[min(end_line, len(line_offsets) - 1)],
-                    signature=sig,
-                    signature_skeleton=sig,
-                    docstring="",
-                    contextual_summary=f"Terraform {block_kind} {sym_name}: {sig}",
-                )
-            )
-            for var_ref in re.finditer(r"\bvar\.([A-Za-z0-9_-]+)", block_text):
-                v_name = var_ref.group(1)
-                t_qual = f"{module_prefix}.{v_name}" if module_prefix else v_name
-                edges.append(
-                    ParsedEdge(
-                        source_qualified_name=qual,
-                        target_qualified_name=t_qual,
-                        edge_kind="USES_TYPE",
-                    )
-                )
-            i = max(i + 1, end_idx + 1)
+        self.last_parse_diagnostics = diag
         return symbols, edges
 
     def _extract_compiled_lang(
@@ -1402,9 +1765,7 @@ class ASTExtractor:
                 headings.append((slug[:64], raw_title, idx + 1))
 
         for h_idx, (slug, raw_title, start_line) in enumerate(headings):
-            end_line = (
-                headings[h_idx + 1][2] - 1 if h_idx + 1 < len(headings) else len(lines)
-            )
+            end_line = headings[h_idx + 1][2] - 1 if h_idx + 1 < len(headings) else len(lines)
             qual = f"{module_prefix}.{slug}" if module_prefix else slug
             section_text = "\n".join(lines[start_line - 1 : end_line])
             symbols.append(
@@ -1434,3 +1795,32 @@ class ASTExtractor:
                     )
         return symbols, edges
 
+
+def match_symbol_identifier(candidate: str, record_qualified_name: str) -> bool:
+    """Matches query symbol candidates against repo-qualified symbols."""
+    if candidate == record_qualified_name:
+        return True
+    if "::" in record_qualified_name:
+        parts = record_qualified_name.split("::")
+        bare_name = parts[-1]
+        # Match bare name (e.g. 'TokenValidator' or 'Order.AddOrderItem')
+        if candidate == bare_name or candidate == bare_name.split(".")[-1]:
+            return True
+        # Match module.bare name (e.g. 'services.auth.TokenValidator')
+        if len(parts) >= 2:
+            legacy_dot_format = f"{parts[1]}.{bare_name}"
+            if candidate == legacy_dot_format:
+                return True
+        # Suffix match
+        if record_qualified_name.endswith(f"::{candidate}"):
+            return True
+    else:
+        if (
+            record_qualified_name.endswith(f".{candidate}")
+            or record_qualified_name.split(".")[-1] == candidate.split(".")[-1]
+        ):
+            return True
+    return False
+
+
+__all__ = ["ASTExtractor", "match_symbol_identifier"]

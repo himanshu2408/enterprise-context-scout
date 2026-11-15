@@ -9,9 +9,21 @@ from collections import Counter
 from typing import Final
 
 _TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(r"\w+", re.UNICODE)
-_CAMEL_BOUNDARY: Final[re.Pattern[str]] = re.compile(
-    r"([a-z0-9])([A-Z])|([A-Z]+)([A-Z][a-z])"
-)
+
+
+def _split_identifier_parts(word: str) -> list[str]:
+    """Splits snake_case and camelCase/PascalCase boundaries in linear O(N) time."""
+    buf: list[str] = []
+    n = len(word)
+    for idx, ch in enumerate(word):
+        if idx > 0 and ch.isupper():
+            prev = word[idx - 1]
+            prev_is_lower_or_digit = prev.islower() or prev.isdigit()
+            next_is_lower = idx + 1 < n and word[idx + 1].islower()
+            if prev_is_lower_or_digit or (prev.isupper() and next_is_lower):
+                buf.append("_")
+        buf.append(ch)
+    return [part.lower() for part in "".join(buf).split("_") if part]
 
 
 def tokenize_bm25(text: str) -> list[str]:
@@ -20,8 +32,7 @@ def tokenize_bm25(text: str) -> list[str]:
     for raw_match in _TOKEN_PATTERN.findall(text):
         lower_full = raw_match.lower()
         tokens.append(lower_full)
-        split_camel = _CAMEL_BOUNDARY.sub(r"\1\3_\2\4", raw_match)
-        parts = [p.lower() for p in split_camel.split("_") if p]
+        parts = _split_identifier_parts(raw_match)
         if len(parts) > 1:
             tokens.extend(parts)
     return tokens

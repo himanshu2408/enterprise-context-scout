@@ -15,8 +15,29 @@ from context_scout.schemas.contracts import (
     InsufficientContextDiagnostic,
     MissingContextRequest,
     PreFlightValidationReport,
+    PrincipalContext,
     QuantStrategyBrief,
+    RoleType,
+    StageConfidence,
 )
+
+
+class AuthSessionRequest(BaseModel):
+    """Non-production session exchange request for minting signed Bearer tokens."""
+
+    user_id: str = Field(default="demo_engineer", min_length=1, max_length=128)
+    role: RoleType = Field(default=RoleType.ENGINEER)
+    allowed_scopes: list[str] | None = None
+    max_session_paid_tokens: int = Field(default=50_000, ge=1_000, le=500_000)
+
+
+class AuthSessionResponse(BaseModel):
+    """Signed Bearer token session response."""
+
+    access_token: str
+    token_type: Literal["Bearer"] = "Bearer"
+    expires_in_seconds: int = 3600
+    principal: PrincipalContext
 
 
 class HealthHardwareProfile(BaseModel):
@@ -63,10 +84,11 @@ class ScoutStreamRequest(BaseModel):
     """Request payload for scout query or SSE stream."""
 
     query: str = Field(min_length=1, max_length=16_000)
-    domain_id: str = Field(default="trading_code_scout")
+    domain_id: str = Field(default="default")
     trace_id: str | None = None
     normalized_rrf_score: float = Field(default=0.85, ge=0.0, le=1.0)
     max_bounce_backs: int = Field(default=1, ge=0, le=3)
+    source_filter: Literal["all", "code", "wiki", "jira"] = "all"
 
 
 class ScoutTokenSavingsBreakdown(BaseModel):
@@ -103,6 +125,8 @@ class SSEStageEvent(BaseModel):
     stage_name: str
     status: Literal["in_progress", "completed", "failed"] = "in_progress"
     details: str
+    confidence: StageConfidence | None = None
+    elapsed_ms: float | None = None
     timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
@@ -113,6 +137,8 @@ class SSEBounceBackEvent(BaseModel):
     stage: int = 3
     status: Literal["bounce_back_triggered"] = "bounce_back_triggered"
     feedback: str
+    bounce_count: int = 1
+    remediation_action: str = "Re-querying local model with deterministic pre-flight feedback"
     paid_tokens_spent: int = 0
     cost_usd: float = 0.0
     details: str = "$0 local bounce-back loop triggered to resolve missing symbols"
@@ -138,6 +164,7 @@ class SSEErrorEvent(BaseModel):
     status: Literal["blocked", "error"] = "blocked"
     category: str
     rationale: str
+    diagnostic: InsufficientContextDiagnostic | None = None
     timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
@@ -161,6 +188,10 @@ class HandoffPreviewResponse(BaseModel):
     pack_token_count: int
     estimated_paid_cost_usd: float
     estimated_paid_savings_usd: float
+    cost_low_usd: float | None = None
+    cost_expected_usd: float | None = None
+    cost_high_usd: float | None = None
+    pricing_source: str | None = None
     requires_human_confirmation: Literal[True] = True
     expires_in_seconds: int = 3600
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
@@ -198,6 +229,9 @@ class AggregateROISummary(BaseModel):
     frontier_savings_ratio_pct: float
     qlora_overhead_eliminated_per_query: float = 1634.0
     total_qlora_overhead_eliminated: float
+    telemetry_source: Literal["postgresql_live", "in_memory_session", "m6_eval_baseline"] = (
+        "postgresql_live"
+    )
 
 
 class ROIMetricsResponse(BaseModel):

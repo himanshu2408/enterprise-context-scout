@@ -1,13 +1,16 @@
-"""Bounded 1-hop AST dependency closure engine enforcing SEC-03."""
+"""Bounded 2-hop AST dependency closure engine enforcing SEC-03 and completeness-first defaults."""
 
+import logging
 import re
 from collections import defaultdict
-from typing import Final, Literal, Protocol
+from dataclasses import dataclass
+from typing import Final, Protocol
 from uuid import UUID
 
 from context_scout.ast_engine.models import ASTExpansionCandidate, ASTExpansionResult
 from context_scout.db.repositories import (
     ASTEdgeRecord,
+    ASTNeighborhoodRecord,
     ASTSymbolRecord,
     CodeFileRecord,
 )
@@ -16,6 +19,8 @@ from context_scout.schemas.contracts import (
     ModificationIntent,
     PrincipalContext,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ScoutGraphRepository(Protocol):
@@ -33,20 +38,49 @@ class ScoutGraphRepository(Protocol):
         self, principal: PrincipalContext, domain_id: str
     ) -> list[ASTEdgeRecord]: ...
 
+    def traverse_1hop_neighborhood(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        focus_symbol_id: UUID | str,
+        max_direct_callers: int = 3,
+    ) -> list[ASTNeighborhoodRecord]: ...
+
+
+@dataclass(frozen=True)
+class ContextCompletenessConfig:
+    """Configuration for completeness-first AST closure and ContextPack sizing."""
+
+    max_direct_callers_per_symbol: int = 8
+    max_expansion_token_budget: int = 10_000
+    max_pack_token_budget: int = 18_000
+    skeletonize_class_line_threshold: int = 450
+    enable_two_hop_type_closure: bool = True
+
 
 class ASTDependencyExpander:
-    """Bounded 1-hop AST dependency closure engine enforcing SEC-03."""
+    """Bounded 2-hop AST dependency closure engine enforcing SEC-03."""
 
-    MAX_DIRECT_CALLERS_PER_SYMBOL: Final[int] = 3
-    MAX_EXPANSION_TOKEN_BUDGET: Final[int] = 1500
+    MAX_DIRECT_CALLERS_PER_SYMBOL: Final[int] = 8
+    MAX_EXPANSION_TOKEN_BUDGET: Final[int] = 10_000
 
     def __init__(
         self,
-        max_direct_callers: int = MAX_DIRECT_CALLERS_PER_SYMBOL,
-        max_expansion_token_budget: int = MAX_EXPANSION_TOKEN_BUDGET,
+        max_direct_callers: int | None = None,
+        max_expansion_token_budget: int | None = None,
+        completeness_config: ContextCompletenessConfig | None = None,
     ) -> None:
-        self.max_direct_callers = max_direct_callers
-        self.max_expansion_token_budget = max_expansion_token_budget
+        self.completeness_config = completeness_config or ContextCompletenessConfig()
+        self.max_direct_callers = (
+            max_direct_callers
+            if max_direct_callers is not None
+            else self.completeness_config.max_direct_callers_per_symbol
+        )
+        self.max_expansion_token_budget = (
+            max_expansion_token_budget
+            if max_expansion_token_budget is not None
+            else self.completeness_config.max_expansion_token_budget
+        )
 
     def estimate_tokens(self, text: str) -> int:
         """Deterministic integer token estimation using subword-adjusted regex chunks."""
@@ -64,6 +98,20 @@ class ASTDependencyExpander:
         domain_id: str,
     ) -> ASTExpansionResult:
         """Performs bounded 1-hop AST closure under RLS and SEC-03 token budget."""
+        if hasattr(repo, "traverse_1hop_neighborhood"):
+            try:
+                neighbors = repo.traverse_1hop_neighborhood(
+                    principal, domain_id, focus_symbol.symbol_id, self.max_direct_callers
+                )
+                if neighbors:
+                    return self._build_result_from_neighbors(focus_symbol, neighbors)
+            except Exception as exc:
+                logger.warning(
+                    "1-hop neighborhood CTE failed (%s): %s; using in-memory closure",
+                    type(exc).__name__,
+                    exc,
+                )
+
         visible_symbols = {
             s.symbol_id: s for s in repo.list_visible_ast_symbols(principal, domain_id)
         }
@@ -75,16 +123,32 @@ class ASTDependencyExpander:
         def _resolve_symbol_scoped(
             edge_target_id: UUID | None,
             edge_target_qual: str,
+            *,
+            allow_cross_repo: bool = False,
+            edge_target_repo_qual: str | None = None,
         ) -> ASTSymbolRecord | None:
             if edge_target_id and edge_target_id in visible_symbols:
                 cand_direct = visible_symbols[edge_target_id]
                 cand_f = visible_files.get(cand_direct.file_id)
                 if (
-                    focus_repo_name is None
+                    allow_cross_repo
+                    or focus_repo_name is None
                     or cand_f is None
                     or cand_f.repo_name == focus_repo_name
                 ):
                     return cand_direct
+            if allow_cross_repo:
+                if edge_target_repo_qual:
+                    for s in visible_symbols.values():
+                        sf = visible_files.get(s.file_id)
+                        rqid = s.repo_qualified_id or (
+                            f"{sf.repo_name}::{s.qualified_name}" if sf else s.qualified_name
+                        )
+                        if rqid == edge_target_repo_qual:
+                            return s
+                for s in visible_symbols.values():
+                    if s.qualified_name == edge_target_qual:
+                        return s
             rel_suffix = edge_target_qual.lstrip(".")
             target_clean = edge_target_qual.split(".")[-1]
             # Pass 1: Same file
@@ -99,16 +163,24 @@ class ASTDependencyExpander:
             if focus_repo_name is not None:
                 for s in visible_symbols.values():
                     sf = visible_files.get(s.file_id)
-                    if sf is not None and sf.repo_name == focus_repo_name and (
-                        s.qualified_name == rel_suffix
-                        or s.qualified_name.endswith("." + rel_suffix)
+                    if (
+                        sf is not None
+                        and sf.repo_name == focus_repo_name
+                        and (
+                            s.qualified_name == rel_suffix
+                            or s.qualified_name.endswith("." + rel_suffix)
+                        )
                     ):
                         return s
                 for s in visible_symbols.values():
                     sf = visible_files.get(s.file_id)
-                    if sf is not None and sf.repo_name == focus_repo_name and (
-                        s.qualified_name == edge_target_qual
-                        or s.qualified_name.split(".")[-1] == target_clean
+                    if (
+                        sf is not None
+                        and sf.repo_name == focus_repo_name
+                        and (
+                            s.qualified_name == edge_target_qual
+                            or s.qualified_name.split(".")[-1] == target_clean
+                        )
                     ):
                         return s
                 return None
@@ -125,12 +197,22 @@ class ASTDependencyExpander:
             return None
 
         # 1. Collect Tier 1: Imported Types & Internal Calls (USES_TYPE, IMPORTS, CALLS)
+        family_ids: set[UUID] = {focus_symbol.symbol_id}
+        family_qnames: set[str] = {focus_symbol.qualified_name}
+        if focus_symbol.symbol_kind == "class":
+            prefix = f"{focus_symbol.qualified_name}."
+            for sym in visible_symbols.values():
+                if sym.file_id == focus_symbol.file_id and sym.qualified_name.startswith(prefix):
+                    family_ids.add(sym.symbol_id)
+                    family_qnames.add(sym.qualified_name)
+
         type_candidates: list[ASTExpansionCandidate] = []
-        seen_type_sym_ids: set[UUID] = {focus_symbol.symbol_id}
+        seen_type_sym_ids: set[UUID] = set(family_ids)
 
         def _append_type_candidate(
             target_sym: ASTSymbolRecord,
-            edge_kind: Literal["CALLS", "IMPORTS", "USES_TYPE", "INHERITS", "TESTED_BY"],
+            edge_kind: str,
+            depth: int = 1,
         ) -> None:
             if target_sym.symbol_id in seen_type_sym_ids:
                 return
@@ -139,13 +221,18 @@ class ASTDependencyExpander:
             seen_type_sym_ids.add(target_sym.symbol_id)
             f_rec = visible_files[target_sym.file_id]
             end_l = target_sym.end_line
+            span_lines = target_sym.end_line - target_sym.start_line
             if (
-                edge_kind in ("IMPORTS", "INHERITS")
-                or (
-                    edge_kind == "USES_TYPE"
-                    and focus_symbol.symbol_kind == "type_alias"
+                self.max_expansion_token_budget <= 2000
+                and (
+                    edge_kind in ("IMPORTS", "INHERITS")
+                    or (edge_kind == "USES_TYPE" and focus_symbol.symbol_kind == "type_alias")
                 )
-            ) and (target_sym.end_line - target_sym.start_line) > 30:
+                and span_lines > 30
+            ) or (
+                span_lines > 80
+                and (edge_kind == "IMPORTS" or (depth >= 2 and edge_kind == "INHERITS"))
+            ):
                 end_l = min(target_sym.end_line, target_sym.start_line + 24)
             s_lines = f_rec.raw_content.splitlines()[target_sym.start_line - 1 : end_l]
             est = self.estimate_tokens("\n".join(s_lines))
@@ -163,51 +250,77 @@ class ASTDependencyExpander:
             )
 
         hop1_type_syms: list[ASTSymbolRecord] = []
+        _outward_dep_kinds = (
+            "USES_TYPE",
+            "IMPORTS",
+            "INHERITS",
+            "PROVISIONED_BY",
+            "DISPATCHES",
+            "SELECTS",
+            "DOCUMENTS_COMPONENT",
+        )
         for edge in visible_edges:
-            if edge.source_symbol_id == focus_symbol.symbol_id and (
-                edge.edge_kind in ("USES_TYPE", "IMPORTS", "INHERITS")
-                or (
-                    edge.edge_kind == "CALLS"
-                    and edge.target_symbol_id is not None
-                )
+            if edge.source_symbol_id in family_ids and (
+                edge.edge_kind in _outward_dep_kinds
+                or (edge.edge_kind == "CALLS" and edge.target_symbol_id is not None)
             ):
                 target_sym = _resolve_symbol_scoped(
-                    edge.target_symbol_id, edge.target_qualified_name
+                    edge.target_symbol_id,
+                    edge.target_qualified_name,
+                    allow_cross_repo=edge.is_cross_repo,
+                    edge_target_repo_qual=edge.target_repo_qualified_id,
                 )
                 if target_sym and target_sym.file_id in visible_files:
-                    if edge.edge_kind == "CALLS" and target_sym.file_id != focus_symbol.file_id:
+                    if (
+                        edge.edge_kind == "CALLS"
+                        and not edge.is_cross_repo
+                        and target_sym.file_id != focus_symbol.file_id
+                    ):
                         continue
                     _append_type_candidate(target_sym, edge.edge_kind)
-                    if edge.edge_kind in ("USES_TYPE", "INHERITS"):
+                    if (
+                        edge.edge_kind in ("USES_TYPE", "INHERITS", "IMPORTS")
+                        and not edge.is_cross_repo
+                    ):
                         hop1_type_syms.append(target_sym)
 
         # 1b. Transitive 2-hop schema/type/inheritance closure within the same repository
         # (e.g. SQL POLICY -> TABLE -> FK TABLE, Function -> DTO -> BaseDTO across files,
         # or Class -> ParentClass -> GrandparentInterface)
-        for h1_sym in hop1_type_syms:
-            for edge in visible_edges:
-                if edge.source_symbol_id == h1_sym.symbol_id and edge.edge_kind in (
-                    "USES_TYPE",
-                    "INHERITS",
-                ):
-                    h2_sym = _resolve_symbol_scoped(
-                        edge.target_symbol_id, edge.target_qualified_name
-                    )
-                    if h2_sym is not None and h2_sym.file_id in visible_files:
-                        h2_file = visible_files[h2_sym.file_id]
-                        same_repo = (
-                            focus_repo_name is None or h2_file.repo_name == focus_repo_name
+        if self.completeness_config.enable_two_hop_type_closure:
+            for h1_sym in hop1_type_syms:
+                for edge in visible_edges:
+                    if edge.source_symbol_id == h1_sym.symbol_id and edge.edge_kind in (
+                        "USES_TYPE",
+                        "INHERITS",
+                        "IMPORTS",
+                    ):
+                        h2_sym = _resolve_symbol_scoped(
+                            edge.target_symbol_id, edge.target_qualified_name
                         )
-                        is_valid_2hop = (
-                            h2_sym.file_id == focus_symbol.file_id
-                            or edge.edge_kind == "INHERITS"
-                            or (
-                                h1_sym.symbol_kind in ("class", "interface", "type_alias")
-                                and h2_sym.symbol_kind in ("class", "interface", "type_alias")
+                        if h2_sym is not None and h2_sym.file_id in visible_files:
+                            h2_file = visible_files[h2_sym.file_id]
+                            same_repo = (
+                                focus_repo_name is None or h2_file.repo_name == focus_repo_name
                             )
-                        )
-                        if same_repo and is_valid_2hop:
-                            _append_type_candidate(h2_sym, edge.edge_kind)
+                            is_valid_2hop = (
+                                h2_sym.file_id == focus_symbol.file_id
+                                or edge.edge_kind == "INHERITS"
+                                or (
+                                    h1_sym.symbol_kind
+                                    in ("class", "interface", "type_alias", "function")
+                                    and h2_sym.symbol_kind
+                                    in (
+                                        "class",
+                                        "interface",
+                                        "type_alias",
+                                        "constant",
+                                        "variable",
+                                    )
+                                )
+                            )
+                            if same_repo and is_valid_2hop:
+                                _append_type_candidate(h2_sym, edge.edge_kind, depth=2)
 
         # 1c. Same-file body-referenced types, classes, tables, constants, and helper functions
         # (catches snake_case state vars: cancel_scope -> CancelScope, _task_states -> TaskState)
@@ -222,7 +335,8 @@ class ASTDependencyExpander:
                 for s in visible_symbols.values()
                 if s.file_id == focus_symbol.file_id
                 and s.symbol_id != focus_symbol.symbol_id
-                and s.symbol_kind in ("class", "interface", "type_alias", "function")
+                and s.symbol_kind
+                in ("class", "interface", "type_alias", "function", "constant", "variable")
             ]
             for sf_sym in sorted(same_file_syms, key=lambda x: x.start_line):
                 short_n = sf_sym.qualified_name.split(".")[-1]
@@ -260,16 +374,31 @@ class ASTDependencyExpander:
             )
         )
 
-        # 2. Collect Tier 2: Direct Callers (CALLS incoming edges) with call-site diversity
-        focus_short_name = focus_symbol.qualified_name.split(".")[-1]
+        # 2. Collect Tier 2: Direct Callers & Cross-Repo Dependents
+        focus_rqid = focus_symbol.repo_qualified_id or (
+            f"{focus_repo_name}::{focus_symbol.qualified_name}"
+            if focus_repo_name
+            else focus_symbol.qualified_name
+        )
+        _incoming_cross_kinds = ("CALLS", "USES_TYPE", "PROVISIONED_BY", "DOCUMENTS_COMPONENT")
+        family_short_names = {
+            qn.split(".")[-1] for qn in family_qnames if not qn.endswith(".__init__")
+        }
         caller_edges = [
             e
             for e in visible_edges
-            if e.edge_kind == "CALLS"
+            if e.source_symbol_id not in family_ids
             and (
-                e.target_symbol_id == focus_symbol.symbol_id
-                or e.target_qualified_name == focus_symbol.qualified_name
-                or e.target_qualified_name.split(".")[-1] == focus_short_name
+                e.edge_kind == "CALLS" or (e.is_cross_repo and e.edge_kind in _incoming_cross_kinds)
+            )
+            and (
+                e.target_symbol_id in family_ids
+                or (e.target_repo_qualified_id and e.target_repo_qualified_id == focus_rqid)
+                or e.target_qualified_name in family_qnames
+                or (
+                    not e.is_cross_repo
+                    and e.target_qualified_name.split(".")[-1] in family_short_names
+                )
             )
         ]
 
@@ -279,23 +408,26 @@ class ASTDependencyExpander:
             if caller_sym and caller_sym.file_id in visible_files:
                 f_rec = visible_files[caller_sym.file_id]
                 if (
-                    focus_repo_name is not None
+                    not edge.is_cross_repo
+                    and focus_repo_name is not None
                     and f_rec.repo_name != focus_repo_name
-                    and edge.target_symbol_id != focus_symbol.symbol_id
-                    and edge.target_qualified_name != focus_symbol.qualified_name
                 ):
                     continue
-                call_line = self._find_call_site_line(
-                    f_rec.raw_content, caller_sym, focus_symbol.qualified_name
-                )
-                start_l = max(caller_sym.start_line, call_line - 5)
-                end_l = min(caller_sym.end_line, call_line + 5)
+                if (caller_sym.end_line - caller_sym.start_line) <= 35:
+                    start_l = caller_sym.start_line
+                    end_l = caller_sym.end_line
+                else:
+                    call_line = self._find_call_site_line(
+                        f_rec.raw_content, caller_sym, focus_symbol.qualified_name
+                    )
+                    start_l = max(caller_sym.start_line, call_line - 5)
+                    end_l = min(caller_sym.end_line, call_line + 5)
                 snippet_lines = f_rec.raw_content.splitlines()[start_l - 1 : end_l]
                 est = self.estimate_tokens("\n".join(snippet_lines))
                 raw_caller_candidates.append(
                     ASTExpansionCandidate(
                         symbol=caller_sym,
-                        edge_kind="CALLS",
+                        edge_kind=edge.edge_kind,
                         intent=ModificationIntent.DIRECT_CALLER,
                         start_line=start_l,
                         end_line=end_l,
@@ -377,12 +509,167 @@ class ASTDependencyExpander:
             dropped_candidates_count=dropped_count,
         )
 
+    def _build_result_from_neighbors(
+        self,
+        focus_symbol: ASTSymbolRecord,
+        neighbors: list[ASTNeighborhoodRecord],
+    ) -> ASTExpansionResult:
+        type_candidates: list[ASTExpansionCandidate] = []
+        raw_caller_candidates: list[ASTExpansionCandidate] = []
+        test_candidates: list[ASTExpansionCandidate] = []
+
+        for rec in neighbors:
+            if not self.completeness_config.enable_two_hop_type_closure and rec.depth > 1:
+                continue
+            if rec.intent_role == "test_fixture" or rec.edge_kind == "TESTED_BY":
+                start_l = rec.symbol.start_line
+                end_l = (
+                    min(rec.symbol.end_line, rec.symbol.start_line + 35)
+                    if self.max_expansion_token_budget <= 2000
+                    else rec.symbol.end_line
+                )
+                snippet_lines = rec.file.raw_content.splitlines()[start_l - 1 : end_l]
+                est = self.estimate_tokens("\n".join(snippet_lines))
+                test_candidates.append(
+                    ASTExpansionCandidate(
+                        symbol=rec.symbol,
+                        edge_kind="TESTED_BY",
+                        intent=ModificationIntent.TEST_FIXTURE,
+                        start_line=start_l,
+                        end_line=end_l,
+                        estimated_tokens=est,
+                        file_path=rec.file.file_path,
+                        diversity_key=rec.file.file_path,
+                    )
+                )
+            elif rec.intent_role == "imported_type":
+                end_l = rec.symbol.end_line
+                span_lines = rec.symbol.end_line - rec.symbol.start_line
+                if (
+                    self.max_expansion_token_budget <= 2000
+                    and (
+                        rec.edge_kind in ("IMPORTS", "INHERITS")
+                        or (
+                            rec.edge_kind == "USES_TYPE"
+                            and focus_symbol.symbol_kind == "type_alias"
+                        )
+                    )
+                    and span_lines > 30
+                ) or (
+                    span_lines > 80
+                    and (
+                        rec.edge_kind == "IMPORTS"
+                        or (rec.depth >= 2 and rec.edge_kind == "INHERITS")
+                    )
+                ):
+                    end_l = min(rec.symbol.end_line, rec.symbol.start_line + 24)
+                s_lines = rec.file.raw_content.splitlines()[rec.symbol.start_line - 1 : end_l]
+                est = self.estimate_tokens("\n".join(s_lines))
+                type_candidates.append(
+                    ASTExpansionCandidate(
+                        symbol=rec.symbol,
+                        edge_kind=rec.edge_kind,
+                        intent=ModificationIntent.IMPORTED_TYPE,
+                        start_line=rec.symbol.start_line,
+                        end_line=end_l,
+                        estimated_tokens=est,
+                        file_path=rec.file.file_path,
+                        diversity_key=rec.file.file_path,
+                    )
+                )
+            elif rec.intent_role == "direct_caller":
+                call_line = self._find_call_site_line(
+                    rec.file.raw_content, rec.symbol, focus_symbol.qualified_name
+                )
+                start_l = max(rec.symbol.start_line, call_line - 5)
+                end_l = min(rec.symbol.end_line, call_line + 5)
+                snippet_lines = rec.file.raw_content.splitlines()[start_l - 1 : end_l]
+                est = self.estimate_tokens("\n".join(snippet_lines))
+                raw_caller_candidates.append(
+                    ASTExpansionCandidate(
+                        symbol=rec.symbol,
+                        edge_kind=rec.edge_kind or "CALLS",
+                        intent=ModificationIntent.DIRECT_CALLER,
+                        start_line=start_l,
+                        end_line=end_l,
+                        estimated_tokens=est,
+                        file_path=rec.file.file_path,
+                        diversity_key=rec.file.file_path,
+                    )
+                )
+
+        selected_callers = self._select_diverse_callers(
+            raw_caller_candidates,
+            limit=self.max_direct_callers,
+            focus_file_path="",
+        )
+        test_candidate = test_candidates[0] if test_candidates else None
+
+        accumulated_tokens = 0
+        budget_exhausted = False
+        dropped_count = 0
+
+        type_slices: list[CodeSlicePointer] = []
+        caller_slices: list[CodeSlicePointer] = []
+        test_slices: list[CodeSlicePointer] = []
+
+        all_candidates_ordered: list[tuple[ASTExpansionCandidate, list[CodeSlicePointer]]] = []
+        primary_types = [(c, type_slices) for c in type_candidates[:2]]
+        secondary_types = [(c, type_slices) for c in type_candidates[2:]]
+        primary_caller = [(c, caller_slices) for c in selected_callers[:1]]
+        secondary_callers = [(c, caller_slices) for c in selected_callers[1:]]
+        all_candidates_ordered.extend(primary_types)
+        all_candidates_ordered.extend(primary_caller)
+        all_candidates_ordered.extend(secondary_types)
+        all_candidates_ordered.extend(secondary_callers)
+        if test_candidate:
+            all_candidates_ordered.append((test_candidate, test_slices))
+
+        file_map = {rec.symbol.symbol_id: rec.file for rec in neighbors}
+
+        for cand, target_list in all_candidates_ordered:
+            f_rec = file_map.get(cand.symbol.symbol_id)
+            repo_name = f_rec.repo_name if f_rec else ""
+            if accumulated_tokens + cand.estimated_tokens <= self.max_expansion_token_budget:
+                target_list.append(
+                    CodeSlicePointer(
+                        repo_name=repo_name,
+                        file_path=cand.file_path,
+                        start_line=cand.start_line,
+                        end_line=cand.end_line,
+                        qualified_symbol=cand.symbol.qualified_name,
+                        selection_reason=(
+                            f"1-hop {cand.edge_kind} dependency for {focus_symbol.qualified_name}"
+                        ),
+                        modification_intent=cand.intent,
+                    )
+                )
+                accumulated_tokens += cand.estimated_tokens
+            else:
+                budget_exhausted = True
+                dropped_count += 1
+
+        return ASTExpansionResult(
+            focus_symbol=focus_symbol,
+            imported_type_slices=type_slices,
+            caller_slices=caller_slices,
+            test_fixture_slices=test_slices,
+            total_expansion_tokens=accumulated_tokens,
+            budget_exhausted=budget_exhausted,
+            dropped_candidates_count=dropped_count,
+        )
+
     def _find_call_site_line(
         self, raw_content: str, caller_sym: ASTSymbolRecord, target_qualified_name: str
     ) -> int:
         """Finds the line number within caller_sym where target is invoked."""
         target_name = target_qualified_name.split(".")[-1]
         lines = raw_content.splitlines()[caller_sym.start_line - 1 : caller_sym.end_line]
+        call_pattern = re.compile(rf"\b{re.escape(target_name)}\s*\(")
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if call_pattern.search(line) and not stripped.startswith(('"""', "'''", "*", "#")):
+                return caller_sym.start_line + idx
         pattern = re.compile(rf"\b{re.escape(target_name)}\b")
         for idx, line in enumerate(lines):
             if pattern.search(line):
@@ -487,9 +774,7 @@ class ASTDependencyExpander:
 
                 if t_sym and t_sym.file_id in visible_files:
                     f_rec = visible_files[t_sym.file_id]
-                    s_lines = f_rec.raw_content.splitlines()[
-                        t_sym.start_line - 1 : t_sym.end_line
-                    ]
+                    s_lines = f_rec.raw_content.splitlines()[t_sym.start_line - 1 : t_sym.end_line]
                     return ASTExpansionCandidate(
                         symbol=t_sym,
                         edge_kind="TESTED_BY",
@@ -537,5 +822,6 @@ class ASTDependencyExpander:
 
 __all__ = [
     "ASTDependencyExpander",
+    "ContextCompletenessConfig",
     "ScoutGraphRepository",
 ]

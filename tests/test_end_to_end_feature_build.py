@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import json
 import sys
+import uuid
 from pathlib import Path
+
+import psycopg
 
 from context_scout.agents.gemini_executor import GitWorktreeSandbox
 from context_scout.agents.scout_workflow import FederatedScoutCoordinator
@@ -28,7 +31,7 @@ from context_scout.api.dependencies import (
     get_repo_root,
 )
 from context_scout.cli import main as cli_main
-from context_scout.config import detect_hardware_profile
+from context_scout.config import ScoutSettings, detect_hardware_profile
 from context_scout.schemas.contracts import (
     ImplementationContextPack,
     PrincipalContext,
@@ -77,11 +80,7 @@ def test_build_real_feature_from_context_pack_in_worktree_sandbox() -> None:
     assert cost_floor_bps >= 5.0
 
     # Verify the Context Pack localized OrderFlowImbalanceSignal with byte-exact source lines
-    ofi_slices = [
-        s
-        for s in result.code_slices
-        if "order_flow_imbalance.py" in s.file_path
-    ]
+    ofi_slices = [s for s in result.code_slices if "order_flow_imbalance.py" in s.file_path]
     assert len(ofi_slices) >= 1
     primary_slice = ofi_slices[0]
     assert "OrderFlowImbalanceSignal" in primary_slice.verbatim_code_with_lines
@@ -126,9 +125,7 @@ def test_build_real_feature_from_context_pack_in_worktree_sandbox() -> None:
     assert tests_passed is True, f"Behavioral test failed: {verify_out}"
 
 
-def test_clone_and_train_custom_domain_end_to_end_via_cli(
-    tmp_path: Path, capsys: object
-) -> None:
+def test_clone_and_train_custom_domain_end_to_end_via_cli(tmp_path: Path, capsys: object) -> None:
     """Verifies any user can scaffold, distill, and train a brand-new custom domain via CLI."""
     # 1. Verify hardware auto-detection CLI
     rc_hw = cli_main(["hardware"])
@@ -137,7 +134,8 @@ def test_clone_and_train_custom_domain_end_to_end_via_cli(
     assert hw_profile["memory_gb"] >= 4.0
     assert hw_profile["max_kv_tokens"] in (8192, 16384, 32768)
 
-    # 2. Create a custom source codebase folder for a brand-new domain (`payments_ledger_scout`)
+    # 2. Create a custom source codebase folder for an isolated ephemeral domain
+    domain_id = f"eval_payments_ledger_{uuid.uuid4().hex[:8]}"
     custom_src = tmp_path / "payments_repo"
     custom_src.mkdir(parents=True)
     (custom_src / "ledger.py").write_text(
@@ -152,69 +150,86 @@ def test_clone_and_train_custom_domain_end_to_end_via_cli(
     domains_dir = tmp_path / "domains"
     data_dir = tmp_path / "data" / "tuning"
 
-    # Step A: `context-scout init-domain`
-    rc_init = cli_main(
-        [
-            "init-domain",
-            "--domain-id",
-            "payments_ledger_scout",
-            "--kind",
-            "code",
-            "--display-name",
-            "Payments Double-Entry Ledger Scout",
-            "--domains-dir",
-            str(domains_dir),
-        ]
-    )
-    assert rc_init == 0
-    assert (domains_dir / "payments_ledger_scout" / "domain.yaml").is_file()
+    try:
+        # Step A: `context-scout init-domain`
+        rc_init = cli_main(
+            [
+                "init-domain",
+                "--domain-id",
+                domain_id,
+                "--kind",
+                "code",
+                "--display-name",
+                "Payments Double-Entry Ledger Scout",
+                "--domains-dir",
+                str(domains_dir),
+            ]
+        )
+        assert rc_init == 0
+        assert (domains_dir / domain_id / "domain.yaml").is_file()
 
-    # Step B: `context-scout distill`
-    rc_distill = cli_main(
-        [
-            "distill",
-            "--domain-id",
-            "payments_ledger_scout",
-            "--source-dir",
-            str(custom_src),
-            "--num-samples",
-            "12",
-            "--domains-dir",
-            str(domains_dir),
-            "--data-dir",
-            str(data_dir),
-        ]
-    )
-    assert rc_distill == 0
-    train_file = data_dir / "payments_ledger_scout" / "train.jsonl"
-    valid_file = data_dir / "payments_ledger_scout" / "valid.jsonl"
-    assert train_file.is_file()
-    assert valid_file.is_file()
-    first_sample = json.loads(train_file.read_text(encoding="utf-8").splitlines()[0])
-    assert "DoubleEntryLedger" in first_sample["messages"][0]["content"]
-    assert "Retrieved AST Candidate:" in first_sample["messages"][0]["content"]
+        # Step B: `context-scout distill`
+        rc_distill = cli_main(
+            [
+                "distill",
+                "--domain-id",
+                domain_id,
+                "--source-dir",
+                str(custom_src),
+                "--num-samples",
+                "12",
+                "--domains-dir",
+                str(domains_dir),
+                "--data-dir",
+                str(data_dir),
+            ]
+        )
+        assert rc_distill == 0
+        train_file = data_dir / domain_id / "train.jsonl"
+        valid_file = data_dir / domain_id / "valid.jsonl"
+        assert train_file.is_file()
+        assert valid_file.is_file()
+        first_sample = json.loads(train_file.read_text(encoding="utf-8").splitlines()[0])
+        assert "DoubleEntryLedger" in first_sample["messages"][0]["content"]
+        assert "Retrieved AST Candidate:" in first_sample["messages"][0]["content"]
 
-    # Step C: `context-scout train`
-    rc_train = cli_main(
-        [
-            "train",
-            "--domain-id",
-            "payments_ledger_scout",
-            "--steps",
-            "6",
-            "--domains-dir",
-            str(domains_dir),
-            "--data-dir",
-            str(data_dir),
-        ]
-    )
-    assert rc_train == 0
-    adapter_dir = (
-        domains_dir
-        / "payments_ledger_scout"
-        / "adapters"
-        / "gemma4_26b_payments_ledger_scout"
-    )
-    assert (adapter_dir / "adapters.safetensors").is_file()
-    assert (adapter_dir / "adapter_config.json").is_file()
-    assert (adapter_dir / "training_metrics.json").is_file()
+        # Step C: `context-scout train`
+        rc_train = cli_main(
+            [
+                "train",
+                "--domain-id",
+                domain_id,
+                "--steps",
+                "6",
+                "--domains-dir",
+                str(domains_dir),
+                "--data-dir",
+                str(data_dir),
+            ]
+        )
+        assert rc_train == 0
+        adapter_dir = domains_dir / domain_id / "adapters" / f"gemma4_26b_{domain_id}"
+        assert (adapter_dir / "adapters.safetensors").is_file()
+        assert (adapter_dir / "adapter_config.json").is_file()
+        assert (adapter_dir / "training_metrics.json").is_file()
+    finally:
+        cleanup_tables = (
+            "ast_edges",
+            "ast_symbols",
+            "code_files",
+            "repositories",
+            "confluence_pages",
+            "jira_issues",
+            "doc_chunks",
+            "indexing_queue",
+            "indexing_dead_letter",
+            "execution_telemetry",
+            "domain_packs",
+        )
+        try:
+            with psycopg.connect(ScoutSettings().db_admin_url) as conn:
+                for table in cleanup_tables:
+                    conn.execute(f"DELETE FROM {table} WHERE domain_id = %s;", (domain_id,))
+                conn.commit()
+        except psycopg.Error:
+            pass

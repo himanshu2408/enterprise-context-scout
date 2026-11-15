@@ -1,15 +1,19 @@
 """Typed configuration settings and runtime hardware auto-detection."""
 
+import logging
 import os
 import platform
 import re
 import subprocess
 import sys
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_GOOGLE_MODEL_PREFIXES: Final[tuple[str, ...]] = (
     "google/gemma-4-",
@@ -29,6 +33,36 @@ PROHIBITED_STALE_MODEL_REGEX: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 
+ALLOWED_EU_REGIONS: Final[frozenset[str]] = frozenset(
+    {
+        "europe-west1",  # Belgium
+        "europe-west2",  # London (UK)
+        "europe-west3",  # Frankfurt (Germany) - Primary Default
+        "europe-west4",  # Eemshaven (Netherlands)
+        "europe-west6",  # Zurich (Switzerland)
+        "europe-west8",  # Milan (Italy)
+        "europe-west9",  # Paris (France)
+        "europe-west10",  # Berlin (Germany)
+        "europe-west12",  # Turin (Italy)
+        "europe-north1",  # Hamina (Finland)
+        "europe-central2",  # Warsaw (Poland)
+        "europe-southwest1",  # Madrid (Spain)
+    }
+)
+
+
+def validate_vertex_location(location: str, allow_non_eu: bool = False) -> str:
+    """Enforces EU data residency for Vertex AI execution unless explicitly overridden."""
+    cleaned = location.strip().lower()
+    if not allow_non_eu and not (cleaned.startswith("europe-") or cleaned in ALLOWED_EU_REGIONS):
+        raise ValueError(
+            f"Vertex AI region '{location}' violates EU data residency policy. "
+            "Only EU regions (e.g. 'europe-west3') are permitted to comply with GDPR data "
+            "residency requirements, unless allow_non_eu_regions=True "
+            "(or SCOUT_ALLOW_NON_EU_REGIONS=true) is explicitly configured."
+        )
+    return cleaned
+
 
 def validate_google_model_id(model_id: str) -> str:
     """Enforces that only current October 2026 Google model IDs are configured."""
@@ -41,6 +75,58 @@ def validate_google_model_id(model_id: str) -> str:
             f"Allowed prefixes: {ALLOWED_GOOGLE_MODEL_PREFIXES}"
         )
     return cleaned
+
+
+class ClaimVerificationPolicy(StrEnum):
+    """Configurable policy governing claim verification in compiled gates (M4 Requirement 6)."""
+
+    STRICT_ABSTAIN_ON_ANY_UNVERIFIED = "strict_abstain"
+    PRUNE_AND_MARK_LOW_TRUST = "prune_and_warn"
+    MIN_VERIFIED_COUNT = "min_verified_count"
+
+
+class ClaimVerifierConfig(BaseModel):
+    """Configuration for ClaimVerifier policy and thresholds."""
+
+    policy: ClaimVerificationPolicy = ClaimVerificationPolicy.STRICT_ABSTAIN_ON_ANY_UNVERIFIED
+    min_verified_claims: int = Field(default=1, ge=1)
+    record_pruned_audit_trail: bool = True
+    reject_homoglyphs: bool = True
+
+
+class DomainConfig(BaseModel):
+    """Multi-tenant domain configuration with neutral defaults and zero hardcoded workflows."""
+
+    domain_id: str = "default"
+    min_retrieval_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
+    cross_encoder_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
+    jira_terminal_statuses: list[str] = Field(
+        default_factory=lambda: ["Closed", "Resolved", "Archived"]
+    )
+    jira_negative_resolutions: list[str] = Field(
+        default_factory=lambda: [
+            "Won't Fix",
+            "Duplicate",
+            "Cannot Reproduce",
+            "Abandoned",
+            "Won't Do",
+            "Rejected",
+            "Cancelled",
+        ]
+    )
+    confluence_strict_freshness: bool = True
+    claim_policy: ClaimVerificationPolicy = ClaimVerificationPolicy.STRICT_ABSTAIN_ON_ANY_UNVERIFIED
+    claim_config: ClaimVerifierConfig = Field(default_factory=ClaimVerifierConfig)
+
+
+class ScoutConfig(BaseModel):
+    """Global scout configuration integrating multi-tenant domain overrides."""
+
+    default_domain_config: DomainConfig = Field(default_factory=DomainConfig)
+    domain_configs: dict[str, DomainConfig] = Field(default_factory=dict)
+
+    def get_domain_config(self, domain_id: str) -> DomainConfig:
+        return self.domain_configs.get(domain_id, self.default_domain_config)
 
 
 class ScoutSettings(BaseSettings):
@@ -67,6 +153,7 @@ class ScoutSettings(BaseSettings):
     shield_model_id: str = Field(default="google/shieldgemma-2-2b-it")
     frontier_model_id: str = Field(default="gemini-3.8-flash")
 
+    min_retrieval_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
     embedding_dimensions: int = Field(default=768, ge=128, le=3072)
     local_max_kv_tokens: int = Field(default=32_768, ge=4_096, le=131_072)
     local_mlx_endpoint: str = Field(default="http://127.0.0.1:8000/v1")
@@ -76,6 +163,44 @@ class ScoutSettings(BaseSettings):
     lora_slots_capacity: int = Field(default=4, ge=1, le=32)
     domains_dir: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parents[2] / "domains"
+    )
+    default_domain_id: str = Field(
+        default="default",
+        description="Neutral default domain identifier for multi-tenant context scout operations.",
+    )
+
+    auth_hmac_secret: str | None = Field(
+        default=None,
+        description=(
+            "HMAC-SHA256 secret key for signing principal attestation tokens "
+            "(minimum 32 characters)."
+        ),
+    )
+    allow_insecure_dev_secret: bool = Field(
+        default=False,
+        description="Explicitly allow insecure default HMAC secret for local development.",
+    )
+
+    # GCP Vertex AI Data Residency & Secret Hygiene Settings
+    gcp_project: str | None = Field(
+        default=None,
+        description="Google Cloud Project ID for Vertex AI execution.",
+    )
+    gcp_location: str = Field(
+        default="europe-west3",
+        description="Google Cloud Region for Vertex AI execution (default: europe-west3).",
+    )
+    use_vertex_ai: bool = Field(
+        default=True,
+        description="Enforces Google Cloud Vertex AI mode instead of Developer API.",
+    )
+    service_token: str | None = Field(
+        default=None,
+        description="Read-only service bearer token for Vertex AI authentication.",
+    )
+    allow_non_eu_regions: bool = Field(
+        default=False,
+        description="Allows non-EU Vertex AI regions if explicitly enabled.",
     )
 
     @field_validator(
@@ -89,6 +214,14 @@ class ScoutSettings(BaseSettings):
     @classmethod
     def _enforce_google_models(cls, value: str) -> str:
         return validate_google_model_id(value)
+
+    @model_validator(mode="after")
+    def _enforce_residency_rules(self) -> "ScoutSettings":
+        if self.use_vertex_ai and self.gcp_location:
+            self.gcp_location = validate_vertex_location(
+                self.gcp_location, allow_non_eu=self.allow_non_eu_regions
+            )
+        return self
 
 
 def detect_hardware_profile(
@@ -110,7 +243,12 @@ def detect_hardware_profile(
             page_size = os.sysconf("SC_PAGE_SIZE")
             phys_pages = os.sysconf("SC_PHYS_PAGES")
             mem_gb = round((page_size * phys_pages) / (1024**3), 1)
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Physical memory auto-detection via sysconf failed (%s): %s; defaulting to 16.0 GB",
+                type(exc).__name__,
+                exc,
+            )
             mem_gb = 16.0
 
     # 2. Detect chip / accelerator
@@ -129,7 +267,12 @@ def detect_hardware_profile(
                     device_name = raw_chip.replace("Apple ", "Apple Silicon ", 1)
                 else:
                     device_name = raw_chip or "Apple Silicon"
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "macOS chip brand detection failed (%s): %s; defaulting to Apple Silicon",
+                    type(exc).__name__,
+                    exc,
+                )
                 device_name = "Apple Silicon"
         else:
             try:
@@ -139,7 +282,12 @@ def detect_hardware_profile(
                     device_name = str(torch.cuda.get_device_name(0))
                 else:
                     device_name = platform.processor() or platform.machine() or "Linux CPU"
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Accelerator detection via torch failed (%s): %s; using platform identifier",
+                    type(exc).__name__,
+                    exc,
+                )
                 device_name = platform.processor() or platform.machine() or "Generic Host"
 
     # 3. Detect quantization & compute backend
@@ -152,7 +300,12 @@ def detect_hardware_profile(
                 import torch
 
                 quantization = "4-bit (CUDA)" if torch.cuda.is_available() else "4-bit (PyTorch)"
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Quantization backend probe failed (%s): %s; defaulting to 4-bit (PyTorch)",
+                    type(exc).__name__,
+                    exc,
+                )
                 quantization = "4-bit (PyTorch)"
 
     # 4. Compute safe KV token budget scaled to available memory unless explicitly overridden

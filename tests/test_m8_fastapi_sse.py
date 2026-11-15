@@ -23,7 +23,11 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from context_scout.api.dependencies import get_repo_root
+from context_scout.api.dependencies import (
+    DEFAULT_ROLE_SCOPES,
+    create_signed_principal_token,
+    get_repo_root,
+)
 from context_scout.api.main import app
 from context_scout.schemas.contracts import (
     ImplementationContextPack,
@@ -37,8 +41,13 @@ from context_scout.schemas.contracts import (
 
 @pytest.fixture
 def client() -> TestClient:
-    """Provides FastAPI TestClient instance."""
-    return TestClient(app)
+    """Provides FastAPI TestClient instance authenticated with signed engineer bearer token."""
+    token = create_signed_principal_token(
+        user_id="demo_engineer",
+        role=RoleType.ENGINEER,
+        allowed_scopes=DEFAULT_ROLE_SCOPES[RoleType.ENGINEER],
+    )
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"})
 
 
 @pytest.fixture
@@ -152,8 +161,17 @@ def test_domains_endpoint_manifest_and_adapter_pool(client: TestClient) -> None:
             "trading_code_scout",
             "quant_research_scout",
             "polyglot_unseen_v2",
+            "data_engineering_scout",
         )
-        assert len(manifest["display_name"]) > 0
+        assert isinstance(manifest["display_name"], str)
+        assert manifest["display_name"].strip() == manifest["display_name"]
+        expected_name_tokens = {
+            "trading_code_scout": "Scout",
+            "quant_research_scout": "Specialist",
+            "polyglot_unseen_v2": "Unseen",
+            "data_engineering_scout": "Data Engineering",
+        }
+        assert expected_name_tokens[manifest["domain_id"]] in manifest["display_name"]
         assert manifest["authority_rules"]["primary_truth_source"] in ("code", "document")
 
         # Adapter verification
@@ -188,7 +206,13 @@ def test_out_of_band_principal_extraction_valid_roles(
     client: TestClient, role_str: str, expected_role: RoleType
 ) -> None:
     """Verifies all four valid RoleType strings extract into PrincipalContext without error."""
+    token = create_signed_principal_token(
+        user_id=f"user_{role_str}",
+        role=role_str,
+        allowed_scopes=["public_eng", "public_quant", "quant_restricted"],
+    )
     headers = {
+        "Authorization": f"Bearer {token}",
         "X-Principal-User-Id": f"user_{role_str}",
         "X-Principal-Role": role_str,
         "X-Principal-Scopes": "public_eng,public_quant,quant_restricted",
@@ -210,8 +234,10 @@ def test_out_of_band_principal_extraction_valid_roles(
     assert data["trace_attributes"]["context_scout.principal_role"] == expected_role.value
 
 
-def test_invalid_role_rejection_http_400(client: TestClient) -> None:
-    """Verifies invalid role header (e.g. 'superuser' or 'admin') is rejected with HTTP 400."""
+def test_invalid_role_rejection_http_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies invalid role header is rejected with HTTP 400 under fallback."""
+    monkeypatch.setenv("SCOUT_REQUIRE_SIGNED_AUTH", "false")
+    client = TestClient(app)
     headers = {
         "X-Principal-User-Id": "attacker",
         "X-Principal-Role": "superuser",
@@ -229,7 +255,13 @@ def test_invalid_role_rejection_http_400(client: TestClient) -> None:
 
 def test_custom_scopes_header_mapping(client: TestClient) -> None:
     """Verifies X-Principal-Scopes header properly overrides default scopes."""
+    token = create_signed_principal_token(
+        user_id="special_auditor",
+        role=RoleType.COMPLIANCE_OFFICER,
+        allowed_scopes=["audit:compliance", "public_eng"],
+    )
     headers = {
+        "Authorization": f"Bearer {token}",
         "X-Principal-User-Id": "special_auditor",
         "X-Principal-Role": "compliance_officer",
         "X-Principal-Scopes": "audit:compliance,public_eng",
@@ -248,7 +280,13 @@ def test_custom_scopes_header_mapping(client: TestClient) -> None:
 
 def test_prompt_injection_cannot_override_principal_header(client: TestClient) -> None:
     """Verifies role-spoofing text inside prompt does NOT alter out-of-band principal context."""
+    token = create_signed_principal_token(
+        user_id="eng_dev",
+        role=RoleType.ENGINEER,
+        allowed_scopes=DEFAULT_ROLE_SCOPES[RoleType.ENGINEER],
+    )
     headers = {
+        "Authorization": f"Bearer {token}",
         "X-Principal-User-Id": "eng_dev",
         "X-Principal-Role": "engineer",
     }
@@ -334,12 +372,13 @@ def test_scout_query_single_domain_success(client: TestClient) -> None:
 
     assert data["passed"] is True
     assert data["domain_id"] == "trading_code_scout"
-    assert len(data["trace_id"]) > 0
+    assert data["trace_id"].startswith("trace_")
+    assert int(data["trace_id"].removeprefix("trace_"), 16) >= 0
 
     # ContextPack assertions
     pack = data["context_pack"]
     assert pack is not None
-    assert len(pack["code_slices"]) > 0
+    assert any("volatility_garch.py" in s["file_path"] for s in pack["code_slices"])
     first_slice = pack["code_slices"][0]
     assert "file_path" in first_slice
     assert "git_commit_sha" in first_slice
@@ -382,9 +421,9 @@ def test_scout_query_federated_all_success(client: TestClient) -> None:
     assert data["quant_strategy_spec"] is not None
 
     spec = data["quant_strategy_spec"]
-    assert len(spec["target_markets"]) > 0
-    assert any(m in [regime.value for regime in MarketRegime] for m in spec["target_markets"])
-    assert len(spec["mathematical_signal_latex"]) > 0
+    valid_regimes = {regime.value for regime in MarketRegime}
+    assert any(m in valid_regimes for m in spec["target_markets"])
+    assert any(tok in spec["mathematical_signal_latex"] for tok in ("=", "\\", "E[", "_"))
 
 
 def test_scout_query_unknown_domain_http_404(client: TestClient) -> None:
@@ -495,8 +534,8 @@ def test_handoff_preview_mode_and_token_generation(
     assert data["requires_human_confirmation"] is True
     assert data["confirmation_token"].startswith("tok_")
     assert data["model_id"] == "gemini-3.8-flash"
-    assert len(data["patch_diff"]) > 0
-    assert len(data["target_files"]) > 0
+    assert "--- " in data["patch_diff"] and "+++ " in data["patch_diff"]
+    assert set(data["target_files"]) == {s.file_path for s in sample_pack.code_slices}
     assert data["expires_in_seconds"] == 3600
     assert data["estimated_paid_cost_usd"] > 0.0
 
@@ -680,6 +719,91 @@ def test_repository_hygiene_zero_prohibited_terms() -> None:
         text=True,
     )
     # git grep returns code 1 when no matches are found
-    assert result.returncode == 1, (
-        f"Found prohibited paths/secrets in repository:\n{result.stdout}"
+    assert result.returncode == 1, f"Found prohibited paths/secrets in repository:\n{result.stdout}"
+
+
+# =============================================================================
+# Suite 11: Session Token Exchange & Server-Side Handoff RBAC (SEC-04)
+# =============================================================================
+
+
+def test_auth_session_mint_and_verify_me(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies /api/v1/auth/session mints a Bearer token accepted by /auth/me and /scout/query."""
+    monkeypatch.delenv("SCOUT_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    raw_client = TestClient(app)
+
+    res = raw_client.post(
+        "/api/v1/auth/session",
+        json={
+            "user_id": "ui_engineer_test",
+            "role": "engineer",
+            "allowed_scopes": ["public_eng", "repo:trading_strategies"],
+        },
     )
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["token_type"] == "Bearer"
+    assert payload["expires_in_seconds"] == 3600
+    assert payload["principal"]["user_id"] == "ui_engineer_test"
+    assert payload["principal"]["role"] == "engineer"
+    assert payload["principal"]["allowed_scopes"] == ["public_eng", "repo:trading_strategies"]
+    token = payload["access_token"]
+
+    me_res = raw_client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert me_res.status_code == 200
+    assert me_res.json()["user_id"] == "ui_engineer_test"
+
+    bad_scopes_res = raw_client.post(
+        "/api/v1/auth/session",
+        json={
+            "user_id": "ui_engineer_test",
+            "role": "engineer",
+            "allowed_scopes": ["   "],
+        },
+    )
+    assert bad_scopes_res.status_code == 400
+
+
+def test_auth_session_blocked_in_production_negative_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative control: interactive persona token minting fails closed with 403 in prod."""
+    monkeypatch.setenv("SCOUT_ENV", "production")
+    raw_client = TestClient(app)
+
+    res = raw_client.post(
+        "/api/v1/auth/session",
+        json={"user_id": "prod_attempt", "role": "engineer"},
+    )
+    assert res.status_code == 403
+    assert "disabled in production" in res.json()["detail"]
+
+
+def test_handoff_preview_and_apply_restricted_to_engineer(
+    sample_pack: ImplementationContextPack,
+) -> None:
+    """Verifies server-side RBAC rejects non-engineer principals on handoff endpoints."""
+    for blocked_role in (RoleType.PRODUCT_MANAGER, RoleType.QUANT_RESEARCHER):
+        token = create_signed_principal_token(
+            user_id=f"user_{blocked_role.value}",
+            role=blocked_role,
+            allowed_scopes=DEFAULT_ROLE_SCOPES[blocked_role],
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        preview_res = TestClient(app, headers=headers).post(
+            "/api/v1/handoff/preview",
+            json={"pack": sample_pack.model_dump(), "model_id": "gemini-3.8-flash"},
+        )
+        assert preview_res.status_code == 403
+        assert "restricted to Engineer" in preview_res.json()["detail"]
+
+        apply_res = TestClient(app, headers=headers).post(
+            "/api/v1/handoff/apply",
+            json={"confirmation_token": "tok_dummy", "confirmed": True},
+        )
+        assert apply_res.status_code == 403
+        assert "restricted to Engineer" in apply_res.json()["detail"]

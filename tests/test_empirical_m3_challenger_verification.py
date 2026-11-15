@@ -93,9 +93,8 @@ def _make_brief(
         mathematical_signal_latex=mathematical_signal_latex,
         entry_exit_rules=entry_exit_rules or ["Enter on signal > 0.0", "Exit on signal <= 0.0"],
         sample_period_years=sample_period_years,
-        market_specific_caveats=market_specific_caveats or [
-            "Subject to statutory transaction cost"
-        ],
+        market_specific_caveats=market_specific_caveats
+        or ["Subject to statutory transaction cost"],
         known_failure_regimes=known_failure_regimes or ["Flash crash volatility"],
     )
 
@@ -238,10 +237,7 @@ def test_empirical_3way_rrf_formula_bounds_and_extremes() -> None:
     # 8. Randomized rank monotonicity and strict containment across 1,000 trials
     rng = random.Random(2026)
     for _ in range(1000):
-        ranks: list[int | None] = [
-            rng.choice([None, rng.randint(1, 50_000)])
-            for _ in range(3)
-        ]
+        ranks: list[int | None] = [rng.choice([None, rng.randint(1, 50_000)]) for _ in range(3)]
         s = compute_normalized_rrf(ranks, num_modalities=3, k=60)
         assert 0.0 <= s <= 1.0, f"RRF score {s} outside [0.0, 1.0] for ranks {ranks}"
 
@@ -542,9 +538,7 @@ def test_empirical_scepticism_gate_distorted_and_fabricated_citations() -> None:
     assert res_fab.error_code == SlicerErrorCode.HALLUCINATED_QUOTE
 
     # 4. Truncated quote with unclosed delimiter
-    truncated_quote = (
-        "floor of 15.0 bps for (equity delivery transactions"
-    )
+    truncated_quote = "floor of 15.0 bps for (equity delivery transactions"
     with pytest.raises(TruncatedLineError):
         slicer.verify_quote(truncated_quote, source_text, strict=True)
 
@@ -587,19 +581,33 @@ def test_empirical_live_corpus_scepticism_gate_integration(settings: ScoutSettin
         allowed_scopes=["public_quant"],
     )
 
-    # Fetch a real chunk from the live corpus
+    # Fetch a real chunk from the live corpus with deterministic ordering
+    from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
+
+    slicer = DeterministicSlicer()
     with mgr.scoped_transaction(auth_principal, enable_hnsw_iterative_scan=False) as conn:
-        row = conn.execute(
+        rows = conn.execute(
             """
             SELECT chunk_id, doc_id, doc_title, source_uri, market_scope,
                    section_heading, verbatim_content
             FROM doc_chunks
             WHERE market_scope = 'IN_NSE'
-            LIMIT 1;
+            ORDER BY doc_id ASC, chunk_id ASC
+            LIMIT 25;
             """
-        ).fetchone()
+        ).fetchall()
 
-        assert row is not None, "Live database must contain at least one IN_NSE doc chunk"
+        assert rows, "Live database must contain at least one IN_NSE doc chunk"
+        row = None
+        for cand in rows:
+            cand_words = str(cand[6]).split()
+            if len(cand_words) >= 12 and not slicer._has_unclosed_delimiters(
+                slicer.normalize_text(" ".join(cand_words[2:12]))
+            ):
+                row = cand
+                break
+        if row is None:
+            row = rows[0]
         chunk_id_raw, doc_id_raw, title_raw, uri_raw, market_raw, heading_raw, content_raw = row
         assert isinstance(chunk_id_raw, uuid.UUID)
         assert isinstance(doc_id_raw, str)

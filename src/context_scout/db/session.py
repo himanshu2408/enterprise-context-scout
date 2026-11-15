@@ -88,3 +88,6 @@ class RLSConnectionManager:
                 if enable_hnsw_iterative_scan:
                     conn.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'")
                 yield conn
+
+    # Alias for compatibility with callers expecting scoped_session
+    scoped_session = scoped_transaction

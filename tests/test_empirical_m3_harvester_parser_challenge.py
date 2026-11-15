@@ -455,9 +455,12 @@ def test_adversarial_pdf_parser_truncated_pdf_header() -> None:
 
 def test_adversarial_pdf_parser_on_real_academic_corpus_pdfs() -> None:
     """Verifies that all cached academic PDFs parse and produce chunks with section headings."""
-    cached_pdfs = list(Path("data/papers/content").glob("*/*.pdf"))
+    from tests.fixtures.corpus_paths import resolve_local_data_dir
+
+    papers_dir = resolve_local_data_dir("data/papers/content")
+    cached_pdfs = sorted(papers_dir.glob("*/*.pdf"))
     if not cached_pdfs:
-        pytest.skip("No cached PDFs available in data/papers/content")
+        pytest.fail(f"No cached PDFs available in {papers_dir}")
 
     parser = PdfDocParser()
     for pdf_path in cached_pdfs[:5]:

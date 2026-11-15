@@ -177,8 +177,12 @@ def _detect_host_unified_memory_gb() -> float:
             out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True)
             bytes_val = int(out.strip())
             return round(bytes_val / (1024**3), 2)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Failed to detect macOS Unified Memory via sysctl (%s): %s; using 48.0 GB default",
+                type(exc).__name__,
+                exc,
+            )
     return 48.0
 
 
@@ -460,7 +464,7 @@ class QLoRAHyperparameters(BaseModel):
     learning_rate: float = Field(default=1e-4, gt=0.0)
     batch_size: int = Field(default=4, ge=1)
     num_epochs: int = Field(default=3, ge=1)
-    max_seq_length: int = Field(default=2048, ge=256)
+    max_seq_length: int = Field(default=4096, ge=256)
     seed: int = Field(default=42)
 
     @property
@@ -677,13 +681,28 @@ class LocalQLoRATrainer:
                 return AutoTokenizer.from_pretrained(
                     self.base_model_id, local_files_only=True, fix_markdown=False
                 )
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Local cache lookup failed for tokenizer %s (%s): %s",
+                    self.base_model_id,
+                    type(exc).__name__,
+                    exc,
+                )
                 try:
                     return AutoTokenizer.from_pretrained(self.base_model_id, fix_markdown=False)
-                except Exception:
-                    pass
-        except ImportError:
-            pass
+                except Exception as remote_exc:
+                    logger.debug(
+                        "Remote AutoTokenizer lookup failed for %s (%s): %s",
+                        self.base_model_id,
+                        type(remote_exc).__name__,
+                        remote_exc,
+                    )
+        except ImportError as exc:
+            logger.debug(
+                "transformers not available for tokenizer load (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
 
         # Check local path
         local_cand = Path(self.base_model_id) / "tokenizer.json"
@@ -733,9 +752,11 @@ class LocalQLoRATrainer:
         train_jsonl: Path | str,
         valid_jsonl: Path | str,
         output_adapter_dir: Path | str,
-        domain_id: str = "trading_code_scout",
+        domain_id: str | None = None,
         num_steps: int | None = None,
         use_mlx_native: bool = False,
+        learning_rate: float | None = None,
+        max_seq_length: int | None = None,
     ) -> TrainingRunResult:
         """Executes genuine QLoRA fine-tuning with process mutual exclusion lock (HW-01).
 
@@ -747,6 +768,17 @@ class LocalQLoRATrainer:
         """
         output_dir = Path(output_adapter_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        if domain_id is None:
+            from context_scout.config import ScoutSettings
+            from context_scout.plugins.registry import PluginRegistry
+
+            plugin = PluginRegistry.get_primary_domain_plugin()
+            if plugin is not None:
+                domain_id = plugin.get_role_domain_ids().get(
+                    "code", ScoutSettings().default_domain_id
+                )
+            else:
+                domain_id = ScoutSettings().default_domain_id
 
         train_data = self.load_dataset(train_jsonl)
         valid_data = self.load_dataset(valid_jsonl)
@@ -810,9 +842,19 @@ class LocalQLoRATrainer:
                 for name, _ in flat_trainable:
                     assert "router" not in name, f"Router parameter unexpectedly trainable: {name}"
 
-                full_seq_limit = self.hyperparameters.max_seq_length
+                full_seq_limit = (
+                    max_seq_length
+                    if max_seq_length is not None
+                    else self.hyperparameters.max_seq_length
+                )
+                active_lr = (
+                    learning_rate
+                    if learning_rate is not None
+                    else self.hyperparameters.learning_rate
+                )
                 mlx_samples: list[tuple[Any, Any, Any, int]] = []
                 total_tokens = 0
+                truncated_rows = 0
                 for ex in train_data:
                     msgs = ex.get("messages", [])
                     if len(msgs) < 2:
@@ -826,9 +868,13 @@ class LocalQLoRATrainer:
                     target_str = msgs[-1].get("content", "") + "<turn|>\n"
                     prompt_ids = [int(t) for t in mlx_tok.encode(prompt_str)]
                     target_ids = [int(t) for t in mlx_tok.encode(target_str)]
+                    if len(prompt_ids) + len(target_ids) > full_seq_limit:
+                        truncated_rows += 1
+                        keep_prompt = max(64, full_seq_limit - len(target_ids))
+                        prompt_ids = prompt_ids[-keep_prompt:]
                     full_ids = (prompt_ids + target_ids)[:full_seq_limit]
-                    p_len = len(prompt_ids)
-                    t_len = max(1, len(full_ids) - p_len)
+                    p_len = min(len(prompt_ids), max(0, len(full_ids) - 1))
+                    t_len = len(full_ids) - p_len
                     full_mask = [0.0] * p_len + [1.0] * t_len
                     x_arr = mx.array([full_ids[:-1]])
                     y_arr = mx.array([full_ids[1:]])
@@ -838,18 +884,26 @@ class LocalQLoRATrainer:
                 if not mlx_samples:
                     raise ValueError(f"No valid sequences tokenized in {train_jsonl}")
 
-                def _mlx_loss_fn(model_obj: Any, x_arr: Any, y_arr: Any, m_arr: Any) -> Any:
+                if truncated_rows > 0:
+                    logger.warning(
+                        "Truncated %d/%d MLX training sequences at max_seq_length=%d",
+                        truncated_rows,
+                        len(train_data),
+                        full_seq_limit,
+                    )
+
+                def _mlx_loss_fn(model_obj: Any, x_arr: Any, y_tgt: Any, m_arr: Any) -> Any:
                     logits_out = model_obj(x_arr)
-                    unreduced = mnn.losses.cross_entropy(logits_out, y_arr, reduction="none")
+                    unreduced = mnn.losses.cross_entropy(logits_out, y_tgt, reduction="none")
                     return (unreduced * m_arr).sum() / m_arr.sum()
 
                 mnn_any: Any = mnn
                 val_grad_builder: Any = mnn_any.value_and_grad
                 loss_and_grad_fn: Any = val_grad_builder(mlx_model, _mlx_loss_fn)
                 sched_fn: Any = moptim.cosine_decay(
-                    init=self.hyperparameters.learning_rate,
+                    init=active_lr,
                     decay_steps=steps_to_run,
-                    end=self.hyperparameters.learning_rate * 0.1,
+                    end=active_lr * 0.1,
                 )
                 mlx_opt = moptim.AdamW(
                     learning_rate=sched_fn,
@@ -870,11 +924,7 @@ class LocalQLoRATrainer:
                     if step == 1:
                         initial_loss = current_loss
                     final_loss = current_loss
-                    cur_lr = (
-                        float(sched_fn(step).item())
-                        if callable(sched_fn)
-                        else self.hyperparameters.learning_rate
-                    )
+                    cur_lr = float(sched_fn(step).item()) if callable(sched_fn) else active_lr
                     step_history.append(
                         {
                             "step": step,
@@ -900,9 +950,12 @@ class LocalQLoRATrainer:
                     vt_str = v_msgs[-1].get("content", "") + "<turn|>\n"
                     vp_ids = [int(t) for t in mlx_tok.encode(vp_str)]
                     vt_ids = [int(t) for t in mlx_tok.encode(vt_str)]
+                    if len(vp_ids) + len(vt_ids) > full_seq_limit:
+                        v_keep = max(64, full_seq_limit - len(vt_ids))
+                        vp_ids = vp_ids[-v_keep:]
                     v_full = (vp_ids + vt_ids)[:full_seq_limit]
-                    vp_len = len(vp_ids)
-                    vt_len = max(1, len(v_full) - vp_len)
+                    vp_len = min(len(vp_ids), max(0, len(v_full) - 1))
+                    vt_len = len(v_full) - vp_len
                     v_mask = [0.0] * vp_len + [1.0] * vt_len
                     vx_arr = mx.array([v_full[:-1]])
                     vy_arr = mx.array([v_full[1:]])
@@ -1164,23 +1217,22 @@ class LocalQLoRATrainer:
 
 
 def main() -> None:
-    """Trains QLoRA adapters for trading_code_scout and quant_research_scout."""
+    """Trains QLoRA adapters for all registered domain plugin adapter specifications."""
+    from context_scout.plugins.registry import PluginRegistry
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     trainer = LocalQLoRATrainer()
 
+    plugin = PluginRegistry.get_primary_domain_plugin()
+    specs = plugin.get_adapter_specs() if plugin is not None else []
     configs = [
         (
-            "data/tuning/trading_code_scout/train.jsonl",
-            "data/tuning/trading_code_scout/valid.jsonl",
-            "domains/trading_code_scout/adapters/gemma4_26b_code_scout",
-            "trading_code_scout",
-        ),
-        (
-            "data/tuning/quant_research_scout/train.jsonl",
-            "data/tuning/quant_research_scout/valid.jsonl",
-            "domains/quant_research_scout/adapters/gemma4_26b_quant_research",
-            "quant_research_scout",
-        ),
+            spec["train_jsonl"],
+            spec["valid_jsonl"],
+            spec["adapter_rel_path"],
+            spec["domain_id"],
+        )
+        for spec in specs
     ]
 
     for train_j, valid_j, out_d, dom_id in configs:

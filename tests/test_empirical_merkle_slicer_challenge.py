@@ -169,9 +169,7 @@ def test_slicer_zero_indexed_and_negative_start_bounds(
         slicer.slice_lines(sample_multiline_text, start_line=-50, end_line=-10)
 
 
-def test_slicer_inverted_bounds(
-    slicer: DeterministicSlicer, sample_multiline_text: str
-) -> None:
+def test_slicer_inverted_bounds(slicer: DeterministicSlicer, sample_multiline_text: str) -> None:
     """Stress tests inverted bounds (start_line > end_line)."""
     with pytest.raises(InvalidLineBoundsError, match="cannot be less than start_line"):
         slicer.slice_lines(sample_multiline_text, start_line=5, end_line=2)
