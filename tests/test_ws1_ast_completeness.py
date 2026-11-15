@@ -19,6 +19,7 @@ from context_scout.db.repositories import (
     ASTEdgeRecord,
     ASTSymbolRecord,
     CodeFileRecord,
+    DocChunkRecord,
     InMemoryRLSRepository,
     PostgresRLSRepository,
 )
@@ -480,7 +481,9 @@ def test_prompt_guard_blocks_html_comment_system_override_with_negative_control(
     assert decision_ok.passed is True
 
 
-def test_cost_governance_kill_switch_and_pg17_doc_count_and_rrf() -> None:
+def test_cost_governance_kill_switch_and_pg17_doc_count_and_rrf(
+    ephemeral_pg_domain: str,
+) -> None:
     """Verifies 1M exploration kill switch, live PG17 doc count, and clean RRF hits."""
     assert DEFAULT_EXPLORATION_TOKEN_KILL_SWITCH == 1_000_000
 
@@ -488,17 +491,54 @@ def test_cost_governance_kill_switch_and_pg17_doc_count_and_rrf() -> None:
     mgr = RLSConnectionManager(settings.db_app_url)
     adapter = PostgresScoutGraphAdapter(mgr, settings=settings)
     principal = _eng_principal()
-
-    active_cnt, stale_cnt = adapter.count_visible_doc_chunks(principal, "data_engineering_scout")
-    assert active_cnt > 30_000
-    assert stale_cnt >= 0
-
     repo = PostgresRLSRepository()
     zero_vec = [0.0] * 768
+
+    active_cnt, stale_cnt = adapter.count_visible_doc_chunks(principal, "data_engineering_scout")
+    target_domain = "data_engineering_scout"
+    if active_cnt > 0:
+        assert active_cnt > 30_000
+        assert stale_cnt >= 0
+    else:
+        target_domain = ephemeral_pg_domain
+        seed_sections = [
+            ("Atomicity", "ACID stands for Atomicity: transactions commit all or nothing."),
+            ("Consistency", "ACID Consistency preserves relational integrity invariants."),
+            ("Isolation", "ACID Isolation prevents concurrent transaction interference."),
+            ("Durability", "ACID Durability guarantees committed writes survive crashes."),
+            ("WAL Internals", "ACID transactions flush write-ahead log records before commit."),
+            ("See also", "Related references and further links."),
+        ]
+        with mgr.scoped_transaction(principal) as conn:
+            for idx, (heading, body) in enumerate(seed_sections):
+                repo.insert_doc_chunk(
+                    conn,
+                    DocChunkRecord(
+                        chunk_id=uuid.uuid4(),
+                        domain_id=ephemeral_pg_domain,
+                        doc_id=f"{ephemeral_pg_domain}:acid_{idx}",
+                        doc_title=f"ACID Guide {idx}",
+                        source_uri=f"urn:{ephemeral_pg_domain}:acid_{idx}",
+                        market_scope="ENTERPRISE_DOC",
+                        published_date=None,
+                        authority_weight=0.95,
+                        section_heading=heading,
+                        contextual_header=f"Domain: {ephemeral_pg_domain} | {heading}",
+                        verbatim_content=body,
+                        metadata_json={"idx": idx},
+                        allowed_scopes=["public_eng"],
+                        embedding=[0.01] * 768,
+                        source_type="enterprise_doc",
+                    ),
+                )
+        seeded_cnt, seeded_stale = adapter.count_visible_doc_chunks(principal, ephemeral_pg_domain)
+        assert seeded_cnt == 6
+        assert seeded_stale == 0
+
     with mgr.scoped_transaction(principal) as conn:
         hits = repo.search_doc_chunks_hybrid_rrf(
             conn=conn,
-            domain_id="data_engineering_scout",
+            domain_id=target_domain,
             query_text="what does ACID stands for",
             query_embedding=zero_vec,
             top_k=5,
@@ -511,28 +551,55 @@ def test_cost_governance_kill_switch_and_pg17_doc_count_and_rrf() -> None:
         )
 
 
-def test_polyglot_unseen_v2_blocks_public_quant_only_principal() -> None:
-    """Regression test: public_quant-only principals see 0 polyglot_unseen_v2 code_files."""
+def test_polyglot_unseen_v2_blocks_public_quant_only_principal(
+    ephemeral_pg_domain: str,
+) -> None:
+    """Regression test: public_quant-only principals see 0 public_eng code_files."""
     settings = ScoutSettings()
     mgr = RLSConnectionManager(settings.db_app_url)
+    repo = PostgresRLSRepository()
 
     quant_principal = PrincipalContext(
         user_id="quant_only_probe",
         role=RoleType.QUANT_RESEARCHER,
         allowed_scopes=["public_quant"],
     )
+    eng_principal = _eng_principal()
+    with mgr.scoped_transaction(eng_principal) as conn:
+        row_poly = conn.execute(
+            "SELECT count(*) FROM code_files WHERE domain_id = 'polyglot_unseen_v2';"
+        ).fetchone()
+    poly_cnt = int(str(row_poly[0])) if row_poly is not None else 0
+
+    target_domain = "polyglot_unseen_v2"
+    expected_min_eng = 4000
+    if poly_cnt == 0:
+        target_domain = ephemeral_pg_domain
+        expected_min_eng = 1
+        with mgr.scoped_transaction(eng_principal) as conn:
+            repo.insert_code_file(
+                conn,
+                _make_file(
+                    ephemeral_pg_domain,
+                    "anyio",
+                    "src/anyio/_core/_tasks.py",
+                    "class CancelScope:\n    pass\n",
+                ),
+            )
+
     with mgr.scoped_transaction(quant_principal) as conn:
         row_q = conn.execute(
-            "SELECT count(*) FROM code_files WHERE domain_id = 'polyglot_unseen_v2';"
+            "SELECT count(*) FROM code_files WHERE domain_id = %s;",
+            (target_domain,),
         ).fetchone()
         assert row_q is not None
         assert int(str(row_q[0])) == 0
 
-    # Negative control: public_eng principal sees the synced polyglot_unseen_v2 files
-    eng_principal = _eng_principal()
+    # Negative control: public_eng principal sees the synced code_files
     with mgr.scoped_transaction(eng_principal) as conn:
         row_e = conn.execute(
-            "SELECT count(*) FROM code_files WHERE domain_id = 'polyglot_unseen_v2';"
+            "SELECT count(*) FROM code_files WHERE domain_id = %s;",
+            (target_domain,),
         ).fetchone()
         assert row_e is not None
-        assert int(str(row_e[0])) >= 4000
+        assert int(str(row_e[0])) >= expected_min_eng

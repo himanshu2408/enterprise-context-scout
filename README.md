@@ -9,8 +9,8 @@ Local-first context discovery and verification for enterprise coding and knowled
 ```mermaid
 flowchart LR
   Q[Task] --> D[Local Gemma discovery via MCP tools under Postgres FORCE RLS]
-  D --> A[AST 1-hop closure]
-  A --> P[ContextPack]
+  D --> A["AST 1-hop & 2-hop closure + Facet Grounding"]
+  A --> P["Adaptive ContextPack (8K-18K tok + 4x StageConfidence)"]
   P --> G{4-check pre-flight gate}
   G -- fail --> B[Local bounce-back, max 2 turns]
   B --> D
@@ -200,7 +200,9 @@ uv run context-scout benchmark-domain \
 ```text
 enterprise-context-scout/
 ├── .github/workflows/ci.yml        # 6-stage GitHub Actions CI/CD (pgvector:pg17 + keyless GCP WIF)
-├── sql/001_init_schema.sql         # PostgreSQL 17 DDL: HNSW, pg_trgm, and FORCE ROW LEVEL SECURITY
+├── sql/
+│   ├── 001_init_schema.sql         # PostgreSQL 17 DDL: HNSW, pg_trgm, and FORCE ROW LEVEL SECURITY
+│   └── 002_production_enterprise_schema.sql # Enterprise repos, Confluence/Jira lifecycle, indexing queue & AST indexes
 ├── domains/                        # Declarative DomainPack manifests & trained QLoRA adapters
 │   ├── trading_code_scout/         # Codebase domain.yaml + gemma4_26b_code_scout (safetensors)
 │   ├── quant_research_scout/       # Research domain.yaml + gemma4_26b_quant_research (safetensors)
@@ -215,12 +217,12 @@ enterprise-context-scout/
 │   │   ├── session.py              # RLSConnectionManager (psycopg_pool.ConnectionPool + SET LOCAL scopes)
 │   │   ├── repositories.py         # PostgresRLSRepository & InMemoryRLSRepository
 │   │   └── bm25.py                 # Smoothed Okapi BM25 lexical ranker
-│   ├── ast_engine/                 # Polyglot CST/AST extraction, cross-boundary linking, 1-hop closure & byte-exact slicing
+│   ├── ast_engine/                 # Polyglot CST/AST extraction, cross-boundary linking, 2-hop closure & byte-exact slicing
 │   │   ├── extractor.py            # ASTExtractor (Python, TS/TSX, JS, Go, Rust, Java, C#, SQL, TF, YAML, MD)
 │   │   ├── contract_linker.py      # CrossBoundaryContractLinker (API routes, DTOs, SQL tables, CI/TF contracts)
-│   │   ├── dependency_expander.py  # ASTDependencyExpander (<=3 callers, <=1,500 tokens + 2-hop schema/DTO closure)
-│   │   ├── deterministic_slicer.py # DeterministicSlicer (UTF-8 byte slicing + >=0.98 NFKC quote check)
-│   │   └── models.py               # AST node and edge data models
+│   │   ├── dependency_expander.py  # ASTDependencyExpander (<=8 callers, <=10,000-token budget + 2-hop schema/DTO closure)
+│   │   ├── deterministic_slicer.py # DeterministicSlicer (UTF-8 byte slicing, >450-line skeletonization + >=0.98 NFKC check)
+│   │   └── models.py               # ContextCompletenessConfig, AST node and edge data models
 │   ├── ingestion/                  # Incremental Git Merkle sync & multi-format/paper ingestion
 │   │   ├── git_merkle_indexer.py   # GitMerkleIndexer (<50ms Blob-SHA diff + live working-tree overlay + git cat-file -p)
 │   │   ├── paper_harvester.py      # arXiv Atom/.tar.gz & OpenAlex v2 full-text harvester
@@ -233,15 +235,15 @@ enterprise-context-scout/
 │   ├── security/                   # Out-of-band RBAC, HMAC principal tokens & prompt guardrails
 │   │   ├── rbac.py                 # ContextVar principal binding, DomainAuthorizationGate, tool arg checks
 │   │   └── guardrails.py           # PromptInjectionSanitizer, SecretRedactor, ShieldGemmaGuardrail
-│   ├── mcp_servers/                # Model Context Protocol servers (mcp>=2.3.0, <=10 items, <=32KB cap)
-│   │   ├── code_repo_mcp.py        # 6 codebase tools (trigram grep, AST lookup, 1-hop closure, slicing, verified pack)
+│   ├── mcp_servers/                # Model Context Protocol servers (mcp>=2.3.0, <=25 items, <=128KB cap)
+│   │   ├── code_repo_mcp.py        # 6 codebase tools (trigram grep, AST lookup, 1-hop/2-hop closure, slicing, verified pack)
 │   │   ├── quant_corpus_mcp.py     # 4 quant research tools (hybrid RRF, equations/tables, friction gate)
 │   │   ├── doc_corpus_mcp.py       # 3 domain-agnostic document/knowledge tools (hybrid RRF, quote verify, section lookup)
-│   │   ├── common.py               # SQL query pushdown, payload truncation & out-of-band principal checks
+│   │   ├── common.py               # SQL query pushdown, 128KB payload bounding & out-of-band principal checks
 │   │   └── seed_code_corpus.py     # Idempotent PostgreSQL 17 corpus seeder
-│   ├── agents/                     # Google ADK 2.12 workflows, intent routing, conflict detection, pre-flight gate & worktree executor
+│   ├── agents/                     # Google ADK 2.12 workflows, facet routing, conflict detection, pre-flight gate & worktree executor
 │   │   ├── domain_registry.py      # DomainRegistry & AdapterPool (0.018ms in-memory LoRA pointer switch)
-│   │   ├── intent_router.py        # Role-agnostic QueryIntentClassifier + federated source_filter
+│   │   ├── intent_router.py        # Role-agnostic QueryIntentClassifier, decompose_query_facets & evaluate_facet_grounding
 │   │   ├── conflict_detector.py    # ConflictDetector & Confluence supersession / version freshness hierarchy
 │   │   ├── preflight_gate.py       # 4-Check PreFlightValidator & $0 local bounce-back diagnostics
 │   │   ├── scout_workflow.py       # 4-stage ScoutWorkflow, MAX_LOADED_MLX_MODELS=1 cache & FederatedScoutCoordinator
@@ -276,13 +278,16 @@ Tenant and role isolation is enforced at the PostgreSQL 17 storage kernel rather
       USING (allowed_scopes && string_to_array(NULLIF(current_setting('app.principal_scopes', true), ''), ','));
   ```
   When `app.principal_scopes` is unset or empty, `NULLIF(..., '')` evaluates to `NULL`, causing the array overlap operator `&&` to fail closed (0 rows returned).
-- **Relational & Vector Schema (6 Core Tables):**
+- **Relational & Vector Schema (`sql/001_init_schema.sql` & `sql/002_production_enterprise_schema.sql` — 10 Tables):**
   1. `domain_packs`: Registered domain manifests, active LoRA adapter IDs, and freshness half-life configurations.
-  2. `code_files`: Content-addressed repository files tracked by `git_commit_sha` and `git_blob_sha` with `pg_trgm` GIN indexes.
-  3. `ast_symbols`: Extracted functions, classes, methods, interfaces, and type aliases with 1-indexed line spans, `tsvector` FTS, and 768-dim HNSW `vector(768)` embeddings.
-  4. `ast_edges`: Directed dependency graph edges (`CALLS`, `IMPORTS`, `USES_TYPE`, `INHERITS`, `TESTED_BY`) with independent `FORCE RLS` scope policies.
-  5. `doc_chunks`: Contextualized research chunks (`IN_NSE`, `DE_XETRA`, `US_EQUITY`, `GLOBAL`, `INTERNAL_ADR`) with 50-token headers, `tsvector` FTS, `pg_trgm`, and 768-dim HNSW embeddings.
-  6. `execution_telemetry`: Append-only ROI and flywheel ledger (`local_tokens_read`, `context_pack_tokens_sent`, `paid_tokens_saved`, `estimated_usd_saved`, `preflight_passed_first_try`, `missing_context_requests`).
+  2. `repositories`: Tracked multi-repository metadata (`repo_id`, `domain_id`, `repo_name`, `default_branch`).
+  3. `code_files`: Content-addressed repository files tracked by `git_commit_sha` and `git_blob_sha` with `pg_trgm` GIN indexes.
+  4. `ast_symbols`: Extracted functions, classes, methods, interfaces, hooks/reducers/stories, and IaC resources with 1-indexed line spans, `tsvector` FTS, `(file_id)` / `(domain_id, qualified_name)` B-tree indexes, and 768-dim HNSW `vector(768)` embeddings.
+  5. `ast_edges`: Directed dependency graph edges (`CALLS`, `IMPORTS`, `USES_TYPE`, `INHERITS`, `TESTED_BY`, `PROVISIONED_BY`, `DISPATCHES`, `SELECTS`, `DOCUMENTS_COMPONENT`) with composite 2-hop CTE indexes and independent `FORCE RLS` scope policies.
+  6. `doc_chunks`: Contextualized research and enterprise documentation chunks (`IN_NSE`, `DE_XETRA`, `US_EQUITY`, `GLOBAL`, `INTERNAL_ADR`, `ENTERPRISE_DOC`, `CONFLUENCE`, `JIRA`) with 50-token headers, lifecycle freshness flags (`version_str`, `is_stale`), `tsvector` FTS, `pg_trgm`, and 768-dim HNSW embeddings.
+  7. `confluence_spaces` & `confluence_pages`: Mirrored Confluence space/page permissions, soft-delete tombstones, and `superseded_by` version chains.
+  8. `jira_issues`: Project/ticket metadata, terminal status filtering, and `FORCE RLS` scope arrays.
+  9. `indexing_queue` & `execution_telemetry`: Transactional webhook/push ingestion queue (`PENDING`/`PROCESSING`/`COMPLETED`/`FAILED`) and append-only ROI/flywheel ledger (`local_tokens_read`, `context_pack_tokens_sent`, `paid_tokens_saved`, `estimated_usd_saved`).
 
 ### 4.2 Out-of-Band Principal Attestation & Guardrails (`src/context_scout/security/`)
 
@@ -298,11 +303,11 @@ Tenant and role isolation is enforced at the PostgreSQL 17 storage kernel rather
 
 ## 5. Dual-Engine Retrieval, AST Closure & 4-Check Pre-Flight Gate
 
-### 5.1 Code Engine: Commit-Isolated Merkle Sync, Bounded 1-Hop AST Closure & Byte-Exact Slicing
+### 5.1 Code Engine: Commit-Isolated Merkle Sync, Adaptive 2-Hop AST Closure & Byte-Exact Slicing
 
 - **`GitMerkleIndexer` (`src/context_scout/ingestion/git_merkle_indexer.py`):** Diffs Git blob SHAs directly against `code_files.git_blob_sha` while overlaying live uncommitted working-tree edits (`M`), untracked files (`??`), and deletions (`D`) via `git --no-optional-locks status --porcelain -unormal`, skipping unchanged files and syncing incremental changes in **$<50\text{ ms}$** ($\approx 22\text{ ms}$ warm in-memory, $\approx 37.4\text{ ms}$ against live PostgreSQL 17). Supports `isolate_by_commit=True`, reading historical file contents directly from immutable Git object storage (`git cat-file -p <commit>:<path>`) so historical benchmark checkouts never collide on `(domain_id, repo_name, file_path)`.
-- **`ASTExtractor` & `ASTDependencyExpander` (`src/context_scout/ast_engine/`):** Parses Python, TypeScript/TSX, JavaScript, Go, Rust, Java, C# (`tree-sitter-c-sharp`), SQL DDL/RLS, Terraform HCL, GitLab CI / K8s YAML, and Markdown into structured AST symbols and directed edges, attributing module imports only to classes/functions that reference them while `CrossBoundaryContractLinker` (`contract_linker.py`) links API routes, DTO schemas, SQL tables, and CI/Terraform targets across polyglot services. During expansion, attaches imported types (`USES_TYPE`/`IMPORTS`), unit test fixtures (`TESTED_BY`), and at most **3 direct callers** (`MAX_DIRECT_CALLERS_PER_SYMBOL = 3`) across distinct files within a hard **1,500-token cap** (`MAX_EXPANSION_TOKEN_BUDGET = 1500`).
-- **`DeterministicSlicer` (`src/context_scout/ast_engine/deterministic_slicer.py`):** Models never re-type source code from memory. The scout emits `CodeSlicePointer` coordinates, and `DeterministicSlicer` extracts exact UTF-8 byte ranges from Git/PostgreSQL with `git_commit_sha` provenance.
+- **`ASTExtractor` & `ASTDependencyExpander` (`src/context_scout/ast_engine/`):** Parses Python, TypeScript/TSX, JavaScript, Go, Rust, Java, C# (`tree-sitter-c-sharp`), SQL DDL/RLS, Terraform HCL, GitLab CI / K8s YAML, and Markdown into structured AST symbols and directed edges, attributing module imports only to classes/functions that reference them while `CrossBoundaryContractLinker` (`contract_linker.py`) links API routes, DTO schemas, SQL tables, and CI/Terraform targets across polyglot services. During expansion (`ContextCompletenessConfig`), attaches 1-hop and 2-hop imported types/schemas (`USES_TYPE`/`INHERITS`/`IMPORTS`), unit test fixtures (`TESTED_BY`), and up to **8 diverse direct callers** (`MAX_DIRECT_CALLERS_PER_SYMBOL = 8`) across distinct files within a **10,000-token expansion budget** (`MAX_EXPANSION_TOKEN_BUDGET = 10_000`) and an **18,000-token adaptive pack ceiling** (while honoring explicit tighter caller/token overrides when requested).
+- **`DeterministicSlicer` (`src/context_scout/ast_engine/deterministic_slicer.py`):** Models never re-type source code from memory. The scout emits `CodeSlicePointer` coordinates, and `DeterministicSlicer` extracts exact UTF-8 byte ranges from Git/PostgreSQL with `git_commit_sha` provenance, preserving full class bodies up to `450` lines (`DEFAULT_SKELETONIZE_CLASS_LINE_THRESHOLD = 450`) and keeping query-matched methods un-skeletonized on larger God-classes.
 
 ### 5.2 Research Engine: 3-Way Normalized RRF, Lossless LaTeX/PDF Chunking & Scepticism Gate
 
@@ -317,7 +322,8 @@ Before any paid Gemini token is spent, `PreFlightValidator` enforces four determ
 1. **Check 1 (Internal Symbol Resolution):** All referenced internal symbols across `code_slices` must resolve in the AST graph (auto-attaching missing 1-hop definitions within budget).
 2. **Check 2 (Target Identifier Grounding):** Target symbols slated for modification must exist in the indexed repository AST.
 3. **Check 3 (Normalized RRF Quality Floor):** Top retrieved context item must satisfy $\text{RRF}_{\text{norm}} \ge 0.65$ (`PreFlightValidator.DEFAULT_MIN_RRF_SCORE` and `ScoutSettings.min_retrieval_confidence`; tightened in M4/M5 from the earlier `0.55` M3 draft floor).
-4. **Check 4 (Verbatim Quote Faithfulness):** Every `DocCitationSpan.verbatim_quote` must match the underlying source chunk with $\ge 0.98$ NFKC-normalized token overlap.
+4. **Check 4 (Verbatim Quote Faithfulness):** Every `DocCitationSpan.verbatim_quote` must match the underlying source chunk with $\ge 0.98$ NFKC-normalized token overlap (alongside un-truncated `full_section_content` so multi-paragraph definitions and tables are never clipped).
+5. **Multi-Facet Grounding, Partial-Miss Honesty & Calibrated 4-Stage Confidence (`intent_router.py`, `scout_workflow.py`):** `decompose_query_facets` splits `"top N"`, multi-entity comparisons, and acronym queries (e.g., `"what does ACID stands for"`) into explicit sub-facets evaluated by `evaluate_facet_grounding`. Unverified facets are surfaced explicitly via `query_facets` (`grounded | partial | not_found`) and `missing_or_unverified_aspects`; if `0` facets are grounded and no direct symbol matches, the workflow abstains deterministically at \$0 paid tokens (`zero_grounded_facets`), while emitting calibrated `StageConfidence` (`0.0–1.0`, `high|medium|low`, signal breakdown) across all 4 SSE stages.
 
 If any check fails, `ScoutWorkflow` bounces structured remediation feedback back to local `gemma-4-26B-A4B-it` (up to 2 local retry turns at \$0 API cost). If validation still fails, it returns `InsufficientContextDiagnostic(paid_tokens_spent=0)` without invoking Gemini.
 
