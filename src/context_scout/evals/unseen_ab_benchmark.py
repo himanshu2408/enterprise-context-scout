@@ -285,7 +285,13 @@ class RepoExplorationTools:
                 continue
             try:
                 line_cnt = len(py_file.read_text(encoding="utf-8", errors="replace").splitlines())
-            except OSError:
+            except OSError as exc:
+                logger.debug(
+                    "Unable to count lines in %s (%s): %s",
+                    py_file,
+                    type(exc).__name__,
+                    exc,
+                )
                 line_cnt = 0
             out_lines.append(f"{rel} ({line_cnt} lines)")
         result = "\n".join(out_lines)
@@ -423,7 +429,11 @@ class SharedExecutionBackend:
                 add_generation_prompt=True,
                 enable_thinking=False,
             )
-        except TypeError:
+        except TypeError as exc:
+            logger.debug(
+                "Tokenizer chat template without enable_thinking (%s)",
+                type(exc).__name__,
+            )
             formatted = tokenizer.apply_chat_template(
                 [{"role": "user", "content": prompt}],
                 tokenize=False,
@@ -507,10 +517,19 @@ class UnseenRepoABBenchmarkRunner:
         self.registry.load_all()
         self.gemini_prompt_builder = GeminiImplementationExecutor()
 
+    def _resolve_code_domain_id(self) -> str:
+        from context_scout.plugins.registry import PluginRegistry
+
+        primary_plugin = PluginRegistry.get_primary_domain_plugin()
+        if primary_plugin is not None:
+            return primary_plugin.get_role_domain_ids().get("code", "default")
+        return "default"
+
     def _verify_postgres_17_rls_sync(self, sample_task: UnseenRepoBugTask, repo_dir: Path) -> bool:
         """Verify live PostgreSQL 17 FORCE RLS indexing on unseen repository."""
         if not self.verify_postgres_rls:
             return False
+        code_domain_id = self._resolve_code_domain_id()
         try:
             settings = ScoutSettings()
             conn_mgr = RLSConnectionManager(settings.db_app_url)
@@ -537,19 +556,19 @@ class UnseenRepoABBenchmarkRunner:
                     conn=conn,
                     repo=pg_repo,
                     principal=principal,
-                    domain_id="trading_code_scout",
+                    domain_id=code_domain_id,
                     repo_name="httpx_pg_rls_probe",
                     allowed_scopes=["public_eng"],
                     ref=sample_task.parent_commit_sha,
                 )
-            vis_auth = pg_adapter.list_visible_code_files(principal, "trading_code_scout")
-            vis_unauth = pg_adapter.list_visible_code_files(unauth_principal, "trading_code_scout")
+            vis_auth = pg_adapter.list_visible_code_files(principal, code_domain_id)
+            vis_unauth = pg_adapter.list_visible_code_files(unauth_principal, code_domain_id)
             has_probe = any(f.repo_name == "httpx_pg_rls_probe" for f in vis_auth)
             leaked_probe = any(f.repo_name == "httpx_pg_rls_probe" for f in vis_unauth)
             with scoped_db_session(conn_mgr, principal) as conn:
                 conn.execute(
                     "DELETE FROM code_files WHERE domain_id = %s AND repo_name = %s;",
-                    ("trading_code_scout", "httpx_pg_rls_probe"),
+                    (code_domain_id, "httpx_pg_rls_probe"),
                 )
             return bool(has_probe and not leaked_probe)
         except Exception as exc:
@@ -800,8 +819,9 @@ class UnseenRepoABBenchmarkRunner:
         httpx_workflow = ScoutWorkflow(registry=self.registry, repo=httpx_mem_repo)
         click_workflow = ScoutWorkflow(registry=self.registry, repo=click_mem_repo)
 
+        code_domain_id = self._resolve_code_domain_id()
         qlora_client = LocalGemmaClient(adapter_pool=self.registry.adapter_pool)
-        qlora_client.set_active_domain("trading_code_scout")
+        qlora_client.set_active_domain(code_domain_id)
 
         results: list[
             tuple[
@@ -829,14 +849,14 @@ class UnseenRepoABBenchmarkRunner:
                 repo_dir=repo_dir,
                 repo=mem_repo,
                 principal=principal,
-                domain_id="trading_code_scout",
+                domain_id=code_domain_id,
                 repo_name=repo_name,
                 ref=task.parent_commit_sha,
             )
             scout_res = workflow.run(
                 user_prompt=task.problem_statement,
                 principal=principal,
-                domain_id="trading_code_scout",
+                domain_id=code_domain_id,
             )
             scout_ms = round((time.perf_counter() - t_scout) * 1000.0, 2)
 
@@ -866,7 +886,7 @@ class UnseenRepoABBenchmarkRunner:
 
                     raw_q = qlora_client._call_in_process_mlx(
                         qlora_prompt,
-                        domain_id="trading_code_scout",
+                        domain_id=code_domain_id,
                         max_tokens=384,
                     )
                     qlora_ms = round((time.perf_counter() - t_q0) * 1000.0, 2)
@@ -914,8 +934,8 @@ class UnseenRepoABBenchmarkRunner:
             import mlx.core as mx
 
             mx.clear_cache()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("MLX cache cleanup skipped (%s): %s", type(exc).__name__, exc)
 
         return results
 
@@ -1322,6 +1342,7 @@ class UnseenRepoABBenchmarkRunner:
             summary_str = summary[0] if summary else f"exit_code={proc.returncode}"
             return (proc.returncode == 0, summary_str)
         except Exception as exc:
+            logger.warning("Worktree pytest error (%s): %s", type(exc).__name__, exc)
             return (False, f"Worktree pytest error: {exc}")
         finally:
             subprocess.run(

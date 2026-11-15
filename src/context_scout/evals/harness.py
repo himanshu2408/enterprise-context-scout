@@ -36,7 +36,6 @@ from context_scout.config import ScoutSettings
 from context_scout.db.repositories import (
     ASTSymbolRecord,
     CodeFileRecord,
-    DocChunkRecord,
     InMemoryRLSRepository,
 )
 from context_scout.db.session import RLSConnectionManager
@@ -49,9 +48,9 @@ from context_scout.evals.golden_dataset import (
     get_default_golden_suite,
 )
 from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
+from context_scout.plugins.registry import PluginRegistry
 from context_scout.schemas.contracts import (
     ImplementationContextPack,
-    MarketRegime,
     PrincipalContext,
     RoleType,
 )
@@ -122,12 +121,20 @@ class EvaluationHarness:
         repo_root: Path | None = None,
         require_postgres: bool = False,
         force_in_memory: bool = False,
+        code_domain_id: str | None = None,
+        research_domain_id: str | None = None,
     ) -> None:
         self.settings = settings or ScoutSettings()
         self.thresholds = thresholds or EvaluationGateThresholds()
         self.tracer = tracer or get_tracer()
         self.slicer = DeterministicSlicer()
         self.guardrail = ShieldGemmaGuardrail(allow_deterministic_fallback=True)
+        primary_plugin = PluginRegistry.get_primary_domain_plugin()
+        roles = primary_plugin.get_role_domain_ids() if primary_plugin is not None else {}
+        self.code_domain_id = code_domain_id or roles.get("code", self.settings.default_domain_id)
+        self.research_domain_id = research_domain_id or roles.get(
+            "research", self.settings.default_domain_id
+        )
 
         # Resolve repository root
         if repo_root is not None:
@@ -171,12 +178,13 @@ class EvaluationHarness:
             )
             with mgr.scoped_transaction(test_principal) as conn:
                 row = conn.execute(
-                    "SELECT COUNT(*) FROM doc_chunks WHERE domain_id = 'quant_research_scout';"
+                    "SELECT COUNT(*) FROM doc_chunks WHERE domain_id = %s;",
+                    (self.research_domain_id,),
                 ).fetchone()
                 quant_count = int(str(row[0])) if row else 0
             if quant_count < 100 and not require_postgres:
                 logger.info(
-                    "PostgreSQL has %d quant chunks (<100); using InMemoryRLSRepository.",
+                    "PostgreSQL has %d research chunks (<100); using InMemoryRLSRepository.",
                     quant_count,
                 )
                 return self._create_populated_in_memory_repo()
@@ -211,27 +219,30 @@ class EvaluationHarness:
                 conn.cursor() as cur,
             ):
                 cur.execute(
-                    "SELECT COUNT(*) FROM code_files WHERE domain_id = 'trading_code_scout';"
+                    "SELECT COUNT(*) FROM code_files WHERE domain_id = %s;",
+                    (self.code_domain_id,),
                 )
                 row = cur.fetchone()
                 if row and int(str(row[0])) > 0:
                     mgr = RLSConnectionManager(self.settings.db_app_url)
                     adapter = PostgresScoutGraphAdapter(mgr, self.settings)
-                    for f in adapter.list_visible_code_files(admin_principal, "trading_code_scout"):
+                    for f in adapter.list_visible_code_files(admin_principal, self.code_domain_id):
                         repo.insert_code_file(admin_principal, f)
-                    for s in adapter.list_visible_ast_symbols(
-                        admin_principal, "trading_code_scout"
-                    ):
+                    for s in adapter.list_visible_ast_symbols(admin_principal, self.code_domain_id):
                         repo.insert_ast_symbol(admin_principal, s)
-                    for e in adapter.list_visible_ast_edges(admin_principal, "trading_code_scout"):
+                    for e in adapter.list_visible_ast_edges(admin_principal, self.code_domain_id):
                         repo.insert_ast_edge(admin_principal, e)
                     for c in adapter.list_visible_doc_chunks(
-                        admin_principal, "quant_research_scout"
+                        admin_principal, self.research_domain_id
                     ):
                         repo.insert_doc_chunk(admin_principal, c)
                     return repo
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "PostgreSQL hydration skipped for EvaluationHarness in-memory repo (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
 
         import ast
         import uuid
@@ -241,14 +252,20 @@ class EvaluationHarness:
             for py_file in sorted(scout_src_dir.rglob("*.py")):
                 try:
                     content = py_file.read_text(encoding="utf-8")
-                except Exception:
+                except Exception as exc:
+                    logger.debug(
+                        "Skipping unreadable source file %s in EvaluationHarness (%s): %s",
+                        py_file,
+                        type(exc).__name__,
+                        exc,
+                    )
                     continue
                 rel_path = str(py_file.relative_to(self.repo_root))
                 lines = content.splitlines()
                 f_id = uuid.uuid4()
                 rec = CodeFileRecord(
                     file_id=f_id,
-                    domain_id="trading_code_scout",
+                    domain_id=self.code_domain_id,
                     repo_name="enterprise-context-scout",
                     file_path=rel_path,
                     git_commit_sha="c0ffee123456",
@@ -275,7 +292,7 @@ class EvaluationHarness:
                                 ASTSymbolRecord(
                                     symbol_id=uuid.uuid4(),
                                     file_id=f_id,
-                                    domain_id="trading_code_scout",
+                                    domain_id=self.code_domain_id,
                                     qualified_name=q_name,
                                     symbol_kind="class",
                                     start_line=node.lineno,
@@ -286,32 +303,19 @@ class EvaluationHarness:
                                     embedding=[0.05] * 768,
                                 ),
                             )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "AST parse failed for %s in EvaluationHarness (%s): %s",
+                        rel_path,
+                        type(exc).__name__,
+                        exc,
+                    )
 
-        # Seed sample doc chunk for quant research
-        repo.insert_doc_chunk(
-            admin_principal,
-            DocChunkRecord(
-                chunk_id=uuid.uuid4(),
-                domain_id="quant_research_scout",
-                doc_id="arxiv:2606.31387",
-                doc_title="Signature-Based Optimal Execution for Statistical Arbitrage",
-                source_uri="urn:arxiv:2606.31387.pdf",
-                market_scope=MarketRegime.US_NYSE_NASDAQ,
-                published_date=datetime.date(2026, 6, 15),
-                authority_weight=1.0,
-                section_heading="Optimal Liquidation Trajectory",
-                contextual_header="Quantitative optimal execution analysis.",
-                verbatim_content=(
-                    "Optimal execution requires balancing market impact and inventory risk. "
-                    "Order flow imbalance exhibits mean reversion over sub-second horizons."
-                ),
-                metadata_json={},
-                allowed_scopes=["public_quant"],
-                embedding=[0.05] * 768,
-            ),
-        )
+        # Seed sample doc chunks from registered domain plugins
+        for domain_plugin in PluginRegistry.list_domain_plugins():
+            seed_payload = domain_plugin.get_demo_seed_payloads()
+            for doc_rec in seed_payload.get("doc_chunks", [])[:1]:
+                repo.insert_doc_chunk(admin_principal, doc_rec)
 
         return repo
 
@@ -345,7 +349,11 @@ class EvaluationHarness:
                 t_p = PrincipalContext(
                     user_id=f"zero_touch_{t.task_id}",
                     role=RoleType.ENGINEER,
-                    allowed_scopes=["public_eng", "public_quant", "domain:quant_research_scout"],
+                    allowed_scopes=[
+                        "public_eng",
+                        "public_quant",
+                        f"domain:{self.research_domain_id}",
+                    ],
                     session_budget_tokens=200_000,
                     max_session_paid_tokens=200_000,
                 )
@@ -364,7 +372,7 @@ class EvaluationHarness:
         task_details: list[dict[str, Any]] = []
 
         # Fast and reliable verification commands for sandbox testing
-        lint_cmd = ["ruff", "check", "src/context_scout/trading_strategies"]
+        lint_cmd = ["ruff", "check", "src/context_scout/schemas"]
         test_cmd = [
             "pytest",
             "-q",
@@ -385,7 +393,7 @@ class EvaluationHarness:
             task_principal = PrincipalContext(
                 user_id=f"zero_touch_evaluator_{t_id}",
                 role=RoleType.ENGINEER,
-                allowed_scopes=["public_eng", "public_quant", "domain:quant_research_scout"],
+                allowed_scopes=["public_eng", "public_quant", f"domain:{self.research_domain_id}"],
                 session_budget_tokens=200_000,
                 max_session_paid_tokens=200_000,
             )
@@ -604,8 +612,12 @@ class EvaluationHarness:
                                     else:
                                         is_faithful = False
                                         break
-                                except ValueError:
-                                    pass
+                                except ValueError as exc:
+                                    logger.debug(
+                                        "Skipping non-numbered slice prefix (%s): %s",
+                                        type(exc).__name__,
+                                        exc,
+                                    )
                         if is_faithful:
                             valid_slices += 1
                         else:
@@ -650,14 +662,14 @@ class EvaluationHarness:
                         role=RoleType.QUANT_RESEARCHER,
                         allowed_scopes=["public_quant"],
                     )
-                    chunks = self.repo.list_visible_doc_chunks(dummy_p, "quant_research_scout")
+                    chunks = self.repo.list_visible_doc_chunks(dummy_p, self.research_domain_id)
                     matching_chk = next(
                         (c for c in chunks if str(c.chunk_id) == cit.chunk_id),
                         None,
                     )
                     if matching_chk is None and hasattr(self.repo, "get_doc_chunks_by_ids"):
                         fetched_chks = self.repo.get_doc_chunks_by_ids(
-                            dummy_p, "quant_research_scout", [str(cit.chunk_id)]
+                            dummy_p, self.research_domain_id, [str(cit.chunk_id)]
                         )
                         if fetched_chks:
                             matching_chk = fetched_chks[0]
@@ -772,7 +784,7 @@ class EvaluationHarness:
             # Test against repository
             try:
                 if q.target_table == "code_files":
-                    files = self.repo.list_visible_code_files(q.principal, "trading_code_scout")
+                    files = self.repo.list_visible_code_files(q.principal, self.code_domain_id)
                     # Check if target scope or restricted record was returned
                     if "target_scope" in q.query_payload:
                         records_returned = sum(
@@ -788,7 +800,7 @@ class EvaluationHarness:
                         )
 
                 elif q.target_table == "ast_symbols":
-                    symbols = self.repo.list_visible_ast_symbols(q.principal, "trading_code_scout")
+                    symbols = self.repo.list_visible_ast_symbols(q.principal, self.code_domain_id)
                     if "qualified_name" in q.query_payload:
                         records_returned = sum(
                             1
@@ -801,13 +813,13 @@ class EvaluationHarness:
                         )
 
                 elif q.target_table == "ast_edges":
-                    edges = self.repo.list_visible_ast_edges(q.principal, "trading_code_scout")
+                    edges = self.repo.list_visible_ast_edges(q.principal, self.code_domain_id)
                     records_returned = sum(
                         1 for e in edges if q.target_scope_to_test in e.allowed_scopes
                     )
 
                 elif q.target_table == "doc_chunks":
-                    chunks = self.repo.list_visible_doc_chunks(q.principal, "quant_research_scout")
+                    chunks = self.repo.list_visible_doc_chunks(q.principal, self.research_domain_id)
                     records_returned = sum(
                         1 for c in chunks if q.target_scope_to_test in c.allowed_scopes
                     )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from datetime import date
 from typing import Any, Final
 from uuid import UUID
@@ -11,6 +12,7 @@ from uuid import UUID
 from context_scout.config import ScoutSettings
 from context_scout.db.repositories import (
     ASTEdgeRecord,
+    ASTNeighborhoodRecord,
     ASTSymbolRecord,
     CodeFileRecord,
     DocChunkRecord,
@@ -23,9 +25,15 @@ from context_scout.security.rbac import (
     validate_tool_call_arguments,
 )
 
+logger = logging.getLogger(__name__)
+
 MAX_PAYLOAD_ITEMS: Final[int] = 10
 MAX_PAYLOAD_BYTES: Final[int] = 32768  # 32 KB hard serialized JSON cap
 TRUNCATION_INDICATOR: Final[str] = "[PAYLOAD_TRUNCATED_AT_32KB]"
+
+
+def _as_uuid(val: object) -> UUID:
+    return val if isinstance(val, UUID) else UUID(str(val))
 
 
 def bound_payload_dict(
@@ -151,7 +159,7 @@ class PostgresScoutGraphAdapter:
                 )
                 results.append(
                     CodeFileRecord(
-                        file_id=UUID(str(r[0])),
+                        file_id=_as_uuid(r[0]),
                         domain_id=str(r[1]),
                         repo_name=str(r[2]),
                         file_path=str(r[3]),
@@ -166,15 +174,24 @@ class PostgresScoutGraphAdapter:
             return results
 
     def list_visible_ast_symbols(
-        self, principal: PrincipalContext, domain_id: str
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        *,
+        include_embeddings: bool = False,
     ) -> list[ASTSymbolRecord]:
         """Returns all AST symbols visible to the principal under Forced RLS."""
+        cols = (
+            "symbol_id, file_id, domain_id, qualified_name, symbol_kind, "
+            "start_line, end_line, signature_skeleton, contextual_summary, "
+            "allowed_scopes"
+        )
+        if include_embeddings:
+            cols += ", embedding"
         with scoped_db_session(self.connection_manager, principal) as conn:
             rows = conn.execute(
-                """
-                SELECT symbol_id, file_id, domain_id, qualified_name, symbol_kind,
-                       start_line, end_line, signature_skeleton, contextual_summary,
-                       allowed_scopes, embedding
+                f"""
+                SELECT {cols}
                 FROM ast_symbols
                 WHERE domain_id = %s
                 ORDER BY qualified_name;
@@ -183,17 +200,17 @@ class PostgresScoutGraphAdapter:
             ).fetchall()
             results: list[ASTSymbolRecord] = []
             for r in rows:
-                raw_emb = r[10]
-                if isinstance(raw_emb, str):
-                    emb_floats = [
-                        float(x.strip()) for x in raw_emb.strip("[]").split(",") if x.strip()
-                    ]
-                elif hasattr(raw_emb, "tolist"):
-                    emb_floats = [float(x) for x in raw_emb.tolist()]
-                elif isinstance(raw_emb, (list, tuple)):
-                    emb_floats = [float(x) for x in raw_emb]
-                else:
-                    emb_floats = []
+                emb_floats: list[float] = []
+                if include_embeddings and len(r) > 10:
+                    raw_emb = r[10]
+                    if isinstance(raw_emb, str):
+                        emb_floats = [
+                            float(x.strip()) for x in raw_emb.strip("[]").split(",") if x.strip()
+                        ]
+                    elif hasattr(raw_emb, "tolist"):
+                        emb_floats = [float(x) for x in raw_emb.tolist()]
+                    elif isinstance(raw_emb, (list, tuple)):
+                        emb_floats = [float(x) for x in raw_emb]
 
                 scopes_raw = r[9]
                 scopes_list = (
@@ -202,11 +219,11 @@ class PostgresScoutGraphAdapter:
                 kind_str = str(r[4])
                 results.append(
                     ASTSymbolRecord(
-                        symbol_id=UUID(str(r[0])),
-                        file_id=UUID(str(r[1])),
+                        symbol_id=_as_uuid(r[0]),
+                        file_id=_as_uuid(r[1]),
                         domain_id=str(r[2]),
                         qualified_name=str(r[3]),
-                        symbol_kind=kind_str,  # type: ignore[arg-type]
+                        symbol_kind=kind_str,
                         start_line=int(str(r[5])),
                         end_line=int(str(r[6])),
                         signature_skeleton=str(r[7]),
@@ -272,7 +289,7 @@ class PostgresScoutGraphAdapter:
         sql = f"""
             SELECT symbol_id, file_id, domain_id, qualified_name, symbol_kind,
                    start_line, end_line, signature_skeleton, contextual_summary,
-                   allowed_scopes, embedding
+                   allowed_scopes
             FROM ast_symbols
             WHERE domain_id = %s
               AND ({where_expr})
@@ -290,11 +307,11 @@ class PostgresScoutGraphAdapter:
                 )
                 results.append(
                     ASTSymbolRecord(
-                        symbol_id=UUID(str(r[0])),
-                        file_id=UUID(str(r[1])),
+                        symbol_id=_as_uuid(r[0]),
+                        file_id=_as_uuid(r[1]),
                         domain_id=str(r[2]),
                         qualified_name=str(r[3]),
-                        symbol_kind=str(r[4]),  # type: ignore[arg-type]
+                        symbol_kind=str(r[4]),
                         start_line=int(str(r[5])),
                         end_line=int(str(r[6])),
                         signature_skeleton=str(r[7]),
@@ -316,7 +333,13 @@ class PostgresScoutGraphAdapter:
         for fid in file_ids:
             try:
                 valid_uuids.append(str(UUID(str(fid))))
-            except ValueError:
+            except ValueError as exc:
+                logger.debug(
+                    "Skipping invalid code file UUID %r (%s): %s",
+                    fid,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
         if not valid_uuids:
             return []
@@ -340,7 +363,7 @@ class PostgresScoutGraphAdapter:
                 )
                 results.append(
                     CodeFileRecord(
-                        file_id=UUID(str(r[0])),
+                        file_id=_as_uuid(r[0]),
                         domain_id=str(r[1]),
                         repo_name=str(r[2]),
                         file_path=str(r[3]),
@@ -371,19 +394,19 @@ class PostgresScoutGraphAdapter:
             ).fetchall()
             results: list[ASTEdgeRecord] = []
             for r in rows:
-                t_sym_id = UUID(str(r[4])) if r[4] is not None else None
+                t_sym_id = _as_uuid(r[4]) if r[4] is not None else None
                 scopes_raw = r[6]
                 scopes_list = (
                     [str(s) for s in scopes_raw] if isinstance(scopes_raw, (list, tuple)) else []
                 )
                 results.append(
                     ASTEdgeRecord(
-                        edge_id=UUID(str(r[0])),
+                        edge_id=_as_uuid(r[0]),
                         domain_id=str(r[1]),
-                        source_symbol_id=UUID(str(r[2])),
+                        source_symbol_id=_as_uuid(r[2]),
                         target_qualified_name=str(r[3]),
                         target_symbol_id=t_sym_id,
-                        edge_kind=str(r[5]),  # type: ignore[arg-type]
+                        edge_kind=str(r[5]),
                         allowed_scopes=scopes_list,
                     )
                 )
@@ -408,7 +431,7 @@ class PostgresScoutGraphAdapter:
         raw_scopes = r[12]
         scopes_list = [str(s) for s in raw_scopes] if isinstance(raw_scopes, (list, tuple)) else []
         return DocChunkRecord(
-            chunk_id=UUID(str(r[0])),
+            chunk_id=_as_uuid(r[0]),
             domain_id=str(r[1]),
             doc_id=str(r[2]),
             doc_title=str(r[3]),
@@ -522,6 +545,45 @@ class PostgresScoutGraphAdapter:
                 market_bonus_params.append(m_val)
 
             score_expr = " + ".join(score_parts) + f" + {market_bonus_sql}"
+            tsquery_str = " | ".join(words[:8])
+
+            fts_sql = f"""
+                WITH q AS (
+                    SELECT to_tsquery('english', %s) AS tsq
+                ),
+                candidates AS (
+                    SELECT chunk_id, domain_id, doc_id, doc_title, source_uri,
+                           market_scope, published_date, authority_weight,
+                           section_heading, contextual_header, verbatim_content,
+                           metadata_json, allowed_scopes
+                    FROM doc_chunks, q
+                    WHERE domain_id = %s
+                      AND fts_doc @@ q.tsq
+                    ORDER BY {market_bonus_sql} DESC,
+                             ts_rank_cd(fts_doc, q.tsq) DESC,
+                             authority_weight DESC
+                    LIMIT 250
+                )
+                SELECT chunk_id, domain_id, doc_id, doc_title, source_uri,
+                       market_scope, published_date, authority_weight,
+                       section_heading, contextual_header, verbatim_content,
+                       metadata_json, allowed_scopes
+                FROM candidates
+                ORDER BY ({score_expr}) DESC, authority_weight DESC, doc_id ASC, chunk_id ASC
+                LIMIT %s;
+            """
+            fts_params: list[object] = [
+                tsquery_str,
+                domain_id,
+                *market_bonus_params,
+                *score_params,
+                *market_bonus_params,
+                limit,
+            ]
+            rows = conn.execute(fts_sql, tuple(fts_params)).fetchall()
+            if rows:
+                return [self._row_to_doc_chunk(r) for r in rows]
+
             where_expr = " OR ".join(where_parts)
 
             sql = f"""
@@ -563,7 +625,13 @@ class PostgresScoutGraphAdapter:
         for cid in chunk_ids:
             try:
                 valid_uuids.append(str(UUID(str(cid))))
-            except ValueError:
+            except ValueError as exc:
+                logger.debug(
+                    "Skipping invalid doc chunk UUID %r (%s): %s",
+                    cid,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
         if not valid_uuids:
             return []
@@ -579,6 +647,25 @@ class PostgresScoutGraphAdapter:
             """
             rows = conn.execute(sql, (domain_id, valid_uuids)).fetchall()
             return [self._row_to_doc_chunk(r) for r in rows]
+
+    def traverse_1hop_neighborhood(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        focus_symbol_id: UUID | str,
+        max_direct_callers: int = 3,
+    ) -> list[ASTNeighborhoodRecord]:
+        """Executes memory-bounded recursive CTE 1-hop AST closure directly in PostgreSQL 17."""
+        from context_scout.db.repositories import PostgresRLSRepository
+
+        repo = PostgresRLSRepository()
+        with scoped_db_session(self.connection_manager, principal) as conn:
+            return repo.traverse_1hop_neighborhood(
+                conn=conn,
+                domain_id=domain_id,
+                focus_symbol_id=focus_symbol_id,
+                max_direct_callers=max_direct_callers,
+            )
 
 
 __all__ = [

@@ -343,8 +343,11 @@ class PaidComputeCostEstimator:
                 ans = input("Approve paid model compute? [y/N]: ").strip().lower()
                 if ans in ("y", "yes"):
                     return True
-            except (EOFError, KeyboardInterrupt):
-                pass
+            except (EOFError, KeyboardInterrupt) as exc:
+                logger.debug(
+                    "Interactive cost confirmation aborted (%s): declining paid compute",
+                    type(exc).__name__,
+                )
             raise ConfirmationDeclinedException(
                 f"Paid execution declined by user prompt for model {report.model_id}"
             )

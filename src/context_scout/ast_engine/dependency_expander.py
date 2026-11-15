@@ -1,8 +1,9 @@
 """Bounded 1-hop AST dependency closure engine enforcing SEC-03."""
 
+import logging
 import re
 from collections import defaultdict
-from typing import Final, Literal, Protocol
+from typing import Final, Protocol
 from uuid import UUID
 
 from context_scout.ast_engine.models import ASTExpansionCandidate, ASTExpansionResult
@@ -17,6 +18,8 @@ from context_scout.schemas.contracts import (
     ModificationIntent,
     PrincipalContext,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ScoutGraphRepository(Protocol):
@@ -80,8 +83,12 @@ class ASTDependencyExpander:
                 )
                 if neighbors:
                     return self._build_result_from_neighbors(focus_symbol, neighbors)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "1-hop neighborhood CTE failed (%s): %s; using in-memory closure",
+                    type(exc).__name__,
+                    exc,
+                )
 
         visible_symbols = {
             s.symbol_id: s for s in repo.list_visible_ast_symbols(principal, domain_id)
@@ -98,11 +105,7 @@ class ASTDependencyExpander:
             if edge_target_id and edge_target_id in visible_symbols:
                 cand_direct = visible_symbols[edge_target_id]
                 cand_f = visible_files.get(cand_direct.file_id)
-                if (
-                    focus_repo_name is None
-                    or cand_f is None
-                    or cand_f.repo_name == focus_repo_name
-                ):
+                if focus_repo_name is None or cand_f is None or cand_f.repo_name == focus_repo_name:
                     return cand_direct
             rel_suffix = edge_target_qual.lstrip(".")
             target_clean = edge_target_qual.split(".")[-1]
@@ -118,16 +121,24 @@ class ASTDependencyExpander:
             if focus_repo_name is not None:
                 for s in visible_symbols.values():
                     sf = visible_files.get(s.file_id)
-                    if sf is not None and sf.repo_name == focus_repo_name and (
-                        s.qualified_name == rel_suffix
-                        or s.qualified_name.endswith("." + rel_suffix)
+                    if (
+                        sf is not None
+                        and sf.repo_name == focus_repo_name
+                        and (
+                            s.qualified_name == rel_suffix
+                            or s.qualified_name.endswith("." + rel_suffix)
+                        )
                     ):
                         return s
                 for s in visible_symbols.values():
                     sf = visible_files.get(s.file_id)
-                    if sf is not None and sf.repo_name == focus_repo_name and (
-                        s.qualified_name == edge_target_qual
-                        or s.qualified_name.split(".")[-1] == target_clean
+                    if (
+                        sf is not None
+                        and sf.repo_name == focus_repo_name
+                        and (
+                            s.qualified_name == edge_target_qual
+                            or s.qualified_name.split(".")[-1] == target_clean
+                        )
                     ):
                         return s
                 return None
@@ -149,7 +160,7 @@ class ASTDependencyExpander:
 
         def _append_type_candidate(
             target_sym: ASTSymbolRecord,
-            edge_kind: Literal["CALLS", "IMPORTS", "USES_TYPE", "INHERITS", "TESTED_BY"],
+            edge_kind: str,
         ) -> None:
             if target_sym.symbol_id in seen_type_sym_ids:
                 return
@@ -160,10 +171,7 @@ class ASTDependencyExpander:
             end_l = target_sym.end_line
             if (
                 edge_kind in ("IMPORTS", "INHERITS")
-                or (
-                    edge_kind == "USES_TYPE"
-                    and focus_symbol.symbol_kind == "type_alias"
-                )
+                or (edge_kind == "USES_TYPE" and focus_symbol.symbol_kind == "type_alias")
             ) and (target_sym.end_line - target_sym.start_line) > 30:
                 end_l = min(target_sym.end_line, target_sym.start_line + 24)
             s_lines = f_rec.raw_content.splitlines()[target_sym.start_line - 1 : end_l]
@@ -185,10 +193,7 @@ class ASTDependencyExpander:
         for edge in visible_edges:
             if edge.source_symbol_id == focus_symbol.symbol_id and (
                 edge.edge_kind in ("USES_TYPE", "IMPORTS", "INHERITS")
-                or (
-                    edge.edge_kind == "CALLS"
-                    and edge.target_symbol_id is not None
-                )
+                or (edge.edge_kind == "CALLS" and edge.target_symbol_id is not None)
             ):
                 target_sym = _resolve_symbol_scoped(
                     edge.target_symbol_id, edge.target_qualified_name
@@ -214,9 +219,7 @@ class ASTDependencyExpander:
                     )
                     if h2_sym is not None and h2_sym.file_id in visible_files:
                         h2_file = visible_files[h2_sym.file_id]
-                        same_repo = (
-                            focus_repo_name is None or h2_file.repo_name == focus_repo_name
-                        )
+                        same_repo = focus_repo_name is None or h2_file.repo_name == focus_repo_name
                         is_valid_2hop = (
                             h2_sym.file_id == focus_symbol.file_id
                             or edge.edge_kind == "INHERITS"
@@ -414,10 +417,7 @@ class ASTDependencyExpander:
                 end_l = rec.symbol.end_line
                 if (
                     rec.edge_kind in ("IMPORTS", "INHERITS")
-                    or (
-                        rec.edge_kind == "USES_TYPE"
-                        and focus_symbol.symbol_kind == "type_alias"
-                    )
+                    or (rec.edge_kind == "USES_TYPE" and focus_symbol.symbol_kind == "type_alias")
                 ) and (rec.symbol.end_line - rec.symbol.start_line) > 30:
                     end_l = min(rec.symbol.end_line, rec.symbol.start_line + 24)
                 s_lines = rec.file.raw_content.splitlines()[rec.symbol.start_line - 1 : end_l]
@@ -425,7 +425,7 @@ class ASTDependencyExpander:
                 type_candidates.append(
                     ASTExpansionCandidate(
                         symbol=rec.symbol,
-                        edge_kind=rec.edge_kind,  # type: ignore[arg-type]
+                        edge_kind=rec.edge_kind,
                         intent=ModificationIntent.IMPORTED_TYPE,
                         start_line=rec.symbol.start_line,
                         end_line=end_l,
@@ -648,9 +648,7 @@ class ASTDependencyExpander:
 
                 if t_sym and t_sym.file_id in visible_files:
                     f_rec = visible_files[t_sym.file_id]
-                    s_lines = f_rec.raw_content.splitlines()[
-                        t_sym.start_line - 1 : t_sym.end_line
-                    ]
+                    s_lines = f_rec.raw_content.splitlines()[t_sym.start_line - 1 : t_sym.end_line]
                     return ASTExpansionCandidate(
                         symbol=t_sym,
                         edge_kind="TESTED_BY",

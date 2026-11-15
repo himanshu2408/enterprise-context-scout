@@ -5,7 +5,6 @@ from context_scout.plugins.domains.finance import (
     FinancialEvaluationResult,
     ScepticismEvaluationResult,
     calculate_effective_friction_floor,
-    estimate_net_sharpe,
 )
 
 __all__ = [
@@ -13,5 +12,4 @@ __all__ = [
     "FinancialEvaluationResult",
     "ScepticismEvaluationResult",
     "calculate_effective_friction_floor",
-    "estimate_net_sharpe",
 ]

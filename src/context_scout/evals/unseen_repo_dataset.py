@@ -70,22 +70,20 @@ class UnseenRepoBenchmarkSuite(BaseModel):
 
 def verify_frozen_adapter_integrity(repo_root: Path = Path(".")) -> dict[str, Any]:
     """Verify that QLoRA adapters match their pre-benchmark SHA-256 digests."""
-    code_adapter = (
-        repo_root
-        / "domains"
-        / "trading_code_scout"
-        / "adapters"
-        / "gemma4_26b_code_scout"
-        / "adapters.safetensors"
-    )
-    quant_adapter = (
-        repo_root
-        / "domains"
-        / "quant_research_scout"
-        / "adapters"
-        / "gemma4_26b_quant_research"
-        / "adapters.safetensors"
-    )
+    from context_scout.plugins.registry import PluginRegistry
+
+    primary_plugin = PluginRegistry.get_primary_domain_plugin()
+    specs = primary_plugin.get_adapter_specs() if primary_plugin is not None else []
+    by_role = {spec["role"]: spec for spec in specs if "role" in spec}
+    code_spec = by_role.get("code")
+    research_spec = by_role.get("research")
+    if code_spec is None or research_spec is None:
+        raise RuntimeError("No domain adapter specifications registered in PluginRegistry.")
+
+    code_domain_id = code_spec["domain_id"]
+    research_domain_id = research_spec["domain_id"]
+    code_adapter = repo_root / code_spec["adapter_rel_path"] / "adapters.safetensors"
+    quant_adapter = repo_root / research_spec["adapter_rel_path"] / "adapters.safetensors"
     if not code_adapter.exists() or not quant_adapter.exists():
         raise FileNotFoundError("Frozen QLoRA adapter safetensors not found under domains/.")
 
@@ -93,20 +91,20 @@ def verify_frozen_adapter_integrity(repo_root: Path = Path(".")) -> dict[str, An
     quant_sha = hashlib.sha256(quant_adapter.read_bytes()).hexdigest()
     if code_sha != FROZEN_CODE_ADAPTER_SHA256:
         raise ValueError(
-            f"Frozen adapter SHA-256 mismatch for trading_code_scout: "
+            f"Frozen adapter SHA-256 mismatch for {code_domain_id}: "
             f"{code_sha} != {FROZEN_CODE_ADAPTER_SHA256}"
         )
     if quant_sha != FROZEN_QUANT_ADAPTER_SHA256:
         raise ValueError(
-            f"Frozen adapter SHA-256 mismatch for quant_research_scout: "
+            f"Frozen adapter SHA-256 mismatch for {research_domain_id}: "
             f"{quant_sha} != {FROZEN_QUANT_ADAPTER_SHA256}"
         )
     return {
         "verified": True,
         "code_adapter_sha256": code_sha,
         "quant_adapter_sha256": quant_sha,
-        "trading_code_scout": True,
-        "quant_research_scout": True,
+        code_domain_id: True,
+        research_domain_id: True,
     }
 
 

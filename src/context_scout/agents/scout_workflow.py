@@ -7,15 +7,15 @@ Implements Requirement R3:
 - ScoutWorkflow: 4-stage DAG with Stage 1 (guardrails + RBAC), Stage 2 (MCP read tools,
   AST localization, 1-hop closure, deterministic slicing), Stage 3 (Pre-Flight gate
   with $0 local bounce-back self-correction loop), and Stage 4 (pack assembly).
-- FederatedScoutCoordinator (ARC-01): 2-stage cross-domain DAG orchestrating Model 2
-  (quant_research_scout) for QuantStrategyBrief extraction and friction validation,
-  followed by Model 1 (trading_code_scout) for AST localization and 1-hop closure,
-  merging both into a composite ImplementationContextPack.
+- FederatedScoutCoordinator (ARC-01): 2-stage cross-domain DAG orchestrating research
+  synthesis for structured brief extraction and domain rule validation, followed by
+  code localization and 1-hop AST closure, merging both into a composite
+  ImplementationContextPack.
 """
 
 from __future__ import annotations
 
-import contextlib
+import ast
 import json
 import logging
 import re
@@ -40,6 +40,7 @@ from context_scout.db.repositories import (
     CodeFileRecord,
     DocChunkRecord,
 )
+from context_scout.plugins.registry import PluginRegistry
 from context_scout.schemas.contracts import (
     CodeSlicePointer,
     DocCitationSpan,
@@ -47,7 +48,6 @@ from context_scout.schemas.contracts import (
     FrictionVerdict,
     ImplementationContextPack,
     InsufficientContextDiagnostic,
-    MarketRegime,
     ModificationIntent,
     PrincipalContext,
     QuantStrategyBrief,
@@ -63,14 +63,88 @@ from context_scout.telemetry.cost_governance import DEFAULT_EXPLORATION_TOKEN_KI
 
 logger = logging.getLogger(__name__)
 
+
+def _snap_python_ast_pointer_bounds(
+    ptr: CodeSlicePointer,
+    file_rec: CodeFileRecord,
+) -> CodeSlicePointer:
+    """Extends stale Python AST symbol bounds to the enclosing AST node when truncated."""
+    if file_rec.language != "python" or not ptr.qualified_symbol or not file_rec.raw_content:
+        return ptr
+    target_name = ptr.qualified_symbol.rsplit(".", 1)[-1]
+    if not target_name:
+        return ptr
+    try:
+        tree = ast.parse(file_rec.raw_content)
+    except SyntaxError as exc:
+        logger.debug(
+            "Skipping AST pointer bound snap for %s (%s): %s",
+            ptr.file_path,
+            type(exc).__name__,
+            exc,
+        )
+        return ptr
+
+    best_node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    best_dist = 1_000_000
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == target_name
+            and node.end_lineno is not None
+        ):
+            dist = abs(node.lineno - ptr.start_line)
+            if dist <= 15 and dist < best_dist:
+                best_dist = dist
+                best_node = node
+
+    if (
+        best_node is not None
+        and best_node.end_lineno is not None
+        and (best_node.end_lineno > ptr.end_line or best_node.lineno != ptr.start_line)
+    ):
+        return ptr.model_copy(
+            update={"start_line": best_node.lineno, "end_line": best_node.end_lineno}
+        )
+    return ptr
+
+
 # Google ADK 2.x Workflow integration
 try:
     from google.adk import Workflow as ADKWorkflow
 
     HAS_GOOGLE_ADK = True
-except ImportError:
+except ImportError as exc:
     HAS_GOOGLE_ADK = False
     ADKWorkflow = Any  # type: ignore[assignment,misc]
+    logging.getLogger(__name__).debug(
+        "google.adk not installed; using built-in workflow DAG (%s)",
+        type(exc).__name__,
+    )
+
+
+def _resolve_default_domain(domain_id: str | None, role: str = "code") -> str:
+    """Resolves a domain ID when omitted, consulting registered domain plugins."""
+    if domain_id:
+        return domain_id
+    plugin = PluginRegistry.get_primary_domain_plugin()
+    if plugin is not None:
+        return plugin.get_role_domain_ids().get(role, plugin.domain_id)
+    return "default"
+
+
+def _resolve_role_domains() -> tuple[str, str, str]:
+    """Returns (code_domain_id, research_domain_id, federated_domain_id) from active plugin."""
+    plugin = PluginRegistry.get_primary_domain_plugin()
+    if plugin is not None:
+        roles = plugin.get_role_domain_ids()
+        return (
+            roles.get("code", "default"),
+            roles.get("research", plugin.domain_id),
+            roles.get("federated", "federated"),
+        )
+    return ("default", "default", "federated")
+
 
 DEFAULT_LOCAL_GEMMA_MODEL: Final[str] = "google/gemma-4-26B-A4B-it"
 MAX_SAFE_KV_SIZE: Final[int] = 32_768  # Apple M5 Pro 48GB unified memory cap (HW-01)
@@ -289,7 +363,12 @@ class LocalGemmaClient:
             return None
         try:
             return self.adapter_pool.get_slot(domain_id)
-        except KeyError:
+        except KeyError as exc:
+            logger.debug(
+                "No adapter slot registered for domain '%s' (%s)",
+                domain_id,
+                type(exc).__name__,
+            )
             return None
 
     def set_active_domain(self, domain_id: str) -> AdapterSlot | None:
@@ -338,7 +417,13 @@ class LocalGemmaClient:
         try:
             with urllib.request.urlopen(req, timeout=1.0) as resp:
                 return bool(resp.status == 200)
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Local MLX health probe unreachable at %s (%s): %s",
+                health_url,
+                type(exc).__name__,
+                exc,
+            )
             return False
 
     def complete(
@@ -388,10 +473,18 @@ class LocalGemmaClient:
                     domain_id=domain_id,
                     system_instruction=system_instruction,
                 )
-            except TypeError:
+            except TypeError as exc:
+                logger.debug(
+                    "Completion fixture rejected keyword args, retrying prompt-only (%s)",
+                    type(exc).__name__,
+                )
                 try:
                     return self.completion_fixture(prompt=prompt)
-                except TypeError:
+                except TypeError as inner_exc:
+                    logger.debug(
+                        "Completion fixture rejected prompt kwarg, retrying positional (%s)",
+                        type(inner_exc).__name__,
+                    )
                     return self.completion_fixture(prompt)
 
         # Fail closed: strictly abstain on production path
@@ -469,7 +562,11 @@ class LocalGemmaClient:
                     add_generation_prompt=True,
                     enable_thinking=False,
                 )
-            except TypeError:
+            except TypeError as exc:
+                logger.debug(
+                    "Tokenizer chat template without enable_thinking (%s)",
+                    type(exc).__name__,
+                )
                 formatted = tokenizer.apply_chat_template(
                     [{"role": "user", "content": user_text}],
                     tokenize=False,
@@ -524,7 +621,7 @@ class LocalGemmaClient:
     def generate_code_pointers(
         self,
         user_prompt: str,
-        domain_id: str = "trading_code_scout",
+        domain_id: str | None = None,
         repo: Any = None,
         principal: PrincipalContext | None = None,
         bounce_back_feedback: str | None = None,
@@ -535,6 +632,8 @@ class LocalGemmaClient:
         and prompt parsing to locate candidate slices. When bounce_back_feedback is
         provided, remediates missing symbols from feedback for $0 local correction.
         """
+        resolved_domain = _resolve_default_domain(domain_id, role="code")
+        domain_id = resolved_domain
         self.set_active_domain(domain_id)
 
         # 1. Attempt live MLX inference (in-process or HTTP server) if online
@@ -674,10 +773,7 @@ class LocalGemmaClient:
             f.file_id
             for f in visible_files
             if f.file_path in candidates_to_search
-            or any(
-                "/" in cand and f.file_path.endswith(cand)
-                for cand in candidates_to_search
-            )
+            or any("/" in cand and f.file_path.endswith(cand) for cand in candidates_to_search)
             or (
                 "." in f.file_path.split("/")[-1]
                 and f.file_path.split("/")[-1] in candidates_to_search
@@ -737,9 +833,7 @@ class LocalGemmaClient:
             ):
                 continue
             sym_repo_l = (
-                files_by_id[sym.file_id].repo_name.lower()
-                if sym.file_id in files_by_id
-                else ""
+                files_by_id[sym.file_id].repo_name.lower() if sym.file_id in files_by_id else ""
             )
             parts = sym.qualified_name.split(".")
             short_name = parts[-1]
@@ -934,9 +1028,7 @@ class LocalGemmaClient:
         for sym in [] if skip_nl_scan else visible_symbols:
             if mentioned_repo_names_l:
                 sym_r_l = (
-                    files_by_id[sym.file_id].repo_name.lower()
-                    if sym.file_id in files_by_id
-                    else ""
+                    files_by_id[sym.file_id].repo_name.lower() if sym.file_id in files_by_id else ""
                 )
                 if sym_r_l not in mentioned_repo_names_l:
                     continue
@@ -1087,9 +1179,8 @@ class LocalGemmaClient:
                     if re.search(rf",\s*{re.escape(kw_name)}\s*=", body_l):
                         score += 14.0
                         matched_terms += 2
-            if (
-                explicit_kwarg_names & {"ensure_ascii", "allow_nan", "separators", "sort_keys"}
-                and ("dumps" in sum_l or "dumps" in body_l)
+            if explicit_kwarg_names & {"ensure_ascii", "allow_nan", "separators", "sort_keys"} and (
+                "dumps" in sum_l or "dumps" in body_l
             ):
                 score += 16.0
                 matched_terms += 2
@@ -1123,15 +1214,10 @@ class LocalGemmaClient:
                 if s_item.symbol_kind == "type_alias":
                     if type_alias_counts.get(s_item.file_id, 0) >= 1:
                         continue
-                    type_alias_counts[s_item.file_id] = (
-                        type_alias_counts.get(s_item.file_id, 0) + 1
-                    )
+                    type_alias_counts[s_item.file_id] = type_alias_counts.get(s_item.file_id, 0) + 1
                 q_parts = s_item.qualified_name.split(".")
                 parent_key = ".".join(q_parts[:-1]) if len(q_parts) <= 3 else ".".join(q_parts[:3])
-                if (
-                    parent_counts.get(parent_key, 0) >= 2
-                    and s_item.symbol_kind != "class"
-                ):
+                if parent_counts.get(parent_key, 0) >= 2 and s_item.symbol_kind != "class":
                     continue
                 if s_item.symbol_kind != "type_alias":
                     parent_counts[parent_key] = parent_counts.get(parent_key, 0) + 1
@@ -1251,19 +1337,15 @@ class LocalGemmaClient:
         """Calls OpenAI-compatible /v1/chat/completions on local MLX Gemma server."""
         slot = self.get_active_adapter(domain_id)
         model_name = slot.adapter_id if slot else self.model_id
+        schema_fields = ", ".join(QuantStrategyBrief.model_fields.keys())
         payload = {
             "model": model_name,
             "messages": [
                 {
                     "role": "system",
                     "content": (
-                        "You are a local quant research scout. Return only a valid JSON object "
-                        "conforming to QuantStrategyBrief schema with keys: strategy_name, "
-                        "target_markets, is_intraday_futures, mathematical_signal_latex, "
-                        "entry_exit_rules, sample_period_years, reported_sharpe_ratio, "
-                        "reported_max_drawdown_pct, transaction_cost_bps_assumed, "
-                        "friction_verdict, market_specific_caveats, known_failure_regimes, "
-                        "verified_citations."
+                        "You are a local research scout. Return only a valid JSON object "
+                        f"conforming to QuantStrategyBrief schema with keys: {schema_fields}."
                     ),
                 },
                 {"role": "user", "content": user_prompt},
@@ -1286,12 +1368,13 @@ class LocalGemmaClient:
     def generate_quant_brief(
         self,
         user_prompt: str,
-        domain_id: str = "quant_research_scout",
+        domain_id: str | None = None,
         repo: Any = None,
         principal: PrincipalContext | None = None,
         bounce_back_feedback: str | None = None,
     ) -> QuantStrategyBrief | None:
-        """Generates structured QuantStrategyBrief with verified document citations."""
+        """Generates structured domain research brief with verified document citations."""
+        domain_id = _resolve_default_domain(domain_id, role="research")
         self.set_active_domain(domain_id)
 
         # 1. Attempt live MLX inference (in-process or HTTP server) if online
@@ -1312,29 +1395,29 @@ class LocalGemmaClient:
                     return mlx_brief
             except Exception as e:
                 logger.warning(
-                    "Local MLX quant inference failed (%s); using deterministic synthesizer",
+                    "Local MLX research inference failed (%s); using deterministic synthesizer",
                     e,
                 )
 
         bound_repo = BoundGraphRepository(repo)
+        domain_plugin = (
+            PluginRegistry.get_domain_plugin(domain_id)
+            or PluginRegistry.get_primary_domain_plugin()
+        )
+        default_scopes = (
+            domain_plugin.get_default_scopes() if domain_plugin is not None else ["public_eng"]
+        )
         active_principal = principal or PrincipalContext(
-            user_id="local_gemma_quant",
-            role=RoleType.QUANT_RESEARCHER,
-            allowed_scopes=["public_eng", "public_quant", "corpus:quant_papers"],
+            user_id="local_gemma_research",
+            role=RoleType.ENGINEER,
+            allowed_scopes=sorted({"public_eng", *default_scopes}),
         )
 
-        prompt_lower = user_prompt.lower()
-        target_markets: list[MarketRegime] = []
-        if any(k in prompt_lower for k in ("nse", "bse", "nifty", "sensex", "india")):
-            target_markets.append(MarketRegime.INDIA_NSE_BSE)
-        if any(k in prompt_lower for k in ("xetra", "dax", "german", "eurex")):
-            target_markets.append(MarketRegime.GERMANY_XETRA_DAX)
-        if (
-            any(k in prompt_lower for k in ("us", "nyse", "nasdaq", "cme", "mnq"))
-            or not target_markets
-        ):
-            target_markets.append(MarketRegime.US_NYSE_NASDAQ)
-
+        target_markets = (
+            domain_plugin.infer_market_scopes(user_prompt)
+            if domain_plugin is not None and domain_plugin.is_research_domain(domain_id)
+            else []
+        )
         primary_market = target_markets[0] if len(target_markets) == 1 else None
         chunks = bound_repo.search_visible_doc_chunks(
             principal=active_principal,
@@ -1399,241 +1482,33 @@ class LocalGemmaClient:
             )
             return None
 
+        if domain_plugin is not None:
+            brief_res: QuantStrategyBrief = domain_plugin.synthesize_research_brief(
+                user_prompt=user_prompt,
+                domain_id=domain_id,
+                chunks=chunks,
+                verified_citations=verified_citations,
+            )
+            return brief_res
+
         top_chk = chunks[0] if chunks else None
-        assumed_bps: float | None = 12.0
-        if MarketRegime.INDIA_NSE_BSE in target_markets:
-            assumed_bps = 25.0
-
-        prompt_lower = user_prompt.lower()
-        is_ofi = "ofi" in prompt_lower or "order flow" in prompt_lower or (
-            top_chk is not None and "order flow" in top_chk.verbatim_content.lower()
-        )
-        if is_ofi:
-            strategy_name = "Adaptive Order Flow Imbalance Cross-Market Strategy"
-            signal_latex = r"\text{OFI}_t = \sum_{k=1}^K \Delta q_{k,t} \cdot I_{k,t}"
-            entry_exit_rules = [
-                "Enter long when OFI exceeds +1.5 sigma threshold",
-                "Exit position when OFI mean-reverts to zero or at 300ms horizon",
-                "Enforce hard stop-loss at 15.0 bps adverse spread excursion",
-            ]
-            market_caveats = [
-                "Requires ultra-low latency hardware colocation",
-                "Spread elasticity varies significantly during opening and closing auctions",
-            ]
-            failure_regimes = [
-                "High volatility macroeconomic announcement windows",
-                "Flash liquidity withdrawal regimes",
-            ]
-            sharpe_ratio = 2.15
-            max_dd_pct = 4.8
-        else:
-            strategy_name = (
-                f"{top_chk.doc_title} Synthesis"
-                if top_chk
-                else "Verified Empirical Research Strategy"
-            )
-            signal_latex = r"E[Y \mid X] = f_{\theta}(\text{DomainContext})"
-            entry_exit_rules = [
-                f"Grounded in verified citation from {top_chk.doc_title if top_chk else 'corpus'}",
-                "Follow verified quantitative rules from retrieved evidence",
-                "Enforce strict stop-loss on adverse excursion",
-            ]
-            market_caveats = [
-                "Requires empirical validation across historical market regimes",
-                "Transaction friction and execution latency must be evaluated",
-            ]
-            failure_regimes = [
-                "High volatility macroeconomic announcement windows",
-                "Flash liquidity withdrawal regimes",
-            ]
-            sharpe_ratio = 2.0
-            max_dd_pct = 5.0
-
-        if domain_id != "quant_research_scout" and chunks:
-            top_chk = chunks[0]
-            strategy_name = (
-                f"{top_chk.doc_title} — {top_chk.section_heading}"
-                if top_chk.section_heading
-                else f"{top_chk.doc_title} Empirical Synthesis"
-            )
-            target_markets = [MarketRegime.GLOBAL_MULTI]
-            sharpe_ratio = None
-            max_dd_pct = None
-            assumed_bps = None
-            combined_text = "\n".join(c.verbatim_content for c in chunks[:3])
-            math_match = re.search(r"\$\$?([^\$\n]{4,120})\$\$?", combined_text)
-            if math_match:
-                signal_latex = math_match.group(1).strip()
-            else:
-                signal_latex = r"E[Y \mid X] = f_{\theta}(\text{DomainContext})"
-
-            corpus_sentences: list[str] = []
-            caveat_sentences: list[str] = []
-            failure_sentences: list[str] = []
-            for chk in chunks[:3]:
-                for raw_ln in chk.verbatim_content.splitlines():
-                    s_ln = raw_ln.strip().lstrip("-*•0123456789. ")
-                    if len(s_ln) < 30 or s_ln.startswith("#") or s_ln.startswith("%"):
-                        continue
-                    s_lower = s_ln.lower()
-                    if any(
-                        fk in s_lower
-                        for fk in (
-                            "off-target",
-                            "failure",
-                            "fail",
-                            "degrad",
-                            "instability",
-                            "toxic",
-                            "error",
-                            "loss of",
-                            "breach",
-                            "violation",
-                            "penalty",
-                            "outage",
-                        )
-                    ):
-                        if s_ln not in failure_sentences:
-                            failure_sentences.append(s_ln)
-                    elif (
-                        any(
-                            ck in s_lower
-                            for ck in (
-                                "caveat",
-                                "constraint",
-                                "require",
-                                "threshold",
-                                "control",
-                                "concentration",
-                                "temperature",
-                                "condition",
-                                "must",
-                                "mandatory",
-                                "compliance",
-                            )
-                        )
-                        and s_ln not in caveat_sentences
-                    ):
-                        caveat_sentences.append(s_ln)
-                    if s_ln not in corpus_sentences:
-                        corpus_sentences.append(s_ln)
-
-            entry_exit_rules = (
-                corpus_sentences[:3]
-                if corpus_sentences
-                else [f"Apply protocol validated in {top_chk.doc_title}"]
-            )
-            market_caveats = (
-                caveat_sentences[:2]
-                if caveat_sentences
-                else [f"Grounded in {top_chk.doc_id} ({top_chk.section_heading})"]
-            )
-            failure_regimes = (
-                failure_sentences[:3]
-                if failure_sentences
-                else ["Out-of-distribution regime shift across experimental conditions"]
-            )
-        elif "momentum" in prompt_lower:
-            if MarketRegime.INDIA_NSE_BSE in target_markets:
-                strategy_name = (
-                    "Indian Equity Physical & Cross-Sectional Momentum Strategy (NSE/NIFTY)"
-                )
-                signal_latex = (
-                    r"p^1_{t,k} = m_i \cdot v_{i,t} = "
-                    r"\frac{1}{\sigma_i} \cdot \ln\left(\frac{P_{i,t}}{P_{i,t-k}}\right)"
-                )
-                entry_exit_rules = [
-                    (
-                        "Rank NIFTY universe over lookback J (2-8 weeks) by "
-                        "volatility-scaled log return velocity R(t)"
-                    ),
-                    (
-                        "Enter top-decile physical momentum portfolio when expected "
-                        "alpha exceeds 25.0 bps friction hurdle"
-                    ),
-                    (
-                        "Rebalance on holding horizon K (1-8 weeks) with 15.0 bps "
-                        "NSE statutory STT and impact floor"
-                    ),
-                ]
-                market_caveats = [
-                    (
-                        "Indian NSE equity delivery incurs statutory 10-15 bps STT plus "
-                        "exchange and brokerage fees (>=15.0 bps floor)"
-                    ),
-                    (
-                        "High-frequency daily turnover (J, K in 1-7 days) degrades net "
-                        "Sharpe unless filtered by liquidity mass"
-                    ),
-                ]
-                failure_regimes = [
-                    "Sharp post-RBI policy or fiscal announcement momentum crash reversals",
-                    "High-volatility sideways dispersion regimes across mid-cap NSE constituents",
-                ]
-                sharpe_ratio = 1.84
-                max_dd_pct = 11.6
-            else:
-                strategy_name = "Volatility-Scaled Cross-Sectional & Intraday Momentum Strategy"
-                signal_latex = (
-                    r"\alpha^{\text{mom}}_t = \text{sign}(r_{t-k:t}) \cdot "
-                    r"\frac{|r_{t-k:t}|}{\hat{\sigma}_t} \cdot "
-                    r"\mathbb{I}(\text{Vol}_t > \text{Vol}_{\text{med}})"
-                )
-                entry_exit_rules = [
-                    (
-                        "Enter in direction of volatility-normalized return when "
-                        "signal exceeds +1.5 sigma"
-                    ),
-                    "Scale position size inversely with realized volatility sigma_t",
-                    "Exit at horizon K or trailing volatility stop-loss",
-                ]
-        elif any(k in prompt_lower for k in ("portfolio", "hrp", "optimization", "variance")):
-            strategy_name = "Hierarchical Risk Parity (HRP) & Minimum Variance Portfolio Allocation"
-            signal_latex = (
-                r"w_i^{\text{HRP}} = \frac{\tilde{w}_i}{\sum_j \tilde{w}_j}, "
-                r"\quad D_{i,j} = \sqrt{\frac{1}{2}(1 - \rho_{i,j})}"
-            )
-        elif any(k in prompt_lower for k in ("pair", "cointegration", "stat arb")):
-            strategy_name = "Cointegration-Driven Statistical Arbitrage Pair-Trading Strategy"
-            signal_latex = r"Z_t = \frac{(P_{1,t} - \beta P_{2,t}) - \mu_s}{\sigma_s}"
-        elif any(
-            k in prompt_lower
-            for k in ("reinforcement", "actor-critic", "finrl", "deep learning", "agent")
-        ):
-            strategy_name = (
-                "Risk-Sensitive Deep Reinforcement Learning (Actor-Critic / FinRL) Trading Strategy"
-            )
-            signal_latex = (
-                r"J(\theta) = \mathbb{E}_{\pi_\theta}\left[\sum_{t=0}^T \gamma^t "
-                r"\left(r_t - \lambda \cdot \text{CVaR}_\alpha(r_t) - "
-                r"c \cdot |\Delta w_t|\right)\right]"
-            )
-        elif any(k in prompt_lower for k in ("hawkes", "branching", "queue")):
-            strategy_name = "Hawkes Process & Order Flow Imbalance Microstructure Strategy"
-            signal_latex = (
-                r"\lambda_m(t) = \mu_m + \sum_{n=1}^M \int_0^t \alpha_{mn} "
-                r"e^{-\beta_{mn}(t-s)} dN_n(s)"
-            )
-        elif "ofi" in prompt_lower or "order flow" in prompt_lower:
-            strategy_name = "Order Flow Imbalance Alpha & Micro-Price Strategy"
-
-        brief = QuantStrategyBrief(
-            strategy_name=strategy_name,
-            target_markets=target_markets,
+        return QuantStrategyBrief(
+            strategy_name=(
+                f"{top_chk.doc_title} Synthesis" if top_chk else "Verified Empirical Synthesis"
+            ),
+            target_markets=[],
             is_intraday_futures=False,
-            mathematical_signal_latex=signal_latex,
-            entry_exit_rules=entry_exit_rules,
+            mathematical_signal_latex=r"E[Y \mid X] = f_{\theta}(\text{DomainContext})",
+            entry_exit_rules=[
+                f"Grounded in verified citation from {top_chk.doc_title if top_chk else 'corpus'}"
+            ],
             sample_period_years="2020-2024",
-            reported_sharpe_ratio=sharpe_ratio,
-            reported_max_drawdown_pct=max_dd_pct,
-            transaction_cost_bps_assumed=assumed_bps,
+            transaction_cost_bps_assumed=None,
             friction_verdict=FrictionVerdict.REALISTIC_FRICTION,
-            market_specific_caveats=market_caveats,
-            known_failure_regimes=failure_regimes,
+            market_specific_caveats=["Grounded in retrieved corpus citations"],
+            known_failure_regimes=["Out-of-distribution regime shift"],
             verified_citations=verified_citations,
         )
-
-        return brief
 
     def generate_domain_knowledge_brief(
         self,
@@ -1650,16 +1525,30 @@ class LocalGemmaClient:
             repo=repo,
             principal=principal,
         )
+        if base_brief is None:
+            return DomainKnowledgeBrief(
+                brief_title="Insufficient Verified Corpus Citations",
+                domain_id=domain_id,
+                executive_summary="No verified corpus citations found for prompt.",
+                formal_expression_or_rule=None,
+                core_findings_and_rules=[],
+                domain_constraints_and_caveats=[],
+                known_risks_and_failure_modes=[],
+                structured_metadata={"domain_id": domain_id, "verified_citations_count": 0},
+                verified_citations=[],
+            )
         metadata: dict[str, str | float | int | bool] = {
             "domain_id": domain_id,
             "verified_citations_count": len(base_brief.verified_citations),
         }
-        if base_brief.reported_sharpe_ratio is not None:
-            metadata["reported_sharpe_ratio"] = base_brief.reported_sharpe_ratio
-        if base_brief.reported_max_drawdown_pct is not None:
-            metadata["reported_max_drawdown_pct"] = base_brief.reported_max_drawdown_pct
-        if base_brief.transaction_cost_bps_assumed is not None:
-            metadata["transaction_cost_bps_assumed"] = base_brief.transaction_cost_bps_assumed
+        plugin = (
+            PluginRegistry.get_domain_plugin(domain_id)
+            or PluginRegistry.get_primary_domain_plugin()
+        )
+        if plugin is not None:
+            for k, v in plugin.extract_brief_metadata(base_brief).items():
+                if isinstance(v, (str, float, int, bool)):
+                    metadata[k] = v
 
         summary_quote = (
             base_brief.verified_citations[0].verbatim_quote
@@ -1778,11 +1667,12 @@ class ScoutWorkflow:
         self,
         user_prompt: str,
         principal: PrincipalContext,
-        domain_id: str = "trading_code_scout",
+        domain_id: str | None = None,
         trace_id: str | None = None,
         **kwargs: Any,
     ) -> ImplementationContextPack | InsufficientContextDiagnostic:
         """Executes the scout workflow DAG, enforcing fail-closed model verification."""
+        domain_id = _resolve_default_domain(domain_id, role="code")
         active_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
         try:
             _ = self.local_client.complete(
@@ -1822,7 +1712,7 @@ class ScoutWorkflow:
         self,
         user_prompt: str,
         principal: PrincipalContext,
-        domain_id: str = "trading_code_scout",
+        domain_id: str | None = None,
         trace_id: str | None = None,
         normalized_rrf_score: float = 0.85,
         doc_chunks: dict[str, str] | list[DocChunkRecord] | None = None,
@@ -1831,6 +1721,7 @@ class ScoutWorkflow:
         on_stage_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ImplementationContextPack | InsufficientContextDiagnostic:
         """Executes the 4-stage Scout Workflow DAG with OpenTelemetry instrumentation."""
+        domain_id = _resolve_default_domain(domain_id, role="code")
         active_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
         tracer = ScoutTelemetryTracer.get_instance()
         with tracer.trace_workflow(
@@ -1904,7 +1795,8 @@ class ScoutWorkflow:
                 paid_tokens_spent=0,
             )
 
-        if domain_id == "federated_coordinator":
+        domain_plugin = PluginRegistry.get_domain_plugin(domain_id)
+        if domain_plugin is not None and domain_plugin.is_federated_domain(domain_id):
             fed_coord = FederatedScoutCoordinator(
                 registry=self.registry,
                 repo=self.repo,
@@ -1927,7 +1819,12 @@ class ScoutWorkflow:
 
         try:
             manifest = self.registry.get(domain_id)
-        except KeyError:
+        except KeyError as exc:
+            logger.warning(
+                "Domain '%s' not found in DomainRegistry (%s)",
+                domain_id,
+                type(exc).__name__,
+            )
             return InsufficientContextDiagnostic(
                 trace_id=active_trace_id,
                 domain_id=domain_id,
@@ -1937,17 +1834,25 @@ class ScoutWorkflow:
                 paid_tokens_spent=0,
             )
 
-        with contextlib.suppress(Exception):
+        try:
             from context_scout.agents.preflight_gate import sync_custom_domain_corpus_if_needed
             from context_scout.ingestion.git_merkle_indexer import sync_tracked_in_memory_repos
 
             sync_tracked_in_memory_repos(self.repo, principal=principal, domain_id=domain_id)
             sync_custom_domain_corpus_if_needed(domain_id)
+        except Exception as exc:
+            logger.debug(
+                "Live repository sync skipped for domain '%s' (%s): %s",
+                domain_id,
+                type(exc).__name__,
+                exc,
+            )
 
+        run_bound_repo = BoundGraphRepository(self.repo)
         relevance_rejection = _evaluate_query_domain_relevance(
             user_prompt=user_prompt,
             domain_id=domain_id,
-            bound_repo=BoundGraphRepository(self.repo),
+            bound_repo=run_bound_repo,
             principal=principal,
         )
         if relevance_rejection is not None:
@@ -2009,59 +1914,35 @@ class ScoutWorkflow:
                 "module",
                 "symbol",
                 "bindings",
-                "kalman",
-                "garch",
-                "kelly",
-                "almgren",
-                "chriss",
-                "ledoit",
-                "slippage",
-                "orderflowimbalance",
-                "order_flow_imbalance",
                 "bounce",
             )
         )
-        has_quant_research_indicators = bool(
-            re.search(r"\b(?:nifty|nse|xetra|dax|finrl)\b", prompt_l)
-        ) or any(
-            q_kw in prompt_l
-            for q_kw in (
-                "equity market",
-                "stock market",
-                "indian",
-                "actor-critic",
-                "reinforcement learning",
-                "momentum strategy",
-                "hierarchical risk parity",
-                "minimum variance",
-                "outperform",
-                "hawkes process",
+        auto_research_route = (
+            domain_plugin is not None
+            and not has_code_indicators
+            and domain_plugin.should_auto_route_research(
+                user_prompt, domain_id, allowed_scopes=principal.allowed_scopes
             )
         )
-        has_quant_scope = bool(
-            {"public_quant", "corpus:quant_papers", "quant_restricted"}
-            & set(principal.allowed_scopes)
-        )
-        auto_quant_route = (
-            domain_id == "trading_code_scout"
-            and not has_code_indicators
-            and has_quant_research_indicators
-            and has_quant_scope
+        research_domain_id = (
+            domain_plugin.get_role_domain_ids().get("research", domain_id)
+            if domain_plugin is not None
+            else domain_id
         )
 
         is_doc_domain = (
             manifest.output_contract in ("QuantStrategyBrief", "DomainKnowledgeBrief")
-            or domain_id == "quant_research_scout"
-            or auto_quant_route
+            or (domain_plugin is not None and domain_plugin.is_research_domain(domain_id))
+            or auto_research_route
         )
         quant_brief: QuantStrategyBrief | None = None
         domain_knowledge_brief: DomainKnowledgeBrief | None = None
         if is_doc_domain:
-            quant_domain = "quant_research_scout" if auto_quant_route else domain_id
+            quant_domain = research_domain_id if auto_research_route else domain_id
             quant_brief = self.local_client.generate_quant_brief(
                 user_prompt=user_prompt,
                 domain_id=quant_domain,
-                repo=self.repo,
+                repo=run_bound_repo,
                 principal=principal,
                 bounce_back_feedback=None,
             )
@@ -2069,7 +1950,7 @@ class ScoutWorkflow:
                 domain_knowledge_brief = self.local_client.generate_domain_knowledge_brief(
                     user_prompt=user_prompt,
                     domain_id=quant_domain,
-                    repo=self.repo,
+                    repo=run_bound_repo,
                     principal=principal,
                     quant_brief=quant_brief,
                 )
@@ -2085,7 +1966,7 @@ class ScoutWorkflow:
             candidate_pointers = self.local_client.generate_code_pointers(
                 user_prompt=user_prompt,
                 domain_id=domain_id,
-                repo=self.repo,
+                repo=run_bound_repo,
                 principal=principal,
                 bounce_back_feedback=None,
             )
@@ -2101,7 +1982,7 @@ class ScoutWorkflow:
                 }
             )
 
-        bound_repo = BoundGraphRepository(self.repo)
+        bound_repo = run_bound_repo
         pointer_paths = list({p.file_path for p in candidate_pointers})
         targeted_files = bound_repo.get_code_files_by_paths(principal, domain_id, pointer_paths)
         visible_files = bound_repo.list_visible_code_files(principal, domain_id)
@@ -2114,8 +1995,9 @@ class ScoutWorkflow:
             file_rec = files_by_path.get(ptr.file_path)
             if file_rec is not None:
                 try:
+                    snapped_ptr = _snap_python_ast_pointer_bounds(ptr, file_rec)
                     slice_item = self.slicer.slice_pointer(
-                        pointer=ptr,
+                        pointer=snapped_ptr,
                         file_record=file_rec,
                         auto_expanded_by_ast=False,
                     )
@@ -2174,13 +2056,20 @@ class ScoutWorkflow:
                         ):
                             f_rec = files_by_path.get(auto_ptr.file_path)
                             if f_rec is not None:
-                                with contextlib.suppress(Exception):
+                                try:
                                     hydrated_auto = self.slicer.slice_pointer(
                                         pointer=auto_ptr,
                                         file_record=f_rec,
                                         auto_expanded_by_ast=True,
                                     )
                                     hydrated_slices.append(hydrated_auto)
+                                except Exception as exc:
+                                    logger.debug(
+                                        "Skipping auto-expanded slice %s (%s): %s",
+                                        auto_ptr.file_path,
+                                        type(exc).__name__,
+                                        exc,
+                                    )
 
         hydrated_slices = self._coalesce_and_enrich_target_file_slices(
             hydrated_slices=hydrated_slices,
@@ -2219,14 +2108,15 @@ class ScoutWorkflow:
                 paid_tokens_spent=0,
             )
 
+        val_domain = research_domain_id if auto_research_route else domain_id
         initial_report = self.validator.validate(
             code_slices=hydrated_slices,
             user_prompt=user_prompt,
             supporting_doc_citations=supporting_doc_citations,
             normalized_rrf_score=normalized_rrf_score,
-            repo=self.repo,
+            repo=run_bound_repo,
             principal=principal,
-            domain_id=domain_id,
+            domain_id=val_domain,
             doc_chunks=doc_chunks,
         )
 
@@ -2259,7 +2149,7 @@ class ScoutWorkflow:
             remediated_pointers = self.local_client.generate_code_pointers(
                 user_prompt=user_prompt,
                 domain_id=domain_id,
-                repo=self.repo,
+                repo=run_bound_repo,
                 principal=principal,
                 bounce_back_feedback=active_feedback,
             )
@@ -2270,22 +2160,30 @@ class ScoutWorkflow:
                 ):
                     file_rec = files_by_path.get(ptr.file_path)
                     if file_rec is not None:
-                        with contextlib.suppress(Exception):
+                        try:
+                            snapped_ptr = _snap_python_ast_pointer_bounds(ptr, file_rec)
                             remed_slice = self.slicer.slice_pointer(
-                                pointer=ptr,
+                                pointer=snapped_ptr,
                                 file_record=file_rec,
                                 auto_expanded_by_ast=False,
                             )
                             hydrated_slices.append(remed_slice)
+                        except Exception as exc:
+                            logger.debug(
+                                "Skipping remediated slice %s (%s): %s",
+                                ptr.file_path,
+                                type(exc).__name__,
+                                exc,
+                            )
 
             final_report = self.validator.validate(
                 code_slices=hydrated_slices,
                 user_prompt=user_prompt,
                 supporting_doc_citations=supporting_doc_citations,
                 normalized_rrf_score=normalized_rrf_score,
-                repo=self.repo,
+                repo=run_bound_repo,
                 principal=principal,
-                domain_id=domain_id,
+                domain_id=val_domain,
                 doc_chunks=doc_chunks,
             )
 
@@ -2463,7 +2361,7 @@ class ScoutWorkflow:
         # widen the primary MODIFY_TARGET slice to span the contiguous file so the executor
         # never receives disjoint out-of-order fragments with missing gap lines.
         if file_rec.line_count <= 60 and len(same_file_slices) >= 2:
-            with contextlib.suppress(Exception):
+            try:
                 coalesced_ptr = CodeSlicePointer(
                     repo_name=primary.repo_name,
                     file_path=primary.file_path,
@@ -2477,6 +2375,13 @@ class ScoutWorkflow:
                     pointer=coalesced_ptr,
                     file_record=file_rec,
                     auto_expanded_by_ast=primary.auto_expanded_by_ast,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Compact-file slice coalescing skipped for %s (%s): %s",
+                    primary.file_path,
+                    type(exc).__name__,
+                    exc,
                 )
         elif len(same_file_slices) >= 2:
             # 2. For larger files, merge same-file slices separated by <= 15 lines
@@ -2498,7 +2403,7 @@ class ScoutWorkflow:
                         ):
                             min_l, max_l = new_min, new_max
             if min_l != primary.start_line or max_l != primary.end_line:
-                with contextlib.suppress(Exception):
+                try:
                     coalesced_ptr = CodeSlicePointer(
                         repo_name=primary.repo_name,
                         file_path=primary.file_path,
@@ -2512,6 +2417,13 @@ class ScoutWorkflow:
                         pointer=coalesced_ptr,
                         file_record=file_rec,
                         auto_expanded_by_ast=primary.auto_expanded_by_ast,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Adjacent slice merge skipped for %s (%s): %s",
+                        primary.file_path,
+                        type(exc).__name__,
+                        exc,
                     )
 
         # 3. Attach compact top-of-file import & referenced module-constant header
@@ -2539,16 +2451,14 @@ class ScoutWorkflow:
                 ):
                     last_header_line -= 1
             if last_header_line > 0:
-                with contextlib.suppress(Exception):
+                try:
                     hdr_ptr = CodeSlicePointer(
                         repo_name=primary.repo_name,
                         file_path=primary.file_path,
                         start_line=1,
                         end_line=last_header_line,
                         qualified_symbol=primary.qualified_symbol,
-                        selection_reason=(
-                            f"Top-of-file import header for {primary.file_path}"
-                        ),
+                        selection_reason=(f"Top-of-file import header for {primary.file_path}"),
                         modification_intent=ModificationIntent.REFERENCE_ONLY,
                     )
                     hdr_slice = self.slicer.slice_pointer(
@@ -2557,6 +2467,13 @@ class ScoutWorkflow:
                         auto_expanded_by_ast=True,
                     )
                     filtered.append(hdr_slice)
+                except Exception as exc:
+                    logger.debug(
+                        "Top-of-file import header slice skipped for %s (%s): %s",
+                        primary.file_path,
+                        type(exc).__name__,
+                        exc,
+                    )
 
         # 4. If MODIFY_TARGET is a class method, attach enclosing class header & __init__/fields
         if filtered[0].start_line > 10 and len(raw_lines) >= filtered[0].start_line:
@@ -2615,7 +2532,7 @@ class ScoutWorkflow:
                         for s in filtered
                     )
                     if delim_ok and not already_covers_cls and cls_end_cap >= enclosing_cls_line:
-                        with contextlib.suppress(Exception):
+                        try:
                             cls_ptr = CodeSlicePointer(
                                 repo_name=primary.repo_name,
                                 file_path=primary.file_path,
@@ -2634,6 +2551,13 @@ class ScoutWorkflow:
                                 auto_expanded_by_ast=True,
                             )
                             filtered.append(cls_slice)
+                        except Exception as exc:
+                            logger.debug(
+                                "Enclosing class slice skipped for %s (%s): %s",
+                                primary.file_path,
+                                type(exc).__name__,
+                                exc,
+                            )
 
         return filtered
 
@@ -2641,12 +2565,12 @@ class ScoutWorkflow:
 class FederatedScoutCoordinator:
     """2-Stage Cross-Domain Federated Scout DAG (ARC-01).
 
-    Stage 1: Model 2 (quant_research_scout) runs over PostgreSQL 17 doc_chunks
-             to extract and validate QuantStrategyBrief, enforcing MarketRegime friction gates.
-    Stage 2: Passes validated QuantStrategyBrief to Model 1 (trading_code_scout) over
-             PostgreSQL AST tables (code_files, ast_symbols, ast_edges) to locate
-             implementation target files and 1-hop AST dependencies.
-    Composite Merge: Merges both models' outputs into a composite ImplementationContextPack
+    Stage 1: Research domain runs over document chunks to extract and validate a
+             structured research brief and domain rules.
+    Stage 2: Passes validated research context to the paired code domain over AST
+             tables (code_files, ast_symbols, ast_edges) to locate implementation
+             target files and 1-hop AST dependencies.
+    Composite Merge: Merges both stages' outputs into a composite ImplementationContextPack
                      and verifies the unified pack against PreFlightValidator.
     """
 
@@ -2660,7 +2584,14 @@ class FederatedScoutCoordinator:
         expander: ASTDependencyExpander | None = None,
         guardrail: ShieldGemmaGuardrail | None = None,
         auth_gate: DomainAuthorizationGate | None = None,
+        code_domain_id: str | None = None,
+        research_domain_id: str | None = None,
+        federated_domain_id: str | None = None,
     ) -> None:
+        default_code, default_research, default_federated = _resolve_role_domains()
+        self.code_domain_id = code_domain_id or default_code
+        self.research_domain_id = research_domain_id or default_research
+        self.federated_domain_id = federated_domain_id or default_federated
         self.registry = registry
         self.repo = repo
         self.slicer = slicer or DeterministicSlicer()
@@ -2694,7 +2625,7 @@ class FederatedScoutCoordinator:
         tracer = ScoutTelemetryTracer.get_instance()
         with tracer.trace_workflow(
             span_name="scout.federated_workflow",
-            domain_id="federated_coordinator",
+            domain_id=self.federated_domain_id,
             trace_id=active_trace_id,
             model_id="gemma-4-moe",
             system="gemma",
@@ -2722,62 +2653,69 @@ class FederatedScoutCoordinator:
         on_stage_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ImplementationContextPack | InsufficientContextDiagnostic:
         """Executes the 2-stage cross-domain federated DAG."""
+        code_domain = self.code_domain_id
+        research_domain = self.research_domain_id
+        fed_domain = self.federated_domain_id
 
         decision = self.guardrail.evaluate(user_prompt, principal=principal)
         if not decision.passed:
             return InsufficientContextDiagnostic(
                 trace_id=active_trace_id,
-                domain_id="federated_coordinator",
+                domain_id=fed_domain,
                 reason=f"Security guardrail rejection: {decision.rationale}",
                 missing_symbols=[],
                 partial_candidate_files=[],
                 paid_tokens_spent=0,
             )
 
+        fed_bound_repo = BoundGraphRepository(self.repo)
         relevance_rejection = _evaluate_query_domain_relevance(
             user_prompt=user_prompt,
-            domain_id="federated_coordinator",
-            bound_repo=BoundGraphRepository(self.repo),
+            domain_id=fed_domain,
+            bound_repo=fed_bound_repo,
             principal=principal,
         )
         if relevance_rejection is not None:
             return InsufficientContextDiagnostic(
                 trace_id=active_trace_id,
-                domain_id="federated_coordinator",
+                domain_id=fed_domain,
                 reason=relevance_rejection,
                 missing_symbols=[],
                 partial_candidate_files=[],
                 paid_tokens_spent=0,
             )
 
-        quant_scopes = {"public_quant", "corpus:quant_papers", "quant_restricted"}
-        active_principal = principal
-        if any(s in principal.allowed_scopes for s in quant_scopes) and (
-            "domain:quant_research_scout" not in principal.allowed_scopes
-        ):
-            active_principal = PrincipalContext(
-                user_id=principal.user_id,
-                role=principal.role,
-                allowed_scopes=[*principal.allowed_scopes, "domain:quant_research_scout"],
-                session_budget_tokens=principal.session_budget_tokens,
-                max_session_paid_tokens=principal.max_session_paid_tokens,
-            )
+        domain_plugin = PluginRegistry.get_domain_plugin(research_domain)
+        if domain_plugin is not None and hasattr(domain_plugin, "elevate_principal_for_research"):
+            active_principal = domain_plugin.elevate_principal_for_research(principal)
+        else:
+            active_principal = principal
 
         # ---------------------------------------------------------------------
-        # Stage 1: Model 2 (quant_research_scout) Research Extraction
+        # Stage 1: Research Domain Extraction
         # ---------------------------------------------------------------------
-        self.local_client.set_active_domain("quant_research_scout")
+        self.local_client.set_active_domain(research_domain)
         quant_brief = self.local_client.generate_quant_brief(
             user_prompt=user_prompt,
-            domain_id="quant_research_scout",
-            repo=self.repo,
+            domain_id=research_domain,
+            repo=fed_bound_repo,
             principal=active_principal,
             bounce_back_feedback=None,
         )
 
+        if quant_brief is None:
+            return InsufficientContextDiagnostic(
+                trace_id=active_trace_id,
+                domain_id=research_domain,
+                reason="Research brief synthesis returned no verified citations",
+                missing_symbols=[],
+                partial_candidate_files=[],
+                paid_tokens_spent=0,
+            )
+
         if quant_brief.friction_verdict == FrictionVerdict.FAILS_AFTER_COSTS:
             logger.warning(
-                "QuantStrategyBrief failed friction floor: assumed %s bps for %s",
+                "Research brief failed domain rule check: assumed %s bps for %s",
                 quant_brief.transaction_cost_bps_assumed,
                 quant_brief.target_markets,
             )
@@ -2785,9 +2723,9 @@ class FederatedScoutCoordinator:
         citations: list[DocCitationSpan] = list(quant_brief.verified_citations)
 
         # ---------------------------------------------------------------------
-        # Stage 2: Model 1 (trading_code_scout) Implementation Localization
+        # Stage 2: Code Domain Implementation Localization
         # ---------------------------------------------------------------------
-        self.local_client.set_active_domain("trading_code_scout")
+        self.local_client.set_active_domain(code_domain)
 
         code_prompt = (
             f"{user_prompt}\n"
@@ -2797,8 +2735,8 @@ class FederatedScoutCoordinator:
 
         code_pointers = self.local_client.generate_code_pointers(
             user_prompt=code_prompt,
-            domain_id="trading_code_scout",
-            repo=self.repo,
+            domain_id=code_domain,
+            repo=fed_bound_repo,
             principal=active_principal,
             bounce_back_feedback=None,
         )
@@ -2814,8 +2752,8 @@ class FederatedScoutCoordinator:
                 }
             )
 
-        bound_repo = BoundGraphRepository(self.repo)
-        visible_files = bound_repo.list_visible_code_files(active_principal, "trading_code_scout")
+        bound_repo = fed_bound_repo
+        visible_files = bound_repo.list_visible_code_files(active_principal, code_domain)
         files_by_path: dict[str, CodeFileRecord] = {f.file_path: f for f in visible_files}
 
         hydrated_slices: list[VerbatimCodeSlice] = []
@@ -2823,14 +2761,20 @@ class FederatedScoutCoordinator:
             f_rec = files_by_path.get(ptr.file_path)
             if f_rec is not None:
                 try:
+                    snapped_ptr = _snap_python_ast_pointer_bounds(ptr, f_rec)
                     slice_item = self.slicer.slice_pointer(
-                        pointer=ptr,
+                        pointer=snapped_ptr,
                         file_record=f_rec,
                         auto_expanded_by_ast=False,
                     )
                     hydrated_slices.append(slice_item)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Failed slicing federated pointer %s (%s): %s",
+                        ptr.file_path,
+                        type(exc).__name__,
+                        exc,
+                    )
             else:
                 hydrated_slices.append(
                     VerbatimCodeSlice(
@@ -2850,9 +2794,7 @@ class FederatedScoutCoordinator:
                     )
                 )
 
-        visible_symbols = bound_repo.list_visible_ast_symbols(
-            active_principal, "trading_code_scout"
-        )
+        visible_symbols = bound_repo.list_visible_ast_symbols(active_principal, code_domain)
         for s in list(hydrated_slices):
             if s.modification_intent == ModificationIntent.MODIFY_TARGET:
                 sym_rec = next(
@@ -2864,7 +2806,7 @@ class FederatedScoutCoordinator:
                         focus_symbol=sym_rec,
                         repo=bound_repo,
                         principal=active_principal,
-                        domain_id="trading_code_scout",
+                        domain_id=code_domain,
                     )
                     for auto_ptr in (
                         exp_res.imported_type_slices
@@ -2878,7 +2820,7 @@ class FederatedScoutCoordinator:
                         ):
                             f_rec = files_by_path.get(auto_ptr.file_path)
                             if f_rec is not None:
-                                with contextlib.suppress(Exception):
+                                try:
                                     hydrated_slices.append(
                                         self.slicer.slice_pointer(
                                             pointer=auto_ptr,
@@ -2886,15 +2828,21 @@ class FederatedScoutCoordinator:
                                             auto_expanded_by_ast=True,
                                         )
                                     )
+                                except Exception as exc:
+                                    logger.debug(
+                                        "Skipping invalid 1-hop slice %s (%s): %s",
+                                        auto_ptr.file_path,
+                                        type(exc).__name__,
+                                        exc,
+                                    )
 
         # ---------------------------------------------------------------------
         # Stage 3: Composite Pre-Flight Gate & Local Bounce-Back Loop
         # ---------------------------------------------------------------------
-        # In cross-domain federated coordination, doc chunks originate from quant_research_scout
         active_chunks = (
             doc_chunks
             if doc_chunks is not None
-            else bound_repo.list_visible_doc_chunks(active_principal, "quant_research_scout")
+            else bound_repo.list_visible_doc_chunks(active_principal, research_domain)
         )
 
         report = self.validator.validate(
@@ -2903,9 +2851,9 @@ class FederatedScoutCoordinator:
             supporting_doc_citations=citations,
             quant_strategy_spec=quant_brief,
             normalized_rrf_score=normalized_rrf_score,
-            repo=self.repo,
+            repo=fed_bound_repo,
             principal=active_principal,
-            domain_id="trading_code_scout",
+            domain_id=code_domain,
             doc_chunks=active_chunks,
         )
 
@@ -2935,8 +2883,8 @@ class FederatedScoutCoordinator:
                 )
             remed_ptrs = self.local_client.generate_code_pointers(
                 user_prompt=code_prompt,
-                domain_id="trading_code_scout",
-                repo=self.repo,
+                domain_id=code_domain,
+                repo=fed_bound_repo,
                 principal=active_principal,
                 bounce_back_feedback=active_feedback,
             )
@@ -2947,13 +2895,21 @@ class FederatedScoutCoordinator:
                 ):
                     f_rec = files_by_path.get(ptr.file_path)
                     if f_rec is not None:
-                        with contextlib.suppress(Exception):
+                        try:
+                            snapped_ptr = _snap_python_ast_pointer_bounds(ptr, f_rec)
                             hydrated_slices.append(
                                 self.slicer.slice_pointer(
-                                    pointer=ptr,
+                                    pointer=snapped_ptr,
                                     file_record=f_rec,
                                     auto_expanded_by_ast=False,
                                 )
+                            )
+                        except Exception as exc:
+                            logger.debug(
+                                "Skipping invalid bounce-back slice %s (%s): %s",
+                                ptr.file_path,
+                                type(exc).__name__,
+                                exc,
                             )
 
             report = self.validator.validate(
@@ -2962,16 +2918,16 @@ class FederatedScoutCoordinator:
                 supporting_doc_citations=citations,
                 quant_strategy_spec=quant_brief,
                 normalized_rrf_score=normalized_rrf_score,
-                repo=self.repo,
+                repo=fed_bound_repo,
                 principal=active_principal,
-                domain_id="trading_code_scout",
+                domain_id=code_domain,
                 doc_chunks=active_chunks,
             )
 
         if not report.passed:
             return self.validator.create_diagnostic(
                 trace_id=active_trace_id,
-                domain_id="trading_code_scout",
+                domain_id=code_domain,
                 report=report,
                 partial_candidate_files=list({s.file_path for s in hydrated_slices}),
             )
@@ -2981,11 +2937,11 @@ class FederatedScoutCoordinator:
         # ---------------------------------------------------------------------
         plan = [
             (
-                f"Stage 1 (Model 2 quant_research_scout): Extracted '{quant_brief.strategy_name}' "
-                f"with friction verdict {quant_brief.friction_verdict.value}"
+                f"Stage 1 (Research {research_domain}): Extracted '{quant_brief.strategy_name}' "
+                f"with verdict {quant_brief.friction_verdict.value}"
             ),
             (
-                f"Stage 2 (Model 1 trading_code_scout): Located {len(hydrated_slices)} code slices "
+                f"Stage 2 (Code {code_domain}): Located {len(hydrated_slices)} code slices "
                 "via AST localization"
             ),
             f"Stage 3: Composite Pre-Flight Gate PASSED with RRF {report.normalized_rrf_score:.4f}",
@@ -3020,7 +2976,7 @@ class FederatedScoutCoordinator:
 
         pack = ImplementationContextPack(
             trace_id=active_trace_id,
-            domain_id="trading_code_scout",
+            domain_id=code_domain,
             user_task=user_prompt,
             architectural_execution_plan=plan,
             doc_vs_code_conflicts_detected=conflicts,

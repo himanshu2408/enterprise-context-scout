@@ -48,7 +48,9 @@ from context_scout.schemas.contracts import (
 )
 from context_scout.telemetry import ScoutTelemetryTracer
 from context_scout.telemetry.cost_governance import (
-    BudgetExceededError,
+    BudgetExceededError as BudgetExceededError,
+)
+from context_scout.telemetry.cost_governance import (
     CostEstimateReport,
     PaidComputeCostEstimator,
     SessionBudgetTracker,
@@ -461,10 +463,9 @@ class GeminiImplementationExecutor:
     ) -> None:
         self.model_id = validate_google_model_id(model_id)
         self.vertexai = vertexai
-        self.allow_non_eu_regions = (
-            allow_non_eu_regions
-            or os.environ.get("SCOUT_ALLOW_NON_EU_REGIONS", "").strip().lower() in ("true", "1")
-        )
+        self.allow_non_eu_regions = allow_non_eu_regions or os.environ.get(
+            "SCOUT_ALLOW_NON_EU_REGIONS", ""
+        ).strip().lower() in ("true", "1")
 
         # Resolve GCP Project
         self.project = (
@@ -492,9 +493,13 @@ class GeminiImplementationExecutor:
             try:
                 from google.oauth2 import credentials as oauth2_creds
 
-                self.credentials = oauth2_creds.Credentials(token=self.service_token)
-            except ImportError:
-                pass
+                creds_factory: Any = oauth2_creds.Credentials
+                self.credentials = creds_factory(token=self.service_token)
+            except ImportError as exc:
+                logger.debug(
+                    "google.oauth2.credentials unavailable (%s); continuing without ADC wrapper",
+                    type(exc).__name__,
+                )
 
         # Optional backwards-compatibility API key
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
@@ -560,9 +565,10 @@ class GeminiImplementationExecutor:
         elif repo is not None and conn is not None:
             consumed = repo.get_principal_paid_tokens_consumed(conn, principal.user_id)
 
-        budget_cap = getattr(principal, "session_budget_tokens", None) or getattr(
+        raw_cap = getattr(principal, "session_budget_tokens", None) or getattr(
             principal, "max_session_paid_tokens", 16_000
         )
+        budget_cap = int(raw_cap) if raw_cap is not None else 16_000
         projected = consumed + pack.pack_token_count + max_output_tokens
         if projected > budget_cap:
             raise BudgetExceededError(
@@ -726,7 +732,13 @@ class GeminiImplementationExecutor:
                     continue
                 try:
                     text = p.read_text(encoding="utf-8")
-                except UnicodeDecodeError:
+                except UnicodeDecodeError as exc:
+                    logger.debug(
+                        "Skipping non-UTF-8 file %s during miss search (%s): %s",
+                        p,
+                        type(exc).__name__,
+                        exc,
+                    )
                     continue
                 if request.missing_symbol in text:
                     resolved_file = str(p.relative_to(repo_root))
@@ -773,9 +785,7 @@ class GeminiImplementationExecutor:
             if doc_rel_path is None:
                 for ext_pat in ("*.md", "*.txt", "*.tex", "*.py"):
                     found_files = sorted(
-                        p
-                        for p in repo_root.rglob(ext_pat)
-                        if p.is_file() and ".git" not in p.parts
+                        p for p in repo_root.rglob(ext_pat) if p.is_file() and ".git" not in p.parts
                     )
                     if found_files:
                         doc_rel_path = str(found_files[0].relative_to(repo_root))

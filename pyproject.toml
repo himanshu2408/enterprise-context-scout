@@ -83,6 +83,7 @@ python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+explicit_package_bases = true
 mypy_path = "src"
 packages = ["context_scout"]
 
@@ -109,5 +110,6 @@ addopts = "-q --strict-markers"
 markers = [
     "postgres: Live PostgreSQL 17 database integration tests",
     "live: Live external API / service integration tests",
+    "benchmark: Performance benchmark tests measuring latencies and SLAs",
 ]
 

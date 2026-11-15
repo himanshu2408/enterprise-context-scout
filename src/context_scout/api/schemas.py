@@ -63,7 +63,7 @@ class ScoutStreamRequest(BaseModel):
     """Request payload for scout query or SSE stream."""
 
     query: str = Field(min_length=1, max_length=16_000)
-    domain_id: str = Field(default="trading_code_scout")
+    domain_id: str = Field(default="default")
     trace_id: str | None = None
     normalized_rrf_score: float = Field(default=0.85, ge=0.0, le=1.0)
     max_bounce_backs: int = Field(default=1, ge=0, le=3)

@@ -54,7 +54,8 @@ class FrictionVerdict(StrEnum):
 MARKET_MIN_FRICTION_BPS: Final[dict[MarketRegime, float]] = {
     MarketRegime.INDIA_NSE_BSE: 15.0,
     MarketRegime.GERMANY_XETRA_DAX: 10.0,
-    MarketRegime.US_NYSE_NASDAQ: 5.0, MarketRegime.GLOBAL_MULTI: 10.0,
+    MarketRegime.US_NYSE_NASDAQ: 5.0,
+    MarketRegime.GLOBAL_MULTI: 10.0,
     MarketRegime.INTERNAL_ADR: 0.0,
 }
 
@@ -231,18 +232,10 @@ class DocCitationSpan(BaseModel):
     @model_validator(mode="after")
     def _validate_enterprise_provenance(self) -> "DocCitationSpan":
         # If source_uri indicates Confluence, page_id is expected
-        if (
-            "confluence" in self.source_uri.lower()
-            and not self.page_id
-            and self.doc_id.isdigit()
-        ):
+        if "confluence" in self.source_uri.lower() and not self.page_id and self.doc_id.isdigit():
             self.page_id = self.doc_id
         # If source_uri indicates Jira, ticket_key is expected
-        if (
-            "jira" in self.source_uri.lower()
-            and not self.ticket_key
-            and "-" in self.doc_id
-        ):
+        if "jira" in self.source_uri.lower() and not self.ticket_key and "-" in self.doc_id:
             self.ticket_key = self.doc_id
         return self
 
@@ -348,9 +341,9 @@ class CodeSpanPointer(BaseModel):
 class DocSpanPointer(BaseModel):
     """Extractive document span pointer with enterprise provenance and verbatim quote."""
 
-    source_type: Literal[
-        "confluence", "jira", "git_doc", "local_doc", "spec", "general"
-    ] = Field(default="confluence", description="Source enterprise repository type")
+    source_type: Literal["confluence", "jira", "git_doc", "local_doc", "spec", "general"] = Field(
+        default="confluence", description="Source enterprise repository type"
+    )
     item_id: str = Field(min_length=1, description="Confluence page ID, Jira issue key, or doc ID")
     version_or_status: str = Field(
         min_length=1, description="Confluence page version or Jira issue status"
@@ -604,4 +597,3 @@ __all__ = [
     "compute_normalized_rrf",
     "evaluate_market_friction_floor",
 ]
-

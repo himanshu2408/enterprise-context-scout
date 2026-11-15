@@ -692,11 +692,7 @@ class ASTExtractor:
         if not left_node or not right_node or left_node.type != "identifier":
             return
         var_name = _node_text(left_node, code_bytes).strip()
-        if (
-            len(var_name) < 3
-            or var_name.startswith("__")
-            or var_name.lower() in {"logger", "log"}
-        ):
+        if len(var_name) < 3 or var_name.startswith("__") or var_name.lower() in {"logger", "log"}:
             return
 
         right_text = _node_text(right_node, code_bytes).strip()
@@ -725,9 +721,11 @@ class ASTExtractor:
         ):
             dispatch_key, target_ident = pair_match.group(1), pair_match.group(2)
             for sym in symbols:
-                if sym.name == target_ident or sym.qualified_name.endswith(
-                    f".{target_ident}.__init__"
-                ) or sym.qualified_name.startswith(f"{module_prefix}.{target_ident}."):
+                if (
+                    sym.name == target_ident
+                    or sym.qualified_name.endswith(f".{target_ident}.__init__")
+                    or sym.qualified_name.startswith(f"{module_prefix}.{target_ident}.")
+                ):
                     tag = f"[dispatch {var_name}: {dispatch_key}]"
                     if tag not in sym.contextual_summary:
                         sym.contextual_summary = f"{sym.contextual_summary} {tag}".strip()
@@ -1598,9 +1596,7 @@ class ASTExtractor:
                 top_keys.append((km.group(1), idx + 1))
 
         for k_idx, (key_name, start_line) in enumerate(top_keys):
-            end_line = (
-                top_keys[k_idx + 1][1] - 1 if k_idx + 1 < len(top_keys) else len(lines)
-            )
+            end_line = top_keys[k_idx + 1][1] - 1 if k_idx + 1 < len(top_keys) else len(lines)
             while end_line > start_line and not lines[end_line - 1].strip():
                 end_line -= 1
             block_lines = lines[start_line - 1 : end_line]
@@ -1769,9 +1765,7 @@ class ASTExtractor:
                 headings.append((slug[:64], raw_title, idx + 1))
 
         for h_idx, (slug, raw_title, start_line) in enumerate(headings):
-            end_line = (
-                headings[h_idx + 1][2] - 1 if h_idx + 1 < len(headings) else len(lines)
-            )
+            end_line = headings[h_idx + 1][2] - 1 if h_idx + 1 < len(headings) else len(lines)
             qual = f"{module_prefix}.{slug}" if module_prefix else slug
             section_text = "\n".join(lines[start_line - 1 : end_line])
             symbols.append(
@@ -1830,4 +1824,3 @@ def match_symbol_identifier(candidate: str, record_qualified_name: str) -> bool:
 
 
 __all__ = ["ASTExtractor", "match_symbol_identifier"]
-

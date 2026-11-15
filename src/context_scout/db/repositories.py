@@ -1,6 +1,7 @@
 """RLS-enforced repositories and 3-way Normalized RRF search (M1 Foundation)."""
 
 import json
+import logging
 import math
 from collections import Counter
 from datetime import date, datetime
@@ -11,16 +12,34 @@ from psycopg import Connection
 
 from context_scout.db.bm25 import BM25Okapi
 from context_scout.db.schema import (
-    ASTEdgeRecord,
-    ASTNeighborhoodRecord,
-    ASTSymbolRecord,
-    CodeFileRecord,
-    ConfluencePageRecord,
-    DocChunkRecord,
-    JiraIssueRecord,
-    RankedSearchHit,
-    RepoCommitRecord,
-    RepositoryRecord,
+    ASTEdgeRecord as ASTEdgeRecord,
+)
+from context_scout.db.schema import (
+    ASTNeighborhoodRecord as ASTNeighborhoodRecord,
+)
+from context_scout.db.schema import (
+    ASTSymbolRecord as ASTSymbolRecord,
+)
+from context_scout.db.schema import (
+    CodeFileRecord as CodeFileRecord,
+)
+from context_scout.db.schema import (
+    ConfluencePageRecord as ConfluencePageRecord,
+)
+from context_scout.db.schema import (
+    DocChunkRecord as DocChunkRecord,
+)
+from context_scout.db.schema import (
+    JiraIssueRecord as JiraIssueRecord,
+)
+from context_scout.db.schema import (
+    RankedSearchHit as RankedSearchHit,
+)
+from context_scout.db.schema import (
+    RepoCommitRecord as RepoCommitRecord,
+)
+from context_scout.db.schema import (
+    RepositoryRecord as RepositoryRecord,
 )
 from context_scout.schemas.contracts import (
     DomainPackManifest,
@@ -29,6 +48,20 @@ from context_scout.schemas.contracts import (
     PrincipalContext,
     compute_normalized_rrf,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _as_dt(val: object) -> datetime:
+    if isinstance(val, datetime):
+        return val
+    return datetime.fromisoformat(str(val))
+
+
+def _as_opt_dt(val: object) -> datetime | None:
+    if val is None:
+        return None
+    return _as_dt(val)
 
 
 def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
@@ -295,8 +328,8 @@ class PostgresRLSRepository:
             allowed_scopes=[str(s) for s in row[7]] if isinstance(row[7], list) else [],
             metadata_json=row[8] if isinstance(row[8], dict) else json.loads(str(row[8])),
             is_active=bool(row[9]),
-            created_at=row[10],
-            updated_at=row[11],
+            created_at=_as_opt_dt(row[10]),
+            updated_at=_as_opt_dt(row[11]),
         )
 
     def list_repositories(
@@ -325,8 +358,8 @@ class PostgresRLSRepository:
                 allowed_scopes=[str(s) for s in row[7]] if isinstance(row[7], list) else [],
                 metadata_json=row[8] if isinstance(row[8], dict) else json.loads(str(row[8])),
                 is_active=bool(row[9]),
-                created_at=row[10],
-                updated_at=row[11],
+                created_at=_as_opt_dt(row[10]),
+                updated_at=_as_opt_dt(row[11]),
             )
             for row in rows
         ]
@@ -380,8 +413,8 @@ class PostgresRLSRepository:
                 author_name=str(row[4]),
                 author_email=str(row[5]),
                 commit_message=str(row[6]),
-                committed_at=row[7],
-                indexed_at=row[8],
+                committed_at=_as_dt(row[7]),
+                indexed_at=_as_opt_dt(row[8]),
             )
             for row in rows
         ]
@@ -447,8 +480,8 @@ class PostgresRLSRepository:
             author_username=str(row[6]),
             source_url=str(row[7]),
             allowed_scopes=[str(s) for s in row[8]] if isinstance(row[8], list) else [],
-            last_modified_at=row[9],
-            indexed_at=row[10],
+            last_modified_at=_as_dt(row[9]),
+            indexed_at=_as_opt_dt(row[10]),
         )
 
     def list_confluence_pages(
@@ -489,8 +522,8 @@ class PostgresRLSRepository:
                 author_username=str(row[6]),
                 source_url=str(row[7]),
                 allowed_scopes=[str(s) for s in row[8]] if isinstance(row[8], list) else [],
-                last_modified_at=row[9],
-                indexed_at=row[10],
+                last_modified_at=_as_dt(row[9]),
+                indexed_at=_as_opt_dt(row[10]),
             )
             for row in rows
         ]
@@ -564,8 +597,8 @@ class PostgresRLSRepository:
             assignee_username=str(row[8]) if row[8] is not None else None,
             source_url=str(row[9]),
             allowed_scopes=[str(s) for s in row[10]] if isinstance(row[10], list) else [],
-            updated_at=row[11],
-            indexed_at=row[12],
+            updated_at=_as_dt(row[11]),
+            indexed_at=_as_opt_dt(row[12]),
         )
 
     def list_jira_issues(
@@ -610,8 +643,8 @@ class PostgresRLSRepository:
                 assignee_username=str(row[8]) if row[8] is not None else None,
                 source_url=str(row[9]),
                 allowed_scopes=[str(s) for s in row[10]] if isinstance(row[10], list) else [],
-                updated_at=row[11],
-                indexed_at=row[12],
+                updated_at=_as_dt(row[11]),
+                indexed_at=_as_opt_dt(row[12]),
             )
             for row in rows
         ]
@@ -838,7 +871,7 @@ class PostgresRLSRepository:
     ) -> None:
         market_val = (
             record.market_scope.value
-            if hasattr(record.market_scope, "value")
+            if isinstance(record.market_scope, MarketRegime)
             else str(record.market_scope)
         )
         doc_title = record.doc_title.replace("\x00", "")
@@ -896,7 +929,7 @@ class PostgresRLSRepository:
                 record.doc_title.replace("\x00", ""),
                 record.source_uri,
                 record.market_scope.value
-                if hasattr(record.market_scope, "value")
+                if isinstance(record.market_scope, MarketRegime)
                 else str(record.market_scope),
                 record.published_date,
                 record.authority_weight,
@@ -1393,7 +1426,7 @@ class PostgresRLSRepository:
                 file_id=UUID(str(r[1])),
                 domain_id=str(r[2]),
                 qualified_name=str(r[3]),
-                symbol_kind=str(r[4]),  # type: ignore[arg-type]
+                symbol_kind=str(r[4]),
                 start_line=int(str(r[5])),
                 end_line=int(str(r[6])),
                 signature_skeleton=str(r[7]),
@@ -1415,7 +1448,13 @@ class PostgresRLSRepository:
         for fid in file_ids:
             try:
                 clean_ids.append(str(UUID(str(fid))))
-            except ValueError:
+            except ValueError as exc:
+                logger.debug(
+                    "Ignoring malformed file_id %r (%s): %s",
+                    fid,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
         if not clean_ids:
             return []
@@ -1737,9 +1776,7 @@ class InMemoryRLSRepository:
         ]
         for fid in del_ids:
             self._files.pop(fid, None)
-            sym_del_ids = [
-                s_id for s_id, sym in self._symbols.items() if sym.file_id == fid
-            ]
+            sym_del_ids = [s_id for s_id, sym in self._symbols.items() if sym.file_id == fid]
             for s_id in sym_del_ids:
                 self._symbols.pop(s_id, None)
             sym_del_set = set(sym_del_ids)
@@ -1870,8 +1907,7 @@ class InMemoryRLSRepository:
                         and _scopes_intersect(src_file.allowed_scopes, principal_scopes)
                         and (
                             src_file.file_id not in callers_by_file
-                            or src_sym.start_line
-                            < callers_by_file[src_file.file_id][0].start_line
+                            or src_sym.start_line < callers_by_file[src_file.file_id][0].start_line
                         )
                     ):
                         callers_by_file[src_file.file_id] = (src_sym, src_file)
@@ -1908,11 +1944,7 @@ class InMemoryRLSRepository:
                 )
                 if not test_sym_id and (e.target_qualified_name == focus_sym.qualified_name):
                     test_sym_id = e.source_symbol_id
-                if (
-                    test_sym_id
-                    and test_sym_id in self._symbols
-                    and test_sym_id not in seen_syms
-                ):
+                if test_sym_id and test_sym_id in self._symbols and test_sym_id not in seen_syms:
                     t_sym = self._symbols[test_sym_id]
                     t_file = self._files.get(t_sym.file_id)
                     if t_file and _scopes_intersect(t_file.allowed_scopes, principal_scopes):
@@ -2151,7 +2183,13 @@ class InMemoryRLSRepository:
         for fid in file_ids:
             try:
                 target_ids.add(fid if isinstance(fid, UUID) else UUID(str(fid)))
-            except ValueError:
+            except ValueError as exc:
+                logger.debug(
+                    "Ignoring malformed file_id %r (%s): %s",
+                    fid,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
         if not target_ids:
             return []

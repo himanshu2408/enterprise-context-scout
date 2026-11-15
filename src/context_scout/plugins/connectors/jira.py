@@ -130,9 +130,7 @@ class JiraConnectorPlugin(SourceConnectorPlugin):
     def mirror_permissions(self, container_key: str) -> list[str]:
         """Maps Jira project key to RLS allowed_scopes."""
         clean_key = sanitize_scope_identifier(container_key)
-        return PermissionMirror.map_jira_permissions_to_scopes(
-            clean_key, [JiraPermission.BROWSE]
-        )
+        return PermissionMirror.map_jira_permissions_to_scopes(clean_key, [JiraPermission.BROWSE])
 
     def fetch_item(self, item_id: str, version: str | None = None) -> dict[str, Any] | None:
         """Fetches a specific issue by key from Jira REST API v3."""
@@ -142,7 +140,8 @@ class JiraConnectorPlugin(SourceConnectorPlugin):
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        return resp.json()
+        data: Any = resp.json()
+        return data if isinstance(data, dict) else None
 
     def search_issues_incremental(
         self,
@@ -258,16 +257,12 @@ class JiraConnectorPlugin(SourceConnectorPlugin):
                 target = lk["outwardIssue"]["key"]
                 rel = lk.get("type", {}).get("outward", "relates_to").lower().replace(" ", "_")
                 st = lk["outwardIssue"].get("fields", {}).get("status", {}).get("name")
-                links.append(
-                    JiraIssueLink(target_key=target, link_type=rel, target_status=st)
-                )
+                links.append(JiraIssueLink(target_key=target, link_type=rel, target_status=st))
             elif "inwardIssue" in lk:
                 target = lk["inwardIssue"]["key"]
                 rel = lk.get("type", {}).get("inward", "relates_to").lower().replace(" ", "_")
                 st = lk["inwardIssue"].get("fields", {}).get("status", {}).get("name")
-                links.append(
-                    JiraIssueLink(target_key=target, link_type=rel, target_status=st)
-                )
+                links.append(JiraIssueLink(target_key=target, link_type=rel, target_status=st))
 
         if "parent" in fields:
             parent_key = fields["parent"].get("key")
@@ -314,7 +309,8 @@ class JiraConnectorPlugin(SourceConnectorPlugin):
                     text_parts.append(child_text)
             sep = (
                 "\n"
-                if content.get("type") in {
+                if content.get("type")
+                in {
                     "paragraph",
                     "bulletList",
                     "orderedList",

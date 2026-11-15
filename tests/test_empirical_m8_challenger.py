@@ -596,7 +596,22 @@ class TestSSEStreamResilience:
 
             assert "event: stage_update" in content
             assert "event: context_pack_ready" in content
-            assert "QuantStrategyBrief" in content or "Model 2" in content
+            assert "Stage 1: Research Domain Extraction" in content
+            assert "Stage 2: Code AST Localization" in content
+            assert "Stage 4: Pre-Flight Composite Validation" in content
+
+            ready_payloads = [
+                json.loads(line[len("data: ") :])
+                for block in content.split("\n\n")
+                if "event: context_pack_ready" in block
+                for line in block.splitlines()
+                if line.startswith("data: ")
+            ]
+            assert len(ready_payloads) == 1
+            ready_data = ready_payloads[0]
+            assert ready_data["quant_strategy_spec"] is not None
+            assert len(ready_data["quant_strategy_spec"]["verified_citations"]) >= 1
+            assert len(ready_data["pack"]["code_slices"]) >= 1
 
     def test_sse_stream_bounce_back_zero_token_guarantee(self, client: TestClient) -> None:
         """Verifies $0 bounce-back event guarantees paid_tokens_spent == 0 and cost_usd == 0.0."""

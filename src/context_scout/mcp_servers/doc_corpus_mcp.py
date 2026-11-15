@@ -62,9 +62,7 @@ def create_doc_corpus_mcp_server(
         """Executes hybrid RRF search across visible doc_chunks for the given domain_id."""
         validate_tool_call_arguments({"domain_id": domain_id, "query": query, "top_k": top_k})
         principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            domain_id, "doc_corpus_mcp:search_hybrid_rrf", principal
-        )
+        auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:search_hybrid_rrf", principal)
         sync_custom_domain_corpus_if_needed(
             domain_id, index_path=resolved_domains_dir / domain_id / "corpus_index.json"
         )
@@ -123,20 +121,14 @@ def create_doc_corpus_mcp_server(
             }
         )
         principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            domain_id, "doc_corpus_mcp:verify_citation_quote", principal
-        )
+        auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:verify_citation_quote", principal)
         sync_custom_domain_corpus_if_needed(
             domain_id, index_path=resolved_domains_dir / domain_id / "corpus_index.json"
         )
 
         visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
         target_chunk = next(
-            (
-                c
-                for c in visible_chunks
-                if str(c.chunk_id) == chunk_id or c.doc_id == chunk_id
-            ),
+            (c for c in visible_chunks if str(c.chunk_id) == chunk_id or c.doc_id == chunk_id),
             None,
         )
         if target_chunk is None:
@@ -188,9 +180,7 @@ def create_doc_corpus_mcp_server(
             {"domain_id": domain_id, "doc_id": doc_id, "section_query": section_query}
         )
         principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            domain_id, "doc_corpus_mcp:get_document_section", principal
-        )
+        auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:get_document_section", principal)
         sync_custom_domain_corpus_if_needed(
             domain_id, index_path=resolved_domains_dir / domain_id / "corpus_index.json"
         )

@@ -101,8 +101,13 @@ class CorpusHarvestPipeline:
                         parsed_item = json.loads(line)
                         if isinstance(parsed_item, dict) and "doc_id" in parsed_item:
                             existing_meta[str(parsed_item["doc_id"])] = parsed_item
-                    except json.JSONDecodeError:
-                        pass
+                    except json.JSONDecodeError as exc:
+                        logger.debug(
+                            "Skipping malformed metadata line in %s (%s): %s",
+                            jsonl_file,
+                            type(exc).__name__,
+                            exc,
+                        )
 
         market_dir = self.content_dir / market.value
         if market_dir.exists():
@@ -154,10 +159,7 @@ class CorpusHarvestPipeline:
                         final_title = extracted_title or raw_id.replace("_", " ")
 
                     saved_abs = str(saved.get("abstract", "")).strip()
-                    if (
-                        saved_abs
-                        and saved_abs != "Verified quantitative finance research paper"
-                    ):
+                    if saved_abs and saved_abs != "Verified quantitative finance research paper":
                         final_abstract = saved_abs
                     else:
                         final_abstract = (

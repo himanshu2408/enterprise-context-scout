@@ -177,8 +177,12 @@ def _detect_host_unified_memory_gb() -> float:
             out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True)
             bytes_val = int(out.strip())
             return round(bytes_val / (1024**3), 2)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Failed to detect macOS Unified Memory via sysctl (%s): %s; using 48.0 GB default",
+                type(exc).__name__,
+                exc,
+            )
     return 48.0
 
 
@@ -677,13 +681,28 @@ class LocalQLoRATrainer:
                 return AutoTokenizer.from_pretrained(
                     self.base_model_id, local_files_only=True, fix_markdown=False
                 )
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Local cache lookup failed for tokenizer %s (%s): %s",
+                    self.base_model_id,
+                    type(exc).__name__,
+                    exc,
+                )
                 try:
                     return AutoTokenizer.from_pretrained(self.base_model_id, fix_markdown=False)
-                except Exception:
-                    pass
-        except ImportError:
-            pass
+                except Exception as remote_exc:
+                    logger.debug(
+                        "Remote AutoTokenizer lookup failed for %s (%s): %s",
+                        self.base_model_id,
+                        type(remote_exc).__name__,
+                        remote_exc,
+                    )
+        except ImportError as exc:
+            logger.debug(
+                "transformers not available for tokenizer load (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
 
         # Check local path
         local_cand = Path(self.base_model_id) / "tokenizer.json"
@@ -733,7 +752,7 @@ class LocalQLoRATrainer:
         train_jsonl: Path | str,
         valid_jsonl: Path | str,
         output_adapter_dir: Path | str,
-        domain_id: str = "trading_code_scout",
+        domain_id: str | None = None,
         num_steps: int | None = None,
         use_mlx_native: bool = False,
     ) -> TrainingRunResult:
@@ -747,6 +766,17 @@ class LocalQLoRATrainer:
         """
         output_dir = Path(output_adapter_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        if domain_id is None:
+            from context_scout.config import ScoutSettings
+            from context_scout.plugins.registry import PluginRegistry
+
+            plugin = PluginRegistry.get_primary_domain_plugin()
+            if plugin is not None:
+                domain_id = plugin.get_role_domain_ids().get(
+                    "code", ScoutSettings().default_domain_id
+                )
+            else:
+                domain_id = ScoutSettings().default_domain_id
 
         train_data = self.load_dataset(train_jsonl)
         valid_data = self.load_dataset(valid_jsonl)
@@ -1164,23 +1194,22 @@ class LocalQLoRATrainer:
 
 
 def main() -> None:
-    """Trains QLoRA adapters for trading_code_scout and quant_research_scout."""
+    """Trains QLoRA adapters for all registered domain plugin adapter specifications."""
+    from context_scout.plugins.registry import PluginRegistry
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     trainer = LocalQLoRATrainer()
 
+    plugin = PluginRegistry.get_primary_domain_plugin()
+    specs = plugin.get_adapter_specs() if plugin is not None else []
     configs = [
         (
-            "data/tuning/trading_code_scout/train.jsonl",
-            "data/tuning/trading_code_scout/valid.jsonl",
-            "domains/trading_code_scout/adapters/gemma4_26b_code_scout",
-            "trading_code_scout",
-        ),
-        (
-            "data/tuning/quant_research_scout/train.jsonl",
-            "data/tuning/quant_research_scout/valid.jsonl",
-            "domains/quant_research_scout/adapters/gemma4_26b_quant_research",
-            "quant_research_scout",
-        ),
+            spec["train_jsonl"],
+            spec["valid_jsonl"],
+            spec["adapter_rel_path"],
+            spec["domain_id"],
+        )
+        for spec in specs
     ]
 
     for train_j, valid_j, out_d, dom_id in configs:

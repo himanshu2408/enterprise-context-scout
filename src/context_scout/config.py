@@ -1,5 +1,6 @@
 """Typed configuration settings and runtime hardware auto-detection."""
 
+import logging
 import os
 import platform
 import re
@@ -11,6 +12,8 @@ from typing import Any, Final
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_GOOGLE_MODEL_PREFIXES: Final[tuple[str, ...]] = (
     "google/gemma-4-",
@@ -161,6 +164,10 @@ class ScoutSettings(BaseSettings):
     domains_dir: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parents[2] / "domains"
     )
+    default_domain_id: str = Field(
+        default="default",
+        description="Neutral default domain identifier for multi-tenant context scout operations.",
+    )
 
     auth_hmac_secret: str | None = Field(
         default=None,
@@ -236,7 +243,12 @@ def detect_hardware_profile(
             page_size = os.sysconf("SC_PAGE_SIZE")
             phys_pages = os.sysconf("SC_PHYS_PAGES")
             mem_gb = round((page_size * phys_pages) / (1024**3), 1)
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Physical memory auto-detection via sysconf failed (%s): %s; defaulting to 16.0 GB",
+                type(exc).__name__,
+                exc,
+            )
             mem_gb = 16.0
 
     # 2. Detect chip / accelerator
@@ -255,7 +267,12 @@ def detect_hardware_profile(
                     device_name = raw_chip.replace("Apple ", "Apple Silicon ", 1)
                 else:
                     device_name = raw_chip or "Apple Silicon"
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "macOS chip brand detection failed (%s): %s; defaulting to Apple Silicon",
+                    type(exc).__name__,
+                    exc,
+                )
                 device_name = "Apple Silicon"
         else:
             try:
@@ -265,7 +282,12 @@ def detect_hardware_profile(
                     device_name = str(torch.cuda.get_device_name(0))
                 else:
                     device_name = platform.processor() or platform.machine() or "Linux CPU"
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Accelerator detection via torch failed (%s): %s; using platform identifier",
+                    type(exc).__name__,
+                    exc,
+                )
                 device_name = platform.processor() or platform.machine() or "Generic Host"
 
     # 3. Detect quantization & compute backend
@@ -278,7 +300,12 @@ def detect_hardware_profile(
                 import torch
 
                 quantization = "4-bit (CUDA)" if torch.cuda.is_available() else "4-bit (PyTorch)"
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Quantization backend probe failed (%s): %s; defaulting to 4-bit (PyTorch)",
+                    type(exc).__name__,
+                    exc,
+                )
                 quantization = "4-bit (PyTorch)"
 
     # 4. Compute safe KV token budget scaled to available memory unless explicitly overridden

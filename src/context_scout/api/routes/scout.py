@@ -31,6 +31,7 @@ from context_scout.api.schemas import (
     SSEErrorEvent,
     SSEStageEvent,
 )
+from context_scout.plugins.registry import PluginRegistry
 from context_scout.schemas.contracts import (
     ImplementationContextPack,
     PrincipalContext,
@@ -45,18 +46,32 @@ router = APIRouter(tags=["Scout"])
 
 def _resolve_federated_doc_chunks(repo: Any, principal: PrincipalContext) -> dict[str, str]:
     """Resolves visible doc_chunks from live PostgreSQL or InMemory repository under RLS."""
-    chunks_map: dict[str, str] = {
-        "chk_quant_default": (
-            "Order flow imbalance exhibits mean reversion over sub-second horizons."
-        )
+    primary_plugin = PluginRegistry.get_primary_domain_plugin()
+    fallback_chunks = (
+        primary_plugin.get_demo_seed_payloads().get("federated_fallback_chunks", {})
+        if primary_plugin is not None
+        else {}
+    )
+    chunks_map: dict[str, str] = {str(k): str(v) for k, v in fallback_chunks.items()} or {
+        "chk_default_seed": "Default domain fallback verification chunk."
     }
+    research_domain_id = (
+        primary_plugin.get_role_domain_ids().get("research", primary_plugin.domain_id)
+        if primary_plugin is not None
+        else "default"
+    )
     if hasattr(repo, "list_visible_doc_chunks"):
         try:
-            visible = repo.list_visible_doc_chunks(principal, "quant_research_scout")
+            visible = repo.list_visible_doc_chunks(principal, research_domain_id)
             for chk in visible[:50]:
                 chunks_map[str(chk.chunk_id)] = chk.verbatim_content
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Failed loading visible doc chunks for domain '%s' (%s): %s",
+                research_domain_id,
+                type(exc).__name__,
+                exc,
+            )
     return chunks_map
 
 
@@ -234,11 +249,11 @@ async def stream_scout(
             # Federated Coordinator Stages
             s1 = SSEStageEvent(
                 stage=1,
-                stage_name="Stage 1: Model 2 Quant Research Extraction",
+                stage_name="Stage 1: Research Domain Extraction",
                 status="completed",
                 details=(
-                    "Extracting QuantStrategyBrief over PostgreSQL doc_chunks "
-                    "and evaluating MarketRegime friction floors"
+                    "Extracting grounded research brief over document chunks "
+                    "and validating domain rules"
                 ),
             )
             yield f"event: stage_update\ndata: {s1.model_dump_json()}\n\n"
@@ -246,11 +261,11 @@ async def stream_scout(
 
             s2 = SSEStageEvent(
                 stage=2,
-                stage_name="Stage 2: Model 1 Trading Code AST Localization",
+                stage_name="Stage 2: Code AST Localization",
                 status="completed",
                 details=(
                     "Localizing implementation target files and 1-hop AST callers/types "
-                    "in PostgreSQL AST tables"
+                    "in repository AST tables"
                 ),
             )
             yield f"event: stage_update\ndata: {s2.model_dump_json()}\n\n"

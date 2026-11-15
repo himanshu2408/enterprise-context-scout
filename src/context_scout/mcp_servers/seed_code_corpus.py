@@ -8,7 +8,7 @@ import logging
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final
 from uuid import UUID, uuid4, uuid5
 
 from context_scout.ast_engine.extractor import ASTExtractor
@@ -218,15 +218,12 @@ def seed_trading_codebase_and_issues(
                 emb = generate_deterministic_embedding(
                     parsed_sym.signature_skeleton + " " + parsed_sym.docstring
                 )
-                kind: Literal["function", "class", "method", "interface", "type_alias"] = (
-                    parsed_sym.symbol_kind
-                )
                 sym_rec = ASTSymbolRecord(
                     symbol_id=sym_id,
                     file_id=file_id,
                     domain_id=domain_id,
                     qualified_name=parsed_sym.qualified_name,
-                    symbol_kind=kind,
+                    symbol_kind=parsed_sym.symbol_kind,
                     start_line=parsed_sym.start_line,
                     end_line=parsed_sym.end_line,
                     signature_skeleton=parsed_sym.signature_skeleton,

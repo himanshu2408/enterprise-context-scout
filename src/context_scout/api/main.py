@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -27,7 +27,7 @@ def create_app() -> FastAPI:
     """Creates and configures the production Enterprise Context Scout FastAPI application."""
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Upfront fail-closed validation: abort server startup if secret is insecure or unconfigured
         validate_auth_secret()
         yield

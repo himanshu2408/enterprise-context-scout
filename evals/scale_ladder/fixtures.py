@@ -20,9 +20,9 @@ DEFAULT_GENERATOR_NAME: Final[str] = "context_scout_scale_ladder_v1"
 
 
 class ScaleLadderTier(IntEnum):
-    TIER_1_FOUNDATION = 1      # 10 Repos, 500 Docs
+    TIER_1_FOUNDATION = 1  # 10 Repos, 500 Docs
     TIER_2_MID_ENTERPRISE = 2  # 100 Repos, 2,500 Docs
-    TIER_3_FULL_ENTERPRISE = 3 # 500 Repos, 10,000 Docs
+    TIER_3_FULL_ENTERPRISE = 3  # 500 Repos, 10,000 Docs
 
 
 class SyntheticProvenance(BaseModel):
@@ -130,7 +130,6 @@ def generate_scale_ladder_corpus(
                 provenance=prov,
             )
         )
-
 
     return ScaleLadderCorpus(
         tier=tier,

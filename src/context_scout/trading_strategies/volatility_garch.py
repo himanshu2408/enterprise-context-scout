@@ -186,7 +186,7 @@ class GARCH11Model:
             if k == 0:
                 v_k = max(one_step_var, self.MIN_OMEGA)
             else:
-                v_k = v_long + (persistence ** k) * (one_step_var - v_long)
+                v_k = v_long + (persistence**k) * (one_step_var - v_long)
                 v_k = max(v_k, self.MIN_OMEGA)
 
             ann_vol = math.sqrt(v_k * self.ANNUALIZATION_FACTOR)

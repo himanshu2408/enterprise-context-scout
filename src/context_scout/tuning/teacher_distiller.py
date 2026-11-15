@@ -4,11 +4,11 @@ Implements Requirement R2:
 - Supports gemini-3.8-flash / google/gemma-4-31B-it Teacher execution over live PostgreSQL 17.
 - Deterministic structured-output fallback when offline or API key unset.
 - "Never Train Weights on Dynamic Facts": outputs AST skeleton localization (CodeSlicePointer)
-  or QuantStrategyBrief with verified citations, never raw repo/doc memorization.
+  or verified domain research briefs with verbatim citations, never raw repo/doc memorization.
 - Deterministic Rejection Sampling: every candidate output passes PreFlightValidator gate.
 - 15-20% Multi-Turn Bounce-Back Recovery Trajectories (ML-01).
 - QLoRA Flywheel: ingests ContextMissEvent telemetry from PostgreSQL execution_telemetry ledger.
-- Leakage-Free Stratified 85/15 Split: stratified by module prefix (code) and doc_id (quant).
+- Leakage-Free Stratified 85/15 Split: stratified by module prefix (code) and doc_id (research).
 - Generates JSONL datasets in standard Gemma 4 / MLX-LM chat format.
 """
 
@@ -40,15 +40,14 @@ from context_scout.db.repositories import (
 )
 from context_scout.db.session import RLSConnectionManager
 from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
+from context_scout.plugins.registry import PluginRegistry
 from context_scout.schemas.contracts import (
     CodeSlicePointer,
     ContextMissEvent,
     DocCitationSpan,
-    FrictionVerdict,
-    MarketRegime,
+    DomainKnowledgeBrief,
     ModificationIntent,
     PrincipalContext,
-    QuantStrategyBrief,
     RoleType,
 )
 
@@ -122,13 +121,23 @@ def repair_and_constrain_code_pointers_json(raw_output: str) -> list[CodeSlicePo
             raw_items = [x for x in parsed if isinstance(x, dict)]
         elif isinstance(parsed, dict):
             raw_items = [parsed]
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "Full JSON array repair parse failed (%s): %s; extracting flat JSON objects",
+            type(exc).__name__,
+            exc,
+        )
         for obj_match in re.finditer(r"\{[^{}]+\}", cleaned, flags=re.DOTALL):
             try:
                 obj = json.loads(re.sub(r",\s*\}", "}", obj_match.group(0)))
                 if isinstance(obj, dict):
                     raw_items.append(obj)
-            except Exception:
+            except Exception as obj_exc:
+                logger.debug(
+                    "Skipping unparseable JSON fragment (%s): %s",
+                    type(obj_exc).__name__,
+                    obj_exc,
+                )
                 continue
 
     pointers: list[CodeSlicePointer] = []
@@ -142,7 +151,12 @@ def repair_and_constrain_code_pointers_json(raw_output: str) -> list[CodeSlicePo
             )
         try:
             pointers.append(CodeSlicePointer.model_validate(item))
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Skipping invalid repaired CodeSlicePointer item (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
             continue
     return pointers
 
@@ -163,6 +177,8 @@ class TeacherDistiller:
         max_bounce_back_ratio: float = MAX_BOUNCE_BACK_RATIO,
         train_split_ratio: float = DEFAULT_TRAIN_RATIO,
         random_seed: int = 42,
+        code_domain_id: str | None = None,
+        research_domain_id: str | None = None,
     ) -> None:
         self.settings = settings or ScoutSettings()
         raw_model = teacher_model_id or self.settings.teacher_model_id or DEFAULT_TEACHER_MODEL
@@ -174,6 +190,20 @@ class TeacherDistiller:
         self.random_seed = random_seed
         self._rng = random.Random(random_seed)
 
+        plugin = PluginRegistry.get_primary_domain_plugin()
+        role_ids = plugin.get_role_domain_ids() if plugin is not None else {}
+        self.code_domain_id = code_domain_id or role_ids.get(
+            "code", self.settings.default_domain_id
+        )
+        self.research_domain_id = research_domain_id or role_ids.get(
+            "research", self.settings.default_domain_id
+        )
+        plugin_scopes = (
+            list(plugin.get_tuning_specs().get("system_scopes", []))
+            if plugin is not None
+            else ["public_eng"]
+        )
+
         # Database adapters
         self.conn_mgr = RLSConnectionManager(self.settings.db_app_url)
         self.graph_adapter = PostgresScoutGraphAdapter(self.conn_mgr, self.settings)
@@ -184,13 +214,7 @@ class TeacherDistiller:
         self.system_principal = PrincipalContext(
             user_id="distiller_system_admin",
             role=RoleType.ENGINEER,
-            allowed_scopes=[
-                "public_eng",
-                "public_quant",
-                "repo:trading_strategies",
-                "corpus:quant_papers",
-                "quant_restricted",
-            ],
+            allowed_scopes=plugin_scopes,
         )
         self.validator = PreFlightValidator(
             repo=self.get_in_memory_twin_repo(),
@@ -201,13 +225,13 @@ class TeacherDistiller:
         """Returns in-memory repository twin hydrated from live PostgreSQL 17."""
         if self._cached_in_mem_repo is None:
             repo = InMemoryRLSRepository()
-            for f in self.get_all_code_files("trading_code_scout"):
+            for f in self.get_all_code_files(self.code_domain_id):
                 repo.insert_code_file(self.system_principal, f)
-            for s in self.get_all_ast_symbols("trading_code_scout"):
+            for s in self.get_all_ast_symbols(self.code_domain_id):
                 repo.insert_ast_symbol(self.system_principal, s)
-            for e in self.get_all_ast_edges("trading_code_scout"):
+            for e in self.get_all_ast_edges(self.code_domain_id):
                 repo.insert_ast_edge(self.system_principal, e)
-            for c in self.get_all_doc_chunks("quant_research_scout"):
+            for c in self.get_all_doc_chunks(self.research_domain_id):
                 repo.insert_doc_chunk(self.system_principal, c)
             self._cached_in_mem_repo = repo
         return self._cached_in_mem_repo
@@ -216,28 +240,32 @@ class TeacherDistiller:
     # Database Introspection & Hydration Helpers
     # -------------------------------------------------------------------------
 
-    def get_all_code_files(self, domain_id: str = "trading_code_scout") -> list[CodeFileRecord]:
+    def get_all_code_files(self, domain_id: str | None = None) -> list[CodeFileRecord]:
         """Loads all indexed code files for domain under RLS."""
-        return self.graph_adapter.list_visible_code_files(self.system_principal, domain_id)
+        target_domain = domain_id or self.code_domain_id
+        return self.graph_adapter.list_visible_code_files(self.system_principal, target_domain)
 
-    def get_all_ast_symbols(self, domain_id: str = "trading_code_scout") -> list[ASTSymbolRecord]:
+    def get_all_ast_symbols(self, domain_id: str | None = None) -> list[ASTSymbolRecord]:
         """Loads all AST symbols for domain under RLS."""
-        return self.graph_adapter.list_visible_ast_symbols(self.system_principal, domain_id)
+        target_domain = domain_id or self.code_domain_id
+        return self.graph_adapter.list_visible_ast_symbols(self.system_principal, target_domain)
 
-    def get_all_ast_edges(self, domain_id: str = "trading_code_scout") -> list[ASTEdgeRecord]:
+    def get_all_ast_edges(self, domain_id: str | None = None) -> list[ASTEdgeRecord]:
         """Loads all AST directed dependency edges for domain under RLS."""
-        return self.graph_adapter.list_visible_ast_edges(self.system_principal, domain_id)
+        target_domain = domain_id or self.code_domain_id
+        return self.graph_adapter.list_visible_ast_edges(self.system_principal, target_domain)
 
     def get_all_doc_chunks(
         self,
-        domain_id: str = "quant_research_scout",
-        market_scope: MarketRegime | None = None,
+        domain_id: str | None = None,
+        market_scope: Any | None = None,
         max_chunks_per_doc: int = 5,
     ) -> list[DocChunkRecord]:
-        """Loads doc chunks across research markets via admin connection."""
+        """Loads doc chunks across research scopes via admin connection."""
+        target_domain = domain_id or self.research_domain_id
         with psycopg.connect(self.settings.db_admin_url) as conn:
             scope_filter = ""
-            params: list[object] = [domain_id]
+            params: list[object] = [target_domain]
             if market_scope is not None:
                 scope_filter = "AND market_scope = %s"
                 params.append(
@@ -272,7 +300,7 @@ class TeacherDistiller:
                         doc_id=str(r[2]),
                         doc_title=str(r[3]),
                         source_uri=str(r[4]),
-                        market_scope=MarketRegime(str(r[5])),
+                        market_scope=str(r[5]),
                         published_date=r[6],
                         authority_weight=float(str(r[7])),
                         section_heading=str(r[8]),
@@ -286,9 +314,10 @@ class TeacherDistiller:
             return results
 
     def get_execution_telemetry_misses(
-        self, domain_id: str = "trading_code_scout"
+        self, domain_id: str | None = None
     ) -> list[ContextMissEvent]:
         """Ingests ContextMissEvent entries from PostgreSQL execution_telemetry ledger."""
+        target_domain = domain_id or self.code_domain_id
         miss_events: list[ContextMissEvent] = []
         with psycopg.connect(self.settings.db_admin_url) as conn:
             cur = conn.execute(
@@ -300,7 +329,7 @@ class TeacherDistiller:
                   AND missing_context_requests != '[]'::jsonb
                 ORDER BY created_at DESC;
                 """,
-                (domain_id,),
+                (target_domain,),
             )
             for row in cur.fetchall():
                 t_id = str(row[0])
@@ -334,12 +363,18 @@ class TeacherDistiller:
         edges: list[ASTEdgeRecord],
         files_by_id: dict[UUID, CodeFileRecord],
         count: int = 15,
+        domain_id: str | None = None,
     ) -> list[ContextMissEvent]:
         """Generates realistic synthetic seed ContextMissEvents if telemetry has 0 miss events."""
+        target_domain = domain_id or self.code_domain_id
+        plugin = PluginRegistry.get_domain_plugin(target_domain)
+        fallback_file = (
+            str(plugin.get_tuning_specs().get("fallback_symbol_file", "src/default.py"))
+            if plugin is not None
+            else "src/default.py"
+        )
         seed_misses: list[ContextMissEvent] = []
-        dependency_edges = [
-            e for e in edges if e.edge_kind in ("IMPORTS", "CALLS", "USES_TYPE")
-        ]
+        dependency_edges = [e for e in edges if e.edge_kind in ("IMPORTS", "CALLS", "USES_TYPE")]
 
         if not dependency_edges and symbols:
             # Fallback to direct symbol pairs
@@ -348,7 +383,7 @@ class TeacherDistiller:
                 seed_misses.append(
                     ContextMissEvent(
                         trace_id=str(uuid.uuid4()),
-                        domain_id="trading_code_scout",
+                        domain_id=target_domain,
                         missing_symbol=sym.qualified_name,
                         reason=f"Missing symbol {sym.qualified_name} needed for AST closure",
                         resolved_file_path=f_rec.file_path if f_rec else "src/default.py",
@@ -364,7 +399,7 @@ class TeacherDistiller:
         sample_edges = self._rng.sample(dependency_edges, min(count, len(dependency_edges)))
         for edge in sample_edges:
             s_rec = symbols_by_qname.get(edge.target_qualified_name)
-            f_path = "src/context_scout/trading_strategies/almgren_chriss_execution.py"
+            f_path = fallback_file
             lines_str = "1-100"
             if s_rec is not None:
                 f_rec = files_by_id.get(s_rec.file_id)
@@ -375,7 +410,7 @@ class TeacherDistiller:
             seed_misses.append(
                 ContextMissEvent(
                     trace_id=str(uuid.uuid4()),
-                    domain_id="trading_code_scout",
+                    domain_id=target_domain,
                     missing_symbol=edge.target_qualified_name,
                     reason=(
                         f"Edge dependency ({edge.edge_kind}) required for compiler-complete pack"
@@ -424,20 +459,20 @@ class TeacherDistiller:
             logger.warning("Gemini Teacher invocation failed (%s); using deterministic fallback", e)
         return None
 
-    def _call_gemini_teacher_quant(
+    def _call_gemini_teacher_research(
         self, prompt: str, candidate_chunks: list[DocChunkRecord]
-    ) -> QuantStrategyBrief | None:
-        """Invokes gemini-3.8-flash Teacher for quant research brief synthesis."""
+    ) -> DomainKnowledgeBrief | None:
+        """Invokes gemini-3.8-flash Teacher for grounded research brief synthesis."""
         if not self.api_key or genai is None or genai_types is None:
             return None
         try:
             client = genai.Client(api_key=self.api_key)
             system_instruction = (
-                "You are an elite quantitative finance researcher. Synthesize a structured "
-                "QuantStrategyBrief adhering strictly to market friction constraints (FIN-01). "
+                "You are an elite domain research analyst. Synthesize a structured "
+                "DomainKnowledgeBrief adhering strictly to source-citation rules. "
                 "Every citation in verified_citations must be an exact verbatim quote from "
                 "the retrieved document chunks. Return only valid JSON conforming to the "
-                "QuantStrategyBrief schema."
+                "DomainKnowledgeBrief schema."
             )
             response = client.models.generate_content(
                 model=self.teacher_model_id,
@@ -451,23 +486,25 @@ class TeacherDistiller:
             if response and response.text:
                 parsed = json.loads(response.text)
                 if isinstance(parsed, dict):
-                    return QuantStrategyBrief.model_validate(parsed)
+                    return DomainKnowledgeBrief.model_validate(parsed)
         except Exception as e:
             logger.warning(
-                "Gemini Teacher quant synthesis failed (%s); using deterministic fallback", e
+                "Gemini Teacher research synthesis failed (%s); using deterministic fallback",
+                e,
             )
         return None
 
     # -------------------------------------------------------------------------
-    # Trading Code Scout Distillation (Model 1)
+    # Code Scout Distillation (Model 1)
     # -------------------------------------------------------------------------
 
-    def distill_trading_code_scout(
+    def distill_code_domain(
         self,
+        domain_id: str | None = None,
         num_samples: int = 120,
         force_offline: bool = False,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Generates train and valid datasets for trading_code_scout.
+        """Generates train and valid datasets for a code scout domain.
 
         Enforces:
         - Never Train Weights on Dynamic Facts (emits CodeSlicePointer list).
@@ -476,9 +513,10 @@ class TeacherDistiller:
         - QLoRA Flywheel ContextMissEvent ingestion.
         - Leakage-Free Stratified Split by repository module prefix.
         """
-        code_files = self.get_all_code_files("trading_code_scout")
-        ast_symbols = self.get_all_ast_symbols("trading_code_scout")
-        ast_edges = self.get_all_ast_edges("trading_code_scout")
+        target_domain = domain_id or self.code_domain_id
+        code_files = self.get_all_code_files(target_domain)
+        ast_symbols = self.get_all_ast_symbols(target_domain)
+        ast_edges = self.get_all_ast_edges(target_domain)
         files_by_id = {f.file_id: f for f in code_files}
 
         # Filter symbols that belong to python files with actual lines
@@ -495,16 +533,14 @@ class TeacherDistiller:
             s
             for s in valid_symbols
             if any(
-                files_by_id[s.file_id].file_path.startswith(p)
-                for p in CODE_EVAL_MODULE_PREFIXES
+                files_by_id[s.file_id].file_path.startswith(p) for p in CODE_EVAL_MODULE_PREFIXES
             )
         ]
         train_symbols = [
             s
             for s in valid_symbols
             if not any(
-                files_by_id[s.file_id].file_path.startswith(p)
-                for p in CODE_EVAL_MODULE_PREFIXES
+                files_by_id[s.file_id].file_path.startswith(p) for p in CODE_EVAL_MODULE_PREFIXES
             )
         ]
 
@@ -515,10 +551,14 @@ class TeacherDistiller:
         train_bounce_target = round(train_target_count * TARGET_BOUNCE_BACK_RATIO)
 
         # 1. Ingest QLoRA Flywheel telemetry misses strictly for train split
-        telemetry_misses = self.get_execution_telemetry_misses("trading_code_scout")
+        telemetry_misses = self.get_execution_telemetry_misses(target_domain)
         if not telemetry_misses:
             telemetry_misses = self.generate_seed_telemetry_misses_if_empty(
-                train_symbols, ast_edges, files_by_id, count=15
+                train_symbols,
+                ast_edges,
+                files_by_id,
+                count=15,
+                domain_id=target_domain,
             )
 
         # Build train split strictly from train_symbols
@@ -529,6 +569,7 @@ class TeacherDistiller:
             target_count=train_target_count,
             target_bounce_backs=train_bounce_target,
             flywheel_misses=telemetry_misses,
+            domain_id=target_domain,
         )
 
         # Build valid split strictly from eval_symbols
@@ -539,10 +580,12 @@ class TeacherDistiller:
             target_count=valid_target_count,
             target_bounce_backs=valid_bounce_target,
             flywheel_misses=None,
+            domain_id=target_domain,
         )
 
         logger.info(
-            "Code scout distillation complete: %d train, %d valid",
+            "Code scout distillation complete (%s): %d train, %d valid",
+            target_domain,
             len(train_examples),
             len(valid_examples),
         )
@@ -556,7 +599,9 @@ class TeacherDistiller:
         target_count: int,
         target_bounce_backs: int,
         flywheel_misses: list[ContextMissEvent] | None = None,
+        domain_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        target_domain = domain_id or self.code_domain_id
         split_examples: list[dict[str, Any]] = []
         symbols_by_id = {s.symbol_id: s for s in pool_symbols}
         symbols_by_qname = {s.qualified_name: s for s in pool_symbols}
@@ -600,7 +645,7 @@ class TeacherDistiller:
                     rep = self.validator.validate(
                         code_slices=[v_slice],
                         user_prompt=val_prompt,
-                        domain_id="trading_code_scout",
+                        domain_id=target_domain,
                         normalized_rrf_score=0.90,
                     )
                     if rep.passed:
@@ -699,7 +744,7 @@ class TeacherDistiller:
             fail_report = self.validator.validate(
                 code_slices=[v_slice_src],
                 user_prompt=val_user_prompt,
-                domain_id="trading_code_scout",
+                domain_id=target_domain,
                 normalized_rrf_score=0.88,
             )
             base_feedback = fail_report.bounce_back_feedback or (
@@ -720,7 +765,7 @@ class TeacherDistiller:
             pass_report = self.validator.validate(
                 code_slices=[v_slice_src, v_slice_dep],
                 user_prompt=val_user_prompt,
-                domain_id="trading_code_scout",
+                domain_id=target_domain,
                 normalized_rrf_score=0.88,
             )
             if pass_report.passed:
@@ -785,7 +830,7 @@ class TeacherDistiller:
             pass_report = self.validator.validate(
                 code_slices=[v_slice],
                 user_prompt=val_prompt,
-                domain_id="trading_code_scout",
+                domain_id=target_domain,
                 normalized_rrf_score=0.88,
             )
             if pass_report.passed:
@@ -807,24 +852,71 @@ class TeacherDistiller:
     # Quant Research Scout Distillation (Model 2)
     # -------------------------------------------------------------------------
 
-    def distill_quant_research_scout(
+    def distill_domain(
         self,
+        domain_id: str,
         num_samples: int = 120,
         force_offline: bool = False,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Generates train and valid datasets for quant_research_scout.
+        """Dispatches distillation to code or research pipeline based on domain plugin/role."""
+        plugin = PluginRegistry.get_domain_plugin(domain_id)
+        is_research = (
+            plugin.is_research_domain(domain_id)
+            if plugin is not None
+            else domain_id == self.research_domain_id
+        )
+        if is_research:
+            return self.distill_research_domain(
+                domain_id=domain_id,
+                num_samples=num_samples,
+                force_offline=force_offline,
+            )
+        return self.distill_code_domain(
+            domain_id=domain_id,
+            num_samples=num_samples,
+            force_offline=force_offline,
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        """Dynamically dispatches `distill_<domain_id>` calls to `distill_domain`."""
+        if name.startswith("distill_"):
+            target_domain = name.removeprefix("distill_")
+
+            def _dispatch(
+                num_samples: int = 120,
+                force_offline: bool = False,
+            ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                return self.distill_domain(
+                    domain_id=target_domain,
+                    num_samples=num_samples,
+                    force_offline=force_offline,
+                )
+
+            return _dispatch
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+
+    def distill_research_domain(
+        self,
+        domain_id: str | None = None,
+        num_samples: int = 120,
+        force_offline: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Generates train and valid datasets for a research/document domain.
 
         Enforces:
-        - Never Train Weights on Dynamic Facts (emits QuantStrategyBrief).
-        - PreFlightValidator deterministic citation and friction verification.
+        - Never Train Weights on Dynamic Facts (emits structured research brief).
+        - PreFlightValidator deterministic citation and domain rule verification.
         - 15-20% Multi-turn Bounce-Back Recovery trajectories (ML-01).
         - Leakage-Free Stratified Split strictly by doc_id (zero paper overlap).
         """
-        all_chunks = self.get_all_doc_chunks("quant_research_scout")
+        target_domain = domain_id or self.research_domain_id
+        all_chunks = self.get_all_doc_chunks(target_domain)
         if not all_chunks:
             raise RuntimeError("Zero doc chunks found in PostgreSQL 17 doc_chunks table")
 
-        # Group chunks by doc_id and market
+        plugin = PluginRegistry.get_domain_plugin(target_domain)
+
+        # Group chunks by doc_id
         chunks_by_doc_id: dict[str, list[DocChunkRecord]] = {}
         for chk in all_chunks:
             chunks_by_doc_id.setdefault(chk.doc_id, []).append(chk)
@@ -834,84 +926,11 @@ class TeacherDistiller:
 
         # 1. Leakage-Free Partition of doc_ids: 85% train_docs, 15% valid_docs
         num_valid_docs = max(1, round(total_docs * (1.0 - self.train_split_ratio)))
-        # Deterministic stratified sample across the sorted doc_ids
         step = max(1, total_docs // num_valid_docs)
         valid_doc_ids = set(unique_doc_ids[::step][:num_valid_docs])
         train_doc_ids = set(unique_doc_ids) - valid_doc_ids
 
         all_candidates: list[dict[str, Any]] = []
-
-        # Market-specific templates and friction floors
-        market_configs: list[dict[str, Any]] = [
-            {
-                "market": MarketRegime.US_NYSE_NASDAQ,
-                "bps": 12.0,
-                "topics": [
-                    (
-                        "Order Flow Imbalance High-Frequency Alpha",
-                        r"\Delta P_t = \lambda \cdot \text{OFI}_t + \varepsilon_t",
-                        ["Enter when OFI z-score > 2.0", "Exit on quote imbalance exhaustion"],
-                    ),
-                    (
-                        "Cross-Sectional Volatility-Managed Momentum",
-                        (
-                            r"w_{i,t} = \frac{\sigma_{\text{target}}}{\hat{\sigma}_{i,t}} "
-                            r"\cdot R_{i,t-12:t-1}"
-                        ),
-                        ["Rebalance at monthly boundary", "Cut position if drawdown exceeds 5%"],
-                    ),
-                    (
-                        "Almgren-Chriss Optimal Liquidation Trajectory",
-                        r"x_j = \frac{\sinh(\kappa (T - t_j))}{\sinh(\kappa T)} X_0",
-                        ["Execute TWAP intervals", "Halt on volume spike > 3 sigma"],
-                    ),
-                ],
-            },
-            {
-                "market": MarketRegime.GERMANY_XETRA_DAX,
-                "bps": 15.0,
-                "topics": [
-                    (
-                        "DAX Continuous Auction Spread Mean-Reversion",
-                        r"S_t = \alpha + \beta_1 \cdot \text{DepthRatio}_t + \varepsilon_t",
-                        [
-                            "Quote bid-ask spread at 95th percentile",
-                            "Cancel unexecuted orders in 500ms",
-                        ],
-                    ),
-                    (
-                        "XETRA Microstructure Limit Order Book Imbalance",
-                        r"\text{LOB}_t = \frac{V_t^b - V_t^a}{V_t^b + V_t^a}",
-                        [
-                            "Enter aggressive market order when |LOB| > 0.4",
-                            "Exit on book replenishment",
-                        ],
-                    ),
-                ],
-            },
-            {
-                "market": MarketRegime.INDIA_NSE_BSE,
-                "bps": 25.0,
-                "topics": [
-                    (
-                        "NSE Nifty 50 Intraday Futures Momentum with STT Barrier",
-                        r"\text{Signal}_t = \text{EMA}_{10}(P_t) - \text{EMA}_{30}(P_t)",
-                        [
-                            "Execute only if expected alpha > 25 bps STT floor",
-                            "Square off at 15:15 IST",
-                        ],
-                    ),
-                    (
-                        "NSE Continuous Double Auction Liquidity Replenishment",
-                        r"R_t = \frac{\sum Q_{\text{replenish}}}{\sum Q_{\text{consumed}}}",
-                        [
-                            "Place passive limit orders inside spread",
-                            "Halt during opening 15 minutes",
-                        ],
-                    ),
-                ],
-            },
-        ]
 
         # Generate candidates for both train docs and valid docs
         for is_eval, doc_pool in [(False, list(train_doc_ids)), (True, list(valid_doc_ids))]:
@@ -937,18 +956,10 @@ class TeacherDistiller:
                 if not chunks:
                     continue
 
-                # Pick chunk with substantial text
                 usable_chunks = [c for c in chunks if len(c.verbatim_content.strip()) >= 100]
                 if not usable_chunks:
                     continue
                 target_chunk = usable_chunks[0]
-
-                # Select market config matching chunk's market_scope
-                cfg = next(
-                    (m for m in market_configs if m["market"] == target_chunk.market_scope),
-                    market_configs[0],
-                )
-                topic_title, math_latex, entry_exit = self._rng.choice(cfg["topics"])
 
                 # Extract verbatim quote candidate directly from target_chunk
                 raw_lines = [
@@ -960,80 +971,75 @@ class TeacherDistiller:
                 ]
                 quote_text = raw_lines[0] if raw_lines else target_chunk.verbatim_content[:120]
 
-                citation = DocCitationSpan(
-                    chunk_id=str(target_chunk.chunk_id),
-                    doc_id=target_chunk.doc_id,
-                    doc_title=target_chunk.doc_title,
-                    source_uri=target_chunk.source_uri,
-                    section_heading=target_chunk.section_heading,
-                    verbatim_quote=quote_text,
-                )
-
-                brief = QuantStrategyBrief(
-                    strategy_name=f"{topic_title} ({target_chunk.market_scope.value})",
-                    target_markets=[target_chunk.market_scope],
-                    is_intraday_futures=False,
-                    mathematical_signal_latex=math_latex,
-                    entry_exit_rules=entry_exit,
-                    sample_period_years="2018-2024",
-                    reported_sharpe_ratio=round(self._rng.uniform(1.4, 2.2), 2),
-                    reported_max_drawdown_pct=round(self._rng.uniform(6.0, 14.0), 1),
-                    transaction_cost_bps_assumed=cfg["bps"],
-                    friction_verdict=FrictionVerdict.REALISTIC_FRICTION,
-                    market_specific_caveats=[
-                        (
-                            f"Requires minimum {cfg['bps']} bps friction barrier to "
-                            "overcome exchange costs"
-                        ),
-                        "Excludes high-volatility scheduled macroeconomic announcement windows",
-                    ],
-                    known_failure_regimes=[
-                        "Severe liquidity dry-ups and widening bid-ask spreads",
-                        "Structural regulatory margin increases",
-                    ],
-                    verified_citations=[citation],
-                )
-
-                # PreFlight validation with chunk lookup
-                val_user_prompt = (
-                    f"Synthesize a market-friction verified QuantStrategyBrief for "
-                    f"`{target_chunk.doc_title}` in the {target_chunk.market_scope.value} regime."
-                )
-                user_prompt = (
-                    f"{val_user_prompt}\n"
-                    f"Retrieved Corpus Chunk: [chunk_id={target_chunk.chunk_id} | "
-                    f"doc_id={target_chunk.doc_id} | title={target_chunk.doc_title} | "
-                    f"uri={target_chunk.source_uri} | section={target_chunk.section_heading} | "
-                    f"strategy={brief.strategy_name} | sharpe={brief.reported_sharpe_ratio} | "
-                    f"mdd={brief.reported_max_drawdown_pct} | bps={cfg['bps']} | "
-                    f"quote={json.dumps(quote_text)}]"
-                )
-
-                # Determine if this example should be Bounce-Back (ML-01)
-                should_bounce = bounce_back_count < target_bounce_backs
-
-                if should_bounce:
-                    # Incomplete candidate with invalid citation quote to trigger Gate 4 bounce-back
+                if plugin is not None:
+                    sample_bundle = plugin.build_research_distillation_sample(
+                        domain_id=target_domain,
+                        target_chunk=target_chunk,
+                        quote_text=quote_text,
+                        rng=self._rng,
+                    )
+                    brief = sample_bundle["brief"]
+                    bad_brief = sample_bundle["bad_brief"]
+                    citation = sample_bundle["citation"]
+                    bad_citation = sample_bundle["bad_citation"]
+                    val_user_prompt = sample_bundle["val_user_prompt"]
+                    user_prompt = sample_bundle["user_prompt"]
+                    brief_kwarg = sample_bundle["brief_kwarg"]
+                    bad_brief_kwarg = sample_bundle["bad_brief_kwarg"]
+                else:
+                    citation = DocCitationSpan(
+                        chunk_id=str(target_chunk.chunk_id),
+                        doc_id=target_chunk.doc_id,
+                        doc_title=target_chunk.doc_title,
+                        source_uri=target_chunk.source_uri,
+                        section_heading=target_chunk.section_heading,
+                        verbatim_quote=quote_text,
+                    )
+                    brief = DomainKnowledgeBrief(
+                        brief_title=f"{target_chunk.doc_title} — {target_chunk.section_heading}",
+                        domain_id=target_domain,
+                        executive_summary=f"Grounded synthesis: {quote_text}",
+                        core_findings_and_rules=[quote_text],
+                        domain_constraints_and_caveats=[
+                            f"Grounded in {target_chunk.doc_id} ({target_chunk.section_heading})"
+                        ],
+                        known_risks_and_failure_modes=["Out-of-distribution domain regime shift"],
+                        verified_citations=[citation],
+                    )
                     bad_citation = DocCitationSpan(
                         chunk_id=str(target_chunk.chunk_id),
                         doc_id=target_chunk.doc_id,
                         doc_title=target_chunk.doc_title,
                         source_uri=target_chunk.source_uri,
                         section_heading=target_chunk.section_heading,
-                        verbatim_quote="Hallucinated econometric quote not present in paper text.",
+                        verbatim_quote="Hallucinated quote not present in source text.",
                     )
-                    bad_brief = brief.model_copy(
-                        update={"verified_citations": [bad_citation]}
+                    bad_brief = brief.model_copy(update={"verified_citations": [bad_citation]})
+                    val_user_prompt = (
+                        f"Synthesize a verified research brief for `{target_chunk.doc_title}`."
                     )
+                    user_prompt = (
+                        f"{val_user_prompt}\n"
+                        f"Retrieved Corpus Chunk: [chunk_id={target_chunk.chunk_id} | "
+                        f"doc_id={target_chunk.doc_id} | title={target_chunk.doc_title} | "
+                        f"uri={target_chunk.source_uri} | section={target_chunk.section_heading} | "
+                        f"quote={json.dumps(quote_text)}]"
+                    )
+                    brief_kwarg = {}
+                    bad_brief_kwarg = {}
 
+                # Determine if this example should be Bounce-Back (ML-01)
+                should_bounce = bounce_back_count < target_bounce_backs
+
+                if should_bounce:
                     fail_rep = self.validator.validate(
-                        quant_strategy_spec=bad_brief,
                         supporting_doc_citations=[bad_citation],
                         user_prompt=val_user_prompt,
-                        domain_id="quant_research_scout",
+                        domain_id=target_domain,
                         principal=self.system_principal,
                         normalized_rrf_score=0.90,
                         doc_chunks=[target_chunk],
+                        **bad_brief_kwarg,
                     )
 
                     base_feedback = fail_rep.bounce_back_feedback
@@ -1041,9 +1047,7 @@ class TeacherDistiller:
                         base_feedback = (
                             "Pre-Flight Gate Validation FAILED ($0 Local Bounce-Back Required):\n"
                             "- Check 4 (Verbatim Citation Verification, VAL-02): Citations failed "
-                            "verbatim verification: overlap 0.0000 < 0.98. "
-                            "Ensure quotes match source documents verbatim with "
-                            ">=0.98 token overlap."
+                            "verbatim verification. Ensure quotes match source documents verbatim."
                         )
                     feedback = (
                         f"{base_feedback}\n"
@@ -1051,15 +1055,14 @@ class TeacherDistiller:
                         f"{target_chunk.chunk_id}: {json.dumps(quote_text)}"
                     )
 
-                    # Remediated candidate
                     pass_rep = self.validator.validate(
-                        quant_strategy_spec=brief,
                         supporting_doc_citations=[citation],
                         user_prompt=val_user_prompt,
-                        domain_id="quant_research_scout",
+                        domain_id=target_domain,
                         principal=self.system_principal,
                         normalized_rrf_score=0.90,
                         doc_chunks=[target_chunk],
+                        **brief_kwarg,
                     )
 
                     if pass_rep.passed:
@@ -1086,13 +1089,13 @@ class TeacherDistiller:
                         generated_for_split += 1
                 else:
                     pass_rep = self.validator.validate(
-                        quant_strategy_spec=brief,
                         supporting_doc_citations=[citation],
                         user_prompt=val_user_prompt,
-                        domain_id="quant_research_scout",
+                        domain_id=target_domain,
                         principal=self.system_principal,
                         normalized_rrf_score=0.90,
                         doc_chunks=[target_chunk],
+                        **brief_kwarg,
                     )
                     if pass_rep.passed:
                         all_candidates.append(
@@ -1121,7 +1124,8 @@ class TeacherDistiller:
 
         total_bounces = sum(1 for c in all_candidates if len(c["messages"]) == 4)
         logger.info(
-            "Quant scout distillation: %d train, %d valid (bounce-backs: %d / %d = %.1f%%)",
+            "Research scout distillation (%s): %d train, %d valid (bounce-backs: %d / %d = %.1f%%)",
+            target_domain,
             len(train_examples),
             len(valid_examples),
             total_bounces,
@@ -1139,20 +1143,19 @@ class TeacherDistiller:
         target_dir: Path | str | None = None,
         num_samples_per_domain: int = 120,
     ) -> dict[str, dict[str, int]]:
-        """Distills both domains and writes JSONL files to data/tuning and domains/<domain>."""
+        """Distills code and research domains and writes JSONL files."""
         base_dir = Path(target_dir).resolve() if target_dir else Path.cwd()
         data_tuning_dir = base_dir / "data" / "tuning"
         domains_dir = base_dir / "domains"
 
         results_summary: dict[str, dict[str, int]] = {}
 
-        # 1. Trading Code Scout Distillation
-        code_train, code_valid = self.distill_trading_code_scout(
-            num_samples=num_samples_per_domain
+        code_train, code_valid = self.distill_code_domain(
+            domain_id=self.code_domain_id, num_samples=num_samples_per_domain
         )
         code_paths = [
-            data_tuning_dir / "trading_code_scout",
-            domains_dir / "trading_code_scout" / "tuning",
+            data_tuning_dir / self.code_domain_id,
+            domains_dir / self.code_domain_id / "tuning",
         ]
         for p in code_paths:
             p.mkdir(parents=True, exist_ok=True)
@@ -1160,30 +1163,29 @@ class TeacherDistiller:
             self._write_jsonl(p / "valid.jsonl", code_valid)
             self._write_jsonl(p / "eval.jsonl", code_valid)
 
-        results_summary["trading_code_scout"] = {
+        results_summary[self.code_domain_id] = {
             "train": len(code_train),
             "valid": len(code_valid),
             "total": len(code_train) + len(code_valid),
         }
 
-        # 2. Quant Research Scout Distillation
-        quant_train, quant_valid = self.distill_quant_research_scout(
-            num_samples=num_samples_per_domain
+        research_train, research_valid = self.distill_research_domain(
+            domain_id=self.research_domain_id, num_samples=num_samples_per_domain
         )
-        quant_paths = [
-            data_tuning_dir / "quant_research_scout",
-            domains_dir / "quant_research_scout" / "tuning",
+        research_paths = [
+            data_tuning_dir / self.research_domain_id,
+            domains_dir / self.research_domain_id / "tuning",
         ]
-        for p in quant_paths:
+        for p in research_paths:
             p.mkdir(parents=True, exist_ok=True)
-            self._write_jsonl(p / "train.jsonl", quant_train)
-            self._write_jsonl(p / "valid.jsonl", quant_valid)
-            self._write_jsonl(p / "eval.jsonl", quant_valid)
+            self._write_jsonl(p / "train.jsonl", research_train)
+            self._write_jsonl(p / "valid.jsonl", research_valid)
+            self._write_jsonl(p / "eval.jsonl", research_valid)
 
-        results_summary["quant_research_scout"] = {
-            "train": len(quant_train),
-            "valid": len(quant_valid),
-            "total": len(quant_train) + len(quant_valid),
+        results_summary[self.research_domain_id] = {
+            "train": len(research_train),
+            "valid": len(research_valid),
+            "total": len(research_train) + len(research_valid),
         }
 
         return results_summary
@@ -1240,11 +1242,15 @@ class TeacherDistiller:
     def verify_zero_leakage(
         train_path: Path | str,
         valid_path: Path | str,
-        domain_id: str = "trading_code_scout",
+        domain_id: str | None = None,
     ) -> bool:
         """Verifies zero data leakage between train and valid splits."""
         p_train = Path(train_path)
         p_valid = Path(valid_path)
+        plugin = PluginRegistry.get_domain_plugin(domain_id) if domain_id else None
+        is_research = bool(
+            plugin is not None and domain_id and plugin.is_research_domain(domain_id)
+        )
 
         def extract_identifiers(p: Path) -> set[str]:
             identifiers: set[str] = set()
@@ -1256,7 +1262,7 @@ class TeacherDistiller:
                     # Check messages
                     for msg in item.get("messages", []):
                         content = msg.get("content", "")
-                        if domain_id == "trading_code_scout":
+                        if not is_research and '"file_path":' in content:
                             # Extract file paths from JSON assistant outputs
                             matches = re.findall(r'"file_path":\s*"([^"]+)"', content)
                             for m in matches:
@@ -1271,7 +1277,7 @@ class TeacherDistiller:
                                     prefix = str(Path(m).parent)
                                 identifiers.add(prefix)
                         else:
-                            # Extract doc_ids from QuantStrategyBrief citations
+                            # Extract doc_ids from research brief citations
                             matches = re.findall(r'"doc_id":\s*"([^"]+)"', content)
                             for m in matches:
                                 identifiers.add(m)

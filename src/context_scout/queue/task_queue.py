@@ -76,9 +76,9 @@ def compute_backoff_delay(
     """
     if attempts <= 0:
         return 0.0
-    delay = min(max_delay_seconds, base_delay_seconds * (2 ** (attempts - 1)))
+    delay: float = min(max_delay_seconds, base_delay_seconds * (2.0 ** (attempts - 1)))
     half_delay = delay / 2.0
-    return half_delay + random.uniform(0.0, half_delay)
+    return float(half_delay + random.uniform(0.0, half_delay))
 
 
 class TaskQueueProtocol(ABC):
@@ -336,7 +336,8 @@ class PostgresTaskQueue(TaskQueueProtocol):
             for status, count in cur.fetchall():
                 stats[status] = count
             cur.execute("SELECT count(*) FROM indexing_dead_letter;")
-            stats["DLQ"] = cur.fetchone()[0]
+            dlq_row = cur.fetchone()
+            stats["DLQ"] = int(dlq_row[0]) if dlq_row is not None else 0
         return stats
 
     def list_dead_letter_records(self, limit: int = 50) -> list[DeadLetterRecord]:

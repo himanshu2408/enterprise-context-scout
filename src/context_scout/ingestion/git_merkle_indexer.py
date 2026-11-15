@@ -1,13 +1,14 @@
 """Git Blob-SHA Merkle incremental indexer with Tree-Sitter AST extraction and RLS persistence."""
 
 import hashlib
+import logging
 import math
 import subprocess
 import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final
 from uuid import UUID, uuid4
 
 from psycopg import Connection
@@ -23,6 +24,8 @@ from context_scout.db.repositories import (
     PostgresRLSRepository,
 )
 from context_scout.schemas.contracts import PrincipalContext
+
+logger = logging.getLogger(__name__)
 
 CODE_EXTENSIONS: Final[set[str]] = {
     ".py",
@@ -81,9 +84,7 @@ LANG_MAP: Final[dict[str, str]] = {
 }
 
 _SYMBOL_EMBEDDING_CACHE: dict[tuple[str, str], list[float]] = {}
-_TRACKED_IN_MEMORY_REPOS: dict[
-    tuple[int, str, str], tuple[Path, list[str] | None, str]
-] = {}
+_TRACKED_IN_MEMORY_REPOS: dict[tuple[int, str, str], tuple[Path, list[str] | None, str]] = {}
 
 SKIP_BINARY_EXTENSIONS: Final[set[str]] = {
     ".png",
@@ -179,8 +180,13 @@ def _resolve_commit_sha(repo_dir: Path, ref: str = "HEAD") -> str:
                                     cand = line.split()[0]
                                     if len(cand) == 40:
                                         return cand
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Direct .git ref lookup failed for %s (%s): %s; falling back to git rev-parse",
+                ref,
+                type(exc).__name__,
+                exc,
+            )
 
     rev_cmd = subprocess.run(
         ["git", "rev-parse", ref],
@@ -341,8 +347,13 @@ class GitMerkleIndexer:
                             if tree.get(rel_part) != wt_blob:
                                 tree[rel_part] = wt_blob
                                 dirty_mutations.append(f"M:{rel_part}:{wt_blob}")
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to hash working-tree file %s (%s): %s",
+                                rel_part,
+                                type(exc).__name__,
+                                exc,
+                            )
                 if dirty_mutations:
                     wt_digest = hashlib.sha1(
                         "|".join(sorted(dirty_mutations)).encode("utf-8")
@@ -436,8 +447,13 @@ class GitMerkleIndexer:
         if prefer_working_tree and disk_file.is_file():
             try:
                 return disk_file.read_text(encoding="utf-8", errors="replace").replace("\x00", "")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "Working-tree read failed for %s (%s): %s; falling back to git cat-file",
+                    file_path,
+                    type(exc).__name__,
+                    exc,
+                )
         if blob_sha:
             proc = subprocess.run(
                 ["git", "-C", str(repo_dir), "cat-file", "-p", blob_sha],
@@ -469,9 +485,7 @@ class GitMerkleIndexer:
             and ref == "HEAD"
             and not isolate_by_commit
         )
-        commit_sha, current_tree = self.get_git_tree(
-            repo_dir, ref, include_working_tree=use_wt
-        )
+        commit_sha, current_tree = self.get_git_tree(repo_dir, ref, include_working_tree=use_wt)
         effective_repo_name = f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
         if ref == "HEAD" and not isolate_by_commit:
             _TRACKED_IN_MEMORY_REPOS[(id(repo), domain_id, effective_repo_name)] = (
@@ -565,15 +579,12 @@ class GitMerkleIndexer:
 
             for parsed_sym, emb in zip(symbols, symbol_embeddings, strict=True):
                 sym_id = uuid4()
-                kind: Literal["function", "class", "method", "interface", "type_alias"] = (
-                    parsed_sym.symbol_kind
-                )
                 sym_rec = ASTSymbolRecord(
                     symbol_id=sym_id,
                     file_id=file_id,
                     domain_id=domain_id,
                     qualified_name=parsed_sym.qualified_name,
-                    symbol_kind=kind,
+                    symbol_kind=parsed_sym.symbol_kind,
                     start_line=parsed_sym.start_line,
                     end_line=parsed_sym.end_line,
                     signature_skeleton=parsed_sym.signature_skeleton,
@@ -657,9 +668,7 @@ class GitMerkleIndexer:
             and ref == "HEAD"
             and not isolate_by_commit
         )
-        commit_sha, current_tree = self.get_git_tree(
-            repo_dir, ref, include_working_tree=use_wt
-        )
+        commit_sha, current_tree = self.get_git_tree(repo_dir, ref, include_working_tree=use_wt)
         effective_repo_name = f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
         existing_hashes = repo.get_file_blob_hashes(conn, domain_id, effective_repo_name)
         existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
@@ -752,15 +761,12 @@ class GitMerkleIndexer:
 
             for parsed_sym, emb in zip(symbols, symbol_embeddings, strict=True):
                 sym_id = uuid4()
-                kind: Literal["function", "class", "method", "interface", "type_alias"] = (
-                    parsed_sym.symbol_kind
-                )
                 sym_rec = ASTSymbolRecord(
                     symbol_id=sym_id,
                     file_id=file_id,
                     domain_id=domain_id,
                     qualified_name=parsed_sym.qualified_name,
-                    symbol_kind=kind,
+                    symbol_kind=parsed_sym.symbol_kind,
                     start_line=parsed_sym.start_line,
                     end_line=parsed_sym.end_line,
                     signature_skeleton=parsed_sym.signature_skeleton,
@@ -951,7 +957,7 @@ class GitMerkleIndexer:
                     file_id=actual_file_id,
                     domain_id=domain_id,
                     qualified_name=parsed_sym.qualified_name,
-                    symbol_kind=parsed_sym.symbol_kind,  # type: ignore[arg-type]
+                    symbol_kind=parsed_sym.symbol_kind,
                     start_line=parsed_sym.start_line,
                     end_line=parsed_sym.end_line,
                     signature_skeleton=parsed_sym.signature_skeleton,
@@ -968,17 +974,17 @@ class GitMerkleIndexer:
 
         # 4. Insert outward edges
         for _actual_file_id, file_scopes, edges, file_symbol_map in parsed_files_data:
-            for edge in edges:
-                src_id = file_symbol_map.get(edge.source_qualified_name) or repo_symbol_map.get(
-                    edge.source_qualified_name
-                )
+            for parsed_edge in edges:
+                src_id = file_symbol_map.get(
+                    parsed_edge.source_qualified_name
+                ) or repo_symbol_map.get(parsed_edge.source_qualified_name)
                 if not src_id:
                     continue
 
-                target_id = repo_symbol_map.get(edge.target_qualified_name)
-                target_qual = edge.target_qualified_name
+                target_id = repo_symbol_map.get(parsed_edge.target_qualified_name)
+                target_qual = parsed_edge.target_qualified_name
                 if not target_id:
-                    target_qual = f"UNRESOLVED::{edge.target_qualified_name}"
+                    target_qual = f"UNRESOLVED::{parsed_edge.target_qualified_name}"
 
                 edge_rec = ASTEdgeRecord(
                     edge_id=uuid4(),
@@ -986,10 +992,10 @@ class GitMerkleIndexer:
                     source_symbol_id=src_id,
                     target_qualified_name=target_qual,
                     target_symbol_id=target_id,
-                    edge_kind=edge.edge_kind,
+                    edge_kind=parsed_edge.edge_kind,
                     allowed_scopes=file_scopes,
-                    target_repo_qualified_id=edge.target_repo_qualified_id,
-                    is_cross_repo=edge.is_cross_repo or target_id is None,
+                    target_repo_qualified_id=parsed_edge.target_repo_qualified_id,
+                    is_cross_repo=parsed_edge.is_cross_repo or target_id is None,
                 )
                 repo.insert_ast_edge(conn, edge_rec)
                 total_edges += 1
@@ -1119,7 +1125,8 @@ class GitMerkleIndexer:
 
                 # Outward edges
                 outward_edge_ids = {
-                    e_id for e_id, edge in repo._edges.items()
+                    e_id
+                    for e_id, edge in repo._edges.items()
                     if edge.source_symbol_id in sym_ids_to_del
                 }
                 for e_id in outward_edge_ids:
@@ -1213,7 +1220,7 @@ class GitMerkleIndexer:
                     file_id=actual_file_id,
                     domain_id=domain_id,
                     qualified_name=parsed_sym.qualified_name,
-                    symbol_kind=parsed_sym.symbol_kind,  # type: ignore[arg-type]
+                    symbol_kind=parsed_sym.symbol_kind,
                     start_line=parsed_sym.start_line,
                     end_line=parsed_sym.end_line,
                     signature_skeleton=parsed_sym.signature_skeleton,
@@ -1230,17 +1237,17 @@ class GitMerkleIndexer:
 
         # 4. Insert outward edges
         for _actual_file_id, file_scopes, edges, file_symbol_map in parsed_files_data:
-            for edge in edges:
-                src_id = file_symbol_map.get(edge.source_qualified_name) or repo_symbol_map.get(
-                    edge.source_qualified_name
-                )
+            for parsed_edge in edges:
+                src_id = file_symbol_map.get(
+                    parsed_edge.source_qualified_name
+                ) or repo_symbol_map.get(parsed_edge.source_qualified_name)
                 if not src_id:
                     continue
 
-                target_id = repo_symbol_map.get(edge.target_qualified_name)
-                target_qual = edge.target_qualified_name
+                target_id = repo_symbol_map.get(parsed_edge.target_qualified_name)
+                target_qual = parsed_edge.target_qualified_name
                 if not target_id:
-                    target_qual = f"UNRESOLVED::{edge.target_qualified_name}"
+                    target_qual = f"UNRESOLVED::{parsed_edge.target_qualified_name}"
 
                 edge_rec = ASTEdgeRecord(
                     edge_id=uuid4(),
@@ -1248,10 +1255,10 @@ class GitMerkleIndexer:
                     source_symbol_id=src_id,
                     target_qualified_name=target_qual,
                     target_symbol_id=target_id,
-                    edge_kind=edge.edge_kind,
+                    edge_kind=parsed_edge.edge_kind,
                     allowed_scopes=file_scopes,
-                    target_repo_qualified_id=edge.target_repo_qualified_id,
-                    is_cross_repo=edge.is_cross_repo or target_id is None,
+                    target_repo_qualified_id=parsed_edge.target_repo_qualified_id,
+                    is_cross_repo=parsed_edge.is_cross_repo or target_id is None,
                 )
                 repo.insert_ast_edge(principal, edge_rec)
                 total_edges += 1
@@ -1377,8 +1384,13 @@ def sync_tracked_in_memory_repos(
                 isolate_by_commit=False,
             )
             results.append(st)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Incremental repo sync skipped %s (%s): %s",
+                repo_dir,
+                type(exc).__name__,
+                exc,
+            )
     return results
 
 

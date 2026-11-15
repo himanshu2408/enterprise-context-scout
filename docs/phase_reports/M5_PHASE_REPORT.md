@@ -1,5 +1,11 @@
 # Milestone 5 Phase Report: Cost Governance, OpenTelemetry Distributed Tracing & Continuous Documentation
 
+> **[RETRACTION / CORRECTION — 2026-11-14]**
+> Earlier verification and documentation claims in this report are formally corrected:
+> - **Retracted Hygiene & DB Claims:** Earlier `"tree clean"`, `"DB untouched"`, and blanket `"tested on PostgreSQL"` statements are retracted; subsequent audits found shared dev-DB writes (`PA-F`), swallowed exception handlers (`PA-D`), and incomplete Rule `E16` domain neutrality (`PA-G`).
+> - **Doc Drift Correction (`PA-H`):** Synchronizing `README.md` (`0.55` vs `0.65` RRF floor) and `src/context_scout/agents/citation_gate.py` docstring (exact NFKC normalized substring verification vs stale `SequenceMatcher >= 0.98`) was missed in M5 and completed on 2026-11-14.
+> - Any `300/300` synthetic abstention metric referenced from M4/M5 fixtures is strictly a synthetic unit/logic regression check, not an empirical benchmark.
+
 **Milestone:** M5 (Features F22, F23, F24, F25: Upfront Cost Estimation, Blocking Confirmation Gate, Automated Kill-Switches, OpenTelemetry 4-Phase Semantic Tracing, and Ledger Reconciliation)  
 **Status:** COMPLETE (143/143 M5 Tests PASS, 340/340 E2E Tests PASS, 0 Ruff Violations)  
 **Verification Record:** 11 Cost Governance Tests, 13 OpenTelemetry Semantic Tracing Tests, 27 Gemini Executor & Adversarial Sandbox Tests, 39 Workflow & Challenger Tests, 53 Adversarial Challenger Empirical Tests (143 M5 Tests), 340 E2E Tests (483 Total Empirical Tests Passed), 0 Ruff Violations across entire codebase  

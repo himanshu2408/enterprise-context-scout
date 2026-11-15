@@ -1,6 +1,7 @@
 """Declarative DomainPack registry and in-memory LoRA AdapterPool (ARC-02)."""
 
 import json
+import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import Any
 import yaml
 
 from context_scout.schemas.contracts import DomainPackManifest
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -26,8 +29,8 @@ class AdapterSlot:
 class AdapterPool:
     """Thread-safe in-memory registry pinning active QLoRA adapters (ARC-02 & HW-01).
 
-    Prevents per-request disk I/O thrashing when alternating between Model 1
-    (trading_code_scout) and Model 2 (quant_research_scout).
+    Prevents per-request disk I/O thrashing when alternating between registered
+    code and research domain adapters.
     """
 
     def __init__(self, max_slots: int = 16, max_kv_tokens: int = 32_768) -> None:
@@ -83,8 +86,12 @@ class AdapterPool:
             cwd = Path.cwd().resolve()
             if adapter_dir.resolve().is_relative_to(cwd):
                 display_path = str(adapter_dir.resolve().relative_to(cwd))
-        except Exception:
-            pass
+        except OSError as exc:
+            logger.debug(
+                "Could not compute relative adapter path (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
 
         if not adapter_dir.exists():
             direct_path = Path(slot.adapter_path).resolve()
@@ -94,8 +101,12 @@ class AdapterPool:
                     cwd = Path.cwd().resolve()
                     if adapter_dir.resolve().is_relative_to(cwd):
                         display_path = str(adapter_dir.resolve().relative_to(cwd))
-                except Exception:
-                    pass
+                except OSError as exc:
+                    logger.debug(
+                        "Could not compute relative direct adapter path (%s): %s",
+                        type(exc).__name__,
+                        exc,
+                    )
             else:
                 return {
                     "domain_id": domain_id,
@@ -131,6 +142,12 @@ class AdapterPool:
             lora_alpha = int(cfg.get("lora_alpha", 0))
             is_moe = bool(cfg.get("is_moe", False))
         except Exception as exc:
+            logger.warning(
+                "Corrupt adapter_config.json for domain '%s' (%s): %s",
+                domain_id,
+                type(exc).__name__,
+                exc,
+            )
             return {
                 "domain_id": domain_id,
                 "is_valid": False,
@@ -144,8 +161,13 @@ class AdapterPool:
                 with open(metrics_path, encoding="utf-8") as f:
                     metrics = json.load(f)
                 final_loss = metrics.get("final_loss")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "Failed reading training_metrics.json for domain '%s' (%s): %s",
+                    domain_id,
+                    type(exc).__name__,
+                    exc,
+                )
 
         return {
             "domain_id": domain_id,
@@ -168,7 +190,6 @@ class AdapterPool:
         for slot in self.list_slots():
             results[slot.domain_id] = self.verify_adapter(slot.domain_id, base_dir=base_dir)
         return results
-
 
 
 class DomainRegistry:
