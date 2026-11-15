@@ -20,7 +20,7 @@ from context_scout.agents.preflight_gate import (
 )
 from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
 from context_scout.config import ScoutSettings
-from context_scout.db.repositories import InMemoryRLSRepository
+from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
 from context_scout.mcp_servers.common import MAX_PAYLOAD_ITEMS, bound_payload_dict
 from context_scout.schemas.contracts import DocCitationSpan
 from context_scout.security.rbac import (
@@ -41,6 +41,11 @@ def create_doc_corpus_mcp_server(
     registry = DomainRegistry(resolved_domains_dir)
     registry.load_all()
     auth_gate = DomainAuthorizationGate(registry)
+    is_pg_repo = (
+        repo is None
+        or isinstance(repo, PostgresRLSRepository)
+        or hasattr(repo, "connection_manager")
+    )
     bound_repo = BoundGraphRepository(repo or InMemoryRLSRepository())
     slicer = DeterministicSlicer()
 
@@ -63,9 +68,10 @@ def create_doc_corpus_mcp_server(
         validate_tool_call_arguments({"domain_id": domain_id, "query": query, "top_k": top_k})
         principal = get_current_principal()
         auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:search_hybrid_rrf", principal)
-        sync_custom_domain_corpus_if_needed(
-            domain_id, index_path=resolved_domains_dir / domain_id / "sync_manifest.json"
-        )
+        if is_pg_repo:
+            sync_custom_domain_corpus_if_needed(
+                domain_id, index_path=resolved_domains_dir / domain_id / "sync_manifest.json"
+            )
 
         clamped_k = min(max(1, top_k), MAX_PAYLOAD_ITEMS)
         visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
@@ -122,9 +128,10 @@ def create_doc_corpus_mcp_server(
         )
         principal = get_current_principal()
         auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:verify_citation_quote", principal)
-        sync_custom_domain_corpus_if_needed(
-            domain_id, index_path=resolved_domains_dir / domain_id / "sync_manifest.json"
-        )
+        if is_pg_repo:
+            sync_custom_domain_corpus_if_needed(
+                domain_id, index_path=resolved_domains_dir / domain_id / "sync_manifest.json"
+            )
 
         visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
         target_chunk = next(
@@ -181,9 +188,10 @@ def create_doc_corpus_mcp_server(
         )
         principal = get_current_principal()
         auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:get_document_section", principal)
-        sync_custom_domain_corpus_if_needed(
-            domain_id, index_path=resolved_domains_dir / domain_id / "sync_manifest.json"
-        )
+        if is_pg_repo:
+            sync_custom_domain_corpus_if_needed(
+                domain_id, index_path=resolved_domains_dir / domain_id / "sync_manifest.json"
+            )
 
         visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
         matching = [

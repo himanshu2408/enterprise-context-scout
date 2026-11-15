@@ -392,59 +392,81 @@ def test_isolated_tmp_path_working_tree_sync_freshness(
     src_dir = tmp_path / "repo_src"
     src_dir.mkdir(parents=True, exist_ok=True)
 
-    (src_dir / "settlement.py").write_text(
-        '"""Base settlement module."""\n\n\n'
-        "def calculate_settlement_fee(notional_usd: float) -> float:\n"
-        "    return notional_usd * 0.0001\n",
-        encoding="utf-8",
-    )
+    try:
+        (src_dir / "settlement.py").write_text(
+            '"""Base settlement module."""\n\n\n'
+            "def calculate_settlement_fee(notional_usd: float) -> float:\n"
+            "    return notional_usd * 0.0001\n",
+            encoding="utf-8",
+        )
 
-    init_res = cmd_init_domain(
-        domain_id=domain_id,
-        kind="code",
-        display_name="Ephemeral Freshness Sync Smoke",
-        domains_dir=domains_dir,
-        source_dir=src_dir,
-    )
-    assert Path(str(init_res["manifest_path"])).exists()
+        init_res = cmd_init_domain(
+            domain_id=domain_id,
+            kind="code",
+            display_name="Ephemeral Freshness Sync Smoke",
+            domains_dir=domains_dir,
+            source_dir=src_dir,
+        )
+        assert Path(str(init_res["manifest_path"])).exists()
 
-    distill_res = cmd_distill_custom_domain(
-        domain_id=domain_id,
-        source_dir=src_dir,
-        num_samples=4,
-        domains_dir=domains_dir,
-        data_dir=data_dir,
-    )
-    assert distill_res["train_samples"] >= 1
+        distill_res = cmd_distill_custom_domain(
+            domain_id=domain_id,
+            source_dir=src_dir,
+            num_samples=4,
+            domains_dir=domains_dir,
+            data_dir=data_dir,
+        )
+        assert distill_res["train_samples"] >= 1
 
-    (src_dir / "settlement_guard.py").write_text(
-        '"""Incremental sync settlement guard module."""\n\n\n'
-        "class NewSettlementGuardV2:\n"
-        '    """Enforces T+1 settlement notional ceiling prior to execution."""\n\n'
-        "    def validate_settlement_window(self, notional_usd: float, limit_usd: float) -> bool:\n"
-        "        return notional_usd <= limit_usd\n",
-        encoding="utf-8",
-    )
+        (src_dir / "settlement_guard.py").write_text(
+            '"""Incremental sync settlement guard module."""\n\n\n'
+            "class NewSettlementGuardV2:\n"
+            '    """Enforces T+1 settlement notional ceiling prior to execution."""\n\n'
+            "    def validate_settlement_window(\n"
+            "        self, notional_usd: float, limit_usd: float\n"
+            "    ) -> bool:\n"
+            "        return notional_usd <= limit_usd\n",
+            encoding="utf-8",
+        )
 
-    sync_res = cmd_sync_domain(
-        domain_id=domain_id,
-        domains_dir=domains_dir,
-        force=True,
-    )
-    assert sync_res["synced"] is True
-    assert int(sync_res["added"]) >= 1
+        sync_res = cmd_sync_domain(
+            domain_id=domain_id,
+            domains_dir=domains_dir,
+            force=True,
+        )
+        assert sync_res["synced"] is True
+        assert int(sync_res["added"]) >= 1
 
-    query_res = cmd_query_domain(
-        domain_id=domain_id,
-        prompt="Explain NewSettlementGuardV2 validate_settlement_window",
-        domains_dir=domains_dir,
-    )
-    assert query_res["result_type"] == "ImplementationContextPack"
-    assert query_res["preflight_report"]["passed"] is True
-    assert any(
-        "NewSettlementGuardV2" in s["qualified_symbol"] or "settlement_guard.py" in s["file_path"]
-        for s in query_res["code_slices"]
-    )
+        query_res = cmd_query_domain(
+            domain_id=domain_id,
+            prompt="Explain NewSettlementGuardV2 validate_settlement_window",
+            domains_dir=domains_dir,
+        )
+        assert query_res["result_type"] == "ImplementationContextPack"
+        assert query_res["preflight_report"]["passed"] is True
+        assert any(
+            "NewSettlementGuardV2" in s["qualified_symbol"]
+            or "settlement_guard.py" in s["file_path"]
+            for s in query_res["code_slices"]
+        )
+    finally:
+        cleanup_tables = (
+            "ast_edges",
+            "ast_symbols",
+            "code_files",
+            "repositories",
+            "confluence_pages",
+            "jira_issues",
+            "doc_chunks",
+            "indexing_queue",
+            "indexing_dead_letter",
+            "execution_telemetry",
+            "domain_packs",
+        )
+        with psycopg.connect(ScoutSettings().db_admin_url) as conn:
+            for table in cleanup_tables:
+                conn.execute(f"DELETE FROM {table} WHERE domain_id = %s;", (domain_id,))
+            conn.commit()
 
 
 _ZERO_VECTOR_768 = "[" + ",".join(["0.05"] * 768) + "]"

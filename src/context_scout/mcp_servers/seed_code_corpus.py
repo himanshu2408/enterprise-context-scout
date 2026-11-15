@@ -12,6 +12,7 @@ from typing import Final
 from uuid import UUID, uuid4, uuid5
 
 from context_scout.ast_engine.extractor import ASTExtractor
+from context_scout.ast_engine.models import ParsedEdge
 from context_scout.config import ScoutSettings
 from context_scout.db.repositories import (
     ASTEdgeRecord,
@@ -319,13 +320,63 @@ def seed_trading_codebase_and_issues(
             )
             total_issues += 1
 
-        # 5. Keep all src/context_scout/*.py files in code_files synchronized with disk
+        # 5. Keep all src/context_scout/*.py files and AST symbols/edges synced with disk
+        existing_file_rows = conn.execute(
+            """
+            SELECT file_id, file_path, git_blob_sha
+            FROM code_files
+            WHERE domain_id = %s AND repo_name = %s;
+            """,
+            (domain_id, repo_name),
+        ).fetchall()
+        existing_files: dict[str, tuple[UUID, str]] = {
+            str(r[1]): (UUID(str(r[0])), str(r[2])) for r in existing_file_rows
+        }
+
+        existing_sym_rows = conn.execute(
+            """
+            SELECT symbol_id, file_id, qualified_name, start_line, end_line
+            FROM ast_symbols
+            WHERE domain_id = %s;
+            """,
+            (domain_id,),
+        ).fetchall()
+        existing_sym_tuples_by_file: dict[UUID, set[tuple[str, int, int]]] = defaultdict(set)
+        existing_syms_by_file: dict[UUID, list[tuple[UUID, str, str]]] = defaultdict(list)
+        for r in existing_sym_rows:
+            sym_id = UUID(str(r[0]))
+            fid = UUID(str(r[1]))
+            qname = str(r[2])
+            sline = int(str(r[3]))
+            eline = int(str(r[4]))
+            short = qname.rsplit(".", 1)[-1]
+            existing_sym_tuples_by_file[fid].add((qname, sline, eline))
+            existing_syms_by_file[fid].append((sym_id, qname, short))
+            if qname not in global_symbol_map:
+                global_symbol_map[qname] = sym_id
+            if sym_id not in short_name_map[short]:
+                short_name_map[short].append(sym_id)
+
+        extra_edges_pending: list[tuple[list[ParsedEdge], dict[str, UUID]]] = []
         for extra_py in sorted((root / "src" / "context_scout").rglob("*.py")):
             rel_p = extra_py.relative_to(root).as_posix()
             if rel_p.startswith("src/context_scout/trading_strategies/"):
                 continue
             raw_c = extra_py.read_text(encoding="utf-8")
-            conn.execute(
+            new_blob = _git_blob_sha(raw_c)
+            symbols, edges = extractor.parse_source(raw_c, "python", file_path=rel_p)
+            parsed_sym_tuples = {(ps.qualified_name, ps.start_line, ps.end_line) for ps in symbols}
+            existing_entry = existing_files.get(rel_p)
+            existing_fid = existing_entry[0] if existing_entry else None
+            existing_blob = existing_entry[1] if existing_entry else None
+            if (
+                existing_fid is not None
+                and existing_blob == new_blob
+                and existing_sym_tuples_by_file.get(existing_fid, set()) == parsed_sym_tuples
+            ):
+                continue
+
+            row_fid = conn.execute(
                 """
                 INSERT INTO code_files (
                     file_id, domain_id, repo_name, file_path,
@@ -338,7 +389,8 @@ def seed_trading_codebase_and_issues(
                     git_blob_sha = EXCLUDED.git_blob_sha,
                     raw_content = EXCLUDED.raw_content,
                     line_count = EXCLUDED.line_count,
-                    indexed_at = NOW();
+                    indexed_at = NOW()
+                RETURNING file_id;
                 """,
                 (
                     uuid4(),
@@ -346,12 +398,93 @@ def seed_trading_codebase_and_issues(
                     repo_name,
                     rel_p,
                     rev_cmd,
-                    _git_blob_sha(raw_c),
+                    new_blob,
                     ["public_eng"],
                     raw_c,
                     len(raw_c.splitlines()),
                 ),
+            ).fetchone()
+            if row_fid is None:
+                continue
+            actual_file_id = UUID(str(row_fid[0]))
+
+            for old_sym_id, old_qname, old_short in existing_syms_by_file.get(actual_file_id, []):
+                if global_symbol_map.get(old_qname) == old_sym_id:
+                    global_symbol_map.pop(old_qname, None)
+                if old_sym_id in short_name_map.get(old_short, []):
+                    short_name_map[old_short] = [
+                        sid for sid in short_name_map[old_short] if sid != old_sym_id
+                    ]
+
+            conn.execute(
+                """
+                DELETE FROM ast_edges
+                WHERE domain_id = %s
+                  AND (
+                      source_symbol_id IN (SELECT symbol_id FROM ast_symbols WHERE file_id = %s)
+                      OR target_symbol_id IN (SELECT symbol_id FROM ast_symbols WHERE file_id = %s)
+                  );
+                """,
+                (domain_id, actual_file_id, actual_file_id),
             )
+            conn.execute(
+                "DELETE FROM ast_symbols WHERE domain_id = %s AND file_id = %s;",
+                (domain_id, actual_file_id),
+            )
+
+            file_sym_map = {}
+            for parsed_sym in symbols:
+                sym_id = uuid4()
+                emb = generate_deterministic_embedding(
+                    parsed_sym.signature_skeleton + " " + parsed_sym.docstring
+                )
+                sym_rec = ASTSymbolRecord(
+                    symbol_id=sym_id,
+                    file_id=actual_file_id,
+                    domain_id=domain_id,
+                    qualified_name=parsed_sym.qualified_name,
+                    symbol_kind=parsed_sym.symbol_kind,
+                    start_line=parsed_sym.start_line,
+                    end_line=parsed_sym.end_line,
+                    signature_skeleton=parsed_sym.signature_skeleton,
+                    contextual_summary=parsed_sym.contextual_summary,
+                    allowed_scopes=["public_eng"],
+                    embedding=emb,
+                )
+                repo.insert_ast_symbol(conn, sym_rec)
+                file_sym_map[parsed_sym.qualified_name] = sym_id
+                global_symbol_map[parsed_sym.qualified_name] = sym_id
+                short_name_map[parsed_sym.name].append(sym_id)
+                total_symbols += 1
+
+            extra_edges_pending.append((edges, file_sym_map))
+
+        for edges, file_sym_map in extra_edges_pending:
+            for edge in edges:
+                src_id = file_sym_map.get(edge.source_qualified_name)
+                if not src_id:
+                    src_id = global_symbol_map.get(edge.source_qualified_name)
+                if not src_id:
+                    continue
+
+                target_id = global_symbol_map.get(edge.target_qualified_name)
+                if not target_id:
+                    target_short = edge.target_qualified_name.split(".")[-1]
+                    matches = short_name_map.get(target_short, [])
+                    if len(matches) == 1:
+                        target_id = matches[0]
+
+                edge_rec = ASTEdgeRecord(
+                    edge_id=uuid4(),
+                    domain_id=domain_id,
+                    source_symbol_id=src_id,
+                    target_qualified_name=edge.target_qualified_name,
+                    target_symbol_id=target_id,
+                    edge_kind=edge.edge_kind,
+                    allowed_scopes=["public_eng"],
+                )
+                repo.insert_ast_edge(conn, edge_rec)
+                total_edges += 1
 
     # 6. Ensure at least 1 public_quant doc_chunks row exists on fresh CI databases
     quant_seed_principal = PrincipalContext(

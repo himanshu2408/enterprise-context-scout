@@ -432,13 +432,21 @@ def test_live_postgres_rls_scoped_db_session_isolation(
     # 2. Engineer Principal: scope ['public_eng']
     with bind_session_principal(sample_engineer_principal), scoped_db_session(conn_mgr) as conn:
         row_cf = conn.execute("SELECT count(*) FROM code_files;").fetchone()
-        row_dc = conn.execute("SELECT count(*) FROM doc_chunks;").fetchone()
+        row_dc = conn.execute(
+            "SELECT count(*) FROM doc_chunks "
+            "WHERE domain_id IN ('trading_code_scout', 'quant_research_scout');"
+        ).fetchone()
+        row_quant = conn.execute(
+            "SELECT count(*) FROM doc_chunks WHERE domain_id = 'quant_research_scout';"
+        ).fetchone()
         assert row_cf is not None
         assert row_dc is not None
+        assert row_quant is not None
         assert isinstance(row_cf[0], int)
         assert isinstance(row_dc[0], int)
         assert row_cf[0] >= 37
         assert row_dc[0] <= 10
+        assert row_quant[0] == 0
 
     # 3. Quant Principal: scope ['public_quant']
     with bind_session_principal(sample_quant_principal), scoped_db_session(conn_mgr) as conn:

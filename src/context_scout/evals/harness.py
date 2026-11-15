@@ -19,6 +19,7 @@ import logging
 import time
 from pathlib import Path
 from typing import Any, Final, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -51,6 +52,7 @@ from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
 from context_scout.plugins.registry import PluginRegistry
 from context_scout.schemas.contracts import (
     ImplementationContextPack,
+    MarketRegime,
     PrincipalContext,
     RoleType,
 )
@@ -232,10 +234,14 @@ class EvaluationHarness:
                         repo.insert_ast_symbol(admin_principal, s)
                     for e in adapter.list_visible_ast_edges(admin_principal, self.code_domain_id):
                         repo.insert_ast_edge(admin_principal, e)
-                    for c in adapter.list_visible_doc_chunks(
-                        admin_principal, self.research_domain_id
-                    ):
-                        repo.insert_doc_chunk(admin_principal, c)
+                    seen_chunk_ids: set[UUID] = set()
+                    for mr in (None, *list(MarketRegime)):
+                        for c in adapter.list_visible_doc_chunks(
+                            admin_principal, self.research_domain_id, market_scope=mr
+                        ):
+                            if c.chunk_id not in seen_chunk_ids:
+                                seen_chunk_ids.add(c.chunk_id)
+                                repo.insert_doc_chunk(admin_principal, c)
                     return repo
         except Exception as exc:
             logger.debug(
