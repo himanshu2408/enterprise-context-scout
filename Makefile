@@ -4,8 +4,10 @@ PY_DIRS := src tests
 PER_FILE_TIMEOUT_S := 120
 
 define _TEST_FULL_PY
+import os
 import pathlib
 import re
+import signal
 import subprocess
 import sys
 
@@ -17,30 +19,39 @@ summary_re = re.compile(r"(\d+)\s+(passed|failed|skipped|errors?)\b")
 
 for f in files:
     totals["files_run"] += 1
+    proc = subprocess.Popen(
+        ["uv", "run", "pytest", "-rs", "--tb=short", str(f)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        r = subprocess.run(
-            ["uv", "run", "pytest", "-rs", "--tb=short", str(f)],
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
-        out = r.stdout + "\n" + r.stderr
-        lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
-        tail = lines[-1] if lines else f"exit={r.returncode}"
-        counts = {"passed": 0, "failed": 0, "skipped": 0, "errors": 0}
-        for n_str, kind in summary_re.findall(tail):
-            key = "errors" if kind.startswith("error") else kind
-            counts[key] += int(n_str)
-        for k, v in counts.items():
-            totals[k] += v
-        print(f"=== {f} === {tail}", flush=True)
-        if r.returncode != 0:
-            failures.append((str(f), f"exit={r.returncode}"))
-            print(out, file=sys.stderr, flush=True)
+        stdout_s, stderr_s = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
         totals["timed_out"] += 1
         failures.append((str(f), "TIMEOUT"))
         print(f"=== {f} === TIMEOUT ({timeout_s}s)", file=sys.stderr, flush=True)
+        continue
+
+    out = stdout_s + "\n" + stderr_s
+    lines = [ln.strip() for ln in stdout_s.splitlines() if ln.strip()]
+    tail = lines[-1] if lines else f"exit={proc.returncode}"
+    counts = {"passed": 0, "failed": 0, "skipped": 0, "errors": 0}
+    for n_str, kind in summary_re.findall(tail):
+        key = "errors" if kind.startswith("error") else kind
+        counts[key] += int(n_str)
+    for k, v in counts.items():
+        totals[k] += v
+    print(f"=== {f} === {tail}", flush=True)
+    if proc.returncode != 0:
+        failures.append((str(f), f"exit={proc.returncode}"))
+        print(out, file=sys.stderr, flush=True)
 
 summary = " ".join(f"{k}={v}" for k, v in totals.items())
 print(f"GRAND TOTAL: {summary}", flush=True)

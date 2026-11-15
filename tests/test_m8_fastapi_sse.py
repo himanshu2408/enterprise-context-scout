@@ -718,3 +718,90 @@ def test_repository_hygiene_zero_prohibited_terms() -> None:
     )
     # git grep returns code 1 when no matches are found
     assert result.returncode == 1, f"Found prohibited paths/secrets in repository:\n{result.stdout}"
+
+
+# =============================================================================
+# Suite 11: Session Token Exchange & Server-Side Handoff RBAC (SEC-04)
+# =============================================================================
+
+
+def test_auth_session_mint_and_verify_me(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies /api/v1/auth/session mints a Bearer token accepted by /auth/me and /scout/query."""
+    monkeypatch.delenv("SCOUT_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    raw_client = TestClient(app)
+
+    res = raw_client.post(
+        "/api/v1/auth/session",
+        json={
+            "user_id": "ui_engineer_test",
+            "role": "engineer",
+            "allowed_scopes": ["public_eng", "repo:trading_strategies"],
+        },
+    )
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["token_type"] == "Bearer"
+    assert payload["expires_in_seconds"] == 3600
+    assert payload["principal"]["user_id"] == "ui_engineer_test"
+    assert payload["principal"]["role"] == "engineer"
+    assert payload["principal"]["allowed_scopes"] == ["public_eng", "repo:trading_strategies"]
+    token = payload["access_token"]
+
+    me_res = raw_client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert me_res.status_code == 200
+    assert me_res.json()["user_id"] == "ui_engineer_test"
+
+    bad_scopes_res = raw_client.post(
+        "/api/v1/auth/session",
+        json={
+            "user_id": "ui_engineer_test",
+            "role": "engineer",
+            "allowed_scopes": ["   "],
+        },
+    )
+    assert bad_scopes_res.status_code == 400
+
+
+def test_auth_session_blocked_in_production_negative_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative control: interactive persona token minting fails closed with 403 in prod."""
+    monkeypatch.setenv("SCOUT_ENV", "production")
+    raw_client = TestClient(app)
+
+    res = raw_client.post(
+        "/api/v1/auth/session",
+        json={"user_id": "prod_attempt", "role": "engineer"},
+    )
+    assert res.status_code == 403
+    assert "disabled in production" in res.json()["detail"]
+
+
+def test_handoff_preview_and_apply_restricted_to_engineer(
+    sample_pack: ImplementationContextPack,
+) -> None:
+    """Verifies server-side RBAC rejects non-engineer principals on handoff endpoints."""
+    for blocked_role in (RoleType.PRODUCT_MANAGER, RoleType.QUANT_RESEARCHER):
+        token = create_signed_principal_token(
+            user_id=f"user_{blocked_role.value}",
+            role=blocked_role,
+            allowed_scopes=DEFAULT_ROLE_SCOPES[blocked_role],
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        preview_res = TestClient(app, headers=headers).post(
+            "/api/v1/handoff/preview",
+            json={"pack": sample_pack.model_dump(), "model_id": "gemini-3.8-flash"},
+        )
+        assert preview_res.status_code == 403
+        assert "restricted to Engineer" in preview_res.json()["detail"]
+
+        apply_res = TestClient(app, headers=headers).post(
+            "/api/v1/handoff/apply",
+            json={"confirmation_token": "tok_dummy", "confirmed": True},
+        )
+        assert apply_res.status_code == 403
+        assert "restricted to Engineer" in apply_res.json()["detail"]

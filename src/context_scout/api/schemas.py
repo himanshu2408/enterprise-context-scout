@@ -15,8 +15,28 @@ from context_scout.schemas.contracts import (
     InsufficientContextDiagnostic,
     MissingContextRequest,
     PreFlightValidationReport,
+    PrincipalContext,
     QuantStrategyBrief,
+    RoleType,
 )
+
+
+class AuthSessionRequest(BaseModel):
+    """Non-production session exchange request for minting signed Bearer tokens."""
+
+    user_id: str = Field(default="demo_engineer", min_length=1, max_length=128)
+    role: RoleType = Field(default=RoleType.ENGINEER)
+    allowed_scopes: list[str] | None = None
+    max_session_paid_tokens: int = Field(default=50_000, ge=1_000, le=500_000)
+
+
+class AuthSessionResponse(BaseModel):
+    """Signed Bearer token session response."""
+
+    access_token: str
+    token_type: Literal["Bearer"] = "Bearer"
+    expires_in_seconds: int = 3600
+    principal: PrincipalContext
 
 
 class HealthHardwareProfile(BaseModel):
@@ -113,6 +133,8 @@ class SSEBounceBackEvent(BaseModel):
     stage: int = 3
     status: Literal["bounce_back_triggered"] = "bounce_back_triggered"
     feedback: str
+    bounce_count: int = 1
+    remediation_action: str = "Re-querying local model with deterministic pre-flight feedback"
     paid_tokens_spent: int = 0
     cost_usd: float = 0.0
     details: str = "$0 local bounce-back loop triggered to resolve missing symbols"
@@ -138,6 +160,7 @@ class SSEErrorEvent(BaseModel):
     status: Literal["blocked", "error"] = "blocked"
     category: str
     rationale: str
+    diagnostic: InsufficientContextDiagnostic | None = None
     timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
@@ -202,6 +225,9 @@ class AggregateROISummary(BaseModel):
     frontier_savings_ratio_pct: float
     qlora_overhead_eliminated_per_query: float = 1634.0
     total_qlora_overhead_eliminated: float
+    telemetry_source: Literal["postgresql_live", "in_memory_session", "m6_eval_baseline"] = (
+        "postgresql_live"
+    )
 
 
 class ROIMetricsResponse(BaseModel):

@@ -1602,3 +1602,306 @@ def test_multi_domain_knowledge_pdf_sync_mcp_benchmark_and_handoff_guard(
             assert quote_data["verified"] is True
 
     asyncio.run(_exercise_doc_mcp())
+
+
+def test_local_gemma_mlx_cache_is_process_shared_and_bounded_to_single_slot() -> None:
+    """Guard: Process MLX weight cache must be shared across clients and bounded to 1 slot."""
+    import sys
+    import types
+
+    import pytest
+
+    from context_scout.agents import scout_workflow
+
+    scout_src = inspect.getsource(LocalGemmaClient._get_or_load_mlx_model)
+    assert "_PROCESS_MLX_CACHE.clear()" in scout_src
+    assert "_release_metal_cache()" in scout_src
+    assert scout_workflow.MAX_LOADED_MLX_MODELS == 1
+
+    clear_calls: list[str] = []
+    fake_mx = types.ModuleType("mlx.core")
+    fake_mx.clear_cache = lambda: clear_calls.append("clear")  # type: ignore[attr-defined]
+    fake_mlx = types.ModuleType("mlx")
+    fake_mlx.core = fake_mx  # type: ignore[attr-defined]
+
+    load_keys: list[str] = []
+
+    def fake_loader(model_id: str, adapter_path: str | None = None) -> tuple[object, object]:
+        load_keys.append(f"{model_id}:{adapter_path or 'none'}")
+        return (object(), object())
+
+    LocalGemmaClient.clear_mlx_cache()
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setitem(sys.modules, "mlx", fake_mlx)
+        mp.setitem(sys.modules, "mlx.core", fake_mx)
+
+        client_a = LocalGemmaClient(offline_mode=True)
+        client_b = LocalGemmaClient(offline_mode=True)
+        assert client_a._mlx_cache is client_b._mlx_cache
+
+        m1, _ = client_a._get_or_load_mlx_model(
+            "mlx-community/gemma-4-26b-a4b-it-4bit",
+            "trading_code_scout:none",
+            None,
+            loader_fn=fake_loader,
+        )
+        # Second independent client instance reuses warm cache instead of allocating +15 GB.
+        m2, _ = client_b._get_or_load_mlx_model(
+            "mlx-community/gemma-4-26b-a4b-it-4bit",
+            "trading_code_scout:none",
+            None,
+            loader_fn=fake_loader,
+        )
+        assert m1 is m2
+        assert len(load_keys) == 1
+        assert len(scout_workflow._PROCESS_MLX_CACHE) == 1
+
+        # Loading a different domain evicts the previous slot and invokes Metal clear_cache first.
+        _ = client_b._get_or_load_mlx_model(
+            "mlx-community/gemma-4-26b-a4b-it-4bit",
+            "quant_research_scout:none",
+            None,
+            loader_fn=fake_loader,
+        )
+        assert len(load_keys) == 2
+        assert len(scout_workflow._PROCESS_MLX_CACHE) == 1
+        assert "trading_code_scout:none" not in scout_workflow._PROCESS_MLX_CACHE
+        assert "quant_research_scout:none" in scout_workflow._PROCESS_MLX_CACHE
+        assert len(clear_calls) == 1
+
+        evicted = LocalGemmaClient.clear_mlx_cache()
+        assert evicted == 1
+        assert len(scout_workflow._PROCESS_MLX_CACHE) == 0
+        assert len(clear_calls) == 2
+    finally:
+        LocalGemmaClient.clear_mlx_cache()
+        mp.undo()
+
+
+def test_makefile_test_full_kills_entire_process_group_on_timeout() -> None:
+    """Guard: Makefile test-full runner must isolate process groups and killpg on timeout."""
+    import contextlib
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    makefile_src = Path("Makefile").read_text(encoding="utf-8")
+    assert "start_new_session=True" in makefile_src
+    assert "os.killpg" in makefile_src
+    assert "subprocess.TimeoutExpired" in makefile_src
+
+    child_script = (
+        "import subprocess, sys, time; "
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+        "print(p.pid, flush=True); "
+        "time.sleep(30)"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child_script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    grandchild_pid: int | None = None
+    try:
+        assert proc.stdout is not None
+        pid_line = proc.stdout.readline().strip()
+        grandchild_pid = int(pid_line)
+        # Negative control precondition: grandchild is actively running before timeout kill.
+        os.kill(grandchild_pid, 0)
+
+        with_timeout_hit = False
+        try:
+            proc.communicate(timeout=0.3)
+        except subprocess.TimeoutExpired:
+            with_timeout_hit = True
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+
+        assert with_timeout_hit is True
+        # Grandchild must not survive as an orphan after process-group killpg.
+        deadline = time.monotonic() + 2.0
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            time.sleep(0.05)
+        assert alive is False, f"Orphan grandchild PID {grandchild_pid} survived killpg"
+    finally:
+        if proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+        if grandchild_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(grandchild_pid, signal.SIGKILL)
+
+
+def test_hybrid_doc_citation_extraction_populates_provenance_and_skips_closed_tickets() -> None:
+    """Guard: Hybrid doc citations preserve Confluence page_id/version and skip closed Jira."""
+    import uuid
+
+    from context_scout.agents.domain_registry import DomainRegistry
+    from context_scout.agents.preflight_gate import PreFlightValidator
+    from context_scout.agents.scout_workflow import ScoutWorkflow, _extract_hybrid_doc_citations
+    from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
+    from context_scout.db.repositories import (
+        ASTSymbolRecord,
+        CodeFileRecord,
+        DocChunkRecord,
+        InMemoryRLSRepository,
+    )
+    from context_scout.schemas.contracts import (
+        ImplementationContextPack,
+        InsufficientContextDiagnostic,
+    )
+
+    domain_id = f"test_hybrid_prov_{uuid.uuid4().hex[:8]}"
+    reg = DomainRegistry(Path("domains"))
+    reg.load_all()
+    base_manifest = reg.get("trading_code_scout")
+    reg.register(base_manifest.model_copy(update={"domain_id": domain_id}))
+
+    repo = InMemoryRLSRepository()
+    admin = PrincipalContext(user_id="admin", role=RoleType.ENGINEER, allowed_scopes=["public_eng"])
+    principal = PrincipalContext(
+        user_id="eng_hybrid",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng", "repo:backend/gateway-service", "repo:dotnet/eShop"],
+    )
+
+    code_src = (
+        '"""Gateway proxy."""\n\n'
+        "class FastAPIProxy_00:\n"
+        "    def dispatch(self, key: str) -> bool:\n"
+        "        return bool(key)\n"
+    )
+    fid = uuid.uuid4()
+    repo.insert_code_file(
+        admin,
+        CodeFileRecord(
+            file_id=fid,
+            domain_id=domain_id,
+            repo_name="backend/gateway-service",
+            file_path="src/gateway/proxy_00.py",
+            git_commit_sha="1111222233334444555566667777888899990000",
+            git_blob_sha="aaaa222233334444555566667777888899990000",
+            language="python",
+            allowed_scopes=["public_eng", "repo:backend/gateway-service"],
+            raw_content=code_src,
+            line_count=len(code_src.splitlines()),
+        ),
+    )
+    repo.insert_ast_symbol(
+        admin,
+        ASTSymbolRecord(
+            symbol_id=uuid.uuid4(),
+            file_id=fid,
+            domain_id=domain_id,
+            qualified_name="backend/gateway-service::src/gateway/proxy_00.py::FastAPIProxy_00",
+            symbol_kind="class",
+            start_line=3,
+            end_line=5,
+            signature_skeleton="class FastAPIProxy_00:",
+            contextual_summary="Gateway dispatcher enforcing Redis token bucket rate limiting.",
+            allowed_scopes=["public_eng", "repo:backend/gateway-service"],
+            embedding=[0.1] * 768,
+        ),
+    )
+
+    conf_chunk = DocChunkRecord(
+        chunk_id=uuid.uuid4(),
+        domain_id=domain_id,
+        doc_id="conf_eshop_ordering_architecture_v3",
+        doc_title="eShop Ordering Architecture",
+        source_uri="confluence://spaces/ORDER/pages/1001?v=3",
+        market_scope="GLOBAL",
+        published_date=None,
+        authority_weight=1.0,
+        section_heading="Architecture Overview",
+        contextual_header="eShop Ordering Architecture — Overview",
+        verbatim_content=(
+            "Orders must enforce Polly exponential backoff policies across database mutations."
+        ),
+        metadata_json={"version": "3", "is_stale": False},
+        allowed_scopes=["public_eng", "repo:dotnet/eShop"],
+        embedding=[0.2] * 768,
+        is_stale=False,
+    )
+    closed_jira_chunk = DocChunkRecord(
+        chunk_id=uuid.uuid4(),
+        domain_id=domain_id,
+        doc_id="jira_GATEWAY_100",
+        doc_title="Jira Ticket GATEWAY-100",
+        source_uri="jira://projects/GATEWAY/issues/GATEWAY-100",
+        market_scope="GLOBAL",
+        published_date=None,
+        authority_weight=1.0,
+        section_heading="Rate Limiting",
+        contextual_header="Jira GATEWAY-100 — Rate Limiting",
+        verbatim_content="Token bucket rate limiter requires strict Redis cluster atomicity.",
+        metadata_json={"resolution": "Resolved", "status": "Closed"},
+        allowed_scopes=["public_eng", "repo:backend/gateway-service"],
+        embedding=[0.3] * 768,
+        is_stale=False,
+    )
+    repo.insert_doc_chunk(admin, conf_chunk)
+    repo.insert_doc_chunk(admin, closed_jira_chunk)
+
+    slicer = DeterministicSlicer()
+    validator = PreFlightValidator(repo=repo, slicer=slicer)
+
+    conf_cits = _extract_hybrid_doc_citations(
+        user_prompt="Add Polly exponential backoff ordering policy",
+        doc_chunks=[conf_chunk],
+        slicer=slicer,
+        validator=validator,
+    )
+    assert len(conf_cits) == 1
+    assert conf_cits[0].page_id == "1001"
+    assert conf_cits[0].version == "3"
+
+    jira_cits = _extract_hybrid_doc_citations(
+        user_prompt="Redis token bucket rate limiter atomicity",
+        doc_chunks=[closed_jira_chunk],
+        slicer=slicer,
+        validator=validator,
+    )
+    assert jira_cits == [], "Closed Jira background chunk must not trigger Check 6 failure"
+
+    wf = ScoutWorkflow(registry=reg, repo=repo)
+    valid_res = wf.run(
+        user_prompt="Implement idempotent Redis token bucket rate limiting on `FastAPIProxy_00`.",
+        principal=principal,
+        domain_id=domain_id,
+    )
+    assert isinstance(valid_res, ImplementationContextPack)
+    assert len(valid_res.code_slices) >= 1
+    assert valid_res.preflight_report.check_results["check_6_freshness"] is True
+
+    conf_only_res = wf.run(
+        user_prompt="Inspect FastAPIProxy_00 Polly exponential backoff ordering policy",
+        principal=principal,
+        domain_id=domain_id,
+    )
+    assert isinstance(conf_only_res, ImplementationContextPack)
+    assert len(conf_only_res.supporting_doc_citations) == 1
+    assert conf_only_res.supporting_doc_citations[0].page_id == "1001"
+    assert conf_only_res.supporting_doc_citations[0].version == "3"
+
+    unans_res = wf.run(
+        user_prompt=(
+            "Refactor `NonExistentSymbol_V999Handler` Polly exponential backoff ordering policy"
+        ),
+        principal=principal,
+        domain_id=domain_id,
+    )
+    assert isinstance(unans_res, InsufficientContextDiagnostic)
+    assert unans_res.paid_tokens_spent == 0

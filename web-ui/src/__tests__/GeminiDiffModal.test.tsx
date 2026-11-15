@@ -1,124 +1,119 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearCachedAuthSession } from "../api/client";
 import { GeminiDiffModal } from "../components/GeminiDiffModal";
-import { MOCK_CONTEXT_PACK } from "../api/client";
-import { PrincipalContext } from "../types/contracts";
-import { ROLE_DEFAULT_SCOPES } from "../components/RoleSwitcher";
+import {
+  installMockApiFetch,
+  TEST_CODE_PACK,
+  TEST_ENGINEER_PRINCIPAL,
+} from "./fixtures";
 
-describe("GeminiDiffModal Component", () => {
-  const principal: PrincipalContext = {
-    user_id: "demo_engineer",
-    role: "engineer",
-    allowed_scopes: ROLE_DEFAULT_SCOPES.engineer,
-    max_session_paid_tokens: 16000,
-  };
+beforeEach(() => {
+  clearCachedAuthSession();
+});
 
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
+describe("GeminiDiffModal", () => {
   it("does not render when isOpen is false", () => {
-    const onClose = vi.fn();
+    const fetchMock = installMockApiFetch();
     render(
       <GeminiDiffModal
         isOpen={false}
-        onClose={onClose}
-        contextPack={MOCK_CONTEXT_PACK}
-        principal={principal}
+        onClose={vi.fn()}
+        contextPack={TEST_CODE_PACK}
+        principal={TEST_ENGINEER_PRINCIPAL}
       />
     );
 
     expect(screen.queryByTestId("gemini-diff-modal")).not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("renders preview diff and keeps Approve button disabled until human confirms", async () => {
-    const onClose = vi.fn();
+  it("loads live preview diff with TTL, requires human confirmation, and submits applyHandoff with custom patch", async () => {
+    const fetchMock = installMockApiFetch();
+
     render(
       <GeminiDiffModal
         isOpen={true}
-        onClose={onClose}
-        contextPack={MOCK_CONTEXT_PACK}
-        principal={principal}
+        onClose={vi.fn()}
+        contextPack={TEST_CODE_PACK}
+        principal={TEST_ENGINEER_PRINCIPAL}
       />
     );
 
-    expect(screen.getByTestId("gemini-diff-modal")).toBeInTheDocument();
-
-    // Wait for preview diff to load
     await waitFor(() => {
-      expect(screen.getByTestId("unified-diff-view")).toBeInTheDocument();
+      expect(screen.getByTestId("unified-diff-view")).toHaveTextContent(
+        "if volatility <= 0:"
+      );
     });
 
-    expect(screen.getByText("Target Files: src/execution/slippage.py")).toBeInTheDocument();
+    expect(screen.getByTestId("gemini-diff-modal")).toHaveTextContent(
+      "TTL 300s"
+    );
+    expect(screen.getByTestId("gemini-diff-modal")).toHaveTextContent(
+      "execution/optimizer.py"
+    );
 
-    // Verify Approve button is disabled before checking checkbox
-    const approveBtn = screen.getByTestId("approve-apply-btn");
-    expect(approveBtn).toBeDisabled();
+    // Apply button disabled until human confirmation checkbox checked
+    const applyBtn = screen.getByTestId("approve-apply-btn");
+    expect(applyBtn).toBeDisabled();
 
-    // Check confirmation checkbox
-    const confirmCheckbox = screen.getByTestId("confirm-apply-checkbox");
-    fireEvent.click(confirmCheckbox);
+    // Edit patch inline
+    fireEvent.click(screen.getByTestId("toggle-edit-patch-btn"));
+    fireEvent.change(screen.getByTestId("custom-patch-textarea"), {
+      target: {
+        value:
+          "--- a/execution/optimizer.py\n+++ b/execution/optimizer.py\n+# edited\n",
+      },
+    });
 
-    // Verify Approve button is now enabled
-    expect(approveBtn).not.toBeDisabled();
+    fireEvent.click(screen.getByTestId("confirm-apply-checkbox"));
+    expect(applyBtn).toBeEnabled();
+    fireEvent.click(applyBtn);
 
-    // Uncheck and verify it is disabled again
-    fireEvent.click(confirmCheckbox);
-    expect(approveBtn).toBeDisabled();
+    await waitFor(() => {
+      expect(screen.getByTestId("apply-success-view")).toHaveTextContent(
+        "Patch Applied & Verified in Sandbox"
+      );
+    });
+
+    // Apply button locks after success to prevent duplicate execution
+    expect(applyBtn).toBeDisabled();
+
+    const applyCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).endsWith("/api/v1/handoff/apply")
+    );
+    expect(applyCall).toBeDefined();
+    const sentBody = JSON.parse(String(applyCall?.[1]?.body)) as {
+      confirmation_token: string;
+      confirmed: boolean;
+      custom_patch?: string;
+    };
+    expect(sentBody.confirmation_token).toBe("confirm_tok_test_001");
+    expect(sentBody.confirmed).toBe(true);
+    expect(sentBody.custom_patch).toContain("+# edited");
   });
 
-  it("applies patch to sandbox after human confirmation and displays verification success", async () => {
-    const onClose = vi.fn();
-    const onApplyComplete = vi.fn();
-
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: string | URL | Request) => {
-      const urlStr = typeof url === "string" ? url : url.toString();
-      if (urlStr.includes("/api/v1/handoff/apply")) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({
-            success: true,
-            confirmed: true,
-            target_files: ["src/execution/slippage.py"],
-            lint_passed: true,
-            tests_passed: true,
-            verification_passed: true,
-            details: "Patch successfully verified and applied in isolated GitWorktreeSandbox.",
-            telemetry: {
-              execution_id: "exec-123",
-              duration_ms: 45,
-              cpu_pct: 10.0,
-              memory_mb: 128,
-              exit_code: 0,
-            },
-          }),
-        } as Response;
-      }
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          confirmation_token: "conf-token-e9182ab47f",
-          patch_diff: `--- a/src/execution/slippage.py\n+++ b/src/execution/slippage.py\n@@ -42,4 +42,7 @@\n def calculate_slippage_bps(order_size: float, adv_pct: float) -> float:\n-    impact_bps = 5.0 + 12.5 * math.sqrt(adv_pct)\n+    # Calibrated square-root impact with regulatory market regime minimum floor\n+    base_floor = 5.0\n+    impact_bps = base_floor + 12.5 * math.sqrt(max(adv_pct, 0.0001))\n     return min(impact_bps, 150.0)`,
-          target_files: ["src/execution/slippage.py"],
-          estimated_paid_cost_usd: 0.0014,
-          pack_token_count: 348,
-          estimated_cost_usd: 0.0014,
-          tokens_used: 348,
-          model_id: "gemini-3.8-flash",
-          requires_human_confirmation: true,
-        }),
-      } as Response;
-    });
+  it("resets confirmation checkbox and triggers fresh preview when switching target model", async () => {
+    const fetchMock = installMockApiFetch();
 
     render(
       <GeminiDiffModal
         isOpen={true}
-        onClose={onClose}
-        contextPack={MOCK_CONTEXT_PACK}
-        principal={principal}
-        onApplyComplete={onApplyComplete}
+        onClose={vi.fn()}
+        contextPack={TEST_CODE_PACK}
+        principal={TEST_ENGINEER_PRINCIPAL}
       />
     );
 
@@ -126,61 +121,77 @@ describe("GeminiDiffModal Component", () => {
       expect(screen.getByTestId("unified-diff-view")).toBeInTheDocument();
     });
 
-    // Check confirmation checkbox
-    const confirmCheckbox = screen.getByTestId("confirm-apply-checkbox");
-    fireEvent.click(confirmCheckbox);
+    const checkbox = screen.getByTestId(
+      "confirm-apply-checkbox"
+    ) as HTMLInputElement;
+    fireEvent.click(checkbox);
+    expect(checkbox.checked).toBe(true);
+    expect(screen.getByTestId("approve-apply-btn")).toBeEnabled();
 
-    const approveBtn = screen.getByTestId("approve-apply-btn");
-    fireEvent.click(approveBtn);
+    fireEvent.click(screen.getByTestId("select-model-flash"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("apply-success-view")).toBeInTheDocument();
-      expect(
-        screen.getByText("Patch Verified and Applied in Git Worktree Sandbox!")
-      ).toBeInTheDocument();
-      expect(screen.getByText("Sandbox Verification Passed")).toBeInTheDocument();
-      expect(screen.getByText("Ruff / Linter Passed")).toBeInTheDocument();
-      expect(screen.getByText("Pytest Suite Passed")).toBeInTheDocument();
+      const previewCalls = fetchMock.mock.calls.filter(([url]) =>
+        String(url).endsWith("/api/v1/handoff/preview")
+      );
+      expect(previewCalls.length).toBe(2);
     });
 
-    expect(onApplyComplete).toHaveBeenCalledTimes(1);
+    expect(
+      (screen.getByTestId("confirm-apply-checkbox") as HTMLInputElement).checked
+    ).toBe(false);
+    expect(screen.getByTestId("approve-apply-btn")).toBeDisabled();
   });
 
-  it("displays error message and never shows success view when backend rejects apply", async () => {
-    const onClose = vi.fn();
-    const onApplyComplete = vi.fn();
-
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: string | URL | Request) => {
-      const urlStr = typeof url === "string" ? url : url.toString();
-      if (urlStr.includes("/api/v1/handoff/apply")) {
-        return {
-          ok: false,
-          status: 400,
-          text: async () => "Invalid confirmation token or expired token",
-        } as Response;
-      }
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          confirmation_token: "conf-token-e9182ab47f",
-          patch_diff: "--- a/file.py\n+++ b/file.py",
-          target_files: ["file.py"],
-          estimated_paid_cost_usd: 0.001,
-          pack_token_count: 100,
-          model_id: "gemini-3.8-flash",
-          requires_human_confirmation: true,
-        }),
-      } as Response;
-    });
+  it("displays explicit error banner when preview fails with HTTP 403 RBAC rejection", async () => {
+    installMockApiFetch({ previewStatus: 403 });
 
     render(
       <GeminiDiffModal
         isOpen={true}
-        onClose={onClose}
-        contextPack={MOCK_CONTEXT_PACK}
-        principal={principal}
-        onApplyComplete={onApplyComplete}
+        onClose={vi.fn()}
+        contextPack={TEST_CODE_PACK}
+        principal={{ ...TEST_ENGINEER_PRINCIPAL, role: "product_manager" }}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("preview-error-banner")).toHaveTextContent(
+        "403"
+      );
+    });
+    expect(screen.getByTestId("approve-apply-btn")).toBeDisabled();
+  });
+
+  it("displays explicit error banner when preview fails with HTTP 500", async () => {
+    installMockApiFetch({ previewStatus: 500 });
+
+    render(
+      <GeminiDiffModal
+        isOpen={true}
+        onClose={vi.fn()}
+        contextPack={TEST_CODE_PACK}
+        principal={TEST_ENGINEER_PRINCIPAL}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("preview-error-banner")).toHaveTextContent(
+        "Preview failed (500)"
+      );
+    });
+    expect(screen.getByTestId("approve-apply-btn")).toBeDisabled();
+  });
+
+  it("displays apply-failure-view and never shows success view when /api/v1/handoff/apply rejects", async () => {
+    installMockApiFetch({ applyStatus: 500 });
+
+    render(
+      <GeminiDiffModal
+        isOpen={true}
+        onClose={vi.fn()}
+        contextPack={TEST_CODE_PACK}
+        principal={TEST_ENGINEER_PRINCIPAL}
       />
     );
 
@@ -188,29 +199,27 @@ describe("GeminiDiffModal Component", () => {
       expect(screen.getByTestId("unified-diff-view")).toBeInTheDocument();
     });
 
-    const confirmCheckbox = screen.getByTestId("confirm-apply-checkbox");
-    fireEvent.click(confirmCheckbox);
-
-    const approveBtn = screen.getByTestId("approve-apply-btn");
-    fireEvent.click(approveBtn);
+    fireEvent.click(screen.getByTestId("confirm-apply-checkbox"));
+    fireEvent.click(screen.getByTestId("approve-apply-btn"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("apply-failure-view")).toBeInTheDocument();
-      expect(screen.queryByTestId("apply-success-view")).not.toBeInTheDocument();
-      expect(
-        screen.getByText("Apply patch failed (400): Invalid confirmation token or expired token")
-      ).toBeInTheDocument();
+      expect(screen.getByTestId("apply-failure-view")).toHaveTextContent(
+        "Apply patch failed (500)"
+      );
     });
+    expect(screen.queryByTestId("apply-success-view")).not.toBeInTheDocument();
   });
 
-  it("resets confirmation checkbox when switching target model", async () => {
+  it("calls onClose when clicking Reject or Close without triggering sandbox apply", async () => {
+    const fetchMock = installMockApiFetch();
     const onClose = vi.fn();
+
     render(
       <GeminiDiffModal
         isOpen={true}
         onClose={onClose}
-        contextPack={MOCK_CONTEXT_PACK}
-        principal={principal}
+        contextPack={TEST_CODE_PACK}
+        principal={TEST_ENGINEER_PRINCIPAL}
       />
     );
 
@@ -218,41 +227,13 @@ describe("GeminiDiffModal Component", () => {
       expect(screen.getByTestId("unified-diff-view")).toBeInTheDocument();
     });
 
-    const confirmCheckbox = screen.getByTestId("confirm-apply-checkbox");
-    fireEvent.click(confirmCheckbox);
-    expect(confirmCheckbox).toBeChecked();
-    expect(screen.getByTestId("approve-apply-btn")).not.toBeDisabled();
+    fireEvent.click(screen.getByTestId("reject-patch-btn"));
+    fireEvent.click(screen.getByTestId("modal-close-btn"));
 
-    // Switch model to Argon
-    const argonBtn = screen.getByTestId("select-model-argon");
-    fireEvent.click(argonBtn);
-
-    // Expect confirmation to be reset to unchecked and approve button to be disabled
-    await waitFor(() => {
-      expect(confirmCheckbox).not.toBeChecked();
-      expect(screen.getByTestId("approve-apply-btn")).toBeDisabled();
-    });
-  });
-
-  it("calls onClose when clicking Reject or Close button", async () => {
-    const onClose = vi.fn();
-
-    render(
-      <GeminiDiffModal
-        isOpen={true}
-        onClose={onClose}
-        contextPack={MOCK_CONTEXT_PACK}
-        principal={principal}
-      />
+    expect(onClose).toHaveBeenCalledTimes(2);
+    const applyCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).endsWith("/api/v1/handoff/apply")
     );
-
-    await waitFor(() => {
-      expect(screen.getByTestId("unified-diff-view")).toBeInTheDocument();
-    });
-
-    const rejectBtn = screen.getByTestId("reject-patch-btn");
-    fireEvent.click(rejectBtn);
-
-    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(applyCalls).toHaveLength(0);
   });
 });
