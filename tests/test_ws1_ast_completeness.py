@@ -7,6 +7,7 @@ import json
 import re
 import time
 import uuid
+from pathlib import Path
 
 from context_scout.agents.preflight_gate import PreFlightValidator
 from context_scout.ast_engine import (
@@ -361,7 +362,9 @@ def test_mcp_bound_payload_dict_preserves_multi_kb_chunks_without_150_mutilation
     assert retained.endswith(TRUNCATION_INDICATOR)
 
 
-def test_pg17_ast_neighborhood_uses_indexes_and_runs_under_200ms() -> None:
+def test_pg17_ast_neighborhood_uses_indexes_and_runs_under_200ms(
+    ephemeral_pg_domain: str,
+) -> None:
     """Regression test: 2-hop AST neighborhood on PG17 uses indexes and runs <200ms."""
     settings = ScoutSettings()
     mgr = RLSConnectionManager(settings.db_app_url)
@@ -373,8 +376,48 @@ def test_pg17_ast_neighborhood_uses_indexes_and_runs_under_200ms() -> None:
     assert match is not None
     cte_sql = match.group(1)
 
+    with mgr.scoped_transaction(principal) as conn:
+        poly_row = conn.execute(
+            "SELECT symbol_id FROM ast_symbols "
+            "WHERE domain_id = 'polyglot_unseen_v2' "
+            "AND qualified_name LIKE %s LIMIT 1",
+            ("%anyio._backends._asyncio.find_root_task%",),
+        ).fetchone()
+    poly_domain = "polyglot_unseen_v2"
+    if poly_row is None:
+        poly_domain = ephemeral_pg_domain
+        with mgr.scoped_transaction(principal) as conn:
+            f_rec = _make_file(
+                ephemeral_pg_domain,
+                "anyio",
+                "src/anyio/_backends/_asyncio.py",
+                "def find_root_task() -> object:\n    return None\n\n"
+                "def get_task_info() -> object:\n    return find_root_task()\n",
+            )
+            repo.insert_code_file(conn, f_rec)
+            root_sym = _make_symbol(
+                f_rec, "anyio._backends._asyncio.find_root_task", "function", 1, 2
+            )
+            caller_sym = _make_symbol(
+                f_rec, "anyio._backends._asyncio.get_task_info", "function", 4, 5
+            )
+            repo.insert_ast_symbol(conn, root_sym)
+            repo.insert_ast_symbol(conn, caller_sym)
+            repo.insert_ast_edge(
+                conn,
+                ASTEdgeRecord(
+                    edge_id=uuid.uuid4(),
+                    domain_id=ephemeral_pg_domain,
+                    source_symbol_id=caller_sym.symbol_id,
+                    target_qualified_name=root_sym.qualified_name,
+                    target_symbol_id=root_sym.symbol_id,
+                    edge_kind="CALLS",
+                    allowed_scopes=["public_eng"],
+                ),
+            )
+
     for domain_id, qname in (
-        ("polyglot_unseen_v2", "anyio._backends._asyncio.find_root_task"),
+        (poly_domain, "anyio._backends._asyncio.find_root_task"),
         ("trading_code_scout", "AlmgrenChrissExecutionOptimizer"),
     ):
         with mgr.scoped_transaction(principal) as conn:
@@ -603,3 +646,99 @@ def test_polyglot_unseen_v2_blocks_public_quant_only_principal(
         ).fetchone()
         assert row_e is not None
         assert int(str(row_e[0])) >= expected_min_eng
+
+
+def test_linear_time_anti_redos_across_bm25_intent_router_and_preflight() -> None:
+    """Regression test: linear O(N) tokenizers and routers resist polynomial ReDoS inputs."""
+    from context_scout.agents.intent_router import (
+        QueryIntentClassifier,
+        decompose_query_facets,
+    )
+    from context_scout.db.bm25 import tokenize_bm25
+
+    t0 = time.perf_counter()
+    camel_tokens = tokenize_bm25("OrderFlowImbalanceSignal " + ("A" * 25_000) + "!")
+    assert "order" in camel_tokens
+    assert "imbalance" in camel_tokens
+
+    classifier = QueryIntentClassifier()
+    d_code = classifier.classify(
+        "Inspect src/context_scout/api/routes/scout.py and " + ("a." * 8_000)
+    )
+    assert d_code.needs_code is True
+
+    plan = decompose_query_facets(
+        "What are the top 3 " + ("findings " * 600) + "without matching preposition?"
+    )
+    assert plan.requested_cardinality == 3
+    assert len(plan.facets) >= 1
+
+    gate = PreFlightValidator(repo=InMemoryRLSRepository())
+    explicit_toks, _ = gate.extract_prompt_candidates(
+        "Check `GARCH11Model` in src/strat/volatility_garch.py "
+        + ("a/b." * 4_000)
+        + " ```unclosed fence "
+        + ("x" * 5_000)
+    )
+    assert "GARCH11Model" in explicit_toks
+    assert "src/strat/volatility_garch.py" in explicit_toks
+
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert elapsed_ms < 250.0, f"Anti-ReDoS suite took {elapsed_ms:.2f}ms (>= 250ms)"
+
+
+def test_custom_domain_manifest_path_traversal_fail_closed(
+    tmp_path: Path,
+) -> None:
+    """Regression test: custom domain manifest helpers reject path traversal and untrusted paths."""
+    import pytest
+
+    from context_scout.agents.preflight_gate import (
+        CUSTOM_CORPUS_INDEX_PATHS,
+        _resolve_custom_corpus_index_path,
+        register_custom_corpus_index,
+        sync_custom_domain_corpus_if_needed,
+        write_custom_sync_manifest,
+    )
+
+    with pytest.raises(ValueError, match="Invalid domain_id slug"):
+        register_custom_corpus_index("../escape_domain", tmp_path / "sync_manifest.json")
+
+    with pytest.raises(ValueError, match="untrusted"):
+        register_custom_corpus_index("valid_slug_check", Path("/etc/passwd"))
+
+    with pytest.raises(ValueError, match="untrusted"):
+        write_custom_sync_manifest(
+            manifest_path=Path("/etc/sync_manifest.json"),
+            domain_id="valid_slug_check",
+            kind="knowledge",
+            source_dir="",
+            repo_commit_shas={},
+            code_files_indexed=0,
+            ast_symbols_indexed=0,
+            ast_edges_indexed=0,
+            doc_chunks_indexed=0,
+        )
+
+    assert _resolve_custom_corpus_index_path("../../etc") is None
+    assert sync_custom_domain_corpus_if_needed("../../etc") is None
+
+    # Positive control: trusted tmp_path manifest writes and resolves cleanly
+    slug = f"ws1_safe_{uuid.uuid4().hex[:8]}"
+    safe_path = tmp_path / slug / "sync_manifest.json"
+    try:
+        written = write_custom_sync_manifest(
+            manifest_path=safe_path,
+            domain_id=slug,
+            kind="knowledge",
+            source_dir="",
+            repo_commit_shas={},
+            code_files_indexed=0,
+            ast_symbols_indexed=0,
+            ast_edges_indexed=0,
+            doc_chunks_indexed=2,
+        )
+        assert written.exists()
+        assert _resolve_custom_corpus_index_path(slug) == written
+    finally:
+        CUSTOM_CORPUS_INDEX_PATHS.pop(slug, None)

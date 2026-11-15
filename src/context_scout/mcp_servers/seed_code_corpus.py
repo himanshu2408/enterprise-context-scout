@@ -358,7 +358,11 @@ def seed_trading_codebase_and_issues(
                 short_name_map[short].append(sym_id)
 
         extra_edges_pending: list[tuple[list[ParsedEdge], dict[str, UUID]]] = []
-        for extra_py in sorted((root / "src" / "context_scout").rglob("*.py")):
+        extra_py_candidates = list(sorted((root / "src" / "context_scout").rglob("*.py")))
+        has_non_src_files = any(not fp.startswith("src/") for fp in existing_files)
+        if not has_non_src_files and (root / "tests").is_dir():
+            extra_py_candidates.extend(sorted((root / "tests").rglob("*.py")))
+        for extra_py in extra_py_candidates:
             rel_p = extra_py.relative_to(root).as_posix()
             if rel_p.startswith("src/context_scout/trading_strategies/"):
                 continue
@@ -486,36 +490,151 @@ def seed_trading_codebase_and_issues(
                 repo.insert_ast_edge(conn, edge_rec)
                 total_edges += 1
 
-    # 6. Ensure at least 1 public_quant doc_chunks row exists on fresh CI databases
+    # 6. Ensure public_quant arXiv baseline chunks exist on fresh CI databases (no-op when seeded)
     quant_seed_principal = PrincipalContext(
         user_id="seed_quant_corpus_indexer",
         role=RoleType.QUANT_RESEARCHER,
         allowed_scopes=["public_quant"],
     )
+    quant_seed_docs: list[tuple[str, str, str, str, date, str, str]] = [
+        (
+            "arxiv:1310.7514",
+            "The Price Impact of Order Book Events",
+            "https://arxiv.org/abs/1310.7514",
+            "US_EQUITY",
+            date(2026, 10, 15),
+            "1. Introduction",
+            (
+                "Order flow imbalance explains short-horizon price changes with linear market "
+                "impact across limit order book levels in US equities."
+            ),
+        ),
+        (
+            "arxiv:2606.31387",
+            (
+                "Signature-Based Optimal Execution for Statistical Arbitrage "
+                "with Path-Dependent Trading Signals"
+            ),
+            "https://arxiv.org/pdf/2606.31387v2",
+            "US_EQUITY",
+            date(2026, 6, 30),
+            "Introduction",
+            (
+                "Statistical-arbitrage strategies depend not only on predictive signals, "
+                "but also on optimal execution under temporary market impact, inventory "
+                "risk, and CME E-mini futures path-dependent trading dynamics clearing a "
+                "5 bps US equity friction floor."
+            ),
+        ),
+        (
+            "arxiv:2502.07393",
+            "FinRL-DeepSeek: LLM-Infused Risk-Sensitive Reinforcement Learning for Trading Agents",
+            "https://arxiv.org/pdf/2502.07393v1",
+            "US_EQUITY",
+            date(2025, 2, 11),
+            "Preamble / Abstract",
+            (
+                "This paper presents a risk-sensitive deep reinforcement learning actor-critic "
+                "trading agent extending Conditional Value-at-Risk Proximal Policy Optimization "
+                "(CPPO) and FinRL benchmarks on US equity Nasdaq-100 markets above 5 bps costs."
+            ),
+        ),
+        (
+            "arxiv:2302.13245",
+            "Physical Momentum in the Indian Stock Market",
+            "https://arxiv.org/abs/2302.13245",
+            "IN_NSE",
+            date(2024, 1, 1),
+            "Preamble / Abstract",
+            (
+                "Our study determines abnormal returns for physical and cross-sectional momentum "
+                "strategy portfolios in the Indian stock market across National Stock Exchange "
+                "(NSE) NIFTY 500 constituents after accounting for >= 18 bps STT and brokerage "
+                "round-trip liquidity friction."
+            ),
+        ),
+        (
+            "arxiv:2211.07080",
+            "Designing Efficient Pair-Trading and Intraday Momentum Strategies on NSE Nifty 50",
+            "https://arxiv.org/abs/2211.07080",
+            "IN_NSE",
+            date(2024, 1, 1),
+            "Abstract",
+            (
+                "High-frequency intraday momentum, order flow, and cointegration pair-trading "
+                "strategies across five sectors of the National Stock Exchange of India (NSE) "
+                "Nifty 50 constituents require >= 18 bps round-trip execution friction assumptions."
+            ),
+        ),
+        (
+            "arxiv:2202.02728",
+            "Hierarchical Risk Parity and Minimum Variance Portfolio Design on NIFTY 50 Stocks",
+            "https://arxiv.org/abs/2202.02728",
+            "IN_NSE",
+            date(2024, 1, 1),
+            "Abstract",
+            (
+                "This paper compares Hierarchical Risk Parity (HRP) and critical-line minimum "
+                "variance portfolio optimization across eight Indian NIFTY sectors on the National "
+                "Stock Exchange (NSE), evaluating out-of-sample Sharpe ratios under >= 16 bps "
+                "Indian equity rebalance friction."
+            ),
+        ),
+        (
+            "arxiv:2607.18001",
+            (
+                "High-Dimensional Factor Statistical Arbitrage and "
+                "Market-Neutral Portfolios on XETRA DAX"
+            ),
+            "https://arxiv.org/pdf/2607.18001v1",
+            "DE_XETRA",
+            date(2026, 7, 20),
+            "Empirical Evaluation",
+            (
+                "Dynamic high-dimensional PCA factor statistical arbitrage and order book "
+                "liquidity herding models on Deutsche Boerse XETRA DAX European equities "
+                "clear a 12 bps continuous-auction round-trip transaction cost floor."
+            ),
+        ),
+    ]
     with mgr.scoped_transaction(quant_seed_principal, enable_hnsw_iterative_scan=False) as q_conn:
-        row_qc = q_conn.execute("SELECT count(*) FROM doc_chunks;").fetchone()
+        row_qc = q_conn.execute(
+            "SELECT count(*) FROM doc_chunks WHERE domain_id = 'quant_research_scout';"
+        ).fetchone()
         if row_qc is not None and int(str(row_qc[0])) == 0:
-            q_emb = generate_deterministic_embedding("Order Flow Imbalance market impact")
-            q_vec = "[" + ",".join(f"{v:.6f}" for v in q_emb) + "]"
-            q_conn.execute(
-                """
-                INSERT INTO doc_chunks (
-                    chunk_id, domain_id, doc_id, doc_title, source_uri,
-                    market_scope, published_date, authority_weight,
-                    section_heading, contextual_header, verbatim_content,
-                    metadata_json, allowed_scopes, embedding
+            for q_doc_id, q_title, q_uri, q_scope, q_date, q_sec, q_body in quant_seed_docs:
+                q_emb = generate_deterministic_embedding(f"{q_title} {q_sec} {q_body}")
+                q_vec = "[" + ",".join(f"{v:.6f}" for v in q_emb) + "]"
+                q_conn.execute(
+                    """
+                    INSERT INTO doc_chunks (
+                        chunk_id, domain_id, doc_id, doc_title, source_uri,
+                        market_scope, published_date, authority_weight,
+                        section_heading, contextual_header, verbatim_content,
+                        metadata_json, allowed_scopes, embedding
+                    )
+                    VALUES (
+                        %s, 'quant_research_scout', %s,
+                        %s,
+                        %s, %s, %s, 1.0,
+                        %s, 'Quant Seed [quant_research_scout]',
+                        %s,
+                        '{}'::jsonb, %s, %s::vector
+                    );
+                    """,
+                    (
+                        uuid4(),
+                        q_doc_id,
+                        q_title,
+                        q_uri,
+                        q_scope,
+                        q_date,
+                        q_sec,
+                        q_body,
+                        ["public_quant"],
+                        q_vec,
+                    ),
                 )
-                VALUES (
-                    %s, 'quant_research_scout', 'arxiv:1310.7514',
-                    'The Price Impact of Order Book Events',
-                    'https://arxiv.org/abs/1310.7514', 'US_EQUITY', %s, 1.0,
-                    '1. Introduction', 'Quant Seed [quant_research_scout]',
-                    'Order flow imbalance explains short-horizon price changes with linear impact.',
-                    '{}'::jsonb, %s, %s::vector
-                );
-                """,
-                (uuid4(), date(2026, 10, 15), ["public_quant"], q_vec),
-            )
 
     return {
         "files_indexed": total_files,

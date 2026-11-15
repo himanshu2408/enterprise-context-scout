@@ -610,14 +610,57 @@ def _should_skip_sync_parts(rel_parts: tuple[str, ...], is_multi_repo: bool) -> 
     return False
 
 
+_SAFE_DOMAIN_SLUG_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+
+
+def _validate_domain_slug(domain_id: str) -> str:
+    """Validates domain_id is a strict alphanumeric/underscore/hyphen slug without traversal."""
+    if (
+        not _SAFE_DOMAIN_SLUG_RE.fullmatch(domain_id)
+        or ".." in domain_id
+        or "/" in domain_id
+        or "\\" in domain_id
+    ):
+        raise ValueError(f"Invalid domain_id slug: {domain_id!r}")
+    return domain_id
+
+
+def _trusted_manifest_prefixes() -> tuple[str, ...]:
+    """Returns canonical realpath directory prefixes permitted for domain manifest I/O."""
+    import tempfile
+
+    raw_roots = (
+        str(ScoutSettings().domains_dir),
+        str(Path("domains")),
+        str(Path(__file__).resolve().parents[3] / "domains"),
+        tempfile.gettempdir(),
+        "/tmp",
+    )
+    prefixes: list[str] = []
+    for root in raw_roots:
+        real_root = os.path.realpath(root)
+        with_sep = real_root if real_root.endswith(os.sep) else real_root + os.sep
+        if with_sep not in prefixes:
+            prefixes.append(with_sep)
+    return tuple(prefixes)
+
+
 def register_custom_corpus_index(domain_id: str, index_path: Path) -> None:
     """Registers a custom domain sync_manifest.json path for runtime resolution."""
-    resolved = index_path.resolve()
-    if resolved.name != _SYNC_MANIFEST_FILENAME and resolved.parent.exists():
-        candidate = resolved.with_name(_SYNC_MANIFEST_FILENAME)
-        if candidate.exists() or resolved.name == "corpus_index.json":
-            resolved = candidate
-    CUSTOM_CORPUS_INDEX_PATHS[domain_id] = resolved
+    safe_domain = _validate_domain_slug(domain_id)
+    allowed_prefixes = _trusted_manifest_prefixes()
+    real_index = os.path.realpath(str(index_path))
+    if not real_index.startswith(allowed_prefixes):
+        raise ValueError(f"Refusing untrusted corpus index path: {index_path}")
+    resolved = Path(real_index)
+    parent_real = os.path.dirname(real_index)
+    if resolved.name != _SYNC_MANIFEST_FILENAME and os.path.exists(parent_real):
+        real_candidate = os.path.realpath(os.path.join(parent_real, _SYNC_MANIFEST_FILENAME))
+        if not real_candidate.startswith(allowed_prefixes):
+            raise ValueError(f"Refusing untrusted sync manifest path: {index_path}")
+        if os.path.exists(real_candidate) or resolved.name == "corpus_index.json":
+            resolved = Path(real_candidate)
+    CUSTOM_CORPUS_INDEX_PATHS[safe_domain] = resolved
 
 
 def invalidate_custom_corpus_cache(domain_id: str | None = None) -> None:
@@ -631,6 +674,9 @@ def invalidate_custom_corpus_cache(domain_id: str | None = None) -> None:
 
 
 def _resolve_custom_corpus_index_path(domain_id: str) -> Path | None:
+    if not _SAFE_DOMAIN_SLUG_RE.fullmatch(domain_id) or ".." in domain_id:
+        return None
+    allowed_prefixes = _trusted_manifest_prefixes()
     candidates: list[Path] = []
     if domain_id in CUSTOM_CORPUS_INDEX_PATHS:
         candidates.append(CUSTOM_CORPUS_INDEX_PATHS[domain_id])
@@ -640,8 +686,11 @@ def _resolve_custom_corpus_index_path(domain_id: str) -> Path | None:
         repo_domains = Path(__file__).resolve().parents[3] / "domains"
         candidates.append(repo_domains / domain_id / _SYNC_MANIFEST_FILENAME)
     for cand in candidates:
-        if cand.exists():
-            return cand
+        real_cand = os.path.realpath(str(cand))
+        if not real_cand.startswith(allowed_prefixes):
+            continue
+        if os.path.exists(real_cand):
+            return Path(real_cand)
     return None
 
 
@@ -751,7 +800,13 @@ def write_custom_sync_manifest(
     empty_doc_shas: dict[str, str] | None = None,
 ) -> Path:
     """Writes a compact metadata-only sync_manifest.json without corpus payloads."""
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_domain = _validate_domain_slug(domain_id)
+    allowed_prefixes = _trusted_manifest_prefixes()
+    real_manifest = os.path.realpath(str(manifest_path))
+    if not real_manifest.startswith(allowed_prefixes):
+        raise ValueError(f"Refusing untrusted sync manifest path: {manifest_path}")
+    safe_manifest = Path(real_manifest)
+    os.makedirs(os.path.dirname(real_manifest), exist_ok=True)
     repo_root = Path(__file__).resolve().parents[3]
     portable_source_dir = source_dir
     if source_dir:
@@ -762,7 +817,7 @@ def write_custom_sync_manifest(
         except OSError:
             portable_source_dir = source_dir
     payload: dict[str, Any] = {
-        "domain_id": domain_id,
+        "domain_id": safe_domain,
         "kind": kind,
         "source_dir": portable_source_dir,
         "synced_at": datetime.datetime.now(datetime.UTC).isoformat(),
@@ -775,10 +830,10 @@ def write_custom_sync_manifest(
     }
     if empty_doc_shas:
         payload["empty_doc_shas"] = dict(sorted(empty_doc_shas.items()))
-    with open(manifest_path, "w", encoding="utf-8") as f:
+    with open(real_manifest, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-    register_custom_corpus_index(domain_id, manifest_path)
-    return manifest_path
+    register_custom_corpus_index(safe_domain, safe_manifest)
+    return safe_manifest
 
 
 def persist_custom_domain_to_pg(
@@ -1166,16 +1221,28 @@ def sync_custom_domain_corpus_if_needed(
         generate_deterministic_embedding,
     )
 
-    cand = index_path or _resolve_custom_corpus_index_path(domain_id)
-    if cand is not None and not cand.exists() and cand.name != _SYNC_MANIFEST_FILENAME:
-        alt = cand.with_name(_SYNC_MANIFEST_FILENAME)
-        if alt.exists():
-            cand = alt
+    if not _SAFE_DOMAIN_SLUG_RE.fullmatch(domain_id) or ".." in domain_id:
+        return None
+    allowed_prefixes = _trusted_manifest_prefixes()
+    raw_cand = index_path or _resolve_custom_corpus_index_path(domain_id)
+    real_cand: str | None = None
+    if raw_cand is not None:
+        resolved_raw = os.path.realpath(str(raw_cand))
+        if not resolved_raw.startswith(allowed_prefixes):
+            return None
+        real_cand = resolved_raw
+        if not os.path.exists(real_cand) and os.path.basename(real_cand) != _SYNC_MANIFEST_FILENAME:
+            real_alt = os.path.realpath(
+                os.path.join(os.path.dirname(real_cand), _SYNC_MANIFEST_FILENAME)
+            )
+            if real_alt.startswith(allowed_prefixes) and os.path.exists(real_alt):
+                real_cand = real_alt
 
     manifest_data: dict[str, Any] = {}
-    if cand is not None and cand.exists():
+    if real_cand is not None and os.path.exists(real_cand):
         try:
-            loaded = json.loads(cand.read_text(encoding="utf-8"))
+            with open(real_cand, encoding="utf-8") as cf:
+                loaded = json.load(cf)
             if isinstance(loaded, dict):
                 manifest_data = loaded
         except Exception as exc:
@@ -1185,21 +1252,30 @@ def sync_custom_domain_corpus_if_needed(
                 type(exc).__name__,
                 exc,
             )
+        cand = Path(real_cand)
     else:
-        domain_yaml_cand = ScoutSettings().domains_dir / domain_id / "domain.yaml"
-        if not domain_yaml_cand.exists():
+        raw_domain_yaml = ScoutSettings().domains_dir / domain_id / "domain.yaml"
+        real_domain_yaml = os.path.realpath(str(raw_domain_yaml))
+        if not real_domain_yaml.startswith(allowed_prefixes) or not os.path.exists(
+            real_domain_yaml
+        ):
             return None
-        cand = domain_yaml_cand.with_name(_SYNC_MANIFEST_FILENAME)
+        real_cand = os.path.realpath(
+            os.path.join(os.path.dirname(real_domain_yaml), _SYNC_MANIFEST_FILENAME)
+        )
+        if not real_cand.startswith(allowed_prefixes):
+            return None
+        cand = Path(real_cand)
 
     source_dir_str = str(manifest_data.get("source_dir", "")).strip()
     kind = str(manifest_data.get("kind", "")).strip()
     yaml_cfg: dict[str, Any] = {}
-    manifest_yaml = cand.parent / "domain.yaml"
-    if manifest_yaml.exists():
+    real_manifest_yaml = os.path.realpath(os.path.join(os.path.dirname(real_cand), "domain.yaml"))
+    if real_manifest_yaml.startswith(allowed_prefixes) and os.path.exists(real_manifest_yaml):
         try:
             import yaml
 
-            with open(manifest_yaml, encoding="utf-8") as mf:
+            with open(real_manifest_yaml, encoding="utf-8") as mf:
                 yaml_cfg = yaml.safe_load(mf) or {}
             if not source_dir_str:
                 source_dir_str = str(yaml_cfg.get("source_dir", "")).strip()
@@ -1569,7 +1645,7 @@ def sync_custom_domain_corpus_if_needed(
             if rel_path in existing_by_path
             else uuid5(NAMESPACE_URL, f"{domain_id}:file:{rel_path}")
         )
-        commit_sha = hashlib.sha1(f"{domain_id}:{rel_path}:{blob_sha}".encode()).hexdigest()
+        commit_sha = hashlib.sha256(f"{domain_id}:{rel_path}:{blob_sha}".encode()).hexdigest()[:40]
         repo_commit_shas[repo_n] = commit_sha
         lang = effective_langs.get(disk_p.suffix.lower(), "python")
         file_scopes = ["public_eng", f"domain:{domain_id}", f"repo:{repo_n}"]
@@ -2724,23 +2800,69 @@ class PreFlightValidator:
 
         # Strip URLs before extracting paths or backticks to avoid treating
         # URL schemes/domains as file paths
-        prompt_clean = re.sub(r"(?:https?|ftp|git|file)://[^\s`'\"]+", " ", user_prompt)
-        prompt_clean = re.sub(
-            r"(?:\b|//)[a-zA-Z0-9_\-\.]+\.(?:org|com|net|io|edu|gov|spec)\b[^\s`'\"]*",
-            " ",
-            prompt_clean,
-        )
+        url_tlds = ("org", "com", "net", "io", "edu", "gov", "spec")
+
+        def _strip_url_token(match: re.Match[str]) -> str:
+            span = match.group(0)
+            low_span = span.lower()
+            if low_span.startswith(("http://", "https://", "ftp://", "git://", "file://", "//")):
+                return " "
+            host_part = low_span.split("/", 1)[0].strip(".,;:()[]{}")
+            if "." in host_part:
+                host_labels = host_part.split(".")
+                if any(lbl in url_tlds for lbl in host_labels[1:]):
+                    return " "
+            return span
+
+        prompt_clean = re.sub(r"[^\s`'\"]+", _strip_url_token, user_prompt)
 
         # 1. Backticked tokens (`symbol_or_path`), ignoring multi-line fenced code blocks
-        prompt_without_fences = re.sub(r"```.*?```", " ", prompt_clean, flags=re.DOTALL)
+        fence_chunks: list[str] = []
+        f_pos = 0
+        while True:
+            f_open = prompt_clean.find("```", f_pos)
+            if f_open == -1:
+                fence_chunks.append(prompt_clean[f_pos:])
+                break
+            fence_chunks.append(prompt_clean[f_pos:f_open])
+            f_close = prompt_clean.find("```", f_open + 3)
+            if f_close == -1:
+                fence_chunks.append(prompt_clean[f_open:])
+                break
+            fence_chunks.append(" ")
+            f_pos = f_close + 3
+        prompt_without_fences = "".join(fence_chunks)
         backtick_tokens = set(re.findall(r"`([^`\n]+)`", prompt_without_fences))
 
-        # 2. File paths (e.g., src/strategies/order_flow.py or models.py)
-        file_path_pattern = (
-            r"(?:[a-zA-Z0-9_\-\./]+/[a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+|"
-            r"[a-zA-Z0-9_\-\.]+\.(?:py|ts|tsx|js|jsx|json|md|sql|yaml|yml|toml))"
-        )
-        path_tokens = set(re.findall(file_path_pattern, prompt_without_fences))
+        # 2. File paths (e.g., src/strategies/order_flow.py or models.py) in linear O(N) time
+        standalone_exts = {
+            "py",
+            "ts",
+            "tsx",
+            "js",
+            "jsx",
+            "json",
+            "md",
+            "sql",
+            "yaml",
+            "yml",
+            "toml",
+        }
+        path_tokens: set[str] = set()
+        for raw_path in re.findall(r"[a-zA-Z0-9_./-]+", prompt_without_fences):
+            cand_path = raw_path.strip(".")
+            if not cand_path:
+                continue
+            if "/" in cand_path:
+                dir_part, leaf = cand_path.rsplit("/", 1)
+                if dir_part and "." in leaf:
+                    stem, ext = leaf.rsplit(".", 1)
+                    if stem and ext and ext.isalnum():
+                        path_tokens.add(cand_path)
+            elif "." in cand_path:
+                stem, ext = cand_path.rsplit(".", 1)
+                if stem and ext.lower() in standalone_exts:
+                    path_tokens.add(cand_path)
 
         explicit_tokens: set[str] = set()
         for tok in backtick_tokens | path_tokens:

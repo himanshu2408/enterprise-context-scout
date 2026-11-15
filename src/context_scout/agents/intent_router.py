@@ -42,12 +42,62 @@ class QueryIntentDecision(BaseModel):
     reason: str
 
 
-_CODE_FILE_OR_PATH_RE = re.compile(
-    r"(?:"
-    r"[A-Za-z0-9_./-]+\.(?:py|ts|tsx|js|jsx|cs|tf|sql|go|rs|java|kt|rb|yaml|yml|toml|sh)\b"
-    r"|\b(?:src|app|tests|test|web-ui|pkg|internal|cmd|lib)/[A-Za-z0-9_./-]+"
-    r")"
+_CODE_FILE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        "py",
+        "ts",
+        "tsx",
+        "js",
+        "jsx",
+        "cs",
+        "tf",
+        "sql",
+        "go",
+        "rs",
+        "java",
+        "kt",
+        "rb",
+        "yaml",
+        "yml",
+        "toml",
+        "sh",
+    }
 )
+_CODE_PATH_ROOTS: tuple[str, ...] = (
+    "src/",
+    "app/",
+    "tests/",
+    "test/",
+    "web-ui/",
+    "pkg/",
+    "internal/",
+    "cmd/",
+    "lib/",
+)
+_PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_./-]+")
+
+
+def _has_code_file_or_path(text: str) -> bool:
+    """Linear-time O(N) check for source file extensions or standard repository path prefixes."""
+    for raw_tok in _PATH_TOKEN_RE.findall(text[:8192]):
+        tok = raw_tok.strip(".").rstrip("/")
+        if not tok:
+            continue
+        if "." in tok:
+            stem, ext = tok.rsplit(".", 1)
+            if stem and ext.lower() in _CODE_FILE_EXTENSIONS:
+                return True
+        low_tok = tok.lower()
+        for root in _CODE_PATH_ROOTS:
+            if low_tok.startswith(root) and len(low_tok) > len(root):
+                return True
+            nested = "/" + root
+            idx = low_tok.find(nested)
+            if idx != -1 and len(low_tok) > idx + len(nested):
+                return True
+    return False
+
+
 _CODE_BACKTICK_RE = re.compile(r"`[^`\n]{2,120}`")
 _CODE_SNAKE_CASE_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b")
 _CODE_CAMEL_CASE_RE = re.compile(r"\b(?:[a-z]+[A-Z][A-Za-z0-9_]*|[A-Z][a-z]+[A-Z][A-Za-z0-9_]*)\b")
@@ -247,7 +297,7 @@ def _classify_facet_source_kind(text: str) -> Literal["code", "docs", "issue", "
     ) or re.search(r"\b[A-Z]{2,10}-\d+\b", text):
         return "issue"
     if (
-        _CODE_FILE_OR_PATH_RE.search(text)
+        _has_code_file_or_path(text)
         or _CODE_BACKTICK_RE.search(text)
         or _CODE_SNAKE_CASE_RE.search(text)
         or any(
@@ -285,9 +335,147 @@ def _classify_facet_source_kind(text: str) -> Literal["code", "docs", "issue", "
     return "any"
 
 
+def _split_ci_phrase(text: str, sep_lower: str) -> list[str]:
+    """Splits single-space-normalized text on a case-insensitive literal phrase in O(N) time."""
+    low = text.lower()
+    out: list[str] = []
+    pos = 0
+    step = len(sep_lower)
+    while True:
+        idx = low.find(sep_lower, pos)
+        if idx == -1:
+            out.append(text[pos:])
+            break
+        out.append(text[pos:idx])
+        pos = idx + step
+    return out
+
+
+def _starts_with_keyword(text_lower: str, pos: int, keywords: tuple[str, ...]) -> bool:
+    for kw in keywords:
+        end = pos + len(kw)
+        if text_lower.startswith(kw, pos) and (
+            end == len(text_lower) or not text_lower[end].isalnum()
+        ):
+            return True
+    return False
+
+
+def _split_ci_before_keywords(
+    text: str, sep_lower: str, keywords: tuple[str, ...]
+) -> list[str] | None:
+    """Splits on sep_lower only when immediately followed by one of keywords (keeping keyword)."""
+    low = text.lower()
+    cut_points: list[tuple[int, int]] = []
+    search_from = 0
+    sep_len = len(sep_lower)
+    while True:
+        idx = low.find(sep_lower, search_from)
+        if idx == -1:
+            break
+        after = idx + sep_len
+        if _starts_with_keyword(low, after, keywords):
+            cut_points.append((idx, after))
+            search_from = after
+        else:
+            search_from = idx + 1
+    if not cut_points:
+        return None
+    parts: list[str] = []
+    prev = 0
+    for start, end in cut_points:
+        parts.append(text[prev:start])
+        prev = end
+    parts.append(text[prev:])
+    return parts
+
+
+def _strip_trailing_closure_clause(text: str) -> str:
+    low = text.lower()
+    marker = "including "
+    search_from = 0
+    suffix_prefixes = (
+        "callers",
+        "all callers",
+        "imported types",
+        "all imported types",
+        "unit tests",
+        "all unit tests",
+        "tests",
+        "all tests",
+    )
+    while True:
+        idx = low.find(marker, search_from)
+        if idx == -1:
+            return text
+        if idx == 0 or not low[idx - 1].isalnum():
+            rest = low[idx + len(marker) :]
+            if _starts_with_keyword(rest, 0, suffix_prefixes):
+                return text[:idx].rstrip(", ").strip()
+        search_from = idx + 1
+
+
+def _strip_top_n_on_preamble(text: str) -> tuple[str, bool]:
+    """Linearly strips leading 'What are [the] top N <words> on ' preamble if present."""
+    low = text.lower()
+    prefix_len = 0
+    if low.startswith("what are the top "):
+        prefix_len = len("what are the top ")
+    elif low.startswith("what are top "):
+        prefix_len = len("what are top ")
+    if prefix_len == 0:
+        return text, False
+    rest_after_top = low[prefix_len:]
+    space_idx = rest_after_top.find(" ")
+    if space_idx <= 0 or not rest_after_top[:space_idx].isdigit():
+        return text, False
+    after_num = prefix_len + space_idx + 1
+    on_idx = low.find(" on ", after_num)
+    if on_idx == -1 or on_idx <= after_num:
+        return text, False
+    middle = low[after_num:on_idx]
+    if all(ch.isalnum() or ch in (" ", "_") for ch in middle):
+        tail = text[on_idx + 4 :].strip()
+        if tail:
+            return tail, True
+    return text, False
+
+
+def _split_question_clauses(text: str) -> list[str]:
+    """Linearly splits on ';' or ', [and ]<which|what|where|how|why>\\b'."""
+    q_words = ("which", "what", "where", "how", "why")
+    semi_parts = text.split(";")
+    clauses: list[str] = []
+    for chunk in semi_parts:
+        s = chunk.strip()
+        if not s:
+            continue
+        low = s.lower()
+        prev = 0
+        pos = 0
+        while True:
+            comma_idx = low.find(",", pos)
+            if comma_idx == -1:
+                break
+            after_comma = comma_idx + 1
+            while after_comma < len(low) and low[after_comma] == " ":
+                after_comma += 1
+            kw_pos = after_comma
+            if low.startswith("and ", after_comma):
+                kw_pos = after_comma + 4
+            if _starts_with_keyword(low, kw_pos, q_words):
+                clauses.append(s[prev:comma_idx])
+                prev = kw_pos
+                pos = kw_pos
+            else:
+                pos = comma_idx + 1
+        clauses.append(s[prev:])
+    return clauses
+
+
 def decompose_query_facets(prompt: str) -> QueryPlan:
     """Deterministically decomposes a prompt into cardinality, acronym, and sub-facets."""
-    cleaned = " ".join(prompt.strip().split())
+    cleaned = " ".join(prompt[:4096].strip().split())
     stripped = cleaned.rstrip("?!. ")
 
     requested_cardinality: int | None = None
@@ -307,78 +495,61 @@ def decompose_query_facets(prompt: str) -> QueryPlan:
         acronym = acr_m.group(1).upper()
 
     # Strip trailing AST closure / meta-clauses so they don't become bogus lexical facets
-    working = re.sub(
-        r"^(?:compare|contrast)\s+",
-        "",
-        stripped,
-        flags=re.IGNORECASE,
-    ).strip()
-    working = re.sub(
-        r",?\s*including\s+(?:all\s+)?(?:callers|imported\s+types|unit\s+tests|tests).*$",
-        "",
-        working,
-        flags=re.IGNORECASE,
-    ).strip()
-    # Strip leading "What are the top N empirical findings on " style preamble for clean facet split
-    preamble_m = re.match(
-        r"^(?:what\s+are\s+(?:the\s+)?top\s+\d+\s+[\w\s]+?\bon\s+)(.+)$",
-        working,
-        flags=re.IGNORECASE,
-    )
-    if preamble_m:
-        working = preamble_m.group(1).strip()
+    working = stripped
+    if working.lower().startswith("compare "):
+        working = working[len("compare ") :].strip()
+    elif working.lower().startswith("contrast "):
+        working = working[len("contrast ") :].strip()
+    working = _strip_trailing_closure_clause(working)
+    working, has_top_preamble = _strip_top_n_on_preamble(working)
 
     # First split on explicit question/issue clauses (", and which ...", ", and how ...")
-    clause_parts = re.split(
-        r"(?:;\s*|,\s*(?:and\s+)?(?=(?:which|what|where|how|why)\b))",
-        working,
-        flags=re.IGNORECASE,
-    )
+    clause_parts = _split_question_clauses(working)
 
     raw_facets: list[str] = []
+    conj_keywords = ("open", "how", "what", "which", "where")
     for part in clause_parts:
         sub = part.strip().strip(",")
         if not sub:
             continue
         # Split "X against Y and Z" or comma-separated lists ("A, B, and C")
-        if re.search(r"\s+against\s+", sub, flags=re.IGNORECASE):
-            against_parts = re.split(r"\s+against\s+", sub, flags=re.IGNORECASE)
-        else:
-            against_parts = [sub]
+        against_parts = _split_ci_phrase(sub, " against ") if " against " in sub.lower() else [sub]
 
         for ap in against_parts:
             ap_clean = ap.strip().strip(",")
             if not ap_clean:
                 continue
             comma_count = ap_clean.count(",")
-            has_oxford = bool(re.search(r",\s+and\s+", ap_clean, flags=re.IGNORECASE))
+            has_oxford = ", and " in ap_clean.lower()
             if has_oxford or comma_count >= 2:
-                items = re.split(r",\s+and\s+|,\s*", ap_clean, flags=re.IGNORECASE)
-                raw_facets.extend(it.strip() for it in items if it.strip())
-            elif re.search(r"\s+and\s+(?:open|how|what|which|where)\b", ap_clean, re.IGNORECASE):
-                items = re.split(
-                    r"\s+and\s+(?=(?:open|how|what|which|where)\b)",
-                    ap_clean,
-                    flags=re.IGNORECASE,
-                )
-                raw_facets.extend(it.strip() for it in items if it.strip())
-            elif preamble_m and re.search(r"\s+and\s+", ap_clean, re.IGNORECASE):
-                items = re.split(r"\s+and\s+", ap_clean, flags=re.IGNORECASE)
-                raw_facets.extend(it.strip() for it in items if it.strip())
+                for ox_part in _split_ci_phrase(ap_clean, ", and "):
+                    for item in ox_part.split(","):
+                        if item.strip():
+                            raw_facets.append(item.strip())
             else:
-                raw_facets.append(ap_clean)
+                kw_split = _split_ci_before_keywords(ap_clean, " and ", conj_keywords)
+                if kw_split is not None:
+                    raw_facets.extend(it.strip() for it in kw_split if it.strip())
+                elif has_top_preamble and " and " in ap_clean.lower():
+                    items = _split_ci_phrase(ap_clean, " and ")
+                    raw_facets.extend(it.strip() for it in items if it.strip())
+                else:
+                    raw_facets.append(ap_clean)
 
     # Filter out trivial fragments, trailing meta-clauses, and generic modifiers
     facets: list[FacetSpec] = []
+    skip_exact = {
+        "their core classes",
+        "including",
+        "all callers",
+        "imported types",
+        "unit tests",
+    }
     for rf in raw_facets:
-        fq = re.sub(r"^and\s+", "", rf, flags=re.IGNORECASE).strip()
+        fq = rf[4:].strip() if rf.lower().startswith("and ") else rf.strip()
         if len(fq) < 4:
             continue
-        if re.match(
-            r"^(?:their\s+core\s+classes|including\s+|all\s+callers|imported\s+types|unit\s+tests)$",
-            fq,
-            flags=re.IGNORECASE,
-        ):
+        if fq.lower() in skip_exact:
             continue
         terms = _extract_facet_key_terms(fq)
         if not terms:
@@ -685,7 +856,7 @@ class QueryIntentClassifier:
 
         text = query.strip()
         code_signals: list[str] = []
-        if _CODE_FILE_OR_PATH_RE.search(text):
+        if _has_code_file_or_path(text):
             code_signals.append("file_path")
         if _CODE_BACKTICK_RE.search(text):
             code_signals.append("backtick_identifier")

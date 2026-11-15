@@ -18,9 +18,13 @@ Verifies:
 from __future__ import annotations
 
 import ast
+import sys
+import types
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, ClassVar
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -48,6 +52,21 @@ from context_scout.telemetry.otel import (
 # =============================================================================
 
 
+@contextmanager
+def _override_mlx_lm(replacement: types.ModuleType | None) -> Iterator[None]:
+    """Overrides only sys.modules['mlx_lm'] without clearing unrelated C++ modules like torch."""
+    had_prev = "mlx_lm" in sys.modules
+    prev_mod = sys.modules.get("mlx_lm")
+    sys.modules["mlx_lm"] = replacement  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        if had_prev and prev_mod is not None:
+            sys.modules["mlx_lm"] = prev_mod
+        else:
+            sys.modules.pop("mlx_lm", None)
+
+
 class TestModelUnavailableAbstentionOnModelPathFailure:
     """Verifies LocalGemmaClient and ScoutWorkflow fail closed on runtime MLX errors."""
 
@@ -59,11 +78,14 @@ class TestModelUnavailableAbstentionOnModelPathFailure:
             offline_mode=False,
         )
 
+        fake_mlx = types.ModuleType("mlx_lm")
+        fake_mlx.load = MagicMock(  # type: ignore[attr-defined]
+            side_effect=FileNotFoundError("No model weights at invalid/path")
+        )
+        fake_mlx.generate = MagicMock()  # type: ignore[attr-defined]
+
         with (
-            patch(
-                "mlx_lm.load",
-                side_effect=FileNotFoundError("No model weights at invalid/path"),
-            ),
+            _override_mlx_lm(fake_mlx),
             pytest.raises(ModelUnavailableError) as exc_info,
         ):
             client.complete(
@@ -81,8 +103,14 @@ class TestModelUnavailableAbstentionOnModelPathFailure:
         """When MLX raises runtime error, client must fail closed without fabrication."""
         client = LocalGemmaClient(use_live_mlx=True, offline_mode=False)
 
+        fake_mlx = types.ModuleType("mlx_lm")
+        fake_mlx.load = MagicMock(  # type: ignore[attr-defined]
+            side_effect=RuntimeError("Metal GPU OOM on Apple M5 Pro")
+        )
+        fake_mlx.generate = MagicMock()  # type: ignore[attr-defined]
+
         with (
-            patch("mlx_lm.load", side_effect=RuntimeError("Metal GPU OOM on Apple M5 Pro")),
+            _override_mlx_lm(fake_mlx),
             pytest.raises(ModelUnavailableError) as exc_info,
         ):
             output = client.complete(
@@ -92,6 +120,25 @@ class TestModelUnavailableAbstentionOnModelPathFailure:
             pytest.fail(f"Expected ModelUnavailableError, got fabricated output: {output}")
 
         assert "model unavailable" in str(exc_info.value).lower()
+
+    def test_client_complete_when_mlx_lm_not_installed_abstains_cleanly(self) -> None:
+        """On Linux x86_64 where mlx_lm is absent, complete() fails closed cleanly."""
+        client = LocalGemmaClient(use_live_mlx=True, offline_mode=False)
+
+        with (
+            _override_mlx_lm(None),
+            pytest.raises(ModelUnavailableError) as exc_info,
+        ):
+            client.complete(
+                prompt="Extract AST pointers from order_flow_imbalance.py",
+                domain_id="trading_code_scout",
+            )
+
+        err = exc_info.value
+        assert "model unavailable" in str(err).lower()
+        assert err.diagnostic is not None
+        assert err.diagnostic.is_abstention is True
+        assert err.diagnostic.paid_tokens_spent == 0
 
     def test_scout_workflow_abstains_with_zero_tokens_and_zero_cost_on_model_failure(self) -> None:
         """When local model fails, ScoutWorkflow must return diagnostic with $0 spend."""

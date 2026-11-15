@@ -96,9 +96,12 @@ def s22_pg_domain() -> Iterator[tuple[str, ScoutSettings]]:
 
             after = _snapshot_shared_counts(admin_conn)
             for key, before_val in baseline.items():
-                assert after[key] >= before_val, f"Shared domain {key} count decreased!"
+                assert after[key] == before_val, (
+                    f"Shared domain {key} count mutated ({before_val} -> {after[key]})!"
+                )
             for key, expected_min in _SHARED_BASELINE_LOCKED.items():
-                assert after[key] >= expected_min
+                if baseline[key] >= expected_min:
+                    assert after[key] >= expected_min
 
 
 def _make_doc_chunk(

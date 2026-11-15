@@ -891,12 +891,37 @@ class LocalGemmaClient:
                     missing_from_feedback.add(clean)
 
         # Extract candidates from prompt (including backticks and dotted parts)
-        prompt_without_fences = re.sub(r"```.*?```", " ", user_prompt, flags=re.DOTALL)
-        prompt_without_fences = re.sub(
-            r"(?im)^\s*(?:-\s*\[[ xX]\]\s+.*|#+\s*checklist\s*)$",
-            " ",
-            prompt_without_fences,
-        )
+        fence_parts: list[str] = []
+        scan_pos = 0
+        while True:
+            open_fence = user_prompt.find("```", scan_pos)
+            if open_fence == -1:
+                fence_parts.append(user_prompt[scan_pos:])
+                break
+            fence_parts.append(user_prompt[scan_pos:open_fence])
+            close_fence = user_prompt.find("```", open_fence + 3)
+            if close_fence == -1:
+                fence_parts.append(user_prompt[open_fence:])
+                break
+            fence_parts.append(" ")
+            scan_pos = close_fence + 3
+        unfenced_prompt = "".join(fence_parts)
+        cleaned_prompt_lines: list[str] = []
+        for raw_line in unfenced_prompt.splitlines():
+            stripped_line = raw_line.strip()
+            if stripped_line.startswith("-") and len(stripped_line) >= 5:
+                after_dash = stripped_line[1:].lstrip()
+                if after_dash.startswith(("[ ] ", "[x] ", "[X] ", "[ ]\t", "[x]\t", "[X]\t")):
+                    cleaned_prompt_lines.append(" ")
+                    continue
+            if (
+                stripped_line.startswith("#")
+                and stripped_line.lstrip("#").strip().lower() == "checklist"
+            ):
+                cleaned_prompt_lines.append(" ")
+                continue
+            cleaned_prompt_lines.append(raw_line)
+        prompt_without_fences = "\n".join(cleaned_prompt_lines)
         raw_backticks = re.findall(r"`([^`\n]+)`", prompt_without_fences)
         backtick_syms: set[str] = set()
         explicit_kwarg_names: set[str] = set()
@@ -1169,14 +1194,18 @@ class LocalGemmaClient:
             for w in re.split(r"[_\-\./]+", bt)
             if len(w) >= 3 and w.lower() not in nl_stopwords
         }
-        code_kwarg_or_snake_terms = {
-            t.lower()
-            for t in re.findall(
-                r"\b[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]+\b|\b[A-Za-z_][A-Za-z0-9_]*(?=\s*=)",
-                prompt_without_fences,
-            )
-            if len(t) >= 3 and t.lower() not in nl_stopwords
-        }
+        code_kwarg_or_snake_terms: set[str] = set()
+        for ident_m in re.finditer(r"\b[A-Za-z_][A-Za-z0-9_]*\b", prompt_without_fences):
+            tok = ident_m.group(0)
+            if len(tok) < 3:
+                continue
+            tok_l = tok.lower()
+            if tok_l in nl_stopwords:
+                continue
+            is_snake = "_" in tok[1:-1]
+            is_kwarg = prompt_without_fences[ident_m.end() :].lstrip(" \t\r\n").startswith("=")
+            if is_snake or is_kwarg:
+                code_kwarg_or_snake_terms.add(tok_l)
         body_search_terms = title_terms | backtick_terms_l | code_kwarg_or_snake_terms
         prompt_l_clean = prompt_without_fences.lower()
         file_lines_by_id: dict[uuid.UUID, list[str]] = {}

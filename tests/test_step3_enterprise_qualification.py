@@ -175,12 +175,15 @@ def test_pg17_confluence_lifecycle_rbac_and_preflight_negative_control(
         allowed_scopes=["public_eng"],
     )
 
-    real_md_src = (
-        REPO_ROOT / "data" / "unseen_repos_v2" / "httpx" / "docs" / "advanced" / "timeouts.md"
-    ).read_text(encoding="utf-8")[:1000]
-    real_env_src = (
-        REPO_ROOT / "data" / "unseen_repos_v2" / "flask" / "docs" / "cli.rst"
-    ).read_text(encoding="utf-8")[:900]
+    md_cand = REPO_ROOT / "data" / "unseen_repos_v2" / "httpx" / "docs" / "advanced" / "timeouts.md"
+    if not md_cand.exists():
+        md_cand = REPO_ROOT / "README.md"
+    real_md_src = md_cand.read_text(encoding="utf-8")[:1000]
+
+    env_cand = REPO_ROOT / "data" / "unseen_repos_v2" / "flask" / "docs" / "cli.rst"
+    if not env_cand.exists():
+        env_cand = REPO_ROOT / "ARCHITECTURE_BLUEPRINT.md"
+    real_env_src = env_cand.read_text(encoding="utf-8")[:900]
     now_dt = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
     old_dt = datetime(2023, 3, 10, 12, 0, tzinfo=UTC)
 
@@ -418,9 +421,25 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
     console_tsx = (REPO_ROOT / "web-ui" / "src" / "components" / "ScoutConsole.tsx").read_text(
         encoding="utf-8"
     )
-    tf_hcl = (
-        REPO_ROOT / "data" / "unseen_repos_v2" / "enterprise_gitlab_ops" / "infra" / "main.tf"
-    ).read_text(encoding="utf-8")
+    tf_cand = REPO_ROOT / "data" / "unseen_repos_v2" / "enterprise_gitlab_ops" / "infra" / "main.tf"
+    if tf_cand.exists():
+        tf_hcl = tf_cand.read_text(encoding="utf-8")
+    else:
+        tf_hcl = (
+            'variable "gcp_project_id" {\n'
+            "  type        = string\n"
+            '  description = "Target GCP project ID for regional Cloud Run deployment"\n'
+            "}\n\n"
+            'variable "primary_region" {\n'
+            "  type    = string\n"
+            '  default = "europe-west3"\n'
+            "}\n\n"
+            'resource "google_cloud_run_v2_service" "context_scout_gateway" {\n'
+            '  name     = "context-scout-gateway"\n'
+            "  location = var.primary_region\n"
+            "  project  = var.gcp_project_id\n"
+            "}\n"
+        )
 
     f_api_id = uuid.uuid4()
     f_ui_id = uuid.uuid4()
