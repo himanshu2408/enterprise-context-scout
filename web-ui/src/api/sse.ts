@@ -1,6 +1,7 @@
 import {
   PrincipalContext,
   ScoutQueryRequest,
+  SourceFilterType,
   SSEBounceBackData,
   SSEContextPackReadyData,
   SSEErrorData,
@@ -16,7 +17,7 @@ export interface SSEStreamCallbacks {
 }
 
 export interface SSEStreamOptions {
-  request: ScoutQueryRequest;
+  request: ScoutQueryRequest & { source_filter?: SourceFilterType };
   principal: PrincipalContext;
   onEvent: (event: SSEStageEvent) => void;
   onError: (err: Error) => void;
@@ -155,6 +156,7 @@ const SECURITY_GUARDRAIL_TRIGGERED = "SECURITY_GUARDRAIL_TRIGGERED";
           trace_id: request.trace_id,
           normalized_rrf_score: request.normalized_rrf_score,
           max_bounce_backs: request.max_bounce_backs,
+          source_filter: request.source_filter ?? "all",
         }),
         signal: controller.signal,
       });

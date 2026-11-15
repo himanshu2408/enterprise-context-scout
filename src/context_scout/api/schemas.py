@@ -87,6 +87,7 @@ class ScoutStreamRequest(BaseModel):
     trace_id: str | None = None
     normalized_rrf_score: float = Field(default=0.85, ge=0.0, le=1.0)
     max_bounce_backs: int = Field(default=1, ge=0, le=3)
+    source_filter: Literal["all", "code", "wiki", "jira"] = "all"
 
 
 class ScoutTokenSavingsBreakdown(BaseModel):

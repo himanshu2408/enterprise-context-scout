@@ -13,6 +13,7 @@ import {
   ROIMetricsResponse,
   ScoutQueryRequest,
   ScoutQueryResponse,
+  SourceFilterType,
 } from "../types/contracts";
 
 export const FEDERATED_ALL_DOMAIN_ID = "federated_all";
@@ -227,7 +228,7 @@ export async function fetchROIMetrics(): Promise<ROIMetricsResponse> {
 }
 
 export async function executeScoutQuery(
-  request: ScoutQueryRequest,
+  request: ScoutQueryRequest & { source_filter?: SourceFilterType },
   principal: PrincipalContext
 ): Promise<ScoutQueryResponse> {
   const token = await ensureBearerToken(principal);
@@ -239,7 +240,10 @@ export async function executeScoutQuery(
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify(request),
+      body: JSON.stringify({
+        ...request,
+        source_filter: request.source_filter ?? "all",
+      }),
     });
   } catch (err: unknown) {
     throw new ApiClientError(

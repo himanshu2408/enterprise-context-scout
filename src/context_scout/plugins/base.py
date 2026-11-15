@@ -39,6 +39,10 @@ class SyncResult(BaseModel):
     items_updated: int = 0
     items_deleted: int = 0
     stale_items_flagged: int = 0
+    noise_filtered_count: int = 0
+    noise_demoted_count: int = 0
+    tombstoned_count: int = 0
+    filter_breakdown: dict[str, int] = Field(default_factory=dict)
     new_checkpoint: str = ""
     cursor_or_checkpoint: str = ""
     duration_ms: float = 0.0
