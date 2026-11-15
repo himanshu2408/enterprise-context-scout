@@ -11,13 +11,13 @@ import re
 from collections.abc import Mapping
 from datetime import date, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 from pydantic import BaseModel, ConfigDict
 
 if TYPE_CHECKING:
     from context_scout.db.schema import DocChunkRecord
-    from context_scout.schemas.contracts import DocCitationSpan
+    from context_scout.schemas.contracts import DocCitationSpan, QueryFacetCoverage
 
 SourceFilter = Literal["all", "code", "wiki", "jira"]
 
@@ -87,6 +87,568 @@ _DOC_KEYWORD_RE = re.compile(
     re.IGNORECASE,
 )
 _CONFLUENCE_SPACE_RE = re.compile(r"/spaces/([A-Za-z0-9_~-]+)")
+
+_CARDINALITY_LEADING_RE = re.compile(
+    r"\b(?:top|first|list|give\s+me|name|what\s+are(?:\s+the)?)\s+(\d{1,2})\b",
+    re.IGNORECASE,
+)
+_CARDINALITY_NOUN_RE = re.compile(
+    r"\b(\d{1,2})\s+(?:failure\s+modes?|risks?|models?|reasons?|ways?|strategies|"
+    r"caveats?|properties|steps?|examples?|methods?|classes|files|issues?|findings?|"
+    r"causes?|patterns?|techniques?|components?)\b",
+    re.IGNORECASE,
+)
+_ACRONYM_STAND_FOR_RE = re.compile(
+    r"\bwhat\s+does\s+([A-Z]{2,8})\s+stands?\s+for\b",
+)
+_ACRONYM_PROPERTIES_RE = re.compile(
+    r"\b(?:explain|describe|what\s+are)\s+(?:the\s+)?([A-Z]{2,8})\s+"
+    r"(?:properties|principles|guarantees|acronym)\b",
+    re.IGNORECASE,
+)
+
+_FACET_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "that",
+        "this",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+        "how",
+        "does",
+        "did",
+        "are",
+        "was",
+        "were",
+        "can",
+        "you",
+        "your",
+        "our",
+        "they",
+        "their",
+        "its",
+        "into",
+        "onto",
+        "over",
+        "under",
+        "between",
+        "during",
+        "using",
+        "running",
+        "compare",
+        "contrast",
+        "versus",
+        "against",
+        "explain",
+        "describe",
+        "list",
+        "give",
+        "top",
+        "each",
+        "all",
+        "both",
+        "also",
+        "only",
+        "about",
+        "have",
+        "has",
+        "had",
+        "not",
+        "but",
+        "stand",
+        "stands",
+        "mean",
+        "mitigate",
+        "prevent",
+        "core",
+        "open",
+        "tracks",
+        "inspect",
+        "including",
+        "codebase",
+        "implementation",
+        "contracts",
+        "unit",
+        "empirical",
+        "findings",
+        "failure",
+        "modes",
+        "classes",
+        "research",
+        "issues",
+    }
+)
+
+
+class FacetSpec(BaseModel):
+    """Single decomposed query sub-facet for stratified retrieval and grounding checks."""
+
+    model_config = ConfigDict(frozen=True)
+
+    facet_id: str
+    facet_query: str
+    key_terms: list[str]
+    expected_source_kind: Literal["code", "docs", "issue", "any"] = "any"
+    is_acronym_component: bool = False
+
+
+class QueryPlan(BaseModel):
+    """Deterministic query decomposition plan (cardinality, acronym, and sub-facets)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    original_query: str
+    requested_cardinality: int | None = None
+    is_acronym_query: bool = False
+    acronym: str | None = None
+    facets: list[FacetSpec]
+
+
+def _extract_facet_key_terms(text: str) -> list[str]:
+    """Extracts distinctive lowercase search tokens from a facet query."""
+    raw = re.findall(r"[A-Za-z0-9_]{2,}", text)
+    terms: list[str] = []
+    for tok in raw:
+        low = tok.lower()
+        if low in _FACET_STOPWORDS:
+            continue
+        if len(low) < 3 and not tok.isupper():
+            continue
+        if low not in terms:
+            terms.append(low)
+    return terms
+
+
+def _classify_facet_source_kind(text: str) -> Literal["code", "docs", "issue", "any"]:
+    """Infers the expected source modality for a decomposed facet."""
+    low = text.lower()
+    if any(
+        w in low
+        for w in (
+            "which issue",
+            "what issue",
+            "which ticket",
+            "what ticket",
+            "jira",
+            "tracks it",
+            "issue tracks",
+            "tracked by",
+            "known issue",
+            "github issue",
+        )
+    ) or re.search(r"\b[A-Z]{2,10}-\d+\b", text):
+        return "issue"
+    if (
+        _CODE_FILE_OR_PATH_RE.search(text)
+        or _CODE_BACKTICK_RE.search(text)
+        or _CODE_SNAKE_CASE_RE.search(text)
+        or any(
+            w in low
+            for w in (
+                "codebase",
+                "implementation",
+                "class",
+                "classes",
+                "method",
+                "function",
+                "module",
+                "symbol",
+                "caller",
+                "unit test",
+            )
+        )
+    ):
+        return "code"
+    if any(
+        w in low
+        for w in (
+            "research",
+            "paper",
+            "documentation",
+            "docs",
+            "confluence",
+            "wiki",
+            "adr",
+            "rfc",
+            "specification",
+        )
+    ):
+        return "docs"
+    return "any"
+
+
+def decompose_query_facets(prompt: str) -> QueryPlan:
+    """Deterministically decomposes a prompt into cardinality, acronym, and sub-facets."""
+    cleaned = " ".join(prompt.strip().split())
+    stripped = cleaned.rstrip("?!. ")
+
+    requested_cardinality: int | None = None
+    for pat in (_CARDINALITY_LEADING_RE, _CARDINALITY_NOUN_RE):
+        m = pat.search(stripped)
+        if m:
+            val = int(m.group(1))
+            if 1 <= val <= 20:
+                requested_cardinality = val
+                break
+
+    acronym: str | None = None
+    is_acronym_query = False
+    acr_m = _ACRONYM_STAND_FOR_RE.search(stripped) or _ACRONYM_PROPERTIES_RE.search(stripped)
+    if acr_m:
+        is_acronym_query = True
+        acronym = acr_m.group(1).upper()
+
+    # Strip trailing AST closure / meta-clauses so they don't become bogus lexical facets
+    working = re.sub(
+        r"^(?:compare|contrast)\s+",
+        "",
+        stripped,
+        flags=re.IGNORECASE,
+    ).strip()
+    working = re.sub(
+        r",?\s*including\s+(?:all\s+)?(?:callers|imported\s+types|unit\s+tests|tests).*$",
+        "",
+        working,
+        flags=re.IGNORECASE,
+    ).strip()
+    # Strip leading "What are the top N empirical findings on " style preamble for clean facet split
+    preamble_m = re.match(
+        r"^(?:what\s+are\s+(?:the\s+)?top\s+\d+\s+[\w\s]+?\bon\s+)(.+)$",
+        working,
+        flags=re.IGNORECASE,
+    )
+    if preamble_m:
+        working = preamble_m.group(1).strip()
+
+    # First split on explicit question/issue clauses (", and which ...", ", and how ...")
+    clause_parts = re.split(
+        r"(?:;\s*|,\s*(?:and\s+)?(?=(?:which|what|where|how|why)\b))",
+        working,
+        flags=re.IGNORECASE,
+    )
+
+    raw_facets: list[str] = []
+    for part in clause_parts:
+        sub = part.strip().strip(",")
+        if not sub:
+            continue
+        # Split "X against Y and Z" or comma-separated lists ("A, B, and C")
+        if re.search(r"\s+against\s+", sub, flags=re.IGNORECASE):
+            against_parts = re.split(r"\s+against\s+", sub, flags=re.IGNORECASE)
+        else:
+            against_parts = [sub]
+
+        for ap in against_parts:
+            ap_clean = ap.strip().strip(",")
+            if not ap_clean:
+                continue
+            comma_count = ap_clean.count(",")
+            has_oxford = bool(re.search(r",\s+and\s+", ap_clean, flags=re.IGNORECASE))
+            if has_oxford or comma_count >= 2:
+                items = re.split(r",\s+and\s+|,\s*", ap_clean, flags=re.IGNORECASE)
+                raw_facets.extend(it.strip() for it in items if it.strip())
+            elif re.search(r"\s+and\s+(?:open|how|what|which|where)\b", ap_clean, re.IGNORECASE):
+                items = re.split(
+                    r"\s+and\s+(?=(?:open|how|what|which|where)\b)",
+                    ap_clean,
+                    flags=re.IGNORECASE,
+                )
+                raw_facets.extend(it.strip() for it in items if it.strip())
+            elif preamble_m and re.search(r"\s+and\s+", ap_clean, re.IGNORECASE):
+                items = re.split(r"\s+and\s+", ap_clean, flags=re.IGNORECASE)
+                raw_facets.extend(it.strip() for it in items if it.strip())
+            else:
+                raw_facets.append(ap_clean)
+
+    # Filter out trivial fragments, trailing meta-clauses, and generic modifiers
+    facets: list[FacetSpec] = []
+    for rf in raw_facets:
+        fq = re.sub(r"^and\s+", "", rf, flags=re.IGNORECASE).strip()
+        if len(fq) < 4:
+            continue
+        if re.match(
+            r"^(?:their\s+core\s+classes|including\s+|all\s+callers|imported\s+types|unit\s+tests)$",
+            fq,
+            flags=re.IGNORECASE,
+        ):
+            continue
+        terms = _extract_facet_key_terms(fq)
+        if not terms:
+            if facets:
+                continue
+            terms = [w.lower() for w in re.findall(r"[A-Za-z0-9_]+", fq) if len(w) >= 2]
+        facets.append(
+            FacetSpec(
+                facet_id=f"facet_{len(facets) + 1}",
+                facet_query=fq,
+                key_terms=terms,
+                expected_source_kind=_classify_facet_source_kind(fq),
+            )
+        )
+
+    if not facets:
+        terms = _extract_facet_key_terms(stripped)
+        facets = [
+            FacetSpec(
+                facet_id="facet_1",
+                facet_query=stripped or prompt.strip(),
+                key_terms=terms,
+                expected_source_kind=_classify_facet_source_kind(stripped),
+            )
+        ]
+
+    return QueryPlan(
+        original_query=prompt,
+        requested_cardinality=requested_cardinality,
+        is_acronym_query=is_acronym_query,
+        acronym=acronym,
+        facets=facets,
+    )
+
+
+def evaluate_facet_grounding(
+    facet: FacetSpec,
+    *,
+    doc_chunks: list[Any],
+    code_slices: list[Any],
+    domain_id: str = "",
+) -> tuple[QueryFacetCoverage, str | None]:
+    """Evaluates whether a single facet has genuine lexical/entity grounding in retrieved items.
+
+    Returns ``(QueryFacetCoverage, missing_aspect_message_or_none)``.
+    """
+    from context_scout.schemas.contracts import QueryFacetCoverage
+
+    # Direct symbol identifier check: if a PascalCase/snake_case symbol from the facet
+    # is directly present in code_slices, mark the facet grounded (1.0).
+    facet_symbols = set(
+        _CODE_CAMEL_CASE_RE.findall(facet.facet_query)
+        + _CODE_SNAKE_CASE_RE.findall(facet.facet_query)
+    )
+    if facet_symbols and code_slices:
+        matched_code_sources: list[str] = []
+        for slc in code_slices:
+            qsym = str(getattr(slc, "qualified_symbol", "") or "")
+            fpath = str(getattr(slc, "file_path", "") or "")
+            code_txt = str(getattr(slc, "verbatim_code_with_lines", "") or "")
+            if any(sym in qsym or sym in fpath or sym in code_txt for sym in facet_symbols):
+                label = fpath or qsym
+                if label and label not in matched_code_sources:
+                    matched_code_sources.append(label)
+        if matched_code_sources:
+            return (
+                QueryFacetCoverage(
+                    facet_id=facet.facet_id,
+                    facet_query=facet.facet_query,
+                    status="grounded",
+                    matched_sources=matched_code_sources[:5],
+                    confidence=1.0,
+                    explanation=(
+                        f"Directly matched symbol(s) in code slices: "
+                        f"{', '.join(matched_code_sources[:3])}."
+                    ),
+                ),
+                None,
+            )
+
+    terms = [t.lower() for t in facet.key_terms if t]
+    if not terms:
+        has_any = bool(doc_chunks or code_slices)
+        status: Literal["grounded", "partial", "not_found"] = "grounded" if has_any else "not_found"
+        return (
+            QueryFacetCoverage(
+                facet_id=facet.facet_id,
+                facet_query=facet.facet_query,
+                status=status,
+                matched_sources=[],
+                confidence=0.8 if has_any else 0.0,
+                explanation="Evaluated against retrieved context." if has_any else "No evidence.",
+            ),
+            None
+            if has_any
+            else (
+                f"No grounded evidence found in indexed corpus '{domain_id}' "
+                f"for: {facet.facet_query}."
+            ),
+        )
+
+    best_hits = 0
+    matched_terms_overall: set[str] = set()
+    matched_sources: list[str] = []
+
+    def _scan_text(text: str, source_label: str) -> None:
+        nonlocal best_hits
+        low = text.lower()
+        hits_here = {
+            t for t in terms if re.search(rf"\b{re.escape(t)}\b", low) or (len(t) >= 5 and t in low)
+        }
+        if hits_here:
+            matched_terms_overall.update(hits_here)
+            if len(hits_here) > best_hits:
+                best_hits = len(hits_here)
+            if source_label not in matched_sources and len(hits_here) >= min(2, len(terms)):
+                matched_sources.append(source_label)
+
+    if facet.expected_source_kind != "code" or not code_slices:
+        for chk in doc_chunks:
+            if facet.expected_source_kind == "issue" and not is_jira_chunk(chk):
+                # Also allow GitHub issue chunks whose title/uri/content mentions issue
+                uri_low = str(getattr(chk, "source_uri", "") or "").lower()
+                title_low = str(getattr(chk, "doc_title", "") or "").lower()
+                if "issue" not in uri_low and "issue" not in title_low and "#" not in title_low:
+                    continue
+            label = str(
+                getattr(chk, "doc_title", "")
+                or getattr(chk, "doc_id", "")
+                or getattr(chk, "chunk_id", "")
+            )
+            txt = (
+                f"{getattr(chk, 'doc_title', '')}\n"
+                f"{getattr(chk, 'section_heading', '')}\n"
+                f"{getattr(chk, 'verbatim_content', '')}\n"
+                f"{getattr(chk, 'full_section_content', '')}\n"
+                f"{getattr(chk, 'verbatim_quote', '')}"
+            )
+            _scan_text(txt, label)
+
+    if facet.expected_source_kind in ("code", "any") or (not matched_terms_overall and code_slices):
+        for slc in code_slices:
+            label = str(getattr(slc, "file_path", "") or getattr(slc, "qualified_symbol", ""))
+            txt = (
+                f"{getattr(slc, 'file_path', '')}\n"
+                f"{getattr(slc, 'qualified_symbol', '')}\n"
+                f"{getattr(slc, 'verbatim_code_with_lines', '')}"
+            )
+            _scan_text(txt, label)
+
+    total_terms = len(terms)
+    coverage_ratio = len(matched_terms_overall) / total_terms
+
+    # Issue tracking facet ("which issue tracks it") is grounded if an issue source matched
+    if facet.expected_source_kind == "issue":
+        if matched_sources or best_hits >= 1:
+            sources_str = ", ".join(matched_sources[:3]) or "matched issue chunk"
+            return (
+                QueryFacetCoverage(
+                    facet_id=facet.facet_id,
+                    facet_query=facet.facet_query,
+                    status="grounded",
+                    matched_sources=matched_sources[:5],
+                    confidence=0.85 if matched_sources else 0.65,
+                    explanation=f"Grounded in issue tracking source(s): {sources_str}.",
+                ),
+                None,
+            )
+        msg = (
+            f"No grounded issue/ticket found in indexed corpus '{domain_id}' "
+            f"for: {facet.facet_query}."
+        )
+        return (
+            QueryFacetCoverage(
+                facet_id=facet.facet_id,
+                facet_query=facet.facet_query,
+                status="not_found",
+                matched_sources=[],
+                confidence=0.0,
+                explanation=msg,
+            ),
+            msg,
+        )
+
+    # Acronym component facets (e.g. ACID Atomicity/Consistency/Isolation/Durability):
+    # grounded if the primary component term OR core acronym+transaction context is matched.
+    if facet.is_acronym_component and terms:
+        primary_term = terms[0]
+        if primary_term in matched_terms_overall or best_hits >= 2:
+            return (
+                QueryFacetCoverage(
+                    facet_id=facet.facet_id,
+                    facet_query=facet.facet_query,
+                    status="grounded",
+                    matched_sources=matched_sources[:5] or ["ACID Reference"],
+                    confidence=0.92 if primary_term in matched_terms_overall else 0.80,
+                    explanation=f"Grounded acronym component '{primary_term}' in retrieved docs.",
+                ),
+                None,
+            )
+
+    uppercase_acronyms = [
+        tok.lower()
+        for tok in re.findall(r"\b[A-Z][A-Z0-9]{2,}\b", facet.facet_query)
+        if tok.lower() in terms
+    ]
+    missing_acronyms = [acr for acr in uppercase_acronyms if acr not in matched_terms_overall]
+
+    if total_terms == 1:
+        is_grounded = best_hits == 1 and not missing_acronyms
+        is_partial = not is_grounded and best_hits >= 1
+    elif total_terms <= 3:
+        is_grounded = coverage_ratio >= 0.75 and not missing_acronyms and best_hits >= 2
+        is_partial = not is_grounded and coverage_ratio > 0.0 and (best_hits >= 1)
+    else:
+        is_grounded = coverage_ratio >= 0.75 and not missing_acronyms and best_hits >= 2
+        is_partial = (
+            not is_grounded and coverage_ratio > 0.0 and (best_hits >= 2 or coverage_ratio >= 0.34)
+        )
+
+    if is_grounded:
+        conf = min(0.98, round(0.60 + 0.38 * coverage_ratio, 3))
+        return (
+            QueryFacetCoverage(
+                facet_id=facet.facet_id,
+                facet_query=facet.facet_query,
+                status="grounded",
+                matched_sources=matched_sources[:5],
+                confidence=conf,
+                explanation=(
+                    f"Matched {len(matched_terms_overall)}/{total_terms} facet terms "
+                    f"across {max(1, len(matched_sources))} source(s)."
+                ),
+            ),
+            None,
+        )
+
+    missing_terms = [t for t in terms if t not in matched_terms_overall]
+    if is_partial:
+        msg = (
+            f"Partial evidence in indexed corpus '{domain_id}' for: {facet.facet_query} "
+            f"(unverified terms: {', '.join(missing_terms[:5])})."
+        )
+        return (
+            QueryFacetCoverage(
+                facet_id=facet.facet_id,
+                facet_query=facet.facet_query,
+                status="partial",
+                matched_sources=matched_sources[:5],
+                confidence=round(0.35 * coverage_ratio, 3),
+                explanation=msg,
+            ),
+            msg,
+        )
+
+    msg = (
+        f"Could not find grounded evidence in indexed corpus '{domain_id}' "
+        f"for: {facet.facet_query}."
+    )
+    return (
+        QueryFacetCoverage(
+            facet_id=facet.facet_id,
+            facet_query=facet.facet_query,
+            status="not_found",
+            matched_sources=[],
+            confidence=0.0,
+            explanation=msg,
+        ),
+        msg,
+    )
 
 
 class QueryIntentClassifier:
@@ -387,10 +949,14 @@ def format_doc_citation_label(
 
 
 __all__ = [
+    "FacetSpec",
     "QueryIntentClassifier",
     "QueryIntentDecision",
     "QueryIntentMode",
+    "QueryPlan",
     "SourceFilter",
+    "decompose_query_facets",
+    "evaluate_facet_grounding",
     "filter_doc_chunks_by_source",
     "format_doc_citation_label",
     "is_jira_chunk",

@@ -30,13 +30,17 @@ from context_scout.security.rbac import (
 
 logger = logging.getLogger(__name__)
 
-MAX_PAYLOAD_ITEMS: Final[int] = 10
-MAX_PAYLOAD_BYTES: Final[int] = 32768  # 32 KB hard serialized JSON cap
-TRUNCATION_INDICATOR: Final[str] = "[PAYLOAD_TRUNCATED_AT_32KB]"
+MAX_PAYLOAD_ITEMS: Final[int] = 25
+MAX_PAYLOAD_BYTES: Final[int] = 131_072  # 128 KB hard serialized JSON cap
+TRUNCATION_INDICATOR: Final[str] = "[PAYLOAD_TRUNCATED]"
 
 
 def _as_uuid(val: object) -> UUID:
     return val if isinstance(val, UUID) else UUID(str(val))
+
+
+def _serialized_byte_len(data: dict[str, Any]) -> int:
+    return len(json.dumps(data, default=str).encode("utf-8"))
 
 
 def bound_payload_dict(
@@ -63,12 +67,22 @@ def bound_payload_dict(
             data[key] = data[key][:max_items]
 
     # 2. Check byte size
-    raw_json = json.dumps(data, default=str)
-    raw_bytes = len(raw_json.encode("utf-8"))
-    if raw_bytes <= max_bytes:
+    if _serialized_byte_len(data) <= max_bytes:
         return data
 
-    # 3. Truncate long text fields within collections
+    data["payload_truncated"] = True
+    data["truncation_notice"] = TRUNCATION_INDICATOR
+
+    # 3. Drop trailing list items cleanly first so retained items remain un-truncated
+    for key in collection_keys:
+        if key in data and isinstance(data[key], list) and len(data[key]) > 1:
+            while len(data[key]) > 1:
+                data[key].pop()
+                if _serialized_byte_len(data) <= max_bytes:
+                    return data
+
+    # 4. Only if a single item alone still exceeds max_bytes, slice its largest text field(s)
+    # proportionally to fit max_bytes (never hardcoded [:150] mutilation).
     text_fields = (
         "verbatim_content",
         "raw_content",
@@ -78,48 +92,54 @@ def bound_payload_dict(
         "signature_skeleton",
         "content",
     )
-    for key in collection_keys:
-        if key in data and isinstance(data[key], list):
-            items_list = data[key]
-            for item in items_list:
-                if isinstance(item, dict):
-                    for tf in text_fields:
-                        if tf in item and isinstance(item[tf], str) and len(item[tf]) > 300:
-                            item[tf] = item[tf][:300] + "... [TRUNCATED]"
-
-    data["payload_truncated"] = True
-    data["truncation_notice"] = TRUNCATION_INDICATOR
-
-    raw_json = json.dumps(data, default=str)
-    raw_bytes = len(raw_json.encode("utf-8"))
-    if raw_bytes <= max_bytes:
-        return data
-
-    # 4. Progressively shed items from list until payload satisfies limit
-    for key in collection_keys:
-        if key in data and isinstance(data[key], list) and len(data[key]) > 1:
-            while len(data[key]) > 1:
-                data[key].pop()
-                if len(json.dumps(data, default=str).encode("utf-8")) <= max_bytes:
-                    return data
-
-    # 5. Fallback: if single item exceeds limit, aggressively truncate its text fields
+    suffix = f"... {TRUNCATION_INDICATOR}"
     for key in collection_keys:
         if key in data and isinstance(data[key], list) and data[key]:
             single_item = data[key][0]
             if isinstance(single_item, dict):
-                for tf in text_fields:
-                    if tf in single_item and isinstance(single_item[tf], str):
-                        single_item[tf] = single_item[tf][:150] + "... " + TRUNCATION_INDICATOR
+                while _serialized_byte_len(data) > max_bytes:
+                    largest_field: str | None = None
+                    largest_len = 0
+                    for tf in text_fields:
+                        val = single_item.get(tf)
+                        if (
+                            isinstance(val, str)
+                            and not val.endswith(TRUNCATION_INDICATOR)
+                            and len(val) > largest_len
+                        ):
+                            largest_len = len(val)
+                            largest_field = tf
+                    if largest_field is None or largest_len == 0:
+                        break
+                    orig_val = str(single_item[largest_field])
+                    single_item[largest_field] = suffix
+                    base_bytes = _serialized_byte_len(data)
+                    available_bytes = max_bytes - base_bytes
+                    if available_bytes <= 0:
+                        break
+                    # Binary-search largest prefix of orig_val that fits within max_bytes
+                    lo, hi = 0, len(orig_val)
+                    best = 0
+                    while lo <= hi:
+                        mid = (lo + hi) // 2
+                        single_item[largest_field] = orig_val[:mid] + suffix
+                        if _serialized_byte_len(data) <= max_bytes:
+                            best = mid
+                            lo = mid + 1
+                        else:
+                            hi = mid - 1
+                    single_item[largest_field] = orig_val[:best] + suffix
 
     # Ensure final JSON is strictly within max_bytes
-    final_json = json.dumps(data, default=str)
-    if len(final_json.encode("utf-8")) > max_bytes:
+    if _serialized_byte_len(data) > max_bytes:
         # Ultimate guarantee: minimal truncated payload
         return {
             "payload_truncated": True,
             "truncation_notice": TRUNCATION_INDICATOR,
-            "error": "Payload exceeded 32 KB threshold and was truncated to minimal representation",
+            "error": (
+                f"Payload exceeded {max_bytes} byte threshold "
+                "and was truncated to minimal representation"
+            ),
             "retained_metadata": {
                 k: v for k, v in data.items() if not isinstance(v, list) and len(str(v)) < 100
             },
@@ -475,6 +495,27 @@ class PostgresScoutGraphAdapter:
             query += " ORDER BY doc_id, chunk_id LIMIT 100;"
             rows = conn.execute(query, tuple(params)).fetchall()
             return [self._row_to_doc_chunk(r) for r in rows]
+
+    def count_visible_doc_chunks(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+    ) -> tuple[int, int]:
+        """Returns (active_non_stale_count, stale_count) visible to principal under RLS."""
+        with scoped_db_session(self.connection_manager, principal) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE NOT COALESCE(is_stale, FALSE)),
+                    COUNT(*) FILTER (WHERE COALESCE(is_stale, FALSE))
+                FROM doc_chunks
+                WHERE domain_id = %s;
+                """,
+                (domain_id,),
+            ).fetchone()
+            if row is None:
+                return (0, 0)
+            return (int(str(row[0] or 0)), int(str(row[1] or 0)))
 
     def search_visible_doc_chunks(
         self,

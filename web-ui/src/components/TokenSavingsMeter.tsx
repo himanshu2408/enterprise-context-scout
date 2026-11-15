@@ -49,19 +49,19 @@ export const TokenSavingsMeter: React.FC<TokenSavingsMeterProps> = ({
 
   return (
     <section
-      className="panel telemetry-strip-panel"
+      className="telemetry-strip-panel"
       data-testid="token-savings-meter"
     >
       <div className="telemetry-strip-row">
         <div className="telemetry-strip-left">
-          <div className="panel-title-row">
+          <div className="scope-section-title">
             <Coins size={15} className="icon-accent" />
-            <h2 className="panel-title">Cost &amp; Telemetry Strip</h2>
+            <h2 className="section-heading">Pack Size &amp; Cost</h2>
           </div>
 
           {summary && (
             <span
-              className="badge badge-info"
+              className="status-tag status-tag-info"
               data-testid="telemetry-source-badge"
             >
               <Database size={11} />
@@ -92,8 +92,9 @@ export const TokenSavingsMeter: React.FC<TokenSavingsMeterProps> = ({
                 Cumulative ({summary.total_queries} queries):{" "}
                 <strong>
                   ${summary.total_estimated_usd_saved.toFixed(2)} saved
-                </strong>{" "}
-                · {summary.total_paid_tokens_saved.toLocaleString()} paid tokens
+                </strong>
+                {", "}
+                {summary.total_paid_tokens_saved.toLocaleString()} paid tokens
                 avoided ({summary.frontier_savings_ratio_pct.toFixed(1)}% avg)
               </span>
             </div>
@@ -102,7 +103,7 @@ export const TokenSavingsMeter: React.FC<TokenSavingsMeterProps> = ({
 
         <button
           type="button"
-          className="btn-metrics-toggle"
+          className="btn-quiet-toggle"
           onClick={() => setExpanded((prev) => !prev)}
           aria-expanded={expanded}
           data-testid="toggle-telemetry-strip-btn"
@@ -120,13 +121,13 @@ export const TokenSavingsMeter: React.FC<TokenSavingsMeterProps> = ({
             <div className="savings-strip-ratio-wrap">
               <span className="savings-label">Current Query Reduction</span>
               <span
-                className="savings-pct-value savings-pct-compact"
+                className="savings-pct-value tabular-num"
                 data-testid="frontier-savings-ratio"
               >
                 {currentQuerySavings.frontier_savings_ratio_pct.toFixed(1)}%
               </span>
               <div
-                className="progress-track progress-track-compact"
+                className="progress-track"
                 aria-label="Frontier token reduction"
               >
                 <div
@@ -137,35 +138,38 @@ export const TokenSavingsMeter: React.FC<TokenSavingsMeterProps> = ({
             </div>
 
             <div className="savings-strip-stats">
-              <div className="stat-chip">
+              <div className="stat-inline">
                 <span className="stat-label">Local Explored</span>
                 <span
-                  className="stat-value"
+                  className="stat-value tabular-num"
                   data-testid="local-tokens-explored"
                 >
                   {currentQuerySavings.local_tokens_explored.toLocaleString()}
                 </span>
               </div>
-              <div className="stat-chip">
+              <div className="stat-inline">
                 <span className="stat-label">Pack Tokens</span>
-                <span className="stat-value" data-testid="frontier-tokens-sent">
+                <span
+                  className="stat-value tabular-num"
+                  data-testid="frontier-tokens-sent"
+                >
                   {currentQuerySavings.pack_tokens_sent.toLocaleString()}
                 </span>
               </div>
-              <div className="stat-chip">
+              <div className="stat-inline">
                 <span className="stat-label">QLoRA Overhead Saved</span>
                 <span
-                  className="stat-value"
+                  className="stat-value tabular-num"
                   data-testid="qlora-overhead-eliminated"
                 >
                   {currentQuerySavings.qlora_overhead_eliminated_tokens.toLocaleString()}{" "}
                   tok
                 </span>
               </div>
-              <div className="stat-chip">
+              <div className="stat-inline">
                 <span className="stat-label">Est. USD Avoided</span>
                 <span
-                  className="stat-value stat-value-accent"
+                  className="stat-value stat-value-accent tabular-num"
                   data-testid="usd-saved"
                 >
                   ${currentQuerySavings.estimated_usd_saved.toFixed(4)}
@@ -175,7 +179,7 @@ export const TokenSavingsMeter: React.FC<TokenSavingsMeterProps> = ({
           </div>
         ) : (
           <div
-            className="empty-telemetry-box empty-telemetry-inline"
+            className="empty-telemetry-inline"
             data-testid="empty-query-savings"
           >
             <Sparkles size={13} className="icon-muted" />
@@ -189,13 +193,13 @@ export const TokenSavingsMeter: React.FC<TokenSavingsMeterProps> = ({
 
       {expanded && (
         <div
-          className="frontier-rates-section frontier-rates-drawer"
+          className="frontier-rates-drawer"
           data-testid="frontier-rates-drawer"
         >
           <span className="field-label">
             Frontier Input Comparison (Oct 2026 Verified List Rates)
           </span>
-          <div className="rates-table rates-table-horizontal">
+          <div className="rates-table-horizontal">
             {OCT_2026_FRONTIER_RATES.map((model) => {
               const naiveUsd = currentQuerySavings
                 ? (currentQuerySavings.local_tokens_explored / 1_000_000) *
@@ -208,12 +212,12 @@ export const TokenSavingsMeter: React.FC<TokenSavingsMeterProps> = ({
               return (
                 <div key={model.name} className="rate-row">
                   <span className="rate-model">{model.name}</span>
-                  <span className="rate-price">
+                  <span className="rate-price tabular-num">
                     ${model.inputUsdPer1M.toFixed(2)}/1M
                   </span>
-                  <span className="rate-delta">
+                  <span className="rate-delta tabular-num">
                     {naiveUsd !== null && scoutUsd !== null
-                      ? `$${naiveUsd.toFixed(4)} → $${scoutUsd.toFixed(4)}`
+                      ? `$${naiveUsd.toFixed(4)} vs $${scoutUsd.toFixed(4)}`
                       : "Run query"}
                   </span>
                 </div>

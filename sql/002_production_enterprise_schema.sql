@@ -115,6 +115,8 @@ ALTER TABLE ast_symbols ADD CONSTRAINT ast_symbols_symbol_kind_check CHECK (symb
 
 CREATE INDEX IF NOT EXISTS idx_ast_symbols_repo_qual ON ast_symbols (domain_id, repo_qualified_id);
 CREATE INDEX IF NOT EXISTS idx_ast_symbols_bare_name ON ast_symbols (bare_name);
+CREATE INDEX IF NOT EXISTS idx_ast_symbols_file_id ON ast_symbols (file_id);
+CREATE INDEX IF NOT EXISTS idx_ast_symbols_domain_qual ON ast_symbols (domain_id, qualified_name);
 
 -- C. ast_edges: add target_repo_qualified_id, is_cross_repo, expand edge_kind
 ALTER TABLE ast_edges ADD COLUMN IF NOT EXISTS target_repo_qualified_id TEXT;
@@ -127,6 +129,8 @@ ALTER TABLE ast_edges ADD CONSTRAINT ast_edges_edge_kind_check CHECK (edge_kind 
 ));
 
 CREATE INDEX IF NOT EXISTS idx_ast_edges_target_qual ON ast_edges (target_repo_qualified_id);
+CREATE INDEX IF NOT EXISTS idx_ast_edges_domain_target_qname ON ast_edges (domain_id, target_qualified_name, edge_kind);
+CREATE INDEX IF NOT EXISTS idx_ast_edges_domain_source_kind ON ast_edges (domain_id, source_symbol_id, edge_kind);
 
 -- D. doc_chunks: add enterprise metadata columns & relax market_scope constraint
 ALTER TABLE doc_chunks ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'quant_paper';

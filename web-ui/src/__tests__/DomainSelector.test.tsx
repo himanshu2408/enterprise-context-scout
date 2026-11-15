@@ -38,7 +38,7 @@ describe("DomainSelector", () => {
     expect(screen.getByTestId("domain-card-federated_all")).toBeInTheDocument();
     expect(
       screen.getByTestId("domain-card-trading_code_scout")
-    ).toHaveClass("domain-card-active");
+    ).toHaveClass("domain-row-active");
 
     fireEvent.click(screen.getByTestId("domain-card-quant_research_scout"));
     expect(onSelect).toHaveBeenCalledWith("quant_research_scout");
@@ -62,10 +62,10 @@ describe("DomainSelector", () => {
 
     expect(
       screen.getByTestId("domain-card-quant_research_scout")
-    ).toHaveClass("domain-card-active");
+    ).toHaveClass("domain-row-active");
     expect(
       screen.getByTestId("domain-card-trading_code_scout")
-    ).not.toHaveClass("domain-card-active");
+    ).not.toHaveClass("domain-row-active");
 
     fireEvent.click(
       screen.getByTestId("toggle-adapter-metrics-trading_code_scout")

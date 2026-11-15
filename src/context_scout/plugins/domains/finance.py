@@ -306,106 +306,132 @@ class FinanceDomainPlugin:
         if MarketRegime.INDIA_NSE_BSE in target_markets:
             assumed_bps = 25.0
 
+        from context_scout.plugins.domains.data_engineering import (
+            clean_brief_title,
+            clean_display_text,
+            is_slop_text,
+        )
+
+        clean_top_title = (
+            clean_brief_title(str(top_chk.doc_title), default="Verified Empirical Research")
+            if top_chk is not None
+            else "Verified Empirical Research"
+        )
         strategy_name = (
-            f"{top_chk.doc_title} Synthesis" if top_chk else "Verified Empirical Research Strategy"
+            f"{clean_top_title} Synthesis" if top_chk else "Verified Empirical Research Strategy"
         )
         signal_latex = r"E[Y \mid X] = f_{\theta}(\text{DomainContext})"
-        entry_exit_rules = [
-            f"Grounded in verified citation from {top_chk.doc_title if top_chk else 'corpus'}",
-            "Follow verified quantitative rules from retrieved evidence",
-            "Enforce strict stop-loss on adverse excursion",
-        ]
-        market_caveats = [
-            "Requires empirical validation across historical market regimes",
-            "Transaction friction and execution latency must be evaluated",
-        ]
-        failure_regimes = [
-            "High volatility macroeconomic announcement windows",
-            "Flash liquidity withdrawal regimes",
-        ]
+
+        # Extract real empirical findings, caveats, and failure regimes from retrieved chunks
+        extracted_rules: list[str] = []
+        extracted_caveats: list[str] = []
+        extracted_failures: list[str] = []
+        for chk in chunks:
+            for raw_ln in str(getattr(chk, "verbatim_content", "") or "").splitlines():
+                s_ln = raw_ln.strip().lstrip("-*•0123456789. ")
+                if len(s_ln) < 30 or s_ln.endswith(":") or is_slop_text(s_ln):
+                    continue
+                cleaned_ln = clean_display_text(s_ln)
+                if len(cleaned_ln) < 30 or len(re.findall(r"[A-Za-z]{3,}", cleaned_ln)) < 4:
+                    continue
+                s_lower = cleaned_ln.lower()
+                if any(
+                    fk in s_lower
+                    for fk in (
+                        "off-target",
+                        "failure",
+                        "fail",
+                        "degrad",
+                        "instability",
+                        "toxic",
+                        "error",
+                        "loss of",
+                        "breach",
+                        "violation",
+                        "penalty",
+                        "outage",
+                        "drawdown",
+                        "crash",
+                        "slippage",
+                        "overfit",
+                        "non-stationar",
+                    )
+                ):
+                    if cleaned_ln not in extracted_failures and len(extracted_failures) < 6:
+                        extracted_failures.append(cleaned_ln)
+                elif any(
+                    ck in s_lower
+                    for ck in (
+                        "caveat",
+                        "constraint",
+                        "require",
+                        "threshold",
+                        "control",
+                        "concentration",
+                        "temperature",
+                        "condition",
+                        "must",
+                        "mandatory",
+                        "compliance",
+                        "friction",
+                        "transaction cost",
+                        "liquidity",
+                    )
+                ):
+                    if cleaned_ln not in extracted_caveats and len(extracted_caveats) < 6:
+                        extracted_caveats.append(cleaned_ln)
+                elif cleaned_ln not in extracted_rules and len(extracted_rules) < 8:
+                    extracted_rules.append(cleaned_ln)
+
+        for cit in reversed(verified_citations):
+            q = str(getattr(cit, "verbatim_quote", "") or "").strip()
+            cleaned_q = clean_display_text(q)
+            if cleaned_q and not is_slop_text(q) and cleaned_q not in extracted_rules:
+                extracted_rules.insert(0, cleaned_q)
+
+        entry_exit_rules = (
+            extracted_rules[:6]
+            if extracted_rules
+            else [
+                f"Grounded in verified citation from {clean_top_title}",
+                "Evaluate empirical signal calibration against out-of-sample regime shifts",
+                "Enforce strict risk limits and drawdown controls",
+            ]
+        )
+        market_caveats = (
+            extracted_caveats[:5]
+            if extracted_caveats
+            else [
+                "Requires empirical validation across historical market regimes",
+                "Transaction friction and execution latency must be evaluated",
+            ]
+        )
+        failure_regimes = (
+            extracted_failures[:5]
+            if extracted_failures
+            else [
+                "High volatility macroeconomic announcement windows",
+                "Flash liquidity withdrawal regimes",
+            ]
+        )
         sharpe_ratio: float | None = 2.0
         max_dd_pct: float | None = 5.0
 
         if domain_id != DOMAIN_ID_FINANCE and top_chk is not None:
+            clean_sec = clean_brief_title(str(top_chk.section_heading or ""), default="")
             strategy_name = (
-                f"{top_chk.doc_title} — {top_chk.section_heading}"
-                if top_chk.section_heading
-                else f"{top_chk.doc_title} Empirical Synthesis"
+                f"{clean_top_title} — {clean_sec}"
+                if clean_sec
+                else f"{clean_top_title} Empirical Synthesis"
             )
             target_markets = [MarketRegime.GLOBAL_MULTI]
             sharpe_ratio = None
             max_dd_pct = None
             assumed_bps = None
-            combined_text = "\n".join(c.verbatim_content for c in chunks[:3])
+            combined_text = "\n".join(c.verbatim_content for c in chunks)
             math_match = re.search(r"\$\$?([^\$\n]{4,120})\$\$?", combined_text)
             if math_match:
                 signal_latex = math_match.group(1).strip()
-            rule_sentences: list[str] = []
-            caveat_sentences: list[str] = []
-            failure_sentences: list[str] = []
-            for chk in chunks[:3]:
-                for raw_ln in chk.verbatim_content.splitlines():
-                    s_ln = raw_ln.strip().lstrip("-*•0123456789. ")
-                    if len(s_ln) < 30 or s_ln.startswith("#") or s_ln.startswith("%"):
-                        continue
-                    s_lower = s_ln.lower()
-                    if any(
-                        fk in s_lower
-                        for fk in (
-                            "off-target",
-                            "failure",
-                            "fail",
-                            "degrad",
-                            "instability",
-                            "toxic",
-                            "error",
-                            "loss of",
-                            "breach",
-                            "violation",
-                            "penalty",
-                            "outage",
-                        )
-                    ):
-                        if s_ln not in failure_sentences:
-                            failure_sentences.append(s_ln)
-                    elif (
-                        any(
-                            ck in s_lower
-                            for ck in (
-                                "caveat",
-                                "constraint",
-                                "require",
-                                "threshold",
-                                "control",
-                                "concentration",
-                                "temperature",
-                                "condition",
-                                "must",
-                                "mandatory",
-                                "compliance",
-                            )
-                        )
-                        and s_ln not in caveat_sentences
-                    ):
-                        caveat_sentences.append(s_ln)
-                    if s_ln not in rule_sentences:
-                        rule_sentences.append(s_ln)
-
-            entry_exit_rules = (
-                rule_sentences[:3]
-                if rule_sentences
-                else [f"Apply protocol validated in {top_chk.doc_title}"]
-            )
-            market_caveats = (
-                caveat_sentences[:2]
-                if caveat_sentences
-                else [f"Grounded in {top_chk.doc_id} ({top_chk.section_heading})"]
-            )
-            failure_regimes = (
-                failure_sentences[:3]
-                if failure_sentences
-                else ["Out-of-distribution regime shift across experimental conditions"]
-            )
         elif "momentum" in prompt_lower:
             if MarketRegime.INDIA_NSE_BSE in target_markets:
                 strategy_name = (

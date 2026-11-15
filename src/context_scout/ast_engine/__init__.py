@@ -2,6 +2,7 @@
 
 from context_scout.ast_engine.dependency_expander import (
     ASTDependencyExpander,
+    ContextCompletenessConfig,
     ScoutGraphRepository,
 )
 from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
@@ -26,6 +27,7 @@ __all__ = [
     "ASTExpansionCandidate",
     "ASTExpansionResult",
     "ASTExtractor",
+    "ContextCompletenessConfig",
     "DeterministicSlicer",
     "HallucinatedQuoteError",
     "InvalidLineBoundsError",

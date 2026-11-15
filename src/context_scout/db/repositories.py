@@ -3,6 +3,7 @@
 import json
 import logging
 import math
+import re
 from collections import Counter
 from datetime import date, datetime
 from typing import Any
@@ -766,7 +767,7 @@ class PostgresRLSRepository:
         """
         focus_uuid = UUID(str(focus_symbol_id))
         cte_sql = """
-        WITH RECURSIVE
+        WITH
         target_sym AS (
             SELECT s.symbol_id, s.file_id, s.domain_id, s.qualified_name, s.symbol_kind,
                    s.start_line, s.end_line, s.signature_skeleton, s.contextual_summary,
@@ -775,96 +776,129 @@ class PostgresRLSRepository:
             JOIN code_files f ON f.file_id = s.file_id
             WHERE s.domain_id = %s AND s.symbol_id = %s
         ),
-        outward_closure AS (
+        focus_family AS (
+            SELECT symbol_id, qualified_name, file_id
+            FROM target_sym
+            UNION
+            SELECT s.symbol_id, s.qualified_name, s.file_id
+            FROM ast_symbols s
+            JOIN target_sym ts ON s.domain_id = ts.domain_id AND s.file_id = ts.file_id
+            WHERE ts.symbol_kind = 'class'
+              AND s.qualified_name LIKE (ts.qualified_name || '.' || CHR(37))
+        ),
+        hop1_outward AS (
             -- Hop 1: Outward edges (USES_TYPE, IMPORTS, INHERITS, and same-file CALLS)
-            SELECT 
+            SELECT
                 e.edge_id,
                 e.edge_kind,
                 e.target_symbol_id AS related_symbol_id,
                 1 AS depth,
                 'imported_type' AS intent_role
             FROM ast_edges e
-            JOIN target_sym ts ON e.source_symbol_id = ts.symbol_id
+            JOIN focus_family ff ON e.source_symbol_id = ff.symbol_id
+            JOIN target_sym ts ON TRUE
             WHERE e.domain_id = %s
               AND e.target_symbol_id IS NOT NULL
+              AND e.target_symbol_id NOT IN (
+                  SELECT ff2.symbol_id FROM focus_family ff2 WHERE ff2.symbol_id <> ts.symbol_id
+              )
               AND (
                   e.edge_kind IN ('USES_TYPE', 'IMPORTS', 'INHERITS')
                   OR (e.edge_kind = 'CALLS' AND EXISTS (
-                      SELECT 1 FROM ast_symbols s2 
+                      SELECT 1 FROM ast_symbols s2
                       WHERE s2.symbol_id = e.target_symbol_id AND s2.file_id = ts.file_id
                   ))
               )
-            UNION
-            -- Hop 2: Transitive schema/type/inheritance closure within the same repository
-            SELECT 
+        ),
+        hop2_outward AS (
+            -- Hop 2: Transitive schema/type/inheritance/import closure within the same repository
+            SELECT
                 e2.edge_id,
                 e2.edge_kind,
                 e2.target_symbol_id AS related_symbol_id,
                 2 AS depth,
                 'imported_type' AS intent_role
-            FROM ast_edges e2
-            JOIN outward_closure oc ON e2.source_symbol_id = oc.related_symbol_id
-            JOIN target_sym ts ON 1=1
-            JOIN ast_symbols s_hop1 ON s_hop1.symbol_id = oc.related_symbol_id
+            FROM hop1_outward h1
+            JOIN ast_edges e2 ON e2.source_symbol_id = h1.related_symbol_id
+            JOIN target_sym ts ON TRUE
+            JOIN ast_symbols s_hop1 ON s_hop1.symbol_id = h1.related_symbol_id
             JOIN code_files f_hop1 ON f_hop1.file_id = s_hop1.file_id
-            WHERE oc.depth = 1
-              AND oc.edge_kind IN ('USES_TYPE', 'INHERITS')
+            WHERE h1.edge_kind IN ('USES_TYPE', 'INHERITS', 'IMPORTS')
               AND e2.domain_id = %s
               AND e2.target_symbol_id IS NOT NULL
-              AND e2.edge_kind IN ('USES_TYPE', 'INHERITS')
+              AND e2.edge_kind IN ('USES_TYPE', 'INHERITS', 'IMPORTS')
               AND f_hop1.repo_name = ts.repo_name
+        ),
+        outward_closure AS (
+            SELECT * FROM hop1_outward
+            UNION
+            SELECT * FROM hop2_outward
+        ),
+        inward_caller_edges AS (
+            SELECT e.edge_id, e.edge_kind, e.source_symbol_id
+            FROM ast_edges e
+            JOIN focus_family ff ON e.target_symbol_id = ff.symbol_id
+            WHERE e.domain_id = %s
+              AND e.edge_kind = 'CALLS'
+              AND e.source_symbol_id NOT IN (SELECT symbol_id FROM focus_family)
+            UNION
+            SELECT e.edge_id, e.edge_kind, e.source_symbol_id
+            FROM ast_edges e
+            JOIN focus_family ff ON e.target_qualified_name = ff.qualified_name
+            WHERE e.domain_id = %s
+              AND e.edge_kind = 'CALLS'
+              AND e.source_symbol_id NOT IN (SELECT symbol_id FROM focus_family)
         ),
         inward_callers AS (
             -- Direct callers ranked with diversity across caller files
-            SELECT 
+            SELECT
                 ranked.edge_id,
                 ranked.edge_kind,
                 ranked.source_symbol_id AS related_symbol_id,
                 1 AS depth,
                 'direct_caller' AS intent_role
             FROM (
-                SELECT 
+                SELECT
                     e.edge_id,
                     e.edge_kind,
                     e.source_symbol_id,
                     ROW_NUMBER() OVER (
-                        PARTITION BY s_caller.file_id 
+                        PARTITION BY s_caller.file_id
                         ORDER BY s_caller.start_line, e.edge_id
                     ) AS file_call_rank,
                     ROW_NUMBER() OVER (
                         ORDER BY (s_caller.file_id = ts.file_id) ASC,
                                  s_caller.file_id, s_caller.start_line
                     ) AS overall_rank
-                FROM ast_edges e
-                JOIN target_sym ts ON (
-                    e.target_symbol_id = ts.symbol_id
-                    OR e.target_qualified_name = ts.qualified_name
-                )
+                FROM inward_caller_edges e
+                CROSS JOIN target_sym ts
                 JOIN ast_symbols s_caller ON s_caller.symbol_id = e.source_symbol_id
-                WHERE e.domain_id = %s
-                  AND e.edge_kind = 'CALLS'
             ) ranked
             WHERE ranked.file_call_rank = 1 AND ranked.overall_rank <= %s
         ),
         test_fixtures AS (
-            -- Direct TESTED_BY edge resolution
-            SELECT 
-                e.edge_id,
-                e.edge_kind,
-                CASE 
-                    WHEN e.source_symbol_id = ts.symbol_id THEN e.target_symbol_id
-                    ELSE e.source_symbol_id
-                END AS related_symbol_id,
-                1 AS depth,
-                'test_fixture' AS intent_role
-            FROM ast_edges e
-            JOIN target_sym ts ON (
-                (e.source_symbol_id = ts.symbol_id AND e.target_symbol_id IS NOT NULL)
-                OR (e.target_symbol_id = ts.symbol_id)
-                OR (e.target_qualified_name = ts.qualified_name)
-            )
-            WHERE e.domain_id = %s
-              AND e.edge_kind = 'TESTED_BY'
+            -- Direct TESTED_BY edge resolution (UNION of index-friendly branches)
+            SELECT edge_id, edge_kind, related_symbol_id, 1 AS depth, 'test_fixture' AS intent_role
+            FROM (
+                SELECT e.edge_id, e.edge_kind, e.target_symbol_id AS related_symbol_id
+                FROM ast_edges e
+                JOIN focus_family ff ON e.source_symbol_id = ff.symbol_id
+                WHERE e.domain_id = %s
+                  AND e.edge_kind = 'TESTED_BY'
+                  AND e.target_symbol_id IS NOT NULL
+                UNION
+                SELECT e.edge_id, e.edge_kind, e.source_symbol_id AS related_symbol_id
+                FROM ast_edges e
+                JOIN focus_family ff ON e.target_symbol_id = ff.symbol_id
+                WHERE e.domain_id = %s
+                  AND e.edge_kind = 'TESTED_BY'
+                UNION
+                SELECT e.edge_id, e.edge_kind, e.source_symbol_id AS related_symbol_id
+                FROM ast_edges e
+                JOIN focus_family ff ON e.target_qualified_name = ff.qualified_name
+                WHERE e.domain_id = %s
+                  AND e.edge_kind = 'TESTED_BY'
+            ) tf
             LIMIT 2
         ),
         combined_neighborhood AS (
@@ -906,7 +940,10 @@ class PostgresRLSRepository:
             domain_id,
             domain_id,
             domain_id,
+            domain_id,
             max_direct_callers,
+            domain_id,
+            domain_id,
             domain_id,
             domain_id,
         )
@@ -1164,21 +1201,71 @@ class PostgresRLSRepository:
         market_str = _serialize_market_scope(market_scope)
         candidate_pool = max(100, top_k * 10)
         penalty_rank = candidate_pool + 1
+        filler_words = {
+            "what",
+            "does",
+            "stand",
+            "stands",
+            "mean",
+            "means",
+            "compare",
+            "list",
+            "top",
+            "explain",
+            "describe",
+            "inspect",
+            "give",
+            "how",
+            "when",
+            "where",
+            "why",
+            "which",
+            "mitigate",
+            "empirical",
+            "findings",
+            "reasons",
+            "failure",
+            "modes",
+        }
+        raw_tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9_]+", query_text)]
+        content_tokens = list(
+            dict.fromkeys(t for t in raw_tokens if len(t) >= 2 and t not in filler_words)
+        )[:16]
+        and_query = " ".join(content_tokens) if content_tokens else query_text.strip()
+        or_query = " OR ".join(content_tokens) if content_tokens else query_text.strip()
+        trgm_query = and_query or query_text.strip()
         query = """
-            WITH fts_ranked AS (
+            WITH domain_size AS (
+                SELECT COUNT(*) AS cnt
+                FROM doc_chunks
+                WHERE domain_id = %s
+            ),
+            fts_ranked AS (
                 SELECT chunk_id,
                        ROW_NUMBER() OVER (
-                           ORDER BY ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) DESC,
-                                    chunk_id
+                           ORDER BY fts_score DESC, chunk_id
                        ) AS fts_rank
                 FROM (
-                    SELECT chunk_id, fts_doc
+                    SELECT chunk_id,
+                           (
+                               ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) * 3.0
+                               + ts_rank_cd(fts_doc, websearch_to_tsquery('english', %s))
+                           ) * authority_weight AS fts_score
                     FROM doc_chunks
                     WHERE domain_id = %s
                       AND (%s::text IS NULL OR market_scope = %s)
                       AND authority_weight > 0.0
                       AND (%s OR NOT is_stale)
-                    ORDER BY ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) DESC, chunk_id
+                      AND fts_doc @@ websearch_to_tsquery('english', %s)
+                      AND (
+                          (SELECT cnt FROM domain_size) <= 50
+                          OR (
+                              LENGTH(TRIM(verbatim_content)) >= 45
+                              AND LEFT(LTRIM(verbatim_content), 5) <> (CHR(37) || ' ---')
+                              AND LEFT(LTRIM(verbatim_content), 11) <> '## See also'
+                          )
+                      )
+                    ORDER BY fts_score DESC, chunk_id
                     LIMIT %s
                 ) fts_sub
             ),
@@ -1194,6 +1281,14 @@ class PostgresRLSRepository:
                       AND (%s::text IS NULL OR market_scope = %s)
                       AND authority_weight > 0.0
                       AND (%s OR NOT is_stale)
+                      AND (
+                          (SELECT cnt FROM domain_size) <= 50
+                          OR (
+                              LENGTH(TRIM(verbatim_content)) >= 45
+                              AND LEFT(LTRIM(verbatim_content), 5) <> (CHR(37) || ' ---')
+                              AND LEFT(LTRIM(verbatim_content), 11) <> '## See also'
+                          )
+                      )
                     ORDER BY embedding <=> %s::vector ASC
                     LIMIT %s
                 ) vec_sub
@@ -1205,13 +1300,32 @@ class PostgresRLSRepository:
                        ) AS trgm_rank
                 FROM (
                     SELECT chunk_id,
-                           (similarity(verbatim_content, %s) * authority_weight) AS trgm_score
+                           (
+                               word_similarity(
+                                   %s,
+                                   doc_title || ' ' || section_heading
+                                   || ' ' || LEFT(verbatim_content, 1200)
+                               ) * authority_weight
+                           ) AS trgm_score
                     FROM doc_chunks
                     WHERE domain_id = %s
                       AND (%s::text IS NULL OR market_scope = %s)
                       AND authority_weight > 0.0
                       AND (%s OR NOT is_stale)
-                    ORDER BY (similarity(verbatim_content, %s) * authority_weight) DESC, chunk_id
+                      AND word_similarity(
+                              %s,
+                              doc_title || ' ' || section_heading
+                              || ' ' || LEFT(verbatim_content, 1200)
+                          ) >= 0.20
+                      AND (
+                          (SELECT cnt FROM domain_size) <= 50
+                          OR (
+                              LENGTH(TRIM(verbatim_content)) >= 45
+                              AND LEFT(LTRIM(verbatim_content), 5) <> (CHR(37) || ' ---')
+                              AND LEFT(LTRIM(verbatim_content), 11) <> '## See also'
+                          )
+                      )
+                    ORDER BY trgm_score DESC, chunk_id
                     LIMIT %s
                 ) trgm_sub
             ),
@@ -1238,12 +1352,14 @@ class PostgresRLSRepository:
               AND (%s OR NOT d.is_stale);
         """
         params = (
-            query_text,
+            domain_id,
+            and_query,
+            or_query,
             domain_id,
             market_str,
             market_str,
             include_stale,
-            query_text,
+            or_query,
             candidate_pool,
             vec_literal,
             domain_id,
@@ -1252,12 +1368,12 @@ class PostgresRLSRepository:
             include_stale,
             vec_literal,
             candidate_pool,
-            query_text,
+            trgm_query,
             domain_id,
             market_str,
             market_str,
             include_stale,
-            query_text,
+            trgm_query,
             candidate_pool,
             penalty_rank,
             penalty_rank,

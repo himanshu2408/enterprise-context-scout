@@ -115,8 +115,8 @@ class PrincipalContext(BaseModel):
     user_id: str = Field(min_length=1)
     role: RoleType
     allowed_scopes: list[str] = Field(min_length=1)
-    session_budget_tokens: int = Field(default=16_000, ge=1_000, le=500_000)
-    max_session_paid_tokens: int = Field(default=16_000, ge=1_000, le=500_000)
+    session_budget_tokens: int = Field(default=64_000, ge=1_000, le=500_000)
+    max_session_paid_tokens: int = Field(default=64_000, ge=1_000, le=500_000)
 
     @model_validator(mode="before")
     @classmethod
@@ -210,6 +210,51 @@ class VerbatimCodeSlice(CodeSlicePointer):
     auto_expanded_by_ast: bool = False
 
 
+class StageConfidence(BaseModel):
+    """Calibrated confidence telemetry for one of the 4 Scout pipeline stages."""
+
+    stage: int = Field(ge=1, le=4)
+    stage_name: str
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    confidence_band: Literal["high", "medium", "low"]
+    signals: dict[str, float | int | str | bool] = Field(default_factory=dict)
+    summary: str = ""
+
+    @classmethod
+    def from_score(
+        cls,
+        *,
+        stage: int,
+        stage_name: str,
+        score: float,
+        signals: dict[str, float | int | str | bool] | None = None,
+        summary: str = "",
+    ) -> "StageConfidence":
+        clamped = max(0.0, min(1.0, round(float(score), 4)))
+        band: Literal["high", "medium", "low"] = (
+            "high" if clamped >= 0.80 else ("medium" if clamped >= 0.55 else "low")
+        )
+        return cls(
+            stage=stage,
+            stage_name=stage_name,
+            confidence_score=clamped,
+            confidence_band=band,
+            signals=signals or {},
+            summary=summary,
+        )
+
+
+class QueryFacetCoverage(BaseModel):
+    """Per-facet grounding status for multi-part, comparison, or Top-N queries."""
+
+    facet_id: str
+    facet_query: str
+    status: Literal["grounded", "partial", "not_found"]
+    matched_sources: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    explanation: str = ""
+
+
 class DocCitationSpan(BaseModel):
     chunk_id: str = Field(min_length=1)
     doc_id: str = Field(min_length=1)
@@ -217,6 +262,7 @@ class DocCitationSpan(BaseModel):
     source_uri: str = Field(min_length=1)
     section_heading: str = Field(min_length=1)
     verbatim_quote: str = Field(min_length=1)
+    full_section_content: str = ""
     version: str = Field(
         default="1.0",
         min_length=1,
@@ -254,6 +300,12 @@ class DomainKnowledgeBrief(BaseModel):
     known_risks_and_failure_modes: list[str] = Field(min_length=1)
     structured_metadata: dict[str, str | float | int | bool] = Field(default_factory=dict)
     verified_citations: list[DocCitationSpan] = Field(min_length=1)
+    query_facets: list[QueryFacetCoverage] = Field(default_factory=list)
+    missing_or_unverified_aspects: list[str] = Field(default_factory=list)
+    completeness_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
+    synthesis_mode: Literal["live_qlora_json", "deterministic_extractive_fallback"] = (
+        "deterministic_extractive_fallback"
+    )
 
 
 def build_domain_knowledge_brief_prompt(
@@ -499,6 +551,9 @@ class InsufficientContextDiagnostic(BaseModel):
     missing_items: list[MissingItemRecord | str] = Field(default_factory=list)
     failure_check: str | None = None
     paid_tokens_spent: Literal[0] = 0
+    query_facets: list[QueryFacetCoverage] = Field(default_factory=list)
+    missing_or_unverified_aspects: list[str] = Field(default_factory=list)
+    stage_confidences: list[StageConfidence] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _sync_missing_items_and_symbols(self) -> "InsufficientContextDiagnostic":
@@ -555,6 +610,16 @@ class ImplementationContextPack(BaseModel):
     preflight_report: PreFlightValidationReport
     local_tokens_consumed: int = Field(ge=0)
     pack_token_count: int = Field(ge=1)
+    query_facets: list[QueryFacetCoverage] = Field(default_factory=list)
+    missing_or_unverified_aspects: list[str] = Field(default_factory=list)
+    completeness_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
+    synthesis_mode: Literal[
+        "live_qlora_json",
+        "deterministic_extractive_fallback",
+        "ast_extractive",
+        "hybrid_federated",
+    ] = "ast_extractive"
+    stage_confidences: list[StageConfidence] = Field(default_factory=list)
 
     @field_validator("code_slices")
     @classmethod
@@ -670,9 +735,11 @@ __all__ = [
     "PreFlightValidationReport",
     "PrincipalContext",
     "QuantStrategyBrief",
+    "QueryFacetCoverage",
     "RawQuoteItem",
     "RoleType",
     "ScoutConfig",
+    "StageConfidence",
     "VerbatimCodeSlice",
     "build_domain_knowledge_brief_prompt",
     "compute_normalized_rrf",

@@ -75,6 +75,8 @@ CREATE TABLE IF NOT EXISTS ast_edges (
 CREATE INDEX IF NOT EXISTS idx_ast_edges_domain ON ast_edges (domain_id);
 CREATE INDEX IF NOT EXISTS idx_ast_edges_source ON ast_edges (source_symbol_id, edge_kind);
 CREATE INDEX IF NOT EXISTS idx_ast_edges_target ON ast_edges (target_symbol_id, edge_kind);
+CREATE INDEX IF NOT EXISTS idx_ast_edges_domain_target_qname ON ast_edges (domain_id, target_qualified_name, edge_kind);
+CREATE INDEX IF NOT EXISTS idx_ast_edges_domain_source_kind ON ast_edges (domain_id, source_symbol_id, edge_kind);
 CREATE INDEX IF NOT EXISTS idx_ast_edges_scopes ON ast_edges USING GIN (allowed_scopes);
 
 -- 5. Contextual Document & Quant Research Paper Chunks

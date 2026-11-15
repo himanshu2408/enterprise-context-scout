@@ -493,12 +493,57 @@ def test_p2_02_deterministic_slicer_skeletonizes_god_classes_over_150_lines() ->
         selection_reason="Target class",
         modification_intent=ModificationIntent.MODIFY_TARGET,
     )
-    slicer = DeterministicSlicer()
-    sliced = slicer.slice_pointer(ptr, file_rec, query_text="Fix bug in method_5")
+    # 1. Explicit 150-line threshold skeletonizes the >200-line class
+    slicer_150 = DeterministicSlicer(skeletonize_class_line_threshold=150)
+    sliced = slicer_150.slice_pointer(ptr, file_rec, query_text="Fix bug in method_5")
     sliced_line_count = len(sliced.verbatim_code_with_lines.splitlines())
     assert sliced_line_count < len(lines) * 0.6
     assert "def method_5" in sliced.verbatim_code_with_lines
     assert "elided" in sliced.verbatim_code_with_lines
+
+    # 2. Default 450-line threshold preserves >200-line classes, skeletonizes >450-line classes
+    default_slicer = DeterministicSlicer()
+    assert default_slicer.skeletonize_class_line_threshold == 450
+    sliced_default_200 = default_slicer.slice_pointer(
+        ptr, file_rec, query_text="Fix bug in method_5"
+    )
+    assert "elided" not in sliced_default_200.verbatim_code_with_lines
+    assert len(sliced_default_200.verbatim_code_with_lines.splitlines()) == len(lines)
+
+    lines_500 = list(lines)
+    for i in range(20, 45):
+        lines_500.append(f"    def method_{i}(self) -> int:")
+        for j in range(1, 12):
+            lines_500.append(f"        val_{j} = {i} * {j}")
+        lines_500.append("        return val_1")
+    assert len(lines_500) > 450
+    file_rec_500 = CodeFileRecord(
+        file_id=file_rec.file_id,
+        domain_id=file_rec.domain_id,
+        repo_name=file_rec.repo_name,
+        file_path=file_rec.file_path,
+        git_commit_sha=file_rec.git_commit_sha,
+        git_blob_sha=file_rec.git_blob_sha,
+        language=file_rec.language,
+        allowed_scopes=file_rec.allowed_scopes,
+        raw_content="\n".join(lines_500),
+        line_count=len(lines_500),
+    )
+    ptr_500 = CodeSlicePointer(
+        repo_name="click",
+        file_path="src/click/core.py",
+        start_line=1,
+        end_line=len(lines_500),
+        qualified_symbol="click.core.GiantCommand",
+        selection_reason="Target class",
+        modification_intent=ModificationIntent.MODIFY_TARGET,
+    )
+    sliced_500 = default_slicer.slice_pointer(
+        ptr_500, file_rec_500, query_text="Fix bug in method_5"
+    )
+    assert len(sliced_500.verbatim_code_with_lines.splitlines()) < len(lines_500) * 0.6
+    assert "def method_5" in sliced_500.verbatim_code_with_lines
+    assert "elided" in sliced_500.verbatim_code_with_lines
 
 
 def test_p2_03_search_replace_patch_repair_loop_in_executor(tmp_path: Path) -> None:

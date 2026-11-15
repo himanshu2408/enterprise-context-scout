@@ -25,7 +25,7 @@ const ROLE_OPTIONS: Array<{
   {
     role: "engineer",
     label: "Engineer",
-    subtitle: "Code + AST + Sandbox Patch",
+    subtitle: "Code, AST & Sandbox Patch",
   },
   {
     role: "quant_researcher",
@@ -106,19 +106,22 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
     principal.allowed_scopes[0] === "unscoped_probe";
 
   return (
-    <section className="panel scope-card role-scope-card" data-testid="role-switcher">
-      <div className="panel-header panel-header-compact">
-        <div className="panel-title-row">
+    <section
+      className="scope-section role-scope-section"
+      data-testid="role-switcher"
+    >
+      <div className="scope-section-head">
+        <div className="scope-section-title">
           <User size={15} className="icon-accent" />
-          <h2 className="panel-title">Persona &amp; RBAC Scope</h2>
+          <h2 className="section-heading">Persona &amp; RBAC Scope</h2>
         </div>
         <span
-          className={`status-pill ${
+          className={`status-tag ${
             authStatus === "ready"
-              ? "status-pill-success"
+              ? "status-tag-ok"
               : authStatus === "authenticating"
-                ? "status-pill-info"
-                : "status-pill-danger"
+                ? "status-tag-info"
+                : "status-tag-danger"
           }`}
           data-testid="auth-status-badge"
         >
@@ -132,7 +135,10 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
       </div>
 
       {authStatus === "error" && authError && (
-        <div className="inline-alert inline-alert-danger" data-testid="auth-error-banner">
+        <div
+          className="inline-alert inline-alert-danger"
+          data-testid="auth-error-banner"
+        >
           <span>{authError}</span>
           {onRetryAuth && (
             <button
@@ -154,8 +160,9 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
           </label>
           <input
             id="principal-user-id"
+            name="principal_user_id"
             type="text"
-            className="text-input text-input-compact"
+            className="text-input"
             value={principal.user_id}
             onChange={handleUserIdChange}
             placeholder="demo_engineer"
@@ -165,14 +172,14 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
 
         <div className="role-pills-block">
           <span className="field-label">Role Persona</span>
-          <div className="role-grid role-grid-compact">
+          <div className="role-grid">
             {ROLE_OPTIONS.map((opt) => {
               const active = principal.role === opt.role;
               return (
                 <button
                   key={opt.role}
                   type="button"
-                  className={`role-btn role-btn-compact ${active ? "role-btn-active" : ""}`}
+                  className={`role-btn ${active ? "role-btn-active" : ""}`}
                   onClick={() => handleRoleSelect(opt.role)}
                   data-testid={`role-btn-${opt.role}`}
                   aria-pressed={active}
@@ -189,7 +196,7 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
 
       <div className="scope-rls-row">
         <div className="scope-rls-controls">
-          <span className="field-label scope-inline-label">RLS Scopes</span>
+          <span className="field-label">RLS Scopes</span>
           <div className="scope-chips-row">
             {AVAILABLE_SCOPES.map(({ scope, label }) => {
               const selected = principal.allowed_scopes.includes(scope);
@@ -210,7 +217,7 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
           <div className="scope-actions">
             <button
               type="button"
-              className={`link-action ${isUnscopedProbe ? "link-action-active" : ""}`}
+              className={`btn-quiet-toggle ${isUnscopedProbe ? "btn-quiet-toggle-active" : ""}`}
               onClick={handleUnscopedProbe}
               data-testid="unscoped-probe-btn"
               title="Simulate caller with zero matching corpus scopes"
@@ -219,7 +226,7 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
             </button>
             <button
               type="button"
-              className="link-action"
+              className="btn-quiet-toggle"
               onClick={handleResetDefaultScopes}
               data-testid="reset-scopes-btn"
             >
@@ -229,14 +236,14 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
         </div>
 
         <div className="scope-rls-meta">
-          <div className="active-scopes-bar active-scopes-bar-inline" data-testid="active-scopes-list">
+          <div className="active-scopes-bar" data-testid="active-scopes-list">
             <Lock size={12} className="icon-muted" />
             <span>
               Scopes: <code>{principal.allowed_scopes.join(", ")}</code>
             </span>
           </div>
-          <div className="rbac-footnote rbac-footnote-inline">
-            <ShieldCheck size={12} className="icon-success" />
+          <div className="rbac-footnote">
+            <ShieldCheck size={12} className="icon-emerald" />
             <span>
               {principal.role === "engineer"
                 ? "Sandbox Patch Handoff enabled"

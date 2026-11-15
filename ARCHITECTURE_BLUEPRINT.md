@@ -2,7 +2,7 @@
 ## Principal Architecture Blueprint, Trade-Off Defense & Implementation Specification
 
 **Project Repository:** `enterprise-context-scout`  
-**Last Updated:** 2026-10-28  
+**Last Updated:** 2026-11-15  
 **Target Hardware (Local Dev & Training):** Apple M5 Pro (48 GB Unified Memory)  
 **Target Production Stack (Enterprise GCP):** Google ADK (`google-adk` v2.12.0), Google Gen AI SDK (`google-genai` v2.31.0), Model Context Protocol (`mcp` v2.3.0), Gemma 4 (`26B-A4B-it` / `31B-it` / `12B-it` / `E4B-it`), `EmbeddingGemma 2` (768-dim), `ShieldGemma 2` / Google Cloud Model Armor, PostgreSQL 17 (`pgvector` + `pg_trgm` + FTS + RLS -> Cloud SQL / AlloyDB), and `gemini-3.8-flash` (Fast Execution) / `gemini-4-argon` (Frontier Reasoning).
 
@@ -29,10 +29,10 @@ We decouple **Context Discovery & Verification** (100% local, open-weights `Gemm
 |:---|:---|:---|
 | **Google Frontier Reasoning** | Google Gemini 4 Argon (`gemini-4-argon`) | Reserved for 1-shot complex architectural refactors |
 | **Local Discovery Engine** | **Google Gemma 4 26B-A4B-it** (MoE, 3.8B Active) | **100% Local Discovery & Verification**: Absorbs 30k–60k exploration tokens at $0 API cost |
-| **Fast Execution Engine** | **Google Gemini 3.8 Flash (`gemini-3.8-flash`)** | **1-Shot Code Execution**: Generates patches from compact 2k–4k verified `ImplementationContextPack` |
+| **Fast Execution Engine** | **Google Gemini 3.8 Flash (`gemini-3.8-flash`)** | **1-Shot Code Execution**: Generates patches from adaptive `2k–18k` verified `ImplementationContextPack` |
 
 1. **Zero-Cost Local Scouting (`Gemma-4-26B-A4B-it` + Domain QLoRA Cartridges):** Absorbs 30,000–60,000 tokens of noisy multi-hop search, AST skeleton inspection, and paper analysis locally ($0 API cost), emitting **structured pointers** (`repo`, `commit_sha`, `file_path`, `start_line`, `end_line`) rather than re-typing code from memory.
-2. **Deterministic Byte-for-Byte Slicing & 1-Hop AST Auto-Closure:** Pure Python + `tree-sitter` slices exact lines from Git and mechanically attaches imported types, direct callers, and matching test fixtures—eliminating "half-information" before a single paid Gemini token is spent.
+2. **Deterministic Byte-for-Byte Slicing & Adaptive 2-Hop AST Auto-Closure (`ContextCompletenessConfig`):** Pure Python + `tree-sitter` slices exact lines from Git (preserving full bodies up to `450` lines) and mechanically attaches 1-hop + 2-hop imported types (`USES_TYPE`/`INHERITS`/`IMPORTS`), up to `8` diverse direct callers, and matching test fixtures under a `10,000`-token expansion budget (`18,000`-token pack ceiling)—eliminating "half-information" before a single paid Gemini token is spent.
 3. **Dual-Engine Retrieval (Code $\neq$ Prose Documents):**
    - **Engine 1 (Code — `domain-trading-code-scout`):** Trigram/lexical search (`ripgrep` + `pg_trgm`) + `tree-sitter` AST Symbol & Call Graph + Git Blob-SHA Merkle incremental indexing over your GitHub trading repositories and issues.
    - **Engine 2 (Documents & Research — `domain-quant-research-scout`):** Anthropic-style **Contextual Retrieval** (`Gemma-4-E4B-it` prepends 50-token document context headers at ingestion) + LaTeX/Docling lossless math/table parsing + Hybrid BM25 + `EmbeddingGemma 2` (768-dim) + Cross-Encoder Reranking + **Quant Scepticism Gate** over 1,000+ Indian (NSE/BSE), German (Xetra/DAX), and US (NYSE/NASDAQ) quantitative trading papers.
@@ -70,7 +70,7 @@ flowchart TD
 
     subgraph ScoutLoop["3. Isolated Open-Source Scout Subagent (Google ADK 2.12 Workflow)"]
         ScoutModel["Gemma-4-26B-A4B-it (MoE, 3.8B Active)\n+ Hot-Swapped Domain QLoRA Adapter"]
-        ASTExpand["Deterministic 1-Hop AST Closure\n(Auto-attaches imported types, callers & test fixtures)"]
+        ASTExpand["Deterministic 1-Hop + 2-Hop AST Closure\n(Auto-attaches types, <=8 callers & tests <=10K tok)"]
         Slicer["Deterministic Byte-for-Byte File Slicer\n+ Verbatim Quote/Equation Verifier"]
         PreFlight{"4-Check Pre-Flight\nQuality Gate"}
     end
@@ -467,14 +467,14 @@ When a user asks a code question or submits a feature for Gemini Flash to implem
    - Every vector query executes inside an explicit `async with conn.transaction():` block with `SET LOCAL app.principal_scopes = $1` and `SET LOCAL hnsw.iterative_scan = 'relaxed_order'` (`OPS-01` & `PERF-02`) so RLS never drops HNSW recall or leaks across pooled connections.
 2. **Stage 2 — AST Skeleton Localization (`Gemma-4-26B-A4B-it` + LoRA Adapter 1):**
    - Instead of feeding full 1,000-line files to the Scout, we feed the **AST Skeletons** (`signature_skeleton` + line ranges) of the top files.
-   - The Scout inspects the skeletons, optionally calls `get_symbol_callers(symbol)` or `grep_repo(pattern)` (bounded to max 2 tool turns, with hard pagination $\le 10$ items and $\le 32\text{ KB}$ per MCP response, `SEC-04`), and emits `list[CodeSlicePointer]`.
-3. **Stage 3 — Deterministic 1-Hop AST Auto-Closure (`ASTDependencyExpander`, Bounded per `SEC-03`):**
-   - For every symbol marked `modify_target` by the Scout, Python queries `ast_edges` (`WHERE source_symbol_id = $1 OR target_symbol_id = $1`) under a hard **1,500-token expansion budget** (`MAX_EXPANSION_TOKEN_BUDGET = 1500`) and automatically attaches:
-     - Every internal `USES_TYPE` / `IMPORTS` schema definition (e.g., `OrderRequest`, `MarketTick`, `RiskConfig`).
-     - Up to **3 representative direct `CALLS` callers** (`MAX_DIRECT_CALLERS_PER_SYMBOL = 3`, ranked by call-site diversity) with $\pm 5$ lines so utility functions with 50+ callers never bloat the `ContextPack`.
+   - The Scout inspects the skeletons, optionally calls `get_symbol_callers(symbol)` or `grep_repo(pattern)` (bounded to max 2 tool turns, with hard pagination $\le 25$ items and $\le 128\text{ KB}$ per MCP response, `SEC-04`), and emits `list[CodeSlicePointer]`.
+3. **Stage 3 — Deterministic 2-Hop AST Auto-Closure (`ASTDependencyExpander` & `ContextCompletenessConfig`, Bounded per `SEC-03`):**
+   - For every symbol marked `modify_target` by the Scout, Python queries `ast_edges` (`WHERE source_symbol_id = $1 OR target_symbol_id = $1`) under a **10,000-token expansion budget** (`MAX_EXPANSION_TOKEN_BUDGET = 10_000`, `max_pack_token_budget = 18_000`) and automatically attaches:
+     - Every internal 1-hop + 2-hop `USES_TYPE` / `INHERITS` / `IMPORTS` schema definition (e.g., `OrderRequest`, `MarketTick`, `RiskConfig`).
+     - Up to **8 representative direct `CALLS` callers** (`MAX_DIRECT_CALLERS_PER_SYMBOL = 8`, ranked by call-site diversity) with $\pm 5$ lines so utility functions with 50+ callers never bloat the `ContextPack`.
      - The matching `TESTED_BY` test function signature and fixture setup (resolved via AST imports + `tests/test_<module>.py` naming convention fallback).
 4. **Stage 4 — Deterministic Byte-for-Byte Slicing:**
-   - Python slices `raw_content.splitlines()[start_line - 1 : end_line]`, prefixes each line with `{line_no:4d} | `, and attaches `git_commit_sha`. **The LLM never types out existing code from memory.**
+   - Python slices `raw_content.splitlines()[start_line - 1 : end_line]`, prefixes each line with `{line_no:4d} | `, and attaches `git_commit_sha`. Python classes up to **450 lines** (`DEFAULT_SKELETONIZE_CLASS_LINE_THRESHOLD = 450`) retain full method bodies, and query-matched methods are never skeletonized. **The LLM never types out existing code from memory.**
 
 ---
 
@@ -502,7 +502,8 @@ Academic trading papers frequently overfit in-sample data or omit transaction co
    - **`IN_NSE` (India NSE/BSE):** $\ge 15\text{ bps}$ for equity delivery (where STT alone is 10 bps per leg + stamp duty + GST + SEBI/exchange fees) or $\ge 5\text{ bps}$ for intraday/futures.
    - **`DE_XETRA` (Germany DAX/MDAX):** $\ge 10\text{ bps}$ (Xetra order-book spread + clearing fees + short-borrow check).
    - **`US_EQUITY` (NYSE/NASDAQ):** $\ge 5\text{ bps}$ (effective half-spread + SEC Section 31 / FINRA TAF fees).
-2. **Normalized Verbatim Citation Check (`VAL-02`):** Every `DocCitationSpan.verbatim_quote` is verified via NFKC Unicode normalization and whitespace/LaTeX-delimiter-normalized substring matching ($\ge 0.98$ token overlap) against `doc_chunks.verbatim_content`. Any fabricated number or ungrounded quote is rejected before reaching the user or Gemini Flash.
+2. **Normalized Verbatim Citation Check (`VAL-02`):** Every `DocCitationSpan.verbatim_quote` is verified via NFKC Unicode normalization and whitespace/LaTeX-delimiter-normalized substring matching ($\ge 0.98$ token overlap) against `doc_chunks.verbatim_content`, while `DocCitationSpan.full_section_content` carries the complete un-truncated document section so multi-paragraph definitions and tables are never mutilated. Any fabricated number or ungrounded quote is rejected before reaching the user or Gemini Flash.
+3. **Multi-Facet Query Decomposition, Explicit Partial-Miss Reporting & Calibrated 4-Stage Confidence (`intent_router.py`, `scout_workflow.py`):** Queries containing `"top N"` cardinalities, multi-entity comparisons, or acronyms (e.g., `"what does ACID stands for"`) are deterministically decomposed into `QueryFacet`s (`decompose_query_facets`), retrieved across facets, and audited via `evaluate_facet_grounding`. Missing or unverified facets are surfaced explicitly via `query_facets` (`grounded | partial | not_found`) and `missing_or_unverified_aspects` (abstaining at `$0` paid tokens when `0` facets are grounded), and every SSE stage emits a calibrated `StageConfidence` (`0.0–1.0` + `high|medium|low` + signal breakdown).
 
 ---
 
@@ -599,11 +600,11 @@ To train **Adapter 1 (`trading_code_scout`)** and **Adapter 2 (`quant_research_s
 
 To prevent the failure mode where the local Scout sends bad context and forces paid execution models (`gemini-3.8-flash` or `gemini-4-argon`) to search on every turn, every implementation handoff passes through **4 deterministic gates**:
 
-1. **Gate 1 — Deterministic 1-Hop AST Expansion (0 LLM Tokens):**
-   - Even if the Scout only selects `src/backtest/engine.py:L110-165`, Python's `ASTDependencyExpander` queries `ast_edges` and automatically slices and appends:
-     - All imported domain models/types used in lines 110–165,
-     - Direct caller signatures across the repo, and
-     - The corresponding unit test fixture.
+1. **Gate 1 — Deterministic 1-Hop + 2-Hop AST Expansion (0 LLM Tokens, `ContextCompletenessConfig`):**
+   - Even if the Scout only selects `src/backtest/engine.py:L110-165`, Python's `ASTDependencyExpander` queries `ast_edges` via indexed 2-hop CTEs and automatically slices and appends:
+     - All 1-hop and 2-hop imported domain models/types used in lines 110–165,
+     - Up to 8 diverse direct caller signatures across distinct files (`<= 10,000` expansion tokens), and
+     - The corresponding unit test fixture (`TESTED_BY`).
 2. **Gate 2 — Pre-Flight Deterministic Validator (`ContextPackValidator`):**
    - Checks:
      1. Are 100% of internal symbols referenced in `modify_target` resolved in the pack?
@@ -614,7 +615,7 @@ To prevent the failure mode where the local Scout sends bad context and forces p
    - If Gate 2 fails, **Gemini Flash is not called**. The exact list of unresolved symbols or failed citations is fed back to local `gemma-4-26B-A4B-it` (bridged into ADK 2.12 via `LocalGemmaClient`) for 1 targeted local remediation pass ($0 cost).
    - **Terminal Exit Contract:** If the 2nd Pre-Flight check still fails, the workflow terminates cleanly by returning a structured `InsufficientContextDiagnostic` (listing the missing symbols/files and top partial matches) to the UI/caller without spending paid Gemini tokens.
 4. **Gate 4 — Isolated Git Worktree Verification + Flywheel Logging:**
-   - When Gemini Flash receives the verified `ImplementationContextPack` (typically 2,000–4,000 tokens instead of 45,000+ raw repo tokens), it generates a unified patch.
+   - When Gemini Flash receives the verified `ImplementationContextPack` (compact `2,000–4,000` tokens on focused code edits and scaling adaptively up to `8,000–18,000` tokens on multi-facet or 2-hop architectural tasks instead of `45,000–250,000+` raw repo tokens), it generates a unified patch.
    - If Gemini Flash still needs an unexpected edge-case symbol, it emits a 20-token `MissingContextRequest` pointer (rather than browsing the repo itself). Our local engine slices that symbol, and logs a `ContextMissEvent` into `execution_telemetry`—which automatically converts into a new QLoRA training example.
    - Before presenting the patch to you, an isolated **Git worktree sandbox** applies the diff and runs `ruff check` + `pytest`, pausing at an **ADK 2.12 `require_confirmation=True` gate** before merging.
 
@@ -699,16 +700,20 @@ enterprise-context-scout/
 │       │   ├── doc_parser.py           # LaTeX + Docling lossless equation/table chunker
 │       │   └── contextualizer.py       # Gemma-4-E4B-it Anthropic Contextual Header injector
 │       ├── ast_engine/
-│       │   ├── dependency_expander.py  # 1-hop AST closure (imports, types, callers, tests)
-│       │   └── deterministic_slicer.py # Byte-exact file line slicer + citation verifier
+│       │   ├── dependency_expander.py  # 1-hop + 2-hop AST closure (<=8 callers, <=10K tok)
+│       │   ├── contract_linker.py      # Cross-boundary route/DTO/SQL/CI contract edges
+│       │   └── deterministic_slicer.py # Byte-exact slicer (>450-line threshold) + quote verifier
 │       ├── mcp_servers/
-│       │   ├── code_repo_mcp.py        # FastMCP / mcp v2.3.0 read tools for GitHub code & issues
+│       │   ├── code_repo_mcp.py        # FastMCP / mcp v2.3.0 read tools (<=25 items, <=128KB)
+│       │   ├── doc_corpus_mcp.py       # FastMCP / mcp v2.3.0 generic document corpus tools
 │       │   └── quant_corpus_mcp.py     # FastMCP / mcp v2.3.0 read tools for India/DE/US papers
 │       ├── agents/
 │       │   ├── domain_registry.py      # Loads DomainPacks & hot-swaps LoRA adapters
-│       │   ├── scout_workflow.py       # Google ADK 2.12 DAG Workflow for Gemma 4 Scout
+│       │   ├── intent_router.py        # QueryIntentClassifier + multi-facet decomposition
+│       │   ├── conflict_detector.py    # Code-vs-doc & version-supersession conflict detection
+│       │   ├── scout_workflow.py       # Google ADK 2.12 DAG Workflow + calibrated 4-stage confidence
 │       │   ├── preflight_gate.py       # 4-Check Pre-Flight Validator + $0 local bounce-back
-│       │   └── gemini_executor.py      # Paid Gemini 2.5/3.8 Flash handoff + Git worktree sandbox
+│       │   └── gemini_executor.py      # Paid Gemini 3.8 Flash / Gemini 4 Argon handoff + sandbox
 │       ├── security/
 │       │   ├── rbac.py                 # Principal token verification & Postgres RLS setter
 │       │   └── guardrails.py           # ShieldGemma 2 (local) / Model Armor (prod) + sanitizer
@@ -735,4 +740,4 @@ enterprise-context-scout/
 | **M5: Google ADK 2.12 Scout Workflow, Pre-Flight Gate & Gemini Handoff** | Build the ADK `Workflow` DAG for `Gemma-4-26B-A4B-it`, the 4-Check `PreFlightValidator` ($0 bounce-back loop), `ShieldGemma 2` guardrails, and the `gemini-3.8-flash` / `gemini-4-argon` worktree handoff with `require_confirmation=True`. | `pytest tests/test_m5_adk_workflow.py` proves an incomplete Scout draft is caught by Pre-Flight and auto-remediated locally before calling Gemini Flash, and logs exact token savings. |
 | **M6: Enterprise Evaluation Harness & OpenTelemetry** | Build the automated eval runner measuring Zero-Touch Sufficiency ($\ge 85\%$), Recall@5, Citation Faithfulness ($100\%$), RBAC zero-leakage, and OTel spans. | `uv run pytest tests/test_m6_eval_harness.py` executes the golden benchmark suite and outputs the Markdown/JSON CI gate report. |
 | **M7: Teacher Distillation & QLoRA Training (`Model 1` & `Model 2`)** | Run `teacher_distiller.py` (with `gemini-3.8-flash` / `gemma-4-31B-it` + deterministic filter) and train both QLoRA adapters (`trading_code_scout` and `quant_research_scout`) on your M5 Pro (`mlx-lm`) + Vertex AI `PEFT` script. | Before-vs-After benchmark report proving QLoRA adapter improves localization/schema pass rate and reduces prompt token overhead. |
-| **M8: FastAPI SSE Backend, TypeScript/React UI & `.gitlab-ci.yml`** | Build the FastAPI streaming API, strict TypeScript/React UI (Role Switcher, DomainPack Selector, Citation Inspector, Token-Savings Meter, 1-Click Gemini Diff Modal), and GitLab CI pipeline. | End-to-end UI + API integration test suite passes (`pytest` + `npm run typecheck && npm run test`). |
+| **M8: FastAPI SSE Backend, Editorial React Workbench UI & `.github/workflows/ci.yml`** | Build the FastAPI streaming API (signed HMAC session auth, 4-stage calibrated SSE confidence, partial-miss facet coverage), strict TypeScript/React editorial workbench (`web-ui/`), and GitHub Actions CI pipeline (`pgvector:pg17` + Vitest). | End-to-end UI + API integration test suite passes (`pytest` + `npm run lint && npm run typecheck && npm run test && npm run build`). |
