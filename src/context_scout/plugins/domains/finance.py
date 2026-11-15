@@ -768,6 +768,111 @@ class FinanceDomainPlugin:
                 allowed_scopes=["public_eng", "public_quant", "quant_restricted"],
                 embedding=[0.05] * 768,
             ),
+            DocChunkRecord(
+                chunk_id=uuid.uuid4(),
+                domain_id=DOMAIN_ID_FINANCE,
+                doc_id="arxiv:2302.13245",
+                doc_title="Physical Momentum in the Indian Stock Market",
+                source_uri="https://arxiv.org/abs/2302.13245",
+                market_scope=MarketRegime.INDIA_NSE_BSE,
+                published_date=datetime.date(2024, 1, 1),
+                authority_weight=1.0,
+                section_heading="Abstract",
+                contextual_header="Indian equity momentum analysis.",
+                verbatim_content=(
+                    "Physical and cross-sectional momentum strategy portfolios across National "
+                    "Stock Exchange (NSE) NIFTY constituents clear >= 18 bps round-trip friction."
+                ),
+                metadata_json={},
+                allowed_scopes=["public_quant"],
+                embedding=[0.05] * 768,
+            ),
+            DocChunkRecord(
+                chunk_id=uuid.uuid4(),
+                domain_id=DOMAIN_ID_FINANCE,
+                doc_id="arxiv:2211.07080",
+                doc_title=(
+                    "Designing Efficient Pair-Trading and Intraday Momentum Strategies "
+                    "on NSE Nifty 50"
+                ),
+                source_uri="https://arxiv.org/abs/2211.07080",
+                market_scope=MarketRegime.INDIA_NSE_BSE,
+                published_date=datetime.date(2024, 1, 1),
+                authority_weight=1.0,
+                section_heading="Abstract",
+                contextual_header="NSE Nifty 50 intraday momentum.",
+                verbatim_content=(
+                    "High-frequency intraday momentum and order flow strategies on National Stock "
+                    "Exchange of India (NSE) Nifty 50 constituents require >= 18 bps friction."
+                ),
+                metadata_json={},
+                allowed_scopes=["public_quant"],
+                embedding=[0.05] * 768,
+            ),
+            DocChunkRecord(
+                chunk_id=uuid.uuid4(),
+                domain_id=DOMAIN_ID_FINANCE,
+                doc_id="arxiv:2202.02728",
+                doc_title=(
+                    "Hierarchical Risk Parity and Minimum Variance Portfolio Design "
+                    "on NIFTY 50 Stocks"
+                ),
+                source_uri="https://arxiv.org/abs/2202.02728",
+                market_scope=MarketRegime.INDIA_NSE_BSE,
+                published_date=datetime.date(2024, 1, 1),
+                authority_weight=1.0,
+                section_heading="Abstract",
+                contextual_header="NIFTY 50 HRP portfolio optimization.",
+                verbatim_content=(
+                    "Hierarchical Risk Parity (HRP) and minimum variance portfolio optimization "
+                    "across Indian NIFTY sectors on NSE outperform under >= 16 bps friction."
+                ),
+                metadata_json={},
+                allowed_scopes=["public_quant"],
+                embedding=[0.05] * 768,
+            ),
+            DocChunkRecord(
+                chunk_id=uuid.uuid4(),
+                domain_id=DOMAIN_ID_FINANCE,
+                doc_id="arxiv:2607.18001",
+                doc_title=(
+                    "High-Dimensional Factor Statistical Arbitrage on Deutsche Boerse XETRA DAX"
+                ),
+                source_uri="https://arxiv.org/pdf/2607.18001v1",
+                market_scope=MarketRegime.GERMANY_XETRA_DAX,
+                published_date=datetime.date(2026, 7, 20),
+                authority_weight=1.0,
+                section_heading="Empirical Evaluation",
+                contextual_header="XETRA DAX factor statistical arbitrage.",
+                verbatim_content=(
+                    "High-dimensional factor statistical arbitrage and order book liquidity "
+                    "herding models on XETRA DAX equities clear a 12 bps friction floor."
+                ),
+                metadata_json={},
+                allowed_scopes=["public_quant"],
+                embedding=[0.05] * 768,
+            ),
+            DocChunkRecord(
+                chunk_id=uuid.uuid4(),
+                domain_id=DOMAIN_ID_FINANCE,
+                doc_id="arxiv:2502.07393",
+                doc_title=(
+                    "FinRL-DeepSeek: Risk-Sensitive Deep Reinforcement Learning Trading Agents"
+                ),
+                source_uri="https://arxiv.org/pdf/2502.07393v1",
+                market_scope=MarketRegime.US_NYSE_NASDAQ,
+                published_date=datetime.date(2025, 2, 11),
+                authority_weight=1.0,
+                section_heading="Abstract",
+                contextual_header="US equity reinforcement learning trading agents.",
+                verbatim_content=(
+                    "Risk-sensitive deep reinforcement learning actor-critic trading agents "
+                    "evaluated on US equity Nasdaq-100 benchmarks clear >= 5 bps execution costs."
+                ),
+                metadata_json={},
+                allowed_scopes=["public_quant"],
+                embedding=[0.05] * 768,
+            ),
         ]
         admin_principal = PrincipalContext(
             user_id="demo_admin",

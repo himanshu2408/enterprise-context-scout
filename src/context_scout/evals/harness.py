@@ -37,7 +37,6 @@ from context_scout.config import ScoutSettings
 from context_scout.db.repositories import (
     ASTSymbolRecord,
     CodeFileRecord,
-    DocChunkRecord,
     InMemoryRLSRepository,
 )
 from context_scout.db.session import RLSConnectionManager
@@ -258,7 +257,6 @@ class EvaluationHarness:
 
         import ast
         import dataclasses
-        import datetime
         import uuid
 
         scan_roots = [self.repo_root / "src" / "context_scout", self.repo_root / "tests"]
@@ -335,10 +333,13 @@ class EvaluationHarness:
                         exc,
                     )
 
-        # Seed sample doc chunks from registered domain plugins and public arXiv baselines
+        # Seed sample doc chunks from registered domain plugins
         for domain_plugin in PluginRegistry.list_domain_plugins():
             seed_payload = domain_plugin.get_demo_seed_payloads()
-            for doc_rec in seed_payload.get("doc_chunks", [])[:1]:
+            chunks_for_plugin = seed_payload.get("doc_chunks", [])
+            is_research_plugin = seed_payload.get("research_domain_id") == self.research_domain_id
+            selected_chunks = chunks_for_plugin if is_research_plugin else chunks_for_plugin[:1]
+            for doc_rec in selected_chunks:
                 if doc_rec.doc_id not in seen_doc_ids:
                     seen_doc_ids.add(doc_rec.doc_id)
                     sanitized_scopes = (
@@ -350,82 +351,6 @@ class EvaluationHarness:
                         admin_principal,
                         dataclasses.replace(doc_rec, allowed_scopes=sanitized_scopes),
                     )
-
-        fallback_arxiv_chunks = [
-            (
-                "arxiv:2302.13245",
-                "Physical Momentum in the Indian Stock Market",
-                "https://arxiv.org/abs/2302.13245",
-                MarketRegime.INDIA_NSE_BSE,
-                (
-                    "Physical and cross-sectional momentum strategy portfolios across National "
-                    "Stock Exchange (NSE) NIFTY constituents clear >= 18 bps round-trip friction."
-                ),
-            ),
-            (
-                "arxiv:2211.07080",
-                "Designing Efficient Pair-Trading and Intraday Momentum Strategies on NSE Nifty 50",
-                "https://arxiv.org/abs/2211.07080",
-                MarketRegime.INDIA_NSE_BSE,
-                (
-                    "High-frequency intraday momentum and order flow strategies on National Stock "
-                    "Exchange of India (NSE) Nifty 50 constituents require >= 18 bps friction."
-                ),
-            ),
-            (
-                "arxiv:2202.02728",
-                "Hierarchical Risk Parity and Minimum Variance Portfolio Design on NIFTY 50 Stocks",
-                "https://arxiv.org/abs/2202.02728",
-                MarketRegime.INDIA_NSE_BSE,
-                (
-                    "Hierarchical Risk Parity (HRP) and minimum variance portfolio optimization "
-                    "across Indian NIFTY sectors on NSE outperform under >= 16 bps friction."
-                ),
-            ),
-            (
-                "arxiv:2607.18001",
-                "High-Dimensional Factor Statistical Arbitrage on Deutsche Boerse XETRA DAX",
-                "https://arxiv.org/pdf/2607.18001v1",
-                MarketRegime.GERMANY_XETRA_DAX,
-                (
-                    "High-dimensional factor statistical arbitrage and order book liquidity "
-                    "herding models on XETRA DAX equities clear a 12 bps friction floor."
-                ),
-            ),
-            (
-                "arxiv:2502.07393",
-                "FinRL-DeepSeek: Risk-Sensitive Deep Reinforcement Learning Trading Agents",
-                "https://arxiv.org/pdf/2502.07393v1",
-                MarketRegime.US_NYSE_NASDAQ,
-                (
-                    "Risk-sensitive deep reinforcement learning actor-critic trading agents "
-                    "evaluated on US equity Nasdaq-100 benchmarks clear >= 5 bps execution costs."
-                ),
-            ),
-        ]
-        for f_doc_id, f_title, f_uri, f_regime, f_text in fallback_arxiv_chunks:
-            if f_doc_id in seen_doc_ids:
-                continue
-            seen_doc_ids.add(f_doc_id)
-            repo.insert_doc_chunk(
-                admin_principal,
-                DocChunkRecord(
-                    chunk_id=uuid.uuid4(),
-                    domain_id=self.research_domain_id,
-                    doc_id=f_doc_id,
-                    doc_title=f_title,
-                    source_uri=f_uri,
-                    market_scope=f_regime,
-                    published_date=datetime.date(2026, 6, 15),
-                    authority_weight=1.0,
-                    section_heading="Abstract",
-                    contextual_header="Quant Seed [quant_research_scout]",
-                    verbatim_content=f_text,
-                    metadata_json={},
-                    allowed_scopes=["public_quant"],
-                    embedding=[0.05] * 768,
-                ),
-            )
 
         return repo
 
