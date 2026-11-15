@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -65,7 +64,7 @@ class QuoteVerificationResult(BaseModel):
 class ParsedSymbol(BaseModel):
     name: str
     qualified_name: str
-    symbol_kind: Literal["function", "class", "method", "interface", "type_alias"]
+    symbol_kind: str
     start_line: int  # 1-indexed
     end_line: int  # 1-indexed
     start_byte: int
@@ -74,18 +73,23 @@ class ParsedSymbol(BaseModel):
     signature_skeleton: str
     docstring: str = ""
     contextual_summary: str = ""
+    repo_name: str = ""
+    repo_qualified_id: str | None = None
+    bare_name: str | None = None
 
 
 class ParsedEdge(BaseModel):
     source_qualified_name: str
     target_qualified_name: str
-    edge_kind: Literal["CALLS", "IMPORTS", "USES_TYPE", "INHERITS", "TESTED_BY"]
+    edge_kind: str
+    target_repo_qualified_id: str | None = None
+    is_cross_repo: bool = False
 
 
 @dataclass(frozen=True)
 class ASTExpansionCandidate:
     symbol: ASTSymbolRecord
-    edge_kind: Literal["CALLS", "IMPORTS", "USES_TYPE", "INHERITS", "TESTED_BY"]
+    edge_kind: str
     intent: ModificationIntent
     start_line: int
     end_line: int

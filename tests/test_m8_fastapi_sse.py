@@ -23,7 +23,11 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from context_scout.api.dependencies import get_repo_root
+from context_scout.api.dependencies import (
+    DEFAULT_ROLE_SCOPES,
+    create_signed_principal_token,
+    get_repo_root,
+)
 from context_scout.api.main import app
 from context_scout.schemas.contracts import (
     ImplementationContextPack,
@@ -37,8 +41,13 @@ from context_scout.schemas.contracts import (
 
 @pytest.fixture
 def client() -> TestClient:
-    """Provides FastAPI TestClient instance."""
-    return TestClient(app)
+    """Provides FastAPI TestClient instance authenticated with signed engineer bearer token."""
+    token = create_signed_principal_token(
+        user_id="demo_engineer",
+        role=RoleType.ENGINEER,
+        allowed_scopes=DEFAULT_ROLE_SCOPES[RoleType.ENGINEER],
+    )
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"})
 
 
 @pytest.fixture
@@ -188,7 +197,13 @@ def test_out_of_band_principal_extraction_valid_roles(
     client: TestClient, role_str: str, expected_role: RoleType
 ) -> None:
     """Verifies all four valid RoleType strings extract into PrincipalContext without error."""
+    token = create_signed_principal_token(
+        user_id=f"user_{role_str}",
+        role=role_str,
+        allowed_scopes=["public_eng", "public_quant", "quant_restricted"],
+    )
     headers = {
+        "Authorization": f"Bearer {token}",
         "X-Principal-User-Id": f"user_{role_str}",
         "X-Principal-Role": role_str,
         "X-Principal-Scopes": "public_eng,public_quant,quant_restricted",
@@ -210,8 +225,10 @@ def test_out_of_band_principal_extraction_valid_roles(
     assert data["trace_attributes"]["context_scout.principal_role"] == expected_role.value
 
 
-def test_invalid_role_rejection_http_400(client: TestClient) -> None:
-    """Verifies invalid role header (e.g. 'superuser' or 'admin') is rejected with HTTP 400."""
+def test_invalid_role_rejection_http_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies invalid role header is rejected with HTTP 400 under fallback."""
+    monkeypatch.setenv("SCOUT_REQUIRE_SIGNED_AUTH", "false")
+    client = TestClient(app)
     headers = {
         "X-Principal-User-Id": "attacker",
         "X-Principal-Role": "superuser",
@@ -229,7 +246,13 @@ def test_invalid_role_rejection_http_400(client: TestClient) -> None:
 
 def test_custom_scopes_header_mapping(client: TestClient) -> None:
     """Verifies X-Principal-Scopes header properly overrides default scopes."""
+    token = create_signed_principal_token(
+        user_id="special_auditor",
+        role=RoleType.COMPLIANCE_OFFICER,
+        allowed_scopes=["audit:compliance", "public_eng"],
+    )
     headers = {
+        "Authorization": f"Bearer {token}",
         "X-Principal-User-Id": "special_auditor",
         "X-Principal-Role": "compliance_officer",
         "X-Principal-Scopes": "audit:compliance,public_eng",
@@ -248,7 +271,13 @@ def test_custom_scopes_header_mapping(client: TestClient) -> None:
 
 def test_prompt_injection_cannot_override_principal_header(client: TestClient) -> None:
     """Verifies role-spoofing text inside prompt does NOT alter out-of-band principal context."""
+    token = create_signed_principal_token(
+        user_id="eng_dev",
+        role=RoleType.ENGINEER,
+        allowed_scopes=DEFAULT_ROLE_SCOPES[RoleType.ENGINEER],
+    )
     headers = {
+        "Authorization": f"Bearer {token}",
         "X-Principal-User-Id": "eng_dev",
         "X-Principal-Role": "engineer",
     }

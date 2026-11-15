@@ -166,6 +166,11 @@ class CodeSlicePointer(BaseModel):
     qualified_symbol: str = Field(min_length=1)
     selection_reason: str = Field(min_length=1)
     modification_intent: ModificationIntent
+    git_commit_sha: str | None = Field(
+        default=None,
+        min_length=7,
+        description="Optional at pointer stage, mandatory upon hydration into VerbatimCodeSlice",
+    )
 
     @model_validator(mode="after")
     def _validate_line_order(self) -> "CodeSlicePointer":
@@ -179,7 +184,7 @@ class CodeSlicePointer(BaseModel):
 class VerbatimCodeSlice(CodeSlicePointer):
     """Hydrated deterministically by the Python Slicer from Git/PostgreSQL."""
 
-    git_commit_sha: str = Field(min_length=7)
+    git_commit_sha: str = Field(min_length=7, description="Full or abbreviated Git commit SHA")
     git_blob_sha: str = Field(min_length=7)
     verbatim_code_with_lines: str = Field(min_length=1)
     auto_expanded_by_ast: bool = False
@@ -192,6 +197,37 @@ class DocCitationSpan(BaseModel):
     source_uri: str = Field(min_length=1)
     section_heading: str = Field(min_length=1)
     verbatim_quote: str = Field(min_length=1)
+    version: str = Field(
+        default="1.0",
+        min_length=1,
+        description="Document version, revision ID, or commit hash",
+    )
+    page_id: str | None = Field(
+        default=None,
+        description="Confluence page ID if retrieved from Confluence",
+    )
+    ticket_key: str | None = Field(
+        default=None,
+        description="Jira ticket key (e.g. 'CORE-101') if retrieved from Jira",
+    )
+
+    @model_validator(mode="after")
+    def _validate_enterprise_provenance(self) -> "DocCitationSpan":
+        # If source_uri indicates Confluence, page_id is expected
+        if (
+            "confluence" in self.source_uri.lower()
+            and not self.page_id
+            and self.doc_id.isdigit()
+        ):
+            self.page_id = self.doc_id
+        # If source_uri indicates Jira, ticket_key is expected
+        if (
+            "jira" in self.source_uri.lower()
+            and not self.ticket_key
+            and "-" in self.doc_id
+        ):
+            self.ticket_key = self.doc_id
+        return self
 
 
 class DomainKnowledgeBrief(BaseModel):
@@ -284,6 +320,36 @@ class ImplementationContextPack(BaseModel):
     preflight_report: PreFlightValidationReport
     local_tokens_consumed: int = Field(ge=0)
     pack_token_count: int = Field(ge=1)
+
+    @field_validator("code_slices")
+    @classmethod
+    def _validate_code_slices_provenance(
+        cls, slices: list[VerbatimCodeSlice]
+    ) -> list[VerbatimCodeSlice]:
+        for s in slices:
+            if not s.repo_name or not s.git_commit_sha or not s.file_path:
+                raise ValueError(
+                    f"Code slice rejected: incomplete provenance (repo={s.repo_name}, "
+                    f"commit={s.git_commit_sha}, path={s.file_path})"
+                )
+            if s.start_line < 1 or s.end_line < s.start_line:
+                raise ValueError(
+                    f"Code slice rejected: invalid line bounds {s.start_line}-{s.end_line}"
+                )
+        return slices
+
+    @field_validator("supporting_doc_citations")
+    @classmethod
+    def _validate_citations_provenance(
+        cls, citations: list[DocCitationSpan]
+    ) -> list[DocCitationSpan]:
+        for c in citations:
+            if not c.doc_id or not c.version or not c.source_uri or not c.section_heading:
+                raise ValueError(
+                    f"Doc citation rejected: missing core provenance fields (doc_id={c.doc_id}, "
+                    f"version={c.version}, uri={c.source_uri}, heading={c.section_heading})"
+                )
+        return citations
 
 
 class MissingContextRequest(BaseModel):

@@ -85,7 +85,7 @@ def preview_handoff(
     # 3. Generate patch diff (custom, live Gemini API if key set, or deterministic synthesis)
     if request.custom_patch is not None:
         patch_diff = request.custom_patch
-    elif executor.api_key:
+    elif executor.is_live_configured():
         patch_diff = executor._generate_gemini_patch(request.pack, repo_root)
     else:
         patch_diff = executor._generate_deterministic_patch(request.pack, repo_root)

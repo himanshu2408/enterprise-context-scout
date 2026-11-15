@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from context_scout.api.dependencies import validate_auth_secret
 from context_scout.api.routes import api_router
+from context_scout.security.rbac import _CURRENT_PRINCIPAL
 from context_scout.telemetry import ScoutTelemetryTracer
 
 logger = logging.getLogger(__name__)
@@ -18,6 +21,13 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
     """Creates and configures the production Enterprise Context Scout FastAPI application."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Upfront fail-closed validation: abort server startup if secret is insecure or unconfigured
+        validate_auth_secret()
+        yield
+
     app = FastAPI(
         title="Enterprise Context Scout API",
         description=(
@@ -27,6 +37,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=lifespan,
     )
 
     # 1. CORS Middleware for enterprise web UI (restricted to explicit frontend origins)
@@ -59,9 +70,13 @@ def create_app() -> FastAPI:
             principal_user = request.headers.get("X-Principal-User-Id", "anonymous")
             span.set_attribute("context_scout.principal_id", principal_user)
 
-            response: Response = await call_next(request)
-            span.set_attribute("http.status_code", response.status_code)
-            return response
+            token = _CURRENT_PRINCIPAL.set(None)
+            try:
+                response: Response = await call_next(request)
+                span.set_attribute("http.status_code", response.status_code)
+                return response
+            finally:
+                _CURRENT_PRINCIPAL.reset(token)
 
     # 3. Mount versioned API routes under /api/v1
     app.include_router(api_router, prefix="/api/v1")
