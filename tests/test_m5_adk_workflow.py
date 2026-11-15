@@ -525,7 +525,7 @@ def test_blk_01_normalized_rrf_threshold_gate(
     principal: PrincipalContext,
     in_memory_repo: InMemoryRLSRepository,
 ) -> None:
-    """Tests BLK-01: Normalized RRF score < 0.55 fails Check 3; >= 0.55 passes."""
+    """Tests BLK-01: Normalized RRF score < 0.65 fails Check 3; >= 0.65 passes."""
     validator = PreFlightValidator(repo=in_memory_repo)
 
     target_slice = VerbatimCodeSlice(
@@ -574,20 +574,20 @@ def test_blk_01_normalized_rrf_threshold_gate(
         domain_id=DOMAIN_CODE,
     )
     assert report_low.passed is False
-    assert report_low.normalized_rrf_score < 0.55
+    assert report_low.normalized_rrf_score < 0.65
     assert report_low.bounce_back_feedback is not None
     assert "Normalized RRF Score" in report_low.bounce_back_feedback
 
     report_pass = validator.validate(
         code_slices=[target_slice, dep_slice1, dep_slice2],
         user_prompt="Examine OFI formula",
-        normalized_rrf_score=0.61,
+        normalized_rrf_score=0.72,
         repo=in_memory_repo,
         principal=principal,
         domain_id=DOMAIN_CODE,
     )
     assert report_pass.passed is True
-    assert report_pass.normalized_rrf_score >= 0.55
+    assert report_pass.normalized_rrf_score >= 0.65
 
 
 def test_val_02_verbatim_citation_verification(
@@ -1228,7 +1228,7 @@ def test_live_postgres_federated_scout_coordinator_seeded_corpus(
     )
 
     pack = coordinator.run(
-        user_prompt="Enhance OrderFlowImbalanceAnalyzer using continuous auction OFI research",
+        user_prompt="Enhance OrderFlowImbalanceSignal using continuous auction OFI research",
         principal=fed_principal,
     )
     assert isinstance(pack, ImplementationContextPack)

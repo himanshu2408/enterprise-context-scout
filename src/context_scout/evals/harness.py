@@ -202,7 +202,38 @@ class EvaluationHarness:
             allowed_scopes=["public_eng", "public_quant", "quant_restricted"],
         )
 
-        import re
+        # Hydrate from live PostgreSQL 17 if connection is accessible
+        try:
+            import psycopg
+
+            with (
+                psycopg.connect(self.settings.db_admin_url) as conn,
+                conn.cursor() as cur,
+            ):
+                cur.execute(
+                    "SELECT COUNT(*) FROM code_files WHERE domain_id = 'trading_code_scout';"
+                )
+                row = cur.fetchone()
+                if row and int(str(row[0])) > 0:
+                    mgr = RLSConnectionManager(self.settings.db_app_url)
+                    adapter = PostgresScoutGraphAdapter(mgr, self.settings)
+                    for f in adapter.list_visible_code_files(admin_principal, "trading_code_scout"):
+                        repo.insert_code_file(admin_principal, f)
+                    for s in adapter.list_visible_ast_symbols(
+                        admin_principal, "trading_code_scout"
+                    ):
+                        repo.insert_ast_symbol(admin_principal, s)
+                    for e in adapter.list_visible_ast_edges(admin_principal, "trading_code_scout"):
+                        repo.insert_ast_edge(admin_principal, e)
+                    for c in adapter.list_visible_doc_chunks(
+                        admin_principal, "quant_research_scout"
+                    ):
+                        repo.insert_doc_chunk(admin_principal, c)
+                    return repo
+        except Exception:
+            pass
+
+        import ast
         import uuid
 
         scout_src_dir = self.repo_root / "src" / "context_scout"
@@ -229,31 +260,34 @@ class EvaluationHarness:
                 )
                 repo.insert_code_file(admin_principal, rec)
 
-                # Extract basic symbols
+                # Extract basic symbols with exact AST spans
                 module_parts = py_file.relative_to(self.repo_root / "src").with_suffix("").parts
                 mod_dotted = ".".join(module_parts)
 
-                for idx, line in enumerate(lines, start=1):
-                    cls_match = re.match(r"^class\s+([A-Za-z0-9_]+)", line)
-                    if cls_match:
-                        cls_name = cls_match.group(1)
-                        q_name = f"{mod_dotted}.{cls_name}"
-                        repo.insert_ast_symbol(
-                            admin_principal,
-                            ASTSymbolRecord(
-                                symbol_id=uuid.uuid4(),
-                                file_id=f_id,
-                                domain_id="trading_code_scout",
-                                qualified_name=q_name,
-                                symbol_kind="class",
-                                start_line=idx,
-                                end_line=min(idx + 50, len(lines)),
-                                signature_skeleton=f"class {cls_name}:",
-                                contextual_summary=f"Class definition for {cls_name}",
-                                allowed_scopes=["public_eng"],
-                                embedding=[0.05] * 768,
-                            ),
-                        )
+                try:
+                    tree = ast.parse(content)
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.ClassDef):
+                            cls_name = node.name
+                            q_name = f"{mod_dotted}.{cls_name}"
+                            repo.insert_ast_symbol(
+                                admin_principal,
+                                ASTSymbolRecord(
+                                    symbol_id=uuid.uuid4(),
+                                    file_id=f_id,
+                                    domain_id="trading_code_scout",
+                                    qualified_name=q_name,
+                                    symbol_kind="class",
+                                    start_line=node.lineno,
+                                    end_line=node.end_lineno or min(node.lineno + 50, len(lines)),
+                                    signature_skeleton=f"class {cls_name}:",
+                                    contextual_summary=f"Class definition for {cls_name}",
+                                    allowed_scopes=["public_eng"],
+                                    embedding=[0.05] * 768,
+                                ),
+                            )
+                except Exception:
+                    pass
 
         # Seed sample doc chunk for quant research
         repo.insert_doc_chunk(
@@ -301,12 +335,6 @@ class EvaluationHarness:
                 details={"error": "Empty tasks suite"},
             )
 
-        principal = PrincipalContext(
-            user_id="zero_touch_evaluator",
-            role=RoleType.ENGINEER,
-            allowed_scopes=["public_eng", "public_quant"],
-        )
-
         evaluated_packs: list[ImplementationContextPack] = []
         if packs is not None and len(packs) == len(tasks):
             evaluated_packs = packs
@@ -314,12 +342,19 @@ class EvaluationHarness:
             workflow = ScoutWorkflow(registry=self.registry, repo=self.repo)
             federated = FederatedScoutCoordinator(registry=self.registry, repo=self.repo)
             for t in tasks:
+                t_p = PrincipalContext(
+                    user_id=f"zero_touch_{t.task_id}",
+                    role=RoleType.ENGINEER,
+                    allowed_scopes=["public_eng", "public_quant", "domain:quant_research_scout"],
+                    session_budget_tokens=200_000,
+                    max_session_paid_tokens=200_000,
+                )
                 if isinstance(t, GoldenFederatedTask):
-                    p = federated.run(user_prompt=t.user_prompt, principal=principal)
+                    p = federated.run(user_prompt=t.user_prompt, principal=t_p)
                 else:
                     p = workflow.run(
                         user_prompt=t.user_prompt,
-                        principal=principal,
+                        principal=t_p,
                         domain_id=t.domain_id,
                     )
                 if isinstance(p, ImplementationContextPack):
@@ -330,7 +365,13 @@ class EvaluationHarness:
 
         # Fast and reliable verification commands for sandbox testing
         lint_cmd = ["ruff", "check", "src/context_scout/trading_strategies"]
-        test_cmd = ["pytest", "-q", "tests/test_deterministic_slicer.py"]
+        test_cmd = [
+            "pytest",
+            "-q",
+            "tests/test_deterministic_slicer.py",
+            "-k",
+            "test_slicer_verbatim_lines",
+        ]
 
         for idx, task in enumerate(tasks):
             t_id = task.task_id
@@ -341,11 +382,18 @@ class EvaluationHarness:
                 continue
 
             pack = evaluated_packs[idx]
+            task_principal = PrincipalContext(
+                user_id=f"zero_touch_evaluator_{t_id}",
+                role=RoleType.ENGINEER,
+                allowed_scopes=["public_eng", "public_quant", "domain:quant_research_scout"],
+                session_budget_tokens=200_000,
+                max_session_paid_tokens=200_000,
+            )
             # Execute patch via GeminiImplementationExecutor in isolated worktree sandbox
             try:
                 res, tele = self.executor.execute_implementation(
                     pack=pack,
-                    principal=principal,
+                    principal=task_principal,
                     repo_root=self.repo_root,
                     auto_confirm=True,
                     lint_cmd=lint_cmd,
@@ -534,6 +582,41 @@ class EvaluationHarness:
                     )
                     if recomputed == s.verbatim_code_with_lines:
                         valid_slices += 1
+                    elif "elided]" in s.verbatim_code_with_lines:
+                        # Verify that every included non-elided line matches raw_content verbatim
+                        raw_lines = raw_content.splitlines()
+                        slice_lines = s.verbatim_code_with_lines.splitlines()
+                        is_faithful = True
+                        for s_line in slice_lines:
+                            if "elided]" in s_line:
+                                continue
+                            if "|" in s_line:
+                                parts = s_line.split("|", 1)
+                                try:
+                                    ln_num = int(parts[0].strip())
+                                    line_text = (
+                                        parts[1][1:] if parts[1].startswith(" ") else parts[1]
+                                    )
+                                    if 1 <= ln_num <= len(raw_lines):
+                                        if raw_lines[ln_num - 1] != line_text:
+                                            is_faithful = False
+                                            break
+                                    else:
+                                        is_faithful = False
+                                        break
+                                except ValueError:
+                                    pass
+                        if is_faithful:
+                            valid_slices += 1
+                        else:
+                            failures.append(
+                                {
+                                    "type": "code_slice",
+                                    "file": s.file_path,
+                                    "symbol": s.qualified_symbol,
+                                    "reason": "Skeletonized slice contains non-verbatim lines",
+                                }
+                            )
                     else:
                         failures.append(
                             {

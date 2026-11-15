@@ -207,6 +207,8 @@ class TeacherDistiller:
                 repo.insert_ast_symbol(self.system_principal, s)
             for e in self.get_all_ast_edges("trading_code_scout"):
                 repo.insert_ast_edge(self.system_principal, e)
+            for c in self.get_all_doc_chunks("quant_research_scout"):
+                repo.insert_doc_chunk(self.system_principal, c)
             self._cached_in_mem_repo = repo
         return self._cached_in_mem_repo
 
@@ -570,6 +572,11 @@ class TeacherDistiller:
                 )
                 if sym is not None:
                     f_rec = files_by_id[sym.file_id]
+                    if f_rec.line_count < 1 or sym.start_line > f_rec.line_count:
+                        continue
+                    effective_end = min(sym.end_line, f_rec.line_count)
+                    if effective_end < sym.start_line:
+                        continue
                     val_prompt = (
                         f"Resolve missing compiler dependency `{sym.qualified_name}` needed for "
                         f"{miss_event.reason}. Locate the exact AST code slice in the repository."
@@ -578,13 +585,13 @@ class TeacherDistiller:
                         f"{val_prompt}\n"
                         f"Retrieved AST Candidate: [repo={f_rec.repo_name} | "
                         f"file={f_rec.file_path} | symbol={sym.qualified_name} | "
-                        f"lines={sym.start_line}-{sym.end_line} | intent=reference_only]"
+                        f"lines={sym.start_line}-{effective_end} | intent=reference_only]"
                     )
                     ptr = CodeSlicePointer(
                         repo_name=f_rec.repo_name,
                         file_path=f_rec.file_path,
                         start_line=sym.start_line,
-                        end_line=sym.end_line,
+                        end_line=effective_end,
                         qualified_symbol=sym.qualified_name,
                         selection_reason=f"Flywheel resolved miss: {miss_event.reason}",
                         modification_intent=ModificationIntent.REFERENCE_ONLY,
@@ -641,6 +648,18 @@ class TeacherDistiller:
             f_src = files_by_id[src_sym.file_id]
             f_dep = files_by_id[dep_sym.file_id]
 
+            if f_src.line_count < 1 or src_sym.start_line > f_src.line_count:
+                continue
+            src_end = min(src_sym.end_line, f_src.line_count)
+            if src_end < src_sym.start_line:
+                continue
+
+            if f_dep.line_count < 1 or dep_sym.start_line > f_dep.line_count:
+                continue
+            dep_end = min(dep_sym.end_line, f_dep.line_count)
+            if dep_end < dep_sym.start_line:
+                continue
+
             clean_src = src_sym.qualified_name.split(".")[-1]
             clean_dep = dep_sym.qualified_name.split(".")[-1]
 
@@ -651,17 +670,17 @@ class TeacherDistiller:
             user_prompt = (
                 f"{val_user_prompt}\n"
                 f"Retrieved AST Candidate 1: [repo={f_src.repo_name} | file={f_src.file_path} | "
-                f"symbol={src_sym.qualified_name} | lines={src_sym.start_line}-{src_sym.end_line} "
+                f"symbol={src_sym.qualified_name} | lines={src_sym.start_line}-{src_end} "
                 f"| intent=modify_target]\n"
                 f"Retrieved AST Candidate 2: [repo={f_dep.repo_name} | file={f_dep.file_path} | "
-                f"symbol={dep_sym.qualified_name} | lines={dep_sym.start_line}-{dep_sym.end_line} "
+                f"symbol={dep_sym.qualified_name} | lines={dep_sym.start_line}-{dep_end} "
                 f"| intent=imported_type]"
             )
             ptr_src = CodeSlicePointer(
                 repo_name=f_src.repo_name,
                 file_path=f_src.file_path,
                 start_line=src_sym.start_line,
-                end_line=src_sym.end_line,
+                end_line=src_end,
                 qualified_symbol=src_sym.qualified_name,
                 selection_reason=f"Target primary symbol {clean_src}",
                 modification_intent=ModificationIntent.MODIFY_TARGET,
@@ -670,7 +689,7 @@ class TeacherDistiller:
                 repo_name=f_dep.repo_name,
                 file_path=f_dep.file_path,
                 start_line=dep_sym.start_line,
-                end_line=dep_sym.end_line,
+                end_line=dep_end,
                 qualified_symbol=dep_sym.qualified_name,
                 selection_reason=f"Resolved internal dependency {clean_dep}",
                 modification_intent=ModificationIntent.IMPORTED_TYPE,
@@ -729,11 +748,19 @@ class TeacherDistiller:
         pool_shuffled = list(pool_symbols)
         self._rng.shuffle(pool_shuffled)
         sym_idx = 0
+        max_attempts = max(100, target_count * 20)
+        attempts = 0
 
-        while len(split_examples) < target_count and pool_shuffled:
+        while len(split_examples) < target_count and pool_shuffled and attempts < max_attempts:
+            attempts += 1
             sym = pool_shuffled[sym_idx % len(pool_shuffled)]
             sym_idx += 1
             f_rec = files_by_id[sym.file_id]
+            if f_rec.line_count < 1 or sym.start_line > f_rec.line_count:
+                continue
+            effective_end = min(sym.end_line, f_rec.line_count)
+            if effective_end < sym.start_line:
+                continue
             short_name = sym.qualified_name.split(".")[-1]
             val_prompt = (
                 f"Localize the AST code slice for `{short_name}` in `{f_rec.file_path}` "
@@ -743,13 +770,13 @@ class TeacherDistiller:
                 f"{val_prompt}\n"
                 f"Retrieved AST Candidate: [repo={f_rec.repo_name} | "
                 f"file={f_rec.file_path} | symbol={sym.qualified_name} | "
-                f"lines={sym.start_line}-{sym.end_line} | intent=modify_target]"
+                f"lines={sym.start_line}-{effective_end} | intent=modify_target]"
             )
             ptr = CodeSlicePointer(
                 repo_name=f_rec.repo_name,
                 file_path=f_rec.file_path,
                 start_line=sym.start_line,
-                end_line=sym.end_line,
+                end_line=effective_end,
                 qualified_symbol=sym.qualified_name,
                 selection_reason=f"Identified symbol {short_name} for requested inspection",
                 modification_intent=ModificationIntent.MODIFY_TARGET,
@@ -899,8 +926,11 @@ class TeacherDistiller:
             bounce_back_count = 0
             generated_for_split = 0
             doc_idx = 0
+            max_attempts = needed_count * 20
+            attempts = 0
 
-            while generated_for_split < needed_count and pool_shuffled:
+            while generated_for_split < needed_count and pool_shuffled and attempts < max_attempts:
+                attempts += 1
                 d_id = pool_shuffled[doc_idx % len(pool_shuffled)]
                 doc_idx += 1
                 chunks = chunks_by_doc_id.get(d_id, [])
@@ -965,7 +995,6 @@ class TeacherDistiller:
                 )
 
                 # PreFlight validation with chunk lookup
-                chunk_map = {str(target_chunk.chunk_id): target_chunk.verbatim_content}
                 val_user_prompt = (
                     f"Synthesize a market-friction verified QuantStrategyBrief for "
                     f"`{target_chunk.doc_title}` in the {target_chunk.market_scope.value} regime."
@@ -1002,8 +1031,9 @@ class TeacherDistiller:
                         supporting_doc_citations=[bad_citation],
                         user_prompt=val_user_prompt,
                         domain_id="quant_research_scout",
+                        principal=self.system_principal,
                         normalized_rrf_score=0.90,
-                        doc_chunks=chunk_map,
+                        doc_chunks=[target_chunk],
                     )
 
                     base_feedback = fail_rep.bounce_back_feedback
@@ -1027,8 +1057,9 @@ class TeacherDistiller:
                         supporting_doc_citations=[citation],
                         user_prompt=val_user_prompt,
                         domain_id="quant_research_scout",
+                        principal=self.system_principal,
                         normalized_rrf_score=0.90,
-                        doc_chunks=chunk_map,
+                        doc_chunks=[target_chunk],
                     )
 
                     if pass_rep.passed:
@@ -1059,8 +1090,9 @@ class TeacherDistiller:
                         supporting_doc_citations=[citation],
                         user_prompt=val_user_prompt,
                         domain_id="quant_research_scout",
+                        principal=self.system_principal,
                         normalized_rrf_score=0.90,
-                        doc_chunks=chunk_map,
+                        doc_chunks=[target_chunk],
                     )
                     if pass_rep.passed:
                         all_candidates.append(

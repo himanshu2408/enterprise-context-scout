@@ -10,6 +10,7 @@ import pytest
 
 from context_scout.api.dependencies import reset_current_principal
 from context_scout.security.rbac import _CURRENT_PRINCIPAL
+from context_scout.telemetry.cost_governance import SessionBudgetTracker
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -26,6 +27,16 @@ def reset_session_principal_contextvar() -> Generator[None, None, None]:
     finally:
         _CURRENT_PRINCIPAL.set(None)
         reset_current_principal()
+
+
+@pytest.fixture(autouse=True)
+def reset_session_budget_tracker_singleton() -> Generator[None, None, None]:
+    """Autouse fixture resetting SessionBudgetTracker singleton before and after each test."""
+    SessionBudgetTracker.get_instance().reset_session()
+    try:
+        yield
+    finally:
+        SessionBudgetTracker.get_instance().reset_session()
 
 
 @pytest.fixture(autouse=True)

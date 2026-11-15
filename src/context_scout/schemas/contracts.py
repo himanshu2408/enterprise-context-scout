@@ -112,7 +112,18 @@ class PrincipalContext(BaseModel):
     user_id: str = Field(min_length=1)
     role: RoleType
     allowed_scopes: list[str] = Field(min_length=1)
-    max_session_paid_tokens: int = Field(default=16_000, ge=1_000, le=100_000)
+    session_budget_tokens: int = Field(default=16_000, ge=1_000, le=500_000)
+    max_session_paid_tokens: int = Field(default=16_000, ge=1_000, le=500_000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _unify_budget_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "session_budget_tokens" in data and "max_session_paid_tokens" not in data:
+                data["max_session_paid_tokens"] = data["session_budget_tokens"]
+            elif "max_session_paid_tokens" in data and "session_budget_tokens" not in data:
+                data["session_budget_tokens"] = data["max_session_paid_tokens"]
+        return data
 
     @field_validator("allowed_scopes")
     @classmethod
@@ -409,6 +420,7 @@ class InsufficientContextDiagnostic(BaseModel):
     trace_id: str
     domain_id: str
     reason: str
+    is_abstention: Literal[True] = True
     missing_symbols: list[str] = Field(default_factory=list)
     partial_candidate_files: list[str] = Field(default_factory=list)
     missing_items: list[MissingItemRecord | str] = Field(default_factory=list)
@@ -461,6 +473,7 @@ class ImplementationContextPack(BaseModel):
     domain_id: str = Field(min_length=1)
     user_task: str = Field(min_length=1)
     architectural_execution_plan: list[str] = Field(min_length=1)
+    is_abstention: Literal[False] = False
     doc_vs_code_conflicts_detected: list[str] = Field(default_factory=list)
     code_slices: list[VerbatimCodeSlice] = Field(default_factory=list)
     supporting_doc_citations: list[DocCitationSpan] = Field(default_factory=list)

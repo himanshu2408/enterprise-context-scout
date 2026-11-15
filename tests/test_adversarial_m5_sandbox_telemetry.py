@@ -285,7 +285,7 @@ class TestGeminiExecutorBudgetAdversarial:
         repo = InMemoryRLSRepository()
         principal_cap = principal.max_session_paid_tokens  # 25,000
 
-        # Case 1: Consumed = 0, requested = 25,000 (Exact match) -> MUST PASS
+        # Case 1: Consumed = 0, prompt = principal_cap - 4096, max_output = 4096 -> Exact cap
         pack_exact = ImplementationContextPack(
             trace_id=str(uuid.uuid4()),
             domain_id=DOMAIN_CODE,
@@ -296,12 +296,12 @@ class TestGeminiExecutorBudgetAdversarial:
                 passed=True, normalized_rrf_score=0.9, citations_verified_100_pct=True
             ),
             local_tokens_consumed=10_000,
-            pack_token_count=principal_cap,
+            pack_token_count=principal_cap - 4096,
         )
         executor.check_principal_budget(principal, pack_exact, repo=repo)
 
         # Case 2: Consumed = 0, requested = 25,001 (1 token over cap) -> MUST RAISE
-        pack_over = pack_exact.model_copy(update={"pack_token_count": principal_cap + 1})
+        pack_over = pack_exact.model_copy(update={"pack_token_count": principal_cap - 4096 + 1})
         with pytest.raises(BudgetExceededError, match="exceeded session token budget"):
             executor.check_principal_budget(principal, pack_over, repo=repo)
 
@@ -372,8 +372,8 @@ class TestGeminiExecutorBudgetAdversarial:
         )
         assert repo.get_principal_paid_tokens_consumed(principal.user_id) == 20_000
 
-        # Call 3: 10,000 tokens requested -> 20,000 + 10,000 = 30,000 > 25,000 cap -> MUST RAISE
-        match_pat = r"consumed 20000 \+ requested 10000 > cap 25000"
+        # Call 3: 10k tokens requested -> 20k + 10k + 4,096 = 34,096 > 25k cap -> MUST RAISE
+        match_pat = r"consumed 20000 \+ projected 14096"
         with pytest.raises(BudgetExceededError, match=match_pat):
             executor.execute_implementation(
                 pack=make_pack(pack_chunk),
@@ -418,6 +418,7 @@ class TestGeminiExecutorBudgetAdversarial:
             principal=principal,
             repo_root=temp_git_repo,
             repo=repo,
+            max_output_tokens=1000,
             lint_cmd=["python3", "-c", "exit(0)"],
             test_cmd=["python3", "-c", "exit(0)"],
         )
@@ -434,6 +435,7 @@ class TestGeminiExecutorBudgetAdversarial:
                 principal=principal,
                 repo_root=temp_git_repo,
                 repo=repo,
+                max_output_tokens=1000,
             )
 
         # Principal B attempts 20,000 tokens -> Allowed
@@ -445,6 +447,7 @@ class TestGeminiExecutorBudgetAdversarial:
             principal=principal_b,
             repo_root=temp_git_repo,
             repo=repo,
+            max_output_tokens=1000,
             lint_cmd=["python3", "-c", "exit(0)"],
             test_cmd=["python3", "-c", "exit(0)"],
         )

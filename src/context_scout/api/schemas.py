@@ -161,6 +161,10 @@ class HandoffPreviewResponse(BaseModel):
     pack_token_count: int
     estimated_paid_cost_usd: float
     estimated_paid_savings_usd: float
+    cost_low_usd: float | None = None
+    cost_expected_usd: float | None = None
+    cost_high_usd: float | None = None
+    pricing_source: str | None = None
     requires_human_confirmation: Literal[True] = True
     expires_in_seconds: int = 3600
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())

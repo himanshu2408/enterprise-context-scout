@@ -16,6 +16,7 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import Final
+from unittest.mock import MagicMock
 
 import opentelemetry.trace as trace
 import pytest
@@ -30,6 +31,7 @@ from context_scout.db.repositories import (
 )
 from context_scout.schemas.contracts import (
     ImplementationContextPack,
+    InsufficientContextDiagnostic,
     ModificationIntent,
     PreFlightValidationReport,
     PrincipalContext,
@@ -45,6 +47,16 @@ from context_scout.telemetry import (
     ATTR_PREFLIGHT_PASSED,
     ATTR_PRINCIPAL_ID,
     ATTR_PRINCIPAL_ROLE,
+    ATTR_SCOUT_AUTO_ATTACHED_AST_COUNT,
+    ATTR_SCOUT_CITATIONS_VERIFIED,
+    ATTR_SCOUT_COST_USD,
+    ATTR_SCOUT_FAILURE_CHECK,
+    ATTR_SCOUT_IS_ABSTENTION,
+    ATTR_SCOUT_NORMALIZED_RRF_SCORE,
+    ATTR_SCOUT_PAID_TOKENS_SPENT,
+    ATTR_SCOUT_PHASE,
+    ATTR_SCOUT_PREFLIGHT_PASSED,
+    ATTR_SCOUT_REJECTION_REASON,
     ATTR_TOKENS_SAVED,
     ATTR_TRACE_ID,
     ATTR_ZERO_TOUCH_SUFFICIENT,
@@ -53,8 +65,14 @@ from context_scout.telemetry import (
     GEN_AI_SYSTEM,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
+    PHASE_EXECUTION,
+    PHASE_GATING,
+    PHASE_RETRIEVAL,
+    PHASE_SLICING,
     ScoutTelemetryTracer,
+    extract_trace_context,
     get_tracer,
+    inject_trace_context,
     reset_tracer,
 )
 
@@ -308,6 +326,22 @@ def test_end_to_end_scout_workflow_span_capture(principal: PrincipalContext) -> 
             symbol_id=uuid.uuid4(),
             file_id=file_id,
             domain_id=DOMAIN_ID,
+            qualified_name="OrderManager",
+            symbol_kind="class",
+            start_line=1,
+            end_line=3,
+            signature_skeleton="class OrderManager:",
+            contextual_summary="Order manager class",
+            allowed_scopes=["public_eng"],
+            embedding=[0.1] * 768,
+        ),
+    )
+    repo.insert_ast_symbol(
+        principal,
+        ASTSymbolRecord(
+            symbol_id=uuid.uuid4(),
+            file_id=file_id,
+            domain_id=DOMAIN_ID,
             qualified_name="OrderManager.submit_order",
             symbol_kind="method",
             start_line=2,
@@ -398,3 +432,164 @@ def test_end_to_end_gemini_executor_span_capture(
     assert attrs[ATTR_ZERO_TOUCH_SUFFICIENT] is True
     assert attrs[ATTR_PRINCIPAL_ID] == principal.user_id
     assert attrs[ATTR_PRINCIPAL_ROLE] == principal.role.value
+
+
+def test_four_pipeline_phase_span_wrappers() -> None:
+    """Verifies all 4 distinct pipeline phases create proper spans with phase attributes."""
+    tracer = get_tracer()
+
+    # 1. Retrieval Phase
+    with tracer.trace_retrieval(
+        domain_id="trading_code_scout", query="OrderFlowImbalance"
+    ) as r_ctx:
+        r_ctx.record_retrieval(doc_chunks_count=5, ast_symbols_count=12, query="OrderFlowImbalance")
+
+    # 2. Slicing Phase
+    with tracer.trace_slicing(domain_id="trading_code_scout", file_path="src/order.py") as s_ctx:
+        s_ctx.record_slicing(file_path="src/order.py", lines_sliced=45, syntax_valid=True)
+
+    # 3. Gating Phase
+    with tracer.trace_gating(domain_id="trading_code_scout", prompt="Refactor signal") as g_ctx:
+        mock_report = MagicMock()
+        mock_report.passed = True
+        mock_report.normalized_rrf_score = 0.88
+        mock_report.citations_verified_100_pct = True
+        mock_report.auto_attached_ast_slices_count = 3
+        g_ctx.record_report(mock_report)
+
+    # 4. Execution Phase
+    with tracer.trace_execution(
+        domain_id="trading_code_scout", model_id="gemini-3.8-flash"
+    ) as e_ctx:
+        mock_result = MagicMock(
+            success=True, token_count=512, verification_passed=True, patch_applied=True
+        )
+        mock_telemetry = MagicMock(
+            paid_tokens_saved=2000,
+            estimated_usd_saved=0.015,
+            zero_touch_sufficient=True,
+            context_pack_tokens_sent=1500,
+            preflight_passed_first_try=True,
+        )
+        e_ctx.record_result(mock_result, mock_telemetry)
+
+    spans = tracer.get_finished_spans()
+    assert len(spans) == 4
+
+    phases = [s.attributes.get(ATTR_SCOUT_PHASE) for s in spans if s.attributes]
+    assert PHASE_RETRIEVAL in phases
+    assert PHASE_SLICING in phases
+    assert PHASE_GATING in phases
+    assert PHASE_EXECUTION in phases
+
+
+def test_abstention_zero_spend_invariant_in_span_context() -> None:
+    """Proves that recording an abstention enforces is_abstention=True, tokens=0, cost=0.0."""
+    tracer = get_tracer()
+
+    diagnostic = InsufficientContextDiagnostic(
+        trace_id="trace_abstain_01",
+        domain_id="trading_code_scout",
+        reason="Check 2 Closure failed: missing symbol OrderFlowImbalanceAnalyzer",
+        failure_check="check_2_closure",
+        paid_tokens_spent=0,
+    )
+
+    with tracer.trace_workflow(
+        span_name="scout.workflow.test_abstain",
+        domain_id="trading_code_scout",
+        trace_id="trace_abstain_01",
+    ) as wf_ctx:
+        wf_ctx.record_pack(diagnostic)
+
+    spans = tracer.find_spans_by_name("scout.workflow.test_abstain")
+    assert len(spans) == 1
+    attrs = spans[0].attributes
+    assert attrs is not None
+
+    # Mandatory Zero-Spend Invariants
+    assert attrs[ATTR_SCOUT_IS_ABSTENTION] is True
+    assert attrs[ATTR_SCOUT_PAID_TOKENS_SPENT] == 0
+    assert attrs[ATTR_SCOUT_COST_USD] == 0.0
+    assert attrs[ATTR_SCOUT_FAILURE_CHECK] == "check_2_closure"
+    assert "Check 2 Closure failed" in str(attrs[ATTR_SCOUT_REJECTION_REASON])
+    assert attrs[ATTR_SCOUT_PREFLIGHT_PASSED] is False
+    assert spans[0].status.status_code == trace.StatusCode.ERROR
+
+
+def test_structured_json_span_exporter() -> None:
+    """Verifies StructuredJsonSpanExporter outputs valid single-line JSON records."""
+    tracer = get_tracer()
+
+    with tracer.trace_retrieval(domain_id="trading_code_scout", query="test") as ctx:
+        ctx.record_retrieval(doc_chunks_count=2, ast_symbols_count=4)
+
+    logs = tracer.get_json_logs()
+    assert len(logs) >= 1
+
+    last_log = logs[-1]
+    assert "trace_id" in last_log
+    assert "span_id" in last_log
+    assert "name" in last_log
+    assert last_log["name"] == "scout.retrieval"
+    assert "duration_ms" in last_log
+    assert "status" in last_log
+    assert last_log["status"] == "OK"
+    assert last_log["attributes"]["scout.phase"] == PHASE_RETRIEVAL
+
+
+def test_w3c_trace_context_propagation() -> None:
+    """Verifies W3C traceparent injection and extraction across boundaries."""
+    tracer = get_tracer()
+
+    # Create root span and inject into carrier
+    with tracer.tracer.start_as_current_span("root_producer") as root_span:
+        carrier: dict[str, str] = {}
+        inject_trace_context(carrier)
+        assert "traceparent" in carrier
+        traceparent = carrier["traceparent"]
+        assert traceparent.startswith("00-")
+
+    # In consumer context, extract context and verify parent linkage
+    extracted_ctx = extract_trace_context(carrier)
+    with tracer.tracer.start_as_current_span("child_consumer", context=extracted_ctx) as child_span:
+        child_span.set_attribute("consumer.action", "processed")
+
+    child_spans = tracer.find_spans_by_name("child_consumer")
+    assert len(child_spans) == 1
+    # Verify child has parent context matching root span ID
+    assert child_spans[0].parent is not None
+    assert trace.format_span_id(child_spans[0].parent.span_id) == trace.format_span_id(
+        root_span.context.span_id
+    )
+
+
+def test_standardized_and_legacy_attribute_dual_emission() -> None:
+    """Verifies that both scout.* and legacy context_scout.* attributes are emitted."""
+    tracer = get_tracer()
+
+    mock_report = MagicMock()
+    mock_report.passed = True
+    mock_report.normalized_rrf_score = 0.95
+    mock_report.citations_verified_100_pct = True
+    mock_report.auto_attached_ast_slices_count = 5
+
+    with tracer.trace_gating(domain_id="trading_code_scout") as g_ctx:
+        g_ctx.record_report(mock_report)
+
+    spans = tracer.find_spans_by_name("scout.preflight_gate")
+    assert len(spans) >= 1
+    attrs = spans[-1].attributes
+    assert attrs is not None
+
+    # Standard scout.*
+    assert attrs[ATTR_SCOUT_PREFLIGHT_PASSED] is True
+    assert attrs[ATTR_SCOUT_NORMALIZED_RRF_SCORE] == 0.95
+    assert attrs[ATTR_SCOUT_CITATIONS_VERIFIED] is True
+    assert attrs[ATTR_SCOUT_AUTO_ATTACHED_AST_COUNT] == 5
+
+    # Backward compatibility context_scout.*
+    assert attrs[ATTR_PREFLIGHT_PASSED] is True
+    assert attrs[ATTR_NORMALIZED_RRF_SCORE] == 0.95
+    assert attrs[ATTR_CITATIONS_VERIFIED] is True
+    assert attrs[ATTR_AUTO_ATTACHED_AST_COUNT] == 5

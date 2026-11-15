@@ -304,11 +304,15 @@ class ASTDependencyExpander:
                     and edge.target_qualified_name != focus_symbol.qualified_name
                 ):
                     continue
-                call_line = self._find_call_site_line(
-                    f_rec.raw_content, caller_sym, focus_symbol.qualified_name
-                )
-                start_l = max(caller_sym.start_line, call_line - 5)
-                end_l = min(caller_sym.end_line, call_line + 5)
+                if (caller_sym.end_line - caller_sym.start_line) <= 35:
+                    start_l = caller_sym.start_line
+                    end_l = caller_sym.end_line
+                else:
+                    call_line = self._find_call_site_line(
+                        f_rec.raw_content, caller_sym, focus_symbol.qualified_name
+                    )
+                    start_l = max(caller_sym.start_line, call_line - 5)
+                    end_l = min(caller_sym.end_line, call_line + 5)
                 snippet_lines = f_rec.raw_content.splitlines()[start_l - 1 : end_l]
                 est = self.estimate_tokens("\n".join(snippet_lines))
                 raw_caller_candidates.append(
@@ -535,6 +539,11 @@ class ASTDependencyExpander:
         """Finds the line number within caller_sym where target is invoked."""
         target_name = target_qualified_name.split(".")[-1]
         lines = raw_content.splitlines()[caller_sym.start_line - 1 : caller_sym.end_line]
+        call_pattern = re.compile(rf"\b{re.escape(target_name)}\s*\(")
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if call_pattern.search(line) and not stripped.startswith(('"""', "'''", "*", "#")):
+                return caller_sym.start_line + idx
         pattern = re.compile(rf"\b{re.escape(target_name)}\b")
         for idx, line in enumerate(lines):
             if pattern.search(line):

@@ -119,7 +119,8 @@ def test_handoff_route_uses_real_ruff_and_pytest_commands_not_sys_exit_0() -> No
     """Guard 4: handoff.py must never use dummy sys.exit(0) sandbox commands."""
     src = inspect.getsource(handoff)
     assert "sys.exit(0)" not in src
-    assert "_generate_gemini_patch" in src
+    assert "_generate_deterministic_patch" in src
+    assert "execute_implementation" in src
     assert '"ruff"' in src
     assert '"pytest"' in src
 

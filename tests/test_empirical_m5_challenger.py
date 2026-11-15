@@ -748,35 +748,35 @@ class TestChallengerCheck3RRFThreshold:
     def test_rrf_exact_sub_threshold_fails_empirically(self) -> None:
         validator = PreFlightValidator()
 
-        # 0.549999 is strictly below 0.55
+        # 0.649999 is strictly below 0.65
         passed, score = validator.check_rrf_threshold(
-            normalized_rrf_score=0.549999,
+            normalized_rrf_score=0.649999,
             cross_encoder_score=None,
         )
         assert not passed
-        assert score == 0.549999
+        assert score == 0.649999
 
     def test_rrf_exact_threshold_passes_empirically(self) -> None:
         validator = PreFlightValidator()
 
-        # 0.550000 exactly meets threshold
+        # 0.650000 exactly meets threshold
         passed, score = validator.check_rrf_threshold(
-            normalized_rrf_score=0.550000,
+            normalized_rrf_score=0.650000,
             cross_encoder_score=None,
         )
         assert passed
-        assert score == 0.55
+        assert score == 0.65
 
     def test_rrf_just_above_threshold_passes_empirically(self) -> None:
         validator = PreFlightValidator()
 
-        # 0.550001 meets threshold
+        # 0.650001 meets threshold
         passed, score = validator.check_rrf_threshold(
-            normalized_rrf_score=0.550001,
+            normalized_rrf_score=0.650001,
             cross_encoder_score=None,
         )
         assert passed
-        assert score == 0.550001
+        assert score == 0.650001
 
     def test_cross_encoder_fallback_boundary_empirically(self) -> None:
         validator = PreFlightValidator()
