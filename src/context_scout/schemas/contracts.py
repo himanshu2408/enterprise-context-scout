@@ -1,5 +1,7 @@
 """Core Pydantic v2 contracts and deterministic scoring/friction validators."""
 
+import json
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Final, Literal
@@ -252,6 +254,84 @@ class DomainKnowledgeBrief(BaseModel):
     known_risks_and_failure_modes: list[str] = Field(min_length=1)
     structured_metadata: dict[str, str | float | int | bool] = Field(default_factory=dict)
     verified_citations: list[DocCitationSpan] = Field(min_length=1)
+
+
+def build_domain_knowledge_brief_prompt(
+    user_prompt: str,
+    domain_id: str,
+    chunk_lines: list[str],
+) -> str:
+    """Builds canonical train/inference prompt for DomainKnowledgeBrief synthesis."""
+    return (
+        f"{user_prompt.strip()}\n"
+        f"Domain: {domain_id}. Return ONLY a valid DomainKnowledgeBrief JSON object with "
+        "keys: brief_title (str), domain_id (str), executive_summary (str), "
+        "formal_expression_or_rule (str or null), core_findings_and_rules (list[str]), "
+        "domain_constraints_and_caveats (list[str]), known_risks_and_failure_modes (list[str]), "
+        "structured_metadata (dict[str, str|float|int|bool], scalar values only), "
+        "verified_citations (list[dict] copying chunk_id, doc_id, doc_title, source_uri, "
+        "section_heading, and verbatim_quote verbatim from the retrieved chunks below).\n"
+        + "\n".join(chunk_lines)
+    )
+
+
+def parse_domain_knowledge_brief_json(
+    raw_text: str,
+    *,
+    domain_id: str | None = None,
+    normalize_scalars: bool = True,
+) -> tuple[DomainKnowledgeBrief | None, bool]:
+    """Parses DomainKnowledgeBrief JSON with raw_decode; returns (brief, strict_raw_valid)."""
+    cleaned = raw_text.replace("<turn|>", "").replace("<eos>", "").strip()
+    cleaned = re.sub(r"```(?:json)?\s*\n?(.*?)```", r"\1", cleaned, flags=re.DOTALL).strip()
+    first_brace = cleaned.find("{")
+    if first_brace == -1:
+        return None, False
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(cleaned[first_brace:])
+    except json.JSONDecodeError:
+        return None, False
+    if not isinstance(obj, dict):
+        return None, False
+
+    try:
+        return DomainKnowledgeBrief.model_validate(obj), True
+    except Exception:
+        if not normalize_scalars:
+            return None, False
+
+    normalized: dict[str, Any] = dict(obj)
+    if not normalized.get("domain_id") and domain_id:
+        normalized["domain_id"] = domain_id
+
+    raw_meta = normalized.get("structured_metadata")
+    if isinstance(raw_meta, dict):
+        clean_meta: dict[str, str | float | int | bool] = {}
+        for k, v in raw_meta.items():
+            key_s = str(k)
+            if isinstance(v, (str, float, int, bool)):
+                clean_meta[key_s] = v
+            elif isinstance(v, (list, tuple)):
+                clean_meta[key_s] = ", ".join(str(item) for item in v if item is not None)
+        normalized["structured_metadata"] = clean_meta
+
+    raw_cits = normalized.get("verified_citations")
+    if isinstance(raw_cits, list):
+        clean_cits: list[Any] = []
+        for vc in raw_cits:
+            if isinstance(vc, dict):
+                vc_copy = dict(vc)
+                if not vc_copy.get("version"):
+                    vc_copy["version"] = "1.0"
+                clean_cits.append(vc_copy)
+            else:
+                clean_cits.append(vc)
+        normalized["verified_citations"] = clean_cits
+
+    try:
+        return DomainKnowledgeBrief.model_validate(normalized), False
+    except Exception:
+        return None, False
 
 
 class QuantStrategyBrief(BaseModel):
@@ -594,6 +674,8 @@ __all__ = [
     "RoleType",
     "ScoutConfig",
     "VerbatimCodeSlice",
+    "build_domain_knowledge_brief_prompt",
     "compute_normalized_rrf",
     "evaluate_market_friction_floor",
+    "parse_domain_knowledge_brief_json",
 ]

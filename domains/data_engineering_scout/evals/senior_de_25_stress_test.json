@@ -1,0 +1,202 @@
+[
+  {
+    "id": "DE-01",
+    "pillar": "STREAMING_CDC",
+    "prompt": "Why does enabling enable.idempotence=true and Kafka transactions NOT guarantee end-to-end exactly-once semantics when sinking to S3, PostgreSQL, or BigQuery, and how do you actually achieve it?",
+    "must_cover_concepts": ["read_process_write", "idempotent sink", "upsert", "two-phase commit", "transactional outbox", "epoch fencing"],
+    "expected_tradeoffs": "Kafka EOS only spans Kafka-to-Kafka read-process-write; external sinks require idempotent keys/deterministic upserts or 2PC/outbox, trading write amplification or latency for correctness.",
+    "anti_pattern_traps": ["claiming Kafka EOS alone gives end-to-end exactly-once across external sinks"]
+  },
+  {
+    "id": "DE-02",
+    "pillar": "STORAGE_LAKEHOUSE",
+    "prompt": "Why do frequent CDC upserts using Apache Iceberg v2 equality deletes destroy Trino/Spark/DuckDB read latency even when total row count is small, and how do you remediate it?",
+    "must_cover_concepts": ["equality deletes", "position deletes", "merge-on-read", "rewrite_data_files", "rewrite_position_delete_files", "compaction"],
+    "expected_tradeoffs": "Equality deletes avoid read-before-write on the writer (fast streaming ingest) but force every reader to evaluate delete predicates across data files until compaction converts/merges them.",
+    "anti_pattern_traps": ["recommending equality deletes without a compaction/rewrite_data_files cadence"]
+  },
+  {
+    "id": "DE-03",
+    "pillar": "BATCH_MPP_ENGINES",
+    "prompt": "When does Spark 3.x Adaptive Query Execution (AQE) silently fail to mitigate data skew or coalesce shuffle partitions?",
+    "must_cover_concepts": ["non-exchange stage", "UDF", "whole-stage codegen", "coalesce", "skewed join", "structured streaming"],
+    "expected_tradeoffs": "AQE only re-optimizes at shuffle/exchange boundaries; Python/opaque UDFs, coalesce(N) collapsing upstream stages, and certain streaming micro-batch plans bypass AQE skew splitting.",
+    "anti_pattern_traps": ["assuming AQE automatically fixes all skew regardless of shuffle boundaries or UDFs"]
+  },
+  {
+    "id": "DE-04",
+    "pillar": "BATCH_MPP_ENGINES",
+    "prompt": "Why does WHERE DATE(event_ts) = '2026-11-01' still trigger a full-table scan and burn budget on a BigQuery TIMESTAMP-partitioned table, and how do you prevent it?",
+    "must_cover_concepts": ["partition pruning", "non-sargable predicate", "require_partition_filter", "range predicate", "clustering"],
+    "expected_tradeoffs": "Wrapping the partition column in a function prevents static/dynamic partition pruning; enforce require_partition_filter=true and rewrite as half-open range predicates event_ts >= ... AND event_ts < ....",
+    "anti_pattern_traps": ["wrapping partition columns in DATE()/CAST() without noting full-scan cost"]
+  },
+  {
+    "id": "DE-05",
+    "pillar": "MODELING_QUALITY_GOV",
+    "prompt": "Why does a dbt incremental merge model with a 1-day lookback silently drop or corrupt aggregates on late-arriving events, and why does unique_key fail when nullable?",
+    "must_cover_concepts": ["late-arriving data", "lookback window", "NULL = NULL", "MERGE", "insert_overwrite", "microbatch"],
+    "expected_tradeoffs": "SQL MERGE evaluates NULL = NULL as UNKNOWN (creating duplicates); fixed 1-day lookback misses p99 late arrivals, whereas partition-level insert_overwrite or microbatch trades compute idempotency for simplicity.",
+    "anti_pattern_traps": ["using SQL MERGE on nullable unique_key without COALESCE/surrogate key or sufficient lookback"]
+  },
+  {
+    "id": "DE-06",
+    "pillar": "MODELING_QUALITY_GOV",
+    "prompt": "How do concurrent or out-of-order updates corrupt SCD Type 2 effective date ranges, and how do you enforce non-overlapping intervals?",
+    "must_cover_concepts": ["half-open interval", "valid_from", "valid_to", "LEAD window", "EXCLUDE USING gist", "is_current"],
+    "expected_tradeoffs": "Naive UPDATE+INSERT races produce overlapping intervals or multiple is_current=true rows; half-open [valid_from, valid_to) intervals with deterministic LEAD() rebuilds or GiST exclusion constraints guarantee disjointness.",
+    "anti_pattern_traps": ["closed [start, end] intervals or non-atomic UPDATE then INSERT without locking/merge"]
+  },
+  {
+    "id": "DE-07",
+    "pillar": "STREAMING_CDC",
+    "prompt": "What happens to a primary PostgreSQL database when a Debezium/pgoutput consumer crashes for 48 hours with an active logical replication slot, and how do you bound the blast radius?",
+    "must_cover_concepts": ["pg_wal", "replication slot", "WAL retention", "max_slot_wal_keep_size", "disk full", "snapshot fallback"],
+    "expected_tradeoffs": "An inactive slot pins WAL segments indefinitely until pg_wal exhausts disk and crashes Postgres; max_slot_wal_keep_size bounds disk usage at the cost of invalidating the slot and requiring re-snapshot.",
+    "anti_pattern_traps": ["enabling logical replication slots without max_slot_wal_keep_size and WAL lag alerting"]
+  },
+  {
+    "id": "DE-08",
+    "pillar": "STORAGE_LAKEHOUSE",
+    "prompt": "Why does SELECT count(*) FROM events after an upsert still return duplicate rows in ClickHouse ReplacingMergeTree?",
+    "must_cover_concepts": ["background merge", "eventual deduplication", "FINAL", "argMax", "sorting key"],
+    "expected_tradeoffs": "ReplacingMergeTree deduplicates asynchronously only during background part merges; FINAL or argMax/GROUP BY at query time gives exact results at the cost of extra read-time CPU/memory.",
+    "anti_pattern_traps": ["assuming ReplacingMergeTree provides immediate synchronous deduplication on read"]
+  },
+  {
+    "id": "DE-09",
+    "pillar": "STORAGE_LAKEHOUSE",
+    "prompt": "Why does running Delta Lake VACUUM table RETAIN 0 HOURS corrupt concurrent readers and break time-travel?",
+    "must_cover_concepts": ["VACUUM", "retention threshold", "snapshot isolation", "time travel", "orphan files"],
+    "expected_tradeoffs": "Zero-hour retention deletes Parquet files still referenced by active long-running queries or streaming checkpoints; retention must exceed max query/checkpoint duration (default 168h).",
+    "anti_pattern_traps": ["running VACUUM RETAIN 0 HOURS in production without disabling/checking active readers"]
+  },
+  {
+    "id": "DE-10",
+    "pillar": "STREAMING_CDC",
+    "prompt": "Why does a Flink event-time windowed join stall completely when 1 of 32 Kafka partitions has zero traffic?",
+    "must_cover_concepts": ["watermark", "idle partition", "withIdleness", "minimum watermark", "event-time skew"],
+    "expected_tradeoffs": "Global operator watermark advances as min(partition watermarks), so an idle partition freezes the join window; withIdleness() advances past idle partitions at the risk of late-data drops if traffic resumes.",
+    "anti_pattern_traps": ["ignoring idle partition watermark propagation in multi-partition Kafka sources"]
+  },
+  {
+    "id": "DE-11",
+    "pillar": "STREAMING_CDC",
+    "prompt": "What breaks in Flink when RocksDB state grows large and you enable unaligned checkpoints without sizing managed memory and backpressure buffers?",
+    "must_cover_concepts": ["RocksDB", "incremental checkpoint", "unaligned checkpoints", "in-flight buffers", "managed memory", "cgroup OOM"],
+    "expected_tradeoffs": "Unaligned checkpoints persist in-flight network buffers to unblock barriers under backpressure, inflating checkpoint size and recovery time; RocksDB off-heap memory also causes container cgroup OOMs if overhead is under-reserved.",
+    "anti_pattern_traps": ["enabling unaligned checkpoints blindly without analyzing backpressure root cause"]
+  },
+  {
+    "id": "DE-12",
+    "pillar": "STORAGE_LAKEHOUSE",
+    "prompt": "Why does a 10-second streaming micro-batch sinking to Iceberg/Delta on S3 degrade metadata planning to minutes within days?",
+    "must_cover_concepts": ["small files", "manifest list", "S3 LIST/GET overhead", "bin-packing", "target-file-size-bytes", "expire_snapshots"],
+    "expected_tradeoffs": "High-frequency commits create thousands of tiny Parquet files and bloated manifest trees; async bin-packing compaction + expire_snapshots restores scan/planning speed while adding background compute cost.",
+    "anti_pattern_traps": ["writing sub-MB micro-batch files directly to lakehouse tables without compaction"]
+  },
+  {
+    "id": "DE-13",
+    "pillar": "MODELING_QUALITY_GOV",
+    "prompt": "Why does renaming a column or widening INT32 to INT64 in raw Parquet break historical queries, and how do Iceberg/Delta field-ID mappings solve it?",
+    "must_cover_concepts": ["field ID", "column mapping", "name-based resolution", "schema evolution", "type widening"],
+    "expected_tradeoffs": "Plain Parquet resolves columns by name (returning NULLs on rename) and often rejects INT32->INT64 across files; Iceberg/Delta field-ID tracking decouples logical names from physical column IDs.",
+    "anti_pattern_traps": ["renaming columns in-place on raw Hive/Parquet tables without field-ID column mapping"]
+  },
+  {
+    "id": "DE-14",
+    "pillar": "BATCH_MPP_ENGINES",
+    "prompt": "Why does DuckDB throw a Conflicting lock error in a multi-worker service, and what happens when a hash join exceeds RAM?",
+    "must_cover_concepts": ["single-writer lock", "read_only", "out-of-core spill", "memory_limit", "temp_directory"],
+    "expected_tradeoffs": "DuckDB enforces a single-writer/multiple-reader file lock per .duckdb database; large joins require explicit memory_limit and temp_directory for disk spill instead of OOMing.",
+    "anti_pattern_traps": ["using a single .duckdb file for concurrent multi-process writes"]
+  },
+  {
+    "id": "DE-15",
+    "pillar": "STREAMING_CDC",
+    "prompt": "Why does Debezium fail or lock a production MySQL/PostgreSQL table during initial snapshot, and how does DBLog watermarking avoid long locks?",
+    "must_cover_concepts": ["binlog_format=ROW", "binlog_row_image=FULL", "FLUSH TABLES WITH READ LOCK", "incremental snapshot", "DBLog watermark"],
+    "expected_tradeoffs": "Full-table lock snapshots block production writes; DBLog incremental chunked snapshots interleave watermarked SELECT chunks with binlog events at the cost of slightly longer initial backfill.",
+    "anti_pattern_traps": ["running blocking initial snapshots on large production OLTP tables"]
+  },
+  {
+    "id": "DE-16",
+    "pillar": "MODELING_QUALITY_GOV",
+    "prompt": "Why does an Airflow/Dagster DAG using INSERT INTO ... WHERE created_at >= NOW() - INTERVAL '1 day' duplicate or corrupt data on backfills?",
+    "must_cover_concepts": ["idempotency", "data_interval_start", "data_interval_end", "DELETE+INSERT", "MERGE", "non-deterministic NOW()"],
+    "expected_tradeoffs": "Using wall-clock NOW() makes retries non-idempotent; scoping writes to logical data_interval_start/end with atomic partition overwrite or MERGE guarantees repeatable backfills.",
+    "anti_pattern_traps": ["using wall-clock NOW()/CURRENT_TIMESTAMP() in backfillable pipeline filters"]
+  },
+  {
+    "id": "DE-17",
+    "pillar": "BATCH_MPP_ENGINES",
+    "prompt": "Why does micro-partitioned cloud MPP warehouse pruning degrade after random UPDATE/DELETEs despite initial ORDER BY ingestion, and why does COPY INTO skip a corrected file?",
+    "must_cover_concepts": ["micro-partition overlap", "clustering depth", "automatic reclustering", "COPY INTO metadata", "64-day load history"],
+    "expected_tradeoffs": "Random DML splits/overlaps micro-partition min/max ranges until reclustering runs; COPY INTO deduplicates by file checksum/name for 64 days unless FORCE=TRUE or a new filename is used.",
+    "anti_pattern_traps": ["assuming initial load sort order persists permanently under random DML"]
+  },
+  {
+    "id": "DE-18",
+    "pillar": "MODELING_QUALITY_GOV",
+    "prompt": "Why is DELETE FROM iceberg_table WHERE user_id = '...' insufficient for GDPR Right-to-be-Forgotten compliance?",
+    "must_cover_concepts": ["immutable Parquet", "time travel", "expire_snapshots", "compaction", "crypto-shredding"],
+    "expected_tradeoffs": "Log-structured deletes leave PII physically intact in older snapshots/Parquet files until compaction + expire_snapshots purge them; crypto-shredding per-user keys enables instant logical erasure.",
+    "anti_pattern_traps": ["claiming a single SQL DELETE satisfies GDPR erasure in an append-only lakehouse"]
+  },
+  {
+    "id": "DE-19",
+    "pillar": "BATCH_MPP_ENGINES",
+    "prompt": "Why does forcing a BROADCAST join hint on a 50 MB Parquet dimension table OOM Spark executors?",
+    "must_cover_concepts": ["compression ratio", "JVM object overhead", "deserialized size", "hash table", "spark.sql.autoBroadcastJoinThreshold"],
+    "expected_tradeoffs": "50 MB Zstd/Snappy Parquet expands 5-10x uncompressed plus JVM object/hash-map overhead, exceeding driver/executor broadcast memory.",
+    "anti_pattern_traps": ["sizing broadcast thresholds from compressed Parquet file size instead of in-memory footprint"]
+  },
+  {
+    "id": "DE-20",
+    "pillar": "MODELING_QUALITY_GOV",
+    "prompt": "How do naive timestamp strings without timezones or float64 money columns pass schema checks yet silently corrupt analytics?",
+    "must_cover_concepts": ["TIMESTAMPTZ", "UTC normalization", "DECIMAL(18,4)", "IEEE-754 rounding", "data contracts", "distribution checks"],
+    "expected_tradeoffs": "Structural type checks miss semantic drift (DST gaps, floating-point pennies); enforce ODCS/Deequ semantic contracts with UTC TIMESTAMPTZ and fixed-point DECIMAL.",
+    "anti_pattern_traps": ["using FLOAT/DOUBLE for monetary amounts or timezone-naive strings for event timestamps"]
+  },
+  {
+    "id": "DE-21",
+    "pillar": "MODELING_QUALITY_GOV",
+    "prompt": "When does Data Vault 2.0 (Hubs, Links, Satellites + PIT/Bridge) pay off over Kimball dimensional modeling, and why does One Big Table (OBT) break down under multi-grain facts?",
+    "must_cover_concepts": ["Kimball star schema", "Data Vault 2.0", "Hub Link Satellite", "PIT table", "fan-out trap", "conformed dimensions"],
+    "expected_tradeoffs": "Data Vault excels at multi-source auditability and parallel ingestion but requires PIT/Bridge tables for BI speed; OBT simplifies single-grain BI but causes double-counting fan-out across mixed grains.",
+    "anti_pattern_traps": ["joining different fact grains into OBT without grain alignment or querying raw Data Vault directly from BI"]
+  },
+  {
+    "id": "DE-22",
+    "pillar": "MODELING_QUALITY_GOV",
+    "prompt": "Why does a naive Bronze -> Silver -> Gold Medallion pipeline leak corrupt data to BI dashboards on partial failures, and how does Write-Audit-Publish (WAP) branching prevent it?",
+    "must_cover_concepts": ["Write-Audit-Publish", "WAP", "Iceberg branching", "Nessie", "atomic fast-forward", "data quality gate"],
+    "expected_tradeoffs": "Direct-to-main writes expose partial/unvalidated batches to readers; WAP writes to an isolated branch, runs quality assertions, and atomically fast-forwards the main branch only on pass.",
+    "anti_pattern_traps": ["mutating production Gold tables before running quality assertions"]
+  },
+  {
+    "id": "DE-23",
+    "pillar": "MODELING_QUALITY_GOV",
+    "prompt": "How do you enforce cross-domain schema compatibility, PII classification, and global lineage in a Data Mesh without re-creating a central bottleneck?",
+    "must_cover_concepts": ["federated computational governance", "data contracts", "ODCS", "OpenLineage", "domain-oriented ownership", "semantic drift"],
+    "expected_tradeoffs": "Centralized manual review kills domain velocity; automated CI/CD contract checks (ODCS + OpenLineage + automated PII tagging) enforce global invariants while keeping domain autonomy.",
+    "anti_pattern_traps": ["equating Data Mesh with unmanaged domain silos lacking automated contract/lineage enforcement"]
+  },
+  {
+    "id": "DE-24",
+    "pillar": "BATCH_MPP_ENGINES",
+    "prompt": "Why do independence assumptions in single-column histograms cause a Cost-Based Optimizer (CBO) to pick catastrophic nested-loop or broadcast joins on correlated predicates?",
+    "must_cover_concepts": ["cardinality misestimation", "independence assumption", "correlated predicates", "multi-column statistics", "dynamic runtime filtering", "AQE"],
+    "expected_tradeoffs": "Single-column histograms multiply selectivities, underestimating row counts by orders of magnitude; multi-column sketches/stats + runtime bloom/AQE re-planning recover at slight planning/runtime overhead.",
+    "anti_pattern_traps": ["relying purely on static single-column histograms for multi-attribute skewed joins"]
+  },
+  {
+    "id": "DE-25",
+    "pillar": "STORAGE_LAKEHOUSE",
+    "prompt": "Under what write/read/range-scan ratios does an LSM-tree's write-amplification advantage over a B-Tree reverse into read-amplification and compaction-stall tail-latency degradation?",
+    "must_cover_concepts": ["RUM conjecture", "write amplification", "read amplification", "space amplification", "Bloom filter", "compaction stall"],
+    "expected_tradeoffs": "LSM-trees convert random writes into sequential SSTable flushes (low write latency) but pay read amplification across levels/tombstones and compaction I/O spikes under heavy point-lookup or range-delete workloads.",
+    "anti_pattern_traps": ["assuming LSM-trees strictly dominate B-Trees on read-heavy or tombstone-heavy range workloads"]
+  }
+]

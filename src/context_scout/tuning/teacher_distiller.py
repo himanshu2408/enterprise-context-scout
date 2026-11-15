@@ -190,6 +190,11 @@ class TeacherDistiller:
         self.random_seed = random_seed
         self._rng = random.Random(random_seed)
 
+        target_domain_plugin = (
+            (PluginRegistry.get_domain_plugin(research_domain_id) if research_domain_id else None)
+            or (PluginRegistry.get_domain_plugin(code_domain_id) if code_domain_id else None)
+            or PluginRegistry.get_primary_domain_plugin()
+        )
         plugin = PluginRegistry.get_primary_domain_plugin()
         role_ids = plugin.get_role_domain_ids() if plugin is not None else {}
         self.code_domain_id = code_domain_id or role_ids.get(
@@ -198,11 +203,11 @@ class TeacherDistiller:
         self.research_domain_id = research_domain_id or role_ids.get(
             "research", self.settings.default_domain_id
         )
-        plugin_scopes = (
-            list(plugin.get_tuning_specs().get("system_scopes", []))
-            if plugin is not None
-            else ["public_eng"]
-        )
+        scope_set = {"public_eng", "GLOBAL", "ENTERPRISE_DOC", "INTERNAL"}
+        if target_domain_plugin is not None:
+            scope_set.update(target_domain_plugin.get_default_scopes())
+            scope_set.update(target_domain_plugin.get_tuning_specs().get("system_scopes", []))
+        plugin_scopes = sorted(scope_set)
 
         # Database adapters
         self.conn_mgr = RLSConnectionManager(self.settings.db_app_url)
@@ -900,6 +905,7 @@ class TeacherDistiller:
         domain_id: str | None = None,
         num_samples: int = 120,
         force_offline: bool = False,
+        split_filter: str | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Generates train and valid datasets for a research/document domain.
 
@@ -911,6 +917,13 @@ class TeacherDistiller:
         """
         target_domain = domain_id or self.research_domain_id
         all_chunks = self.get_all_doc_chunks(target_domain)
+        if split_filter is not None:
+            all_chunks = [
+                c
+                for c in all_chunks
+                if isinstance(c.metadata_json, dict)
+                and str(c.metadata_json.get("split", "")) == split_filter
+            ]
         if not all_chunks:
             raise RuntimeError("Zero doc chunks found in PostgreSQL 17 doc_chunks table")
 
@@ -956,10 +969,75 @@ class TeacherDistiller:
                 if not chunks:
                     continue
 
-                usable_chunks = [c for c in chunks if len(c.verbatim_content.strip()) >= 100]
+                usable_chunks = [
+                    c
+                    for c in chunks
+                    if len(c.verbatim_content.strip()) >= 100
+                    and "apache license" not in c.verbatim_content.lower()
+                    and "licensed to the apache software foundation"
+                    not in c.verbatim_content.lower()
+                    and "licensed to the apache software foundation" not in c.doc_title.lower()
+                    and "spdx-license-identifier" not in c.verbatim_content.lower()
+                ]
                 if not usable_chunks:
                     continue
-                target_chunk = usable_chunks[0]
+                target_chunk = usable_chunks[attempts % len(usable_chunks)]
+
+                # Pair 2-3 related chunks (same doc or same sub_scope) for multi-chunk synthesis
+                paired_chunks: list[DocChunkRecord] = [target_chunk]
+                for sibling in usable_chunks:
+                    if sibling.chunk_id != target_chunk.chunk_id and len(paired_chunks) < 3:
+                        paired_chunks.append(sibling)
+                target_meta = (
+                    target_chunk.metadata_json
+                    if isinstance(target_chunk.metadata_json, dict)
+                    else {}
+                )
+                target_scope = str(target_meta.get("sub_scope", ""))
+                if len(paired_chunks) < 3:
+                    for offset in range(1, min(len(pool_shuffled), 12)):
+                        sib_doc_id = pool_shuffled[(doc_idx + offset) % len(pool_shuffled)]
+                        if sib_doc_id == d_id:
+                            continue
+                        for cand_chk in chunks_by_doc_id.get(sib_doc_id, []):
+                            if len(cand_chk.verbatim_content.strip()) < 100:
+                                continue
+                            low_cand = cand_chk.verbatim_content.lower()
+                            if (
+                                "apache license" in low_cand
+                                or "licensed to the apache software foundation" in low_cand
+                                or "licensed to the apache software foundation"
+                                in cand_chk.doc_title.lower()
+                                or "spdx-license-identifier" in low_cand
+                            ):
+                                continue
+                            cand_meta = (
+                                cand_chk.metadata_json
+                                if isinstance(cand_chk.metadata_json, dict)
+                                else {}
+                            )
+                            if target_scope and str(cand_meta.get("sub_scope", "")) != target_scope:
+                                continue
+                            paired_chunks.append(cand_chk)
+                            break
+                        if len(paired_chunks) >= 3:
+                            break
+
+                class _ChunkWithSiblings:
+                    def __init__(
+                        self, base: DocChunkRecord, siblings: list[DocChunkRecord]
+                    ) -> None:
+                        self._base = base
+                        self._sibling_chunks = siblings
+
+                    def __getattr__(self, item: str) -> Any:
+                        return getattr(self._base, item)
+
+                wrapped_target: Any = (
+                    _ChunkWithSiblings(target_chunk, paired_chunks)
+                    if len(paired_chunks) >= 2
+                    else target_chunk
+                )
 
                 # Extract verbatim quote candidate directly from target_chunk
                 raw_lines = [
@@ -974,7 +1052,7 @@ class TeacherDistiller:
                 if plugin is not None:
                     sample_bundle = plugin.build_research_distillation_sample(
                         domain_id=target_domain,
-                        target_chunk=target_chunk,
+                        target_chunk=wrapped_target,
                         quote_text=quote_text,
                         rng=self._rng,
                     )
@@ -1038,7 +1116,7 @@ class TeacherDistiller:
                         domain_id=target_domain,
                         principal=self.system_principal,
                         normalized_rrf_score=0.90,
-                        doc_chunks=[target_chunk],
+                        doc_chunks=paired_chunks,
                         **bad_brief_kwarg,
                     )
 
@@ -1056,12 +1134,12 @@ class TeacherDistiller:
                     )
 
                     pass_rep = self.validator.validate(
-                        supporting_doc_citations=[citation],
+                        supporting_doc_citations=list(brief.verified_citations),
                         user_prompt=val_user_prompt,
                         domain_id=target_domain,
                         principal=self.system_principal,
                         normalized_rrf_score=0.90,
-                        doc_chunks=[target_chunk],
+                        doc_chunks=paired_chunks,
                         **brief_kwarg,
                     )
 
@@ -1089,12 +1167,12 @@ class TeacherDistiller:
                         generated_for_split += 1
                 else:
                     pass_rep = self.validator.validate(
-                        supporting_doc_citations=[citation],
+                        supporting_doc_citations=list(brief.verified_citations),
                         user_prompt=val_user_prompt,
                         domain_id=target_domain,
                         principal=self.system_principal,
                         normalized_rrf_score=0.90,
-                        doc_chunks=[target_chunk],
+                        doc_chunks=paired_chunks,
                         **brief_kwarg,
                     )
                     if pass_rep.passed:

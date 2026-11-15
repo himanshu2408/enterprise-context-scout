@@ -161,6 +161,7 @@ def test_domains_endpoint_manifest_and_adapter_pool(client: TestClient) -> None:
             "trading_code_scout",
             "quant_research_scout",
             "polyglot_unseen_v2",
+            "data_engineering_scout",
         )
         assert isinstance(manifest["display_name"], str)
         assert manifest["display_name"].strip() == manifest["display_name"]
@@ -168,6 +169,7 @@ def test_domains_endpoint_manifest_and_adapter_pool(client: TestClient) -> None:
             "trading_code_scout": "Scout",
             "quant_research_scout": "Specialist",
             "polyglot_unseen_v2": "Unseen",
+            "data_engineering_scout": "Data Engineering",
         }
         assert expected_name_tokens[manifest["domain_id"]] in manifest["display_name"]
         assert manifest["authority_rules"]["primary_truth_source"] in ("code", "document")

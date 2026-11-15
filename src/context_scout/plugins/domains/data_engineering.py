@@ -1,0 +1,807 @@
+"""Data Engineering Concepts Domain Plugin & Realism Verification Gate.
+
+Provides domain-specific heuristics, multi-chunk conceptual synthesis,
+teacher-student distillation templates, and the 6-check deterministic
+`DataEngineeringRealismGate` composed with `DocumentCitationGate`.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Any, Final
+
+from context_scout.agents.citation_gate import (
+    DocumentCitationGate,
+    DocumentCitationGateResult,
+)
+from context_scout.db.repositories import DocChunkRecord
+from context_scout.ingestion.doc_parser import DocumentChunk
+from context_scout.schemas.contracts import (
+    DocCitationSpan,
+    DomainKnowledgeBrief,
+    MarketRegime,
+    build_domain_knowledge_brief_prompt,
+    parse_domain_knowledge_brief_json,
+)
+
+logger = logging.getLogger(__name__)
+
+DOMAIN_ID_DATA_ENG: Final[str] = "data_engineering_scout"
+
+DATA_ENG_REALISM_CHECK_NAMES: Final[tuple[str, ...]] = (
+    "EOS_WITHOUT_SINK_IDEMPOTENCY",
+    "UNPARTITIONED_SCAN_RISK",
+    "ICEBERG_EQUALITY_DELETE_UNCOMPACTED",
+    "SCD2_NON_ATOMIC_OR_OVERLAP",
+    "CDC_SLOT_WAL_UNBOUNDED",
+    "UNVERIFIED_THROUGHPUT_CLAIM",
+)
+
+_BENCHMARK_CLAIM_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:x\s+faster|gb/s|mb/s|rows/s|events/s|ms\s+p99|million\s+rows)\b",
+    re.IGNORECASE,
+)
+
+_FAILURE_TERMS: Final[tuple[str, ...]] = (
+    "failure",
+    "spill",
+    "oom",
+    "amplification",
+    "skew",
+    "wal",
+    "bloat",
+    "duplicate",
+    "overlap",
+    "lag",
+    "backpressure",
+    "stall",
+    "corrupt",
+    "stale",
+    "out-of-order",
+    "tombstone",
+)
+
+_CAVEAT_TERMS: Final[tuple[str, ...]] = (
+    "require",
+    "must",
+    "trade-off",
+    "tradeoff",
+    "caveat",
+    "bound",
+    "idempoten",
+    "compact",
+    "partition",
+    "watermark",
+    "checkpoint",
+    "retention",
+    "pruning",
+    "atomic",
+    "isolation",
+)
+
+
+@dataclass(frozen=True)
+class DataEngineeringGateResult:
+    """Outcome of the 6-check deterministic DataEngineeringRealismGate."""
+
+    passed: bool
+    checks_evaluated: int
+    failed_checks: list[str]
+    violations: list[str]
+    citations_valid: bool
+    citations_verified_count: int
+    failed_citations: list[tuple[DocCitationSpan, str]] = field(default_factory=list)
+    citation_gate_result: DocumentCitationGateResult | None = None
+    reason: str = ""
+
+
+class DataEngineeringRealismGate:
+    """Deterministic 6-check verification gate for Data Engineering architectural briefs.
+
+    Composes domain-specific invariants with `DocumentCitationGate` verbatim verification.
+    Never early-exits as passing on empty or ungrounded inputs.
+    """
+
+    def __init__(
+        self,
+        *,
+        domain_id: str = DOMAIN_ID_DATA_ENG,
+        citation_gate: DocumentCitationGate | None = None,
+    ) -> None:
+        self.domain_id = domain_id
+        self.citation_gate = citation_gate or DocumentCitationGate(
+            min_overlap_ratio=0.98,
+            require_citations_default=True,
+            strict_freshness=False,
+        )
+
+    def evaluate_domain_rules(self, brief: DomainKnowledgeBrief) -> DataEngineeringGateResult:
+        """Evaluates all 6 Data Engineering architectural & operational invariant checks."""
+        if (
+            not brief.brief_title.strip()
+            or not brief.executive_summary.strip()
+            or not brief.core_findings_and_rules
+            or not brief.verified_citations
+        ):
+            return DataEngineeringGateResult(
+                passed=False,
+                checks_evaluated=len(DATA_ENG_REALISM_CHECK_NAMES),
+                failed_checks=["EMPTY_OR_UNGROUNDED_BRIEF"],
+                violations=[
+                    "Brief must contain non-empty title, summary, findings, and verified_citations."
+                ],
+                citations_valid=False,
+                citations_verified_count=0,
+                reason="EMPTY_OR_UNGROUNDED_BRIEF: missing required brief synthesis or citations.",
+            )
+
+        corpus_text = "\n".join(
+            [
+                brief.brief_title,
+                brief.executive_summary,
+                brief.formal_expression_or_rule or "",
+                *brief.core_findings_and_rules,
+                *brief.domain_constraints_and_caveats,
+                *brief.known_risks_and_failure_modes,
+            ]
+        ).lower()
+        quote_text = " ".join(c.verbatim_quote.lower() for c in brief.verified_citations)
+        combined = f"{corpus_text}\n{quote_text}"
+
+        failed_checks: list[str] = []
+        violations: list[str] = []
+
+        def _has_guard(text: str, guards: tuple[str, ...]) -> bool:
+            # Word-boundary left edge prevents "unpartitioned"/"non-idempotent" substring bypasses
+            return any(re.search(rf"\b{re.escape(g)}", text) for g in guards)
+
+        # 1. EOS_WITHOUT_SINK_IDEMPOTENCY
+        eos_triggers = (
+            "exactly-once",
+            "exactly once",
+            "end-to-end guarantee",
+            "two-phase commit",
+        )
+        eos_guards = (
+            "idempoten",
+            "dedup",
+            "upsert",
+            "transactional sink",
+            "outbox",
+            "atomic commit",
+            "compensat",
+            "unique key",
+        )
+        if any(t in corpus_text for t in eos_triggers) and not _has_guard(combined, eos_guards):
+            failed_checks.append("EOS_WITHOUT_SINK_IDEMPOTENCY")
+            violations.append(
+                "Streaming exactly-once claims require sink idempotency, deduplication, "
+                "or transactional commit caveats."
+            )
+
+        # 2. UNPARTITIONED_SCAN_RISK
+        scan_triggers = (
+            "full scan",
+            "table scan",
+            "unpartitioned",
+            "wide scan",
+            "warehouse scan",
+            "shuffle join",
+        )
+        scan_guards = (
+            "partition",
+            "prun",
+            "z-order",
+            "liquid cluster",
+            "predicate pushdown",
+            "zone map",
+            "sort key",
+            "broadcast",
+            "cluster key",
+        )
+        if any(t in corpus_text for t in scan_triggers) and not _has_guard(combined, scan_guards):
+            failed_checks.append("UNPARTITIONED_SCAN_RISK")
+            violations.append(
+                "Large analytical scan/join patterns must specify partition pruning, "
+                "clustering, or predicate pushdown guards."
+            )
+
+        # 3. ICEBERG_EQUALITY_DELETE_UNCOMPACTED
+        eq_delete_triggers = (
+            "equality delete",
+            "equality-delete",
+            "merge-on-read",
+            "deletion vector",
+        )
+        eq_delete_guards = (
+            "compact",
+            "rewrite_data_files",
+            "read amplification",
+            "copy-on-write",
+            "position delete",
+            "expire_snapshots",
+            "vacuum",
+        )
+        if any(t in corpus_text for t in eq_delete_triggers) and not _has_guard(
+            combined, eq_delete_guards
+        ):
+            failed_checks.append("ICEBERG_EQUALITY_DELETE_UNCOMPACTED")
+            violations.append(
+                "Merge-on-read / equality delete designs must address compaction "
+                "(`rewrite_data_files`) and read amplification."
+            )
+
+        # 4. SCD2_NON_ATOMIC_OR_OVERLAP
+        scd2_triggers = (
+            "scd2",
+            "scd type 2",
+            "slowly changing dimension",
+            "dbt snapshot",
+        )
+        scd2_guards = (
+            "atomic",
+            "merge",
+            "transaction",
+            "non-overlapping",
+            "valid_to",
+            "effective_to",
+            "is_current",
+            "idempotent",
+            "check_cols",
+        )
+        if any(t in corpus_text for t in scd2_triggers) and not _has_guard(combined, scd2_guards):
+            failed_checks.append("SCD2_NON_ATOMIC_OR_OVERLAP")
+            violations.append(
+                "SCD Type 2 designs must enforce atomic MERGE/transaction boundaries "
+                "and non-overlapping validity windows."
+            )
+
+        # 5. CDC_SLOT_WAL_UNBOUNDED
+        cdc_triggers = (
+            "replication slot",
+            "debezium",
+            "pgoutput",
+            "logical replication",
+            "change data capture",
+        )
+        cdc_guards = (
+            "max_slot_wal_keep_size",
+            "wal_keep_size",
+            "wal retention",
+            "wal bound",
+            "wal limit",
+            "heartbeat",
+            "slot_timeout",
+            "retention",
+            "backpressure",
+            "lag bound",
+            "checkpoint",
+        )
+        if any(t in corpus_text for t in cdc_triggers) and not _has_guard(combined, cdc_guards):
+            failed_checks.append("CDC_SLOT_WAL_UNBOUNDED")
+            violations.append(
+                "CDC / logical replication slot architectures must bound WAL retention "
+                "(`max_slot_wal_keep_size`) and slot lag."
+            )
+
+        # 6. UNVERIFIED_THROUGHPUT_CLAIM
+        perf_guards = (
+            "workload",
+            "hardware",
+            "cluster",
+            "concurrency",
+            "codec",
+            "skew",
+            "batch",
+            "benchmark",
+            "cold-cache",
+            "memory",
+        )
+        if (
+            _BENCHMARK_CLAIM_RE.search(corpus_text) or "sub-second latency" in corpus_text
+        ) and not _has_guard(combined, perf_guards):
+            failed_checks.append("UNVERIFIED_THROUGHPUT_CLAIM")
+            violations.append(
+                "Numeric throughput/latency claims must state workload boundaries "
+                "(hardware, codec, concurrency, or benchmark scope)."
+            )
+
+        passed = len(failed_checks) == 0
+        return DataEngineeringGateResult(
+            passed=passed,
+            checks_evaluated=len(DATA_ENG_REALISM_CHECK_NAMES),
+            failed_checks=failed_checks,
+            violations=violations,
+            citations_valid=True,
+            citations_verified_count=len(brief.verified_citations),
+            reason=(
+                "All 6 Data Engineering realism invariants satisfied."
+                if passed
+                else " | ".join(violations)
+            ),
+        )
+
+    def evaluate_brief(
+        self,
+        brief: DomainKnowledgeBrief,
+        corpus_chunks: list[DocChunkRecord] | list[DocumentChunk] | dict[str, str],
+    ) -> DataEngineeringGateResult:
+        """Composes the 6 Data Engineering invariant checks with DocumentCitationGate."""
+        domain_res = self.evaluate_domain_rules(brief)
+        citation_res = self.citation_gate.verify_citations(
+            citations=brief.verified_citations,
+            corpus_chunks=corpus_chunks,
+            domain_id=self.domain_id,
+            require_citations=True,
+        )
+
+        failed_checks = list(domain_res.failed_checks)
+        violations = list(domain_res.violations)
+        if not citation_res.passed:
+            failed_checks.append("CITATION_VERIFICATION_FAILED")
+            violations.append(
+                f"{citation_res.failed_count} of {citation_res.total_citations} "
+                "citations failed verbatim verification."
+            )
+
+        passed = domain_res.passed and citation_res.passed
+        return DataEngineeringGateResult(
+            passed=passed,
+            checks_evaluated=domain_res.checks_evaluated,
+            failed_checks=failed_checks,
+            violations=violations,
+            citations_valid=citation_res.passed,
+            citations_verified_count=citation_res.verified_count,
+            failed_citations=citation_res.failed_citations,
+            citation_gate_result=citation_res,
+            reason=" | ".join(violations) if violations else domain_res.reason,
+        )
+
+
+_BOILERPLATE_SUBSTRINGS: Final[tuple[str, ...]] = (
+    "apache license",
+    "licensed to the apache software foundation",
+    "licensed under the apache",
+    "spdx-license-identifier",
+    "unless required by applicable law",
+    'distributed on an "as is" basis',
+    "without warranties or conditions",
+    "contributor license agreements",
+    "see the notice file",
+    "permission is hereby granted",
+    "copyright (c)",
+    "all rights reserved",
+)
+
+_MD_LINK_ONLY_RE: Final[re.Pattern[str]] = re.compile(r"^(?:[-*•]\s*)?\[[^\]]+\]\([^)]+\)\s*$")
+
+
+def is_boilerplate_text(text: str) -> bool:
+    """Returns True when text is license/copyright boilerplate or a pure link stub."""
+    stripped = text.strip()
+    if not stripped:
+        return True
+    low = stripped.lower()
+    if any(marker in low for marker in _BOILERPLATE_SUBSTRINGS):
+        return True
+    if _MD_LINK_ONLY_RE.match(stripped):
+        return True
+    return stripped.startswith("%")
+
+
+def extract_clean_quote(text: str, max_chars: int = 220) -> str:
+    """Selects a concise, non-boilerplate verbatim line or prefix from chunk text."""
+    for raw_ln in text.splitlines():
+        ln = raw_ln.strip()
+        if len(ln) < 35 or ln.startswith(("#", "%", "```", "|")) or ln.endswith(":"):
+            continue
+        if is_boilerplate_text(ln):
+            continue
+        if len(re.findall(r"[A-Za-z]{3,}", ln)) < 4:
+            continue
+        if len(ln) <= max_chars:
+            return ln
+        # Trim strictly at a word boundary so the quote remains an exact substring prefix
+        cut = ln[:max_chars].rsplit(" ", 1)[0].strip()
+        if len(cut) >= 35:
+            return cut
+        return ln[:max_chars].strip()
+    fallback = " ".join(text.split())
+    if len(fallback) <= max_chars:
+        return fallback
+    return fallback[:max_chars].rsplit(" ", 1)[0].strip() or fallback[:max_chars]
+
+
+def _extract_candidate_sentences(
+    chunks: list[Any], *, limit: int = 4
+) -> tuple[list[str], list[str], list[str]]:
+    """Extracts findings, caveats, and failure-mode lines across multiple retrieved chunks."""
+    findings: list[str] = []
+    caveats: list[str] = []
+    failures: list[str] = []
+
+    for chk in chunks[:3]:
+        content = str(getattr(chk, "verbatim_content", "") or "")
+        for raw_ln in content.splitlines():
+            s_ln = raw_ln.strip().lstrip("-*•0123456789. ")
+            if len(s_ln) < 35 or s_ln.startswith(("#", "%", "```", "|")) or s_ln.endswith(":"):
+                continue
+            if is_boilerplate_text(s_ln):
+                continue
+            trimmed = s_ln[:180].rsplit(" ", 1)[0].strip() if len(s_ln) > 180 else s_ln
+            if len(trimmed) < 25:
+                continue
+            low = trimmed.lower()
+            if any(term in low for term in _FAILURE_TERMS):
+                if trimmed not in failures and len(failures) < 3:
+                    failures.append(trimmed)
+            elif any(term in low for term in _CAVEAT_TERMS):
+                if trimmed not in caveats and len(caveats) < 3:
+                    caveats.append(trimmed)
+            elif trimmed not in findings and len(findings) < limit:
+                findings.append(trimmed)
+
+    return findings, caveats, failures
+
+
+class DataEngineeringDomainPlugin:
+    """Data Engineering domain plugin (`data_engineering_scout`)."""
+
+    domain_id: str = DOMAIN_ID_DATA_ENG
+
+    def __init__(self, citation_gate: DocumentCitationGate | None = None) -> None:
+        self.citation_gate = citation_gate or DocumentCitationGate(
+            min_overlap_ratio=0.98,
+            require_citations_default=True,
+            strict_freshness=False,
+        )
+        self.realism_gate = DataEngineeringRealismGate(
+            domain_id=self.domain_id,
+            citation_gate=self.citation_gate,
+        )
+
+    def supported_domain_ids(self) -> tuple[str, ...]:
+        return (DOMAIN_ID_DATA_ENG,)
+
+    def get_role_domain_ids(self) -> dict[str, str]:
+        return {
+            "research": DOMAIN_ID_DATA_ENG,
+            "knowledge": DOMAIN_ID_DATA_ENG,
+        }
+
+    def get_default_scopes(self) -> list[str]:
+        return [
+            "public_eng",
+            "public_quant",
+            f"domain:{DOMAIN_ID_DATA_ENG}",
+        ]
+
+    def get_adapter_specs(self) -> list[dict[str, str]]:
+        return [
+            {
+                "domain_id": DOMAIN_ID_DATA_ENG,
+                "train_jsonl": f"data/tuning/{DOMAIN_ID_DATA_ENG}/train.jsonl",
+                "valid_jsonl": f"data/tuning/{DOMAIN_ID_DATA_ENG}/valid.jsonl",
+                "adapter_rel_path": (
+                    f"domains/{DOMAIN_ID_DATA_ENG}/adapters/gemma4_26b_data_engineering"
+                ),
+                "label": "Data Engineering Concepts & Systems Specialist",
+                "role": "knowledge",
+            }
+        ]
+
+    def is_federated_domain(self, domain_id: str) -> bool:
+        return False
+
+    def is_research_domain(self, domain_id: str) -> bool:
+        return domain_id.lower() == DOMAIN_ID_DATA_ENG
+
+    def should_auto_route_research(
+        self,
+        prompt: str,
+        domain_id: str,
+        allowed_scopes: list[str] | None = None,
+    ) -> bool:
+        _ = prompt, allowed_scopes
+        return domain_id.lower() == DOMAIN_ID_DATA_ENG
+
+    def infer_friction_label(self, market_scope: str) -> str:
+        scope_map = {
+            "STORAGE_LAKEHOUSE": "Lakehouse Storage & Table Format Spec",
+            "BATCH_MPP_ENGINES": "Distributed Compute & Query Optimizer Spec",
+            "STREAMING_CDC": "Streaming, Watermarks & CDC Semantics Spec",
+            "MODELING_QUALITY_GOV": "Data Modeling, Quality & Governance Spec",
+        }
+        return scope_map.get(market_scope, "Data Engineering Systems Architecture")
+
+    def infer_market_scopes(self, prompt: str) -> list[MarketRegime]:
+        _ = prompt
+        return [MarketRegime.GLOBAL_MULTI]
+
+    def synthesize_research_brief(
+        self,
+        user_prompt: str,
+        domain_id: str,
+        chunks: list[Any],
+        verified_citations: list[Any],
+    ) -> DomainKnowledgeBrief:
+        """Synthesizes a concise multi-chunk Data Engineering DomainKnowledgeBrief."""
+        findings, caveats, failures = _extract_candidate_sentences(chunks, limit=4)
+        citations = list(verified_citations)[:3]
+        for cit in reversed(citations):
+            q = str(getattr(cit, "verbatim_quote", "") or "").strip()
+            if q and not is_boilerplate_text(q) and q not in findings:
+                findings.insert(0, q[:180])
+        if not findings:
+            findings = ["No verified findings extracted from retrieved chunks."]
+        if not caveats:
+            caveats = [
+                "Evaluate partition layout, compaction cadence, and idempotency guarantees "
+                "against target workload.",
+            ]
+        if not failures:
+            failures = [
+                "Unbounded state/WAL retention, uncompacted delete files, or partition skew "
+                "under traffic spikes.",
+            ]
+
+        titles = list(
+            dict.fromkeys(
+                str(getattr(c, "doc_title", "") or "")
+                for c in citations
+                if getattr(c, "doc_title", "")
+            )
+        )
+        brief_title = (
+            f"{titles[0]} — Architectural Synthesis"
+            if titles
+            else "Data Engineering Systems Synthesis"
+        )
+        lead_quote = str(getattr(citations[0], "verbatim_quote", "")) if citations else findings[0]
+        exec_summary = (
+            f"Multi-source synthesis across {len(citations)} verified citation(s) "
+            f"for '{user_prompt.strip()[:140]}': {lead_quote[:180]}"
+        )
+
+        sub_scopes = sorted(
+            {
+                str((getattr(c, "metadata_json", {}) or {}).get("sub_scope", ""))
+                for c in chunks[:3]
+                if isinstance(getattr(c, "metadata_json", None), dict)
+                and (getattr(c, "metadata_json", {}) or {}).get("sub_scope")
+            }
+        )
+        return DomainKnowledgeBrief(
+            brief_title=brief_title,
+            domain_id=domain_id,
+            executive_summary=exec_summary,
+            formal_expression_or_rule=None,
+            core_findings_and_rules=findings[:4],
+            domain_constraints_and_caveats=caveats[:3],
+            known_risks_and_failure_modes=failures[:3],
+            structured_metadata={
+                "domain_id": domain_id,
+                "verified_citations_count": len(citations),
+                "source_documents_count": max(1, len(titles)),
+                "sub_scopes": ", ".join(sub_scopes) if sub_scopes else "data_engineering",
+            },
+            verified_citations=citations,
+        )
+
+    def extract_brief_metadata(self, brief: Any) -> dict[str, Any]:
+        if isinstance(brief, DomainKnowledgeBrief):
+            return dict(brief.structured_metadata)
+        return {}
+
+    def validate_research_brief(
+        self,
+        brief: Any,
+        doc_chunks: list[Any],
+    ) -> tuple[bool, str]:
+        if not isinstance(brief, DomainKnowledgeBrief):
+            return True, ""
+        res = self.realism_gate.evaluate_brief(brief, corpus_chunks=doc_chunks)
+        return res.passed, res.reason
+
+    def build_distillation_prompt_and_brief(
+        self,
+        domain_id: str,
+        doc_id: str,
+        title: str,
+        sec_head: str,
+        quote: str,
+        chk_id: str,
+        manifest: dict[str, Any],
+    ) -> tuple[str, str]:
+        _ = manifest
+        doc_slug = doc_id.split(":")[-1]
+        cit = DocCitationSpan(
+            chunk_id=chk_id,
+            doc_id=doc_id,
+            doc_title=title,
+            source_uri=f"urn:{domain_id}:{doc_slug}",
+            section_heading=sec_head,
+            verbatim_quote=quote,
+        )
+        kb_brief = DomainKnowledgeBrief(
+            brief_title=f"{title} -- {sec_head}",
+            domain_id=domain_id,
+            executive_summary=(
+                f"Grounded Data Engineering synthesis for {title} ({sec_head}): {quote}"
+            ),
+            formal_expression_or_rule=None,
+            core_findings_and_rules=[quote],
+            domain_constraints_and_caveats=[
+                f"Grounded in {doc_id} ({sec_head}); verify partition pruning, "
+                "compaction, and idempotency invariants."
+            ],
+            known_risks_and_failure_modes=[
+                "Unbounded CDC WAL retention, uncompacted equality deletes, "
+                "or non-idempotent sink retries."
+            ],
+            structured_metadata={
+                "domain_id": domain_id,
+                "verified_citations_count": 1,
+                "section": sec_head,
+            },
+            verified_citations=[cit],
+        )
+        user_prompt = (
+            f"Synthesize architectural trade-offs, operational caveats, and failure modes "
+            f"for `{title}` ({sec_head}).\n"
+            f"Retrieved Corpus Chunk: [chunk_id={chk_id} | doc_id={doc_id} | "
+            f"title={title} | uri=urn:{domain_id}:{doc_slug} | section={sec_head} | "
+            f"topic={kb_brief.brief_title} | quote={json.dumps(quote)}]"
+        )
+        return user_prompt, kb_brief.model_dump_json(indent=2)
+
+    def build_multi_chunk_distillation_sample(
+        self,
+        domain_id: str,
+        chunks: list[Any],
+        quotes: list[str],
+        rng: Any,
+    ) -> dict[str, Any]:
+        """Pairs 2-3 chunks into a cross-source conceptual trade-off distillation sample."""
+        _ = rng
+        selected_chunks = chunks[:3] if chunks else []
+        citations: list[DocCitationSpan] = []
+        chunk_lines: list[str] = []
+
+        for idx, chk in enumerate(selected_chunks):
+            raw_quote = (
+                quotes[idx] if idx < len(quotes) else extract_clean_quote(str(chk.verbatim_content))
+            )
+            quote = (
+                raw_quote
+                if len(raw_quote) <= 220
+                else (raw_quote[:220].rsplit(" ", 1)[0].strip() or raw_quote[:220])
+            )
+            cit = DocCitationSpan(
+                chunk_id=str(chk.chunk_id),
+                doc_id=chk.doc_id,
+                doc_title=chk.doc_title,
+                source_uri=chk.source_uri,
+                section_heading=chk.section_heading,
+                verbatim_quote=quote,
+            )
+            citations.append(cit)
+            chunk_lines.append(
+                f"Retrieved Corpus Chunk: [chunk_id={chk.chunk_id} | doc_id={chk.doc_id} | "
+                f"title={chk.doc_title} | uri={chk.source_uri} | section={chk.section_heading} | "
+                f"quote={json.dumps(quote)}]"
+            )
+
+        lead_chk = selected_chunks[0]
+        val_user_prompt = (
+            f"Compare architectural trade-offs, invariants, and operational failure modes across "
+            f"{len(selected_chunks)} Data Engineering sources led by `{lead_chk.doc_title}`."
+        )
+        user_prompt = build_domain_knowledge_brief_prompt(
+            user_prompt=val_user_prompt,
+            domain_id=domain_id,
+            chunk_lines=chunk_lines,
+        )
+        brief = self.synthesize_research_brief(
+            user_prompt=val_user_prompt,
+            domain_id=domain_id,
+            chunks=selected_chunks,
+            verified_citations=citations,
+        )
+        bad_citation = citations[0].model_copy(
+            update={
+                "verbatim_quote": "Hallucinated system benchmark quote absent from corpus text."
+            }
+        )
+        bad_brief = brief.model_copy(update={"verified_citations": [bad_citation]})
+        return {
+            "brief": brief,
+            "bad_brief": bad_brief,
+            "brief_kwarg": {},
+            "bad_brief_kwarg": {},
+            "citation": citations[0],
+            "bad_citation": bad_citation,
+            "val_user_prompt": val_user_prompt,
+            "user_prompt": user_prompt,
+        }
+
+    def build_research_distillation_sample(
+        self,
+        domain_id: str,
+        target_chunk: Any,
+        quote_text: str,
+        rng: Any,
+    ) -> dict[str, Any]:
+        """Builds valid/invalid DomainKnowledgeBrief payloads for TeacherDistiller."""
+        sibling_chunks = getattr(target_chunk, "_sibling_chunks", None)
+        clean_lead_quote = extract_clean_quote(
+            str(getattr(target_chunk, "verbatim_content", "") or quote_text),
+            max_chars=220,
+        )
+        if not clean_lead_quote:
+            clean_lead_quote = quote_text[:220]
+        if isinstance(sibling_chunks, list) and len(sibling_chunks) >= 2:
+            paired = [target_chunk, *[s for s in sibling_chunks if s is not target_chunk][:2]]
+            quotes = [clean_lead_quote] + [
+                extract_clean_quote(str(getattr(sc, "verbatim_content", "") or ""), max_chars=220)
+                for sc in paired[1:]
+            ]
+            return self.build_multi_chunk_distillation_sample(
+                domain_id=domain_id,
+                chunks=paired,
+                quotes=quotes,
+                rng=rng,
+            )
+        return self.build_multi_chunk_distillation_sample(
+            domain_id=domain_id,
+            chunks=[target_chunk],
+            quotes=[clean_lead_quote],
+            rng=rng,
+        )
+
+    def verify_research_brief_output(
+        self,
+        raw_output: str,
+    ) -> tuple[bool, list[str], list[str]]:
+        kb_brief, strict_valid = parse_domain_knowledge_brief_json(
+            raw_output,
+            normalize_scalars=False,
+        )
+        if kb_brief is not None and strict_valid:
+            is_valid = bool(
+                kb_brief.brief_title
+                and kb_brief.executive_summary
+                and kb_brief.core_findings_and_rules
+                and kb_brief.verified_citations
+            )
+            doc_ids = [c.doc_id for c in kb_brief.verified_citations[:5] if c.doc_id]
+            titles = [c.doc_title for c in kb_brief.verified_citations[:5] if c.doc_title]
+            return is_valid, doc_ids, titles
+        return False, [], []
+
+    def get_demo_seed_payloads(self) -> dict[str, Any]:
+        return {
+            "research_domain_id": DOMAIN_ID_DATA_ENG,
+            "code_files": [],
+            "ast_symbols": [],
+            "doc_chunks": [],
+        }
+
+    def get_tuning_specs(self) -> dict[str, Any]:
+        return {
+            "research_domain_id": DOMAIN_ID_DATA_ENG,
+            "system_scopes": self.get_default_scopes(),
+            "adapter_specs": self.get_adapter_specs(),
+        }
+
+
+__all__ = [
+    "DATA_ENG_REALISM_CHECK_NAMES",
+    "DOMAIN_ID_DATA_ENG",
+    "DataEngineeringDomainPlugin",
+    "DataEngineeringGateResult",
+    "DataEngineeringRealismGate",
+]

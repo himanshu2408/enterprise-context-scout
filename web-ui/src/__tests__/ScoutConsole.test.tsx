@@ -399,4 +399,29 @@ describe("ScoutConsole", () => {
     expect(screen.getByTestId("fail-stage-2")).toBeInTheDocument();
     expect(onPackReady).not.toHaveBeenCalled();
   });
+
+  it("renders Data Engineering quick-picks and default prompt when data_engineering_scout is active", async () => {
+    installMockApiFetch();
+    const onPackReady = vi.fn();
+
+    render(
+      <ScoutConsole
+        selectedDomain="data_engineering_scout"
+        principal={TEST_ENGINEER_PRINCIPAL}
+        onContextPackReady={onPackReady}
+      />
+    );
+
+    expect(screen.getByTestId("quick-pick-de_iceberg_cow_mor")).toBeInTheDocument();
+    expect(screen.getByTestId("quick-pick-de_spark_aqe_skew")).toBeInTheDocument();
+    expect(screen.getByTestId("quick-pick-de_flink_eos_cdc")).toBeInTheDocument();
+    expect(screen.getByTestId("quick-pick-de_dbt_scd2_pg17")).toBeInTheDocument();
+    expect(screen.queryByTestId("quick-pick-code_ast")).not.toBeInTheDocument();
+
+    const input = screen.getByTestId("scout-query-input") as HTMLTextAreaElement;
+    expect(input.value).toContain("Apache Iceberg Copy-on-Write vs Merge-on-Read");
+
+    fireEvent.click(screen.getByTestId("quick-pick-de_flink_eos_cdc"));
+    expect(input.value).toContain("Flink two-phase commit exactly-once sink idempotency");
+  });
 });

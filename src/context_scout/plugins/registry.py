@@ -263,3 +263,10 @@ class PluginRegistry:
             cls.register_domain(FinanceDomainPlugin())
         except ImportError as err:
             logger.debug("FinanceDomainPlugin not loaded: %s", err)
+
+        try:
+            from context_scout.plugins.domains.data_engineering import DataEngineeringDomainPlugin
+
+            cls.register_domain(DataEngineeringDomainPlugin())
+        except ImportError as err:
+            logger.debug("DataEngineeringDomainPlugin not loaded: %s", err)
