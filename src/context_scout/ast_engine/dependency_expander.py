@@ -101,12 +101,32 @@ class ASTDependencyExpander:
         def _resolve_symbol_scoped(
             edge_target_id: UUID | None,
             edge_target_qual: str,
+            *,
+            allow_cross_repo: bool = False,
+            edge_target_repo_qual: str | None = None,
         ) -> ASTSymbolRecord | None:
             if edge_target_id and edge_target_id in visible_symbols:
                 cand_direct = visible_symbols[edge_target_id]
                 cand_f = visible_files.get(cand_direct.file_id)
-                if focus_repo_name is None or cand_f is None or cand_f.repo_name == focus_repo_name:
+                if (
+                    allow_cross_repo
+                    or focus_repo_name is None
+                    or cand_f is None
+                    or cand_f.repo_name == focus_repo_name
+                ):
                     return cand_direct
+            if allow_cross_repo:
+                if edge_target_repo_qual:
+                    for s in visible_symbols.values():
+                        sf = visible_files.get(s.file_id)
+                        rqid = s.repo_qualified_id or (
+                            f"{sf.repo_name}::{s.qualified_name}" if sf else s.qualified_name
+                        )
+                        if rqid == edge_target_repo_qual:
+                            return s
+                for s in visible_symbols.values():
+                    if s.qualified_name == edge_target_qual:
+                        return s
             rel_suffix = edge_target_qual.lstrip(".")
             target_clean = edge_target_qual.split(".")[-1]
             # Pass 1: Same file
@@ -190,19 +210,35 @@ class ASTDependencyExpander:
             )
 
         hop1_type_syms: list[ASTSymbolRecord] = []
+        _outward_dep_kinds = (
+            "USES_TYPE",
+            "IMPORTS",
+            "INHERITS",
+            "PROVISIONED_BY",
+            "DISPATCHES",
+            "SELECTS",
+            "DOCUMENTS_COMPONENT",
+        )
         for edge in visible_edges:
             if edge.source_symbol_id == focus_symbol.symbol_id and (
-                edge.edge_kind in ("USES_TYPE", "IMPORTS", "INHERITS")
+                edge.edge_kind in _outward_dep_kinds
                 or (edge.edge_kind == "CALLS" and edge.target_symbol_id is not None)
             ):
                 target_sym = _resolve_symbol_scoped(
-                    edge.target_symbol_id, edge.target_qualified_name
+                    edge.target_symbol_id,
+                    edge.target_qualified_name,
+                    allow_cross_repo=edge.is_cross_repo,
+                    edge_target_repo_qual=edge.target_repo_qualified_id,
                 )
                 if target_sym and target_sym.file_id in visible_files:
-                    if edge.edge_kind == "CALLS" and target_sym.file_id != focus_symbol.file_id:
+                    if (
+                        edge.edge_kind == "CALLS"
+                        and not edge.is_cross_repo
+                        and target_sym.file_id != focus_symbol.file_id
+                    ):
                         continue
                     _append_type_candidate(target_sym, edge.edge_kind)
-                    if edge.edge_kind in ("USES_TYPE", "INHERITS"):
+                    if edge.edge_kind in ("USES_TYPE", "INHERITS") and not edge.is_cross_repo:
                         hop1_type_syms.append(target_sym)
 
         # 1b. Transitive 2-hop schema/type/inheritance closure within the same repository
@@ -282,16 +318,28 @@ class ASTDependencyExpander:
             )
         )
 
-        # 2. Collect Tier 2: Direct Callers (CALLS incoming edges) with call-site diversity
+        # 2. Collect Tier 2: Direct Callers & Cross-Repo Dependents
         focus_short_name = focus_symbol.qualified_name.split(".")[-1]
+        focus_rqid = focus_symbol.repo_qualified_id or (
+            f"{focus_repo_name}::{focus_symbol.qualified_name}"
+            if focus_repo_name
+            else focus_symbol.qualified_name
+        )
+        _incoming_cross_kinds = ("CALLS", "USES_TYPE", "PROVISIONED_BY", "DOCUMENTS_COMPONENT")
         caller_edges = [
             e
             for e in visible_edges
-            if e.edge_kind == "CALLS"
+            if (
+                e.edge_kind == "CALLS" or (e.is_cross_repo and e.edge_kind in _incoming_cross_kinds)
+            )
             and (
                 e.target_symbol_id == focus_symbol.symbol_id
+                or (e.target_repo_qualified_id and e.target_repo_qualified_id == focus_rqid)
                 or e.target_qualified_name == focus_symbol.qualified_name
-                or e.target_qualified_name.split(".")[-1] == focus_short_name
+                or (
+                    not e.is_cross_repo
+                    and e.target_qualified_name.split(".")[-1] == focus_short_name
+                )
             )
         ]
 
@@ -301,10 +349,9 @@ class ASTDependencyExpander:
             if caller_sym and caller_sym.file_id in visible_files:
                 f_rec = visible_files[caller_sym.file_id]
                 if (
-                    focus_repo_name is not None
+                    not edge.is_cross_repo
+                    and focus_repo_name is not None
                     and f_rec.repo_name != focus_repo_name
-                    and edge.target_symbol_id != focus_symbol.symbol_id
-                    and edge.target_qualified_name != focus_symbol.qualified_name
                 ):
                     continue
                 if (caller_sym.end_line - caller_sym.start_line) <= 35:
@@ -321,7 +368,7 @@ class ASTDependencyExpander:
                 raw_caller_candidates.append(
                     ASTExpansionCandidate(
                         symbol=caller_sym,
-                        edge_kind="CALLS",
+                        edge_kind=edge.edge_kind,
                         intent=ModificationIntent.DIRECT_CALLER,
                         start_line=start_l,
                         end_line=end_l,
@@ -445,7 +492,7 @@ class ASTDependencyExpander:
                 raw_caller_candidates.append(
                     ASTExpansionCandidate(
                         symbol=rec.symbol,
-                        edge_kind="CALLS",
+                        edge_kind=rec.edge_kind or "CALLS",
                         intent=ModificationIntent.DIRECT_CALLER,
                         start_line=start_l,
                         end_line=end_l,

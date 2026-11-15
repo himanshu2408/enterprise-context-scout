@@ -151,6 +151,11 @@ def test_preflight_gate_resolve_custom_corpus_neutrality() -> None:
         "Dynamic resolution must check configured paths without a hardcoded blacklist."
     )
 
+    from context_scout.agents import preflight_gate
+
+    assert preflight_gate._SYNC_MANIFEST_FILENAME == "sync_manifest.json"
+    assert not hasattr(preflight_gate, "_CUSTOM_CORPUS_MEM_CACHE")
+
 
 def test_preflight_gate_validate_fallback_neutrality() -> None:
     """Verifies PreFlightValidator.validate does not fall back to 'trading_code_scout'."""

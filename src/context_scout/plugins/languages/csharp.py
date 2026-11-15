@@ -55,6 +55,107 @@ _CSHARP_BUILTIN_CALLS = frozenset(
     }
 )
 
+_HTTP_ATTR_TO_METHOD: dict[str, str] = {
+    "HttpGet": "GET",
+    "HttpGetAttribute": "GET",
+    "HttpPost": "POST",
+    "HttpPostAttribute": "POST",
+    "HttpPut": "PUT",
+    "HttpPutAttribute": "PUT",
+    "HttpDelete": "DELETE",
+    "HttpDeleteAttribute": "DELETE",
+    "HttpPatch": "PATCH",
+    "HttpPatchAttribute": "PATCH",
+}
+
+_MINIMAL_API_TO_METHOD: dict[str, str] = {
+    "MapGet": "GET",
+    "MapPost": "POST",
+    "MapPut": "PUT",
+    "MapDelete": "DELETE",
+    "MapPatch": "PATCH",
+}
+
+
+def _unquote_cs_string(node: Node, code_bytes: bytes) -> str:
+    raw = _node_text(node, code_bytes).strip()
+    if raw.startswith('@"') and raw.endswith('"'):
+        return raw[2:-1].replace('""', '"')
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        return raw[1:-1]
+    return raw
+
+
+def _extract_cs_attributes(node: Node, code_bytes: bytes) -> list[tuple[str, list[str]]]:
+    """Return list of (attribute_name, string_args) from attribute_list children."""
+    found: list[tuple[str, list[str]]] = []
+    for child in node.children:
+        if child.type != "attribute_list":
+            continue
+        for attr in child.children:
+            if attr.type != "attribute":
+                continue
+            attr_name = ""
+            args: list[str] = []
+            for sub in attr.children:
+                if sub.type in {"identifier", "qualified_name"} and not attr_name:
+                    attr_name = _node_text(sub, code_bytes).rsplit(".", 1)[-1]
+                elif sub.type == "attribute_argument_list":
+                    for arg in sub.children:
+                        if arg.type == "attribute_argument":
+                            lit = next(
+                                (
+                                    c
+                                    for c in arg.children
+                                    if c.type in {"string_literal", "verbatim_string_literal"}
+                                ),
+                                None,
+                            )
+                            if lit is not None:
+                                args.append(_unquote_cs_string(lit, code_bytes))
+            if attr_name:
+                found.append((attr_name, args))
+    return found
+
+
+def _combine_aspnet_route(class_route: str, method_route: str, controller_name: str) -> str:
+    ctrl_slug = controller_name[:-10] if controller_name.endswith("Controller") else controller_name
+    ctrl_slug = ctrl_slug.lower()
+    if method_route.startswith("/"):
+        joined = method_route
+    else:
+        base = class_route.strip("/")
+        sub = method_route.strip("/")
+        if base and sub:
+            joined = f"/{base}/{sub}"
+        elif base:
+            joined = f"/{base}"
+        elif sub:
+            joined = f"/{sub}"
+        else:
+            joined = f"/{ctrl_slug}" if ctrl_slug else "/"
+    joined = joined.replace("[controller]", ctrl_slug)
+    return "/" + joined.lstrip("/")
+
+
+def _extract_cs_dto_fields(node: Node, code_bytes: bytes) -> list[str]:
+    """Extract positional record parameters and public property names for DTO matching."""
+    fields: list[str] = []
+    for child in node.children:
+        if child.type == "parameter_list":
+            for param in child.children:
+                if param.type == "parameter":
+                    p_name = param.child_by_field_name("name")
+                    if p_name is not None:
+                        fields.append(_node_text(p_name, code_bytes))
+        elif child.type == "declaration_list":
+            for decl in child.children:
+                if decl.type == "property_declaration":
+                    p_name = decl.child_by_field_name("name")
+                    if p_name is not None:
+                        fields.append(_node_text(p_name, code_bytes))
+    return list(dict.fromkeys(f for f in fields if f))
+
 
 def _collapse_ws(text: str) -> str:
     return " ".join(text.split())
@@ -305,6 +406,7 @@ class CSharpPlugin:
         usings: list[str] = []
         ns_stack: list[str] = []
         type_stack: list[tuple[str, str]] = []
+        class_route_stack: list[str] = []
         seen_edge_keys: set[tuple[str, str, str]] = set()
 
         def add_edge(src: str, tgt: str, kind: str) -> None:
@@ -338,8 +440,29 @@ class CSharpPlugin:
             if target and target not in usings:
                 usings.append(target)
 
-        def scan_invocations(node: Node, owner_qn: str) -> None:
-            if node.type == "invocation_expression":
+        def scan_invocations(
+            node: Node,
+            owner_qn: str,
+            contract_notes: list[str] | None = None,
+        ) -> None:
+            if node.type == "element_access_expression" and contract_notes is not None:
+                subscript = node.child_by_field_name("subscript")
+                if subscript is not None:
+                    for sub in subscript.children:
+                        lit = next(
+                            (
+                                c
+                                for c in ([sub, *list(sub.children)])
+                                if c.type in {"string_literal", "verbatim_string_literal"}
+                            ),
+                            None,
+                        )
+                        if lit is not None:
+                            cfg_key = _unquote_cs_string(lit, code_bytes)
+                            if cfg_key:
+                                contract_notes.append(f"@env {cfg_key}")
+                            break
+            elif node.type == "invocation_expression":
                 func_node = node.child_by_field_name("function")
                 method_name = ""
                 generic_node: Node | None = None
@@ -357,6 +480,68 @@ class CSharpPlugin:
                         method_name = _extract_type_name(func_node, code_bytes)
                     elif func_node.type == "identifier":
                         method_name = _node_text(func_node, code_bytes)
+
+                arg_list = node.child_by_field_name("arguments")
+                str_args: list[str] = []
+                ident_args: list[str] = []
+                if arg_list is not None:
+                    for arg in arg_list.children:
+                        if arg.type == "argument":
+                            lit = next(
+                                (
+                                    c
+                                    for c in arg.children
+                                    if c.type in {"string_literal", "verbatim_string_literal"}
+                                ),
+                                None,
+                            )
+                            if lit is not None:
+                                str_args.append(_unquote_cs_string(lit, code_bytes))
+                            id_nd = next(
+                                (
+                                    c
+                                    for c in arg.children
+                                    if c.type in {"identifier", "member_access_expression"}
+                                ),
+                                None,
+                            )
+                            if id_nd is not None:
+                                ident_args.append(_node_text(id_nd, code_bytes))
+
+                if method_name in _MINIMAL_API_TO_METHOD and str_args:
+                    http_method = _MINIMAL_API_TO_METHOD[method_name]
+                    route_tmpl = "/" + str_args[0].lstrip("/")
+                    note = f"@route {http_method} {route_tmpl}"
+                    if contract_notes is not None:
+                        contract_notes.append(note)
+                    else:
+                        slug = re.sub(r"[^A-Za-z0-9]+", "_", route_tmpl).strip("_") or "endpoint"
+                        ep_name = f"{method_name}_{slug}"
+                        ep_qn = f"{prefix}.{ep_name}"
+                        symbols.append(
+                            ParsedSymbol(
+                                name=ep_name,
+                                qualified_name=ep_qn,
+                                bare_name=ep_name,
+                                symbol_kind="function",
+                                start_line=node.start_point[0] + 1,
+                                end_line=node.end_point[0] + 1,
+                                start_byte=node.start_byte,
+                                end_byte=node.end_byte,
+                                signature=f'app.{method_name}("{route_tmpl}")',
+                                signature_skeleton=f'app.{method_name}("{route_tmpl}")',
+                                docstring=note,
+                                repo_name=repo_name,
+                            )
+                        )
+                    for hname in ident_args[1:] if ident_args else []:
+                        add_edge(owner_qn, hname.rsplit(".", 1)[-1], "CALLS")
+                elif (
+                    method_name in {"GetEnvironmentVariable", "GetValue", "GetSection"} and str_args
+                ):
+                    env_note = f"@env {str_args[0]}"
+                    if contract_notes is not None:
+                        contract_notes.append(env_note)
 
                 if method_name in _DI_METHODS and generic_node is not None:
                     for child in generic_node.children:
@@ -377,7 +562,7 @@ class CSharpPlugin:
 
             for child in node.children:
                 if child.type not in _TYPE_DECLARATION_NODES:
-                    scan_invocations(child, owner_qn)
+                    scan_invocations(child, owner_qn, contract_notes)
 
         def handle_type_declaration(node: Node) -> None:
             name_node = node.child_by_field_name("name")
@@ -390,6 +575,21 @@ class CSharpPlugin:
             symbol_kind = "interface" if node.type == "interface_declaration" else "class"
             sig = _extract_signature_before_body(node, code_bytes)
             doc = _extract_leading_doc_comment(node, code_bytes)
+            attrs = _extract_cs_attributes(node, code_bytes)
+            class_route = ""
+            extra_notes: list[str] = []
+            for aname, aargs in attrs:
+                if aname in {"Route", "RouteAttribute"} and aargs:
+                    class_route = aargs[0]
+                elif aname in {"ExtendObjectType", "QueryType", "MutationType"}:
+                    extra_notes.append(f"@graphql_type {type_name}")
+            dto_fields = _extract_cs_dto_fields(node, code_bytes)
+            if node.type == "record_declaration" or (
+                dto_fields and type_name.endswith(("Dto", "DTO", "Request", "Response", "Payload"))
+            ):
+                extra_notes.append(f"@dto {type_name} fields={','.join(dto_fields)}")
+            if extra_notes:
+                doc = f"{doc} {' '.join(extra_notes)}".strip()
             symbols.append(
                 ParsedSymbol(
                     name=type_name,
@@ -419,6 +619,7 @@ class CSharpPlugin:
                             add_edge(qn, base_name, "INHERITS")
 
             type_stack.append((type_name, qn))
+            class_route_stack.append(class_route)
             body_node = node.child_by_field_name("body")
             if body_node is not None:
                 walk(body_node)
@@ -426,6 +627,7 @@ class CSharpPlugin:
                 for child in node.children:
                     if child.type == "declaration_list":
                         walk(child)
+            class_route_stack.pop()
             type_stack.pop()
 
         def handle_method_declaration(node: Node) -> None:
@@ -440,6 +642,35 @@ class CSharpPlugin:
             bare = f"{type_stack[-1][0]}.{method_name}" if type_stack else method_name
             sig = _extract_signature_before_body(node, code_bytes)
             doc = _extract_leading_doc_comment(node, code_bytes)
+            attrs = _extract_cs_attributes(node, code_bytes)
+            contract_notes: list[str] = []
+            controller_name = type_stack[-1][0] if type_stack else ""
+            class_route = class_route_stack[-1] if class_route_stack else ""
+            gql_name = method_name
+            gql_op = ""
+            for aname, aargs in attrs:
+                if aname in _HTTP_ATTR_TO_METHOD:
+                    http_method = _HTTP_ATTR_TO_METHOD[aname]
+                    sub_route = aargs[0] if aargs else ""
+                    full_route = _combine_aspnet_route(class_route, sub_route, controller_name)
+                    contract_notes.append(f"@route {http_method} {full_route}")
+                elif aname in {"Route", "RouteAttribute"} and aargs:
+                    full_route = _combine_aspnet_route(class_route, aargs[0], controller_name)
+                    contract_notes.append(f"@route ANY {full_route}")
+                elif aname in {"Query", "QueryAttribute"}:
+                    gql_op = "query"
+                elif aname in {"Mutation", "MutationAttribute"}:
+                    gql_op = "mutation"
+                elif aname in {"GraphQLName", "GraphQLNameAttribute"} and aargs:
+                    gql_name = aargs[0]
+            if gql_op:
+                contract_notes.append(f"@graphql {gql_op} {gql_name}")
+            elif controller_name.endswith("Query") and "public" in sig:
+                contract_notes.append(f"@graphql query {gql_name}")
+            elif controller_name.endswith("Mutation") and "public" in sig:
+                contract_notes.append(f"@graphql mutation {gql_name}")
+
+            sym_idx = len(symbols)
             symbols.append(
                 ParsedSymbol(
                     name=method_name,
@@ -456,7 +687,13 @@ class CSharpPlugin:
                     repo_name=repo_name,
                 )
             )
-            scan_invocations(node, qn)
+            scan_invocations(node, qn, contract_notes)
+            if contract_notes:
+                deduped = " ".join(dict.fromkeys(contract_notes))
+                merged_doc = f"{doc} {deduped}".strip()
+                symbols[sym_idx] = symbols[sym_idx].model_copy(
+                    update={"docstring": merged_doc, "contextual_summary": merged_doc}
+                )
 
         def walk(node: Node) -> None:
             file_scoped_pushed = False

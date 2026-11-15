@@ -64,7 +64,7 @@ def create_doc_corpus_mcp_server(
         principal = get_current_principal()
         auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:search_hybrid_rrf", principal)
         sync_custom_domain_corpus_if_needed(
-            domain_id, index_path=resolved_domains_dir / domain_id / "corpus_index.json"
+            domain_id, index_path=resolved_domains_dir / domain_id / "sync_manifest.json"
         )
 
         clamped_k = min(max(1, top_k), MAX_PAYLOAD_ITEMS)
@@ -123,7 +123,7 @@ def create_doc_corpus_mcp_server(
         principal = get_current_principal()
         auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:verify_citation_quote", principal)
         sync_custom_domain_corpus_if_needed(
-            domain_id, index_path=resolved_domains_dir / domain_id / "corpus_index.json"
+            domain_id, index_path=resolved_domains_dir / domain_id / "sync_manifest.json"
         )
 
         visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
@@ -182,7 +182,7 @@ def create_doc_corpus_mcp_server(
         principal = get_current_principal()
         auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:get_document_section", principal)
         sync_custom_domain_corpus_if_needed(
-            domain_id, index_path=resolved_domains_dir / domain_id / "corpus_index.json"
+            domain_id, index_path=resolved_domains_dir / domain_id / "sync_manifest.json"
         )
 
         visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
