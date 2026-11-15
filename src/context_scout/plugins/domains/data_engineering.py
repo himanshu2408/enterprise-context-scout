@@ -379,6 +379,78 @@ _BOILERPLATE_SUBSTRINGS: Final[tuple[str, ...]] = (
 _MD_LINK_ONLY_RE: Final[re.Pattern[str]] = re.compile(r"^(?:[-*•]\s*)?\[[^\]]+\]\([^)]+\)\s*$")
 
 
+_SLOP_SUBSTRINGS: Final[tuple[str, ...]] = (
+    "the rest of this paper",
+    "see also",
+    "declaration on generative ai",
+    "declaration of generative ai",
+    "{prodname}",
+    '[id="',
+    "ifdef::",
+    "endif::",
+    "xref:",
+    "link:https://",
+    "\\bibitem",
+    "// category:",
+    "\\label{",
+    "\\sys",
+    "<td",
+    "<tr",
+    "<span",
+    "<table",
+    "<div",
+    "</",
+    "author ",
+    "### author",
+)
+
+_LATEX_CMD_RE: Final[re.Pattern[str]] = re.compile(
+    r"\\(?:citet|citep|citeauthor|citeyear|cite|ref|eqref|label|sys|textbf|textit|emph|section|subsection|paragraph|textsc|texttt|bibitem|footnotemark)\*?(?:\[[^\]]*\])?(?:\{[^}]*\})?"
+)
+_HTML_TAG_RE: Final[re.Pattern[str]] = re.compile(r"</?[a-zA-Z][^>]*>")
+
+
+_YAML_FRONTMATTER_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:---|title:\s*|layout:\s*|permalink:\s*|-\s+/docs/|category:\s*)",
+    re.IGNORECASE,
+)
+
+
+def is_slop_text(text: str) -> bool:
+    """Returns True for boilerplate, headings, HTML/LaTeX/AsciiDoc slop, or meta-outlines."""
+    stripped = text.strip()
+    if not stripped or is_boilerplate_text(stripped):
+        return True
+    if stripped.startswith(("#", "%", "```", "|", "<<", "//", "---")):
+        return True
+    if _YAML_FRONTMATTER_RE.match(stripped):
+        return True
+    if stripped.startswith("$") and stripped.endswith("$"):
+        return True
+    low = stripped.lower()
+    return any(marker in low for marker in _SLOP_SUBSTRINGS)
+
+
+def clean_display_text(text: str) -> str:
+    """Normalizes LaTeX/HTML/newline noise for human-readable synthesis fields."""
+    cleaned = text.replace("{prodname}", "Debezium")
+    cleaned = _LATEX_CMD_RE.sub("", cleaned)
+    cleaned = _HTML_TAG_RE.sub(" ", cleaned)
+    cleaned = cleaned.replace("~", " ")
+    # Unwrap single newlines while preserving sentence spacing
+    cleaned = " ".join(cleaned.splitlines())
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+def clean_brief_title(raw_title: str, default: str = "Data Engineering Systems Synthesis") -> str:
+    """Sanitizes a document title into a clean brief title."""
+    cleaned = re.sub(r"^#+\s*", "", raw_title.strip())
+    cleaned = clean_display_text(cleaned)
+    if not cleaned or is_slop_text(cleaned) or len(cleaned) < 4:
+        return default
+    return cleaned
+
+
 def is_boilerplate_text(text: str) -> bool:
     """Returns True when text is license/copyright boilerplate or a pure link stub."""
     stripped = text.strip()
@@ -392,13 +464,44 @@ def is_boilerplate_text(text: str) -> bool:
     return stripped.startswith("%")
 
 
-def extract_clean_quote(text: str, max_chars: int = 220) -> str:
-    """Selects a concise, non-boilerplate verbatim line or prefix from chunk text."""
+def _has_complete_sentence(text: str) -> bool:
+    """Returns True if text contains at least one complete sentence with >=5 words."""
+    stripped = text.strip()
+    if len(re.findall(r"[A-Za-z]{3,}", stripped)) < 5:
+        return False
+    return bool(re.search(r"[.!?](?:\s|$)", stripped))
+
+
+def extract_paragraph_blocks(text: str) -> list[str]:
+    """Splits text on double-newline paragraph blocks and filters slop/frontmatter."""
+    blocks: list[str] = []
+    for raw_blk in re.split(r"\n\s*\n", text):
+        blk = raw_blk.strip()
+        if len(blk) < 40 or blk.endswith(":"):
+            continue
+        first_ln = blk.splitlines()[0].strip() if blk else ""
+        if is_slop_text(blk) or is_slop_text(first_ln):
+            continue
+        if not _has_complete_sentence(blk):
+            continue
+        blocks.append(blk)
+    return blocks
+
+
+def extract_clean_quote(text: str, max_chars: int = 260) -> str:
+    """Selects an intact, non-boilerplate verbatim paragraph or line from chunk text."""
+    for blk in extract_paragraph_blocks(text):
+        if len(blk) <= max_chars:
+            return blk
+        cut = blk[:max_chars].rsplit(" ", 1)[0].strip()
+        if len(cut) >= 40:
+            return cut
+        return blk[:max_chars].strip()
     for raw_ln in text.splitlines():
         ln = raw_ln.strip()
-        if len(ln) < 35 or ln.startswith(("#", "%", "```", "|")) or ln.endswith(":"):
+        if len(ln) < 35 or ln.endswith(":"):
             continue
-        if is_boilerplate_text(ln):
+        if is_slop_text(ln):
             continue
         if len(re.findall(r"[A-Za-z]{3,}", ln)) < 4:
             continue
@@ -416,35 +519,67 @@ def extract_clean_quote(text: str, max_chars: int = 220) -> str:
 
 
 def _extract_candidate_sentences(
-    chunks: list[Any], *, limit: int = 4
+    chunks: list[Any], *, limit: int = 12, max_failures: int = 8, max_caveats: int = 8
 ) -> tuple[list[str], list[str], list[str]]:
-    """Extracts findings, caveats, and failure-mode lines across multiple retrieved chunks."""
+    """Extracts complete paragraph-unwrapped findings, caveats, and failure modes."""
     findings: list[str] = []
     caveats: list[str] = []
     failures: list[str] = []
 
-    for chk in chunks[:3]:
+    for chk in chunks:
         content = str(getattr(chk, "verbatim_content", "") or "")
-        for raw_ln in content.splitlines():
-            s_ln = raw_ln.strip().lstrip("-*•0123456789. ")
-            if len(s_ln) < 35 or s_ln.startswith(("#", "%", "```", "|")) or s_ln.endswith(":"):
+        blocks = extract_paragraph_blocks(content)
+        candidates = blocks if blocks else [ln.strip() for ln in content.splitlines()]
+        for raw_cand in candidates:
+            s_cand = raw_cand.strip().lstrip("-*•0123456789. ")
+            if len(s_cand) < 35 or s_cand.endswith(":"):
                 continue
-            if is_boilerplate_text(s_ln):
+            if is_slop_text(s_cand):
                 continue
-            trimmed = s_ln[:180].rsplit(" ", 1)[0].strip() if len(s_ln) > 180 else s_ln
-            if len(trimmed) < 25:
+            cleaned_ln = clean_display_text(s_cand)
+            if len(cleaned_ln) < 35 or not _has_complete_sentence(cleaned_ln):
                 continue
-            low = trimmed.lower()
+            low = cleaned_ln.lower()
             if any(term in low for term in _FAILURE_TERMS):
-                if trimmed not in failures and len(failures) < 3:
-                    failures.append(trimmed)
+                if cleaned_ln not in failures and len(failures) < max_failures:
+                    failures.append(cleaned_ln)
             elif any(term in low for term in _CAVEAT_TERMS):
-                if trimmed not in caveats and len(caveats) < 3:
-                    caveats.append(trimmed)
-            elif trimmed not in findings and len(findings) < limit:
-                findings.append(trimmed)
+                if cleaned_ln not in caveats and len(caveats) < max_caveats:
+                    caveats.append(cleaned_ln)
+            elif cleaned_ln not in findings and len(findings) < limit:
+                findings.append(cleaned_ln)
 
     return findings, caveats, failures
+
+
+DATA_ENGINEERING_ACRONYMS: dict[str, list[tuple[str, str, str]]] = {
+    "ACID": [
+        ("A", "Atomicity", "ACID Atomicity transaction commit rollback"),
+        ("C", "Consistency", "ACID Consistency database constraints invariants"),
+        ("I", "Isolation", "ACID Isolation concurrent transactions MVCC"),
+        ("D", "Durability", "ACID Durability write-ahead log WAL crash recovery"),
+    ],
+    "CAP": [
+        ("C", "Consistency", "CAP Consistency distributed linearizability"),
+        ("A", "Availability", "CAP Availability distributed non-failing response"),
+        ("P", "Partition Tolerance", "CAP Partition Tolerance network split"),
+    ],
+    "CDC": [
+        ("C", "Change", "CDC Change Data Capture log"),
+        ("D", "Data", "CDC Data replication stream"),
+        ("C", "Capture", "CDC Capture WAL debezium"),
+    ],
+    "OLAP": [
+        ("O", "Online", "OLAP Online analytical query"),
+        ("A", "Analytical", "OLAP Analytical columnar aggregation"),
+        ("P", "Processing", "OLAP Processing warehouse"),
+    ],
+    "OLTP": [
+        ("O", "Online", "OLTP Online transactional query"),
+        ("T", "Transactional", "OLTP Transactional row-store ACID"),
+        ("P", "Processing", "OLTP Processing database"),
+    ],
+}
 
 
 class DataEngineeringDomainPlugin:
@@ -521,6 +656,40 @@ class DataEngineeringDomainPlugin:
         _ = prompt
         return [MarketRegime.GLOBAL_MULTI]
 
+    def expand_query_plan(self, plan: Any) -> Any:
+        """Expands recognized Data Engineering acronyms (e.g. ACID) into component facets."""
+        from context_scout.agents.intent_router import FacetSpec, QueryPlan
+
+        if not isinstance(plan, QueryPlan) or not plan.is_acronym_query or not plan.acronym:
+            return plan
+        components = DATA_ENGINEERING_ACRONYMS.get(plan.acronym.upper())
+        if not components:
+            return plan
+        expanded_facets = [
+            FacetSpec(
+                facet_id=f"facet_{idx}",
+                facet_query=enriched_query,
+                key_terms=[
+                    term.lower(),
+                    *[
+                        w
+                        for w in enriched_query.lower().split()
+                        if w != term.lower() and len(w) >= 3
+                    ][:3],
+                ],
+                expected_source_kind="docs",
+                is_acronym_component=True,
+            )
+            for idx, (letter, term, enriched_query) in enumerate(components, start=1)
+        ]
+        return QueryPlan(
+            original_query=plan.original_query,
+            requested_cardinality=plan.requested_cardinality or len(expanded_facets),
+            is_acronym_query=True,
+            acronym=plan.acronym.upper(),
+            facets=expanded_facets,
+        )
+
     def synthesize_research_brief(
         self,
         user_prompt: str,
@@ -528,13 +697,102 @@ class DataEngineeringDomainPlugin:
         chunks: list[Any],
         verified_citations: list[Any],
     ) -> DomainKnowledgeBrief:
-        """Synthesizes a concise multi-chunk Data Engineering DomainKnowledgeBrief."""
-        findings, caveats, failures = _extract_candidate_sentences(chunks, limit=4)
-        citations = list(verified_citations)[:3]
+        """Synthesizes a complete, un-truncated Data Engineering DomainKnowledgeBrief."""
+        from context_scout.agents.intent_router import decompose_query_facets
+
+        plan = self.expand_query_plan(decompose_query_facets(user_prompt))
+        req_card = plan.requested_cardinality or 6
+        findings, caveats, failures = _extract_candidate_sentences(
+            chunks,
+            limit=max(10, req_card * 2),
+            max_failures=max(6, req_card),
+            max_caveats=6,
+        )
+        citations = list(verified_citations)
+
+        # Acronym expansion adherence (e.g. "what does ACID stands for" -> all 4 properties)
+        acronym_findings: list[str] = []
+        if plan.is_acronym_query and plan.acronym and plan.acronym in DATA_ENGINEERING_ACRONYMS:
+            synonym_map: dict[str, tuple[str, ...]] = {
+                "atomicity": (
+                    "atomic",
+                    "atomicity",
+                    "begin transaction",
+                    "rollback",
+                    "all-or-nothing",
+                    "all or nothing",
+                    "commit",
+                ),
+                "consistency": (
+                    "consistency",
+                    "consistent",
+                    "constraint",
+                    "invariant",
+                    "foreign key",
+                    "check constraint",
+                    "valid state",
+                ),
+                "isolation": (
+                    "isolation",
+                    "isolated",
+                    "concurrent",
+                    "mvcc",
+                    "serializable",
+                    "repeatable read",
+                    "snapshot",
+                ),
+                "durability": (
+                    "durability",
+                    "durable",
+                    "wal",
+                    "write-ahead log",
+                    "flushed",
+                    "crash",
+                    "fsync",
+                    "persisted",
+                ),
+            }
+            for letter, term, _enriched in DATA_ENGINEERING_ACRONYMS[plan.acronym]:
+                term_low = term.lower()
+                match_terms = synonym_map.get(term_low, (term_low,))
+                matched_line = ""
+                for chk in chunks:
+                    content = str(getattr(chk, "verbatim_content", "") or "")
+                    blocks = extract_paragraph_blocks(content)
+                    candidates = blocks if blocks else [ln.strip() for ln in content.splitlines()]
+                    for raw_cand in candidates:
+                        s_cand = raw_cand.strip().lstrip("-*•0123456789. ")
+                        if len(s_cand) < 25 or is_slop_text(s_cand):
+                            continue
+                        cleaned_ln = clean_display_text(s_cand)
+                        if len(cleaned_ln) < 25:
+                            continue
+                        low_ln = cleaned_ln.lower()
+                        if any(mt in low_ln for mt in match_terms):
+                            matched_line = cleaned_ln
+                            break
+                    if matched_line:
+                        break
+                if matched_line:
+                    acronym_findings.append(f"{term} ({letter}): {matched_line}")
+                else:
+                    acronym_findings.append(
+                        f"{term} ({letter}): Referenced under {plan.acronym} "
+                        "transactional guarantees."
+                    )
+
         for cit in reversed(citations):
             q = str(getattr(cit, "verbatim_quote", "") or "").strip()
-            if q and not is_boilerplate_text(q) and q not in findings:
-                findings.insert(0, q[:180])
+            cleaned_q = clean_display_text(q)
+            if cleaned_q and not is_slop_text(q) and cleaned_q not in findings:
+                findings.insert(0, cleaned_q)
+
+        if acronym_findings:
+            merged_findings = acronym_findings + [
+                f for f in findings if not any(f in af for af in acronym_findings)
+            ]
+            findings = merged_findings
+
         if not findings:
             findings = ["No verified findings extracted from retrieved chunks."]
         if not caveats:
@@ -550,7 +808,7 @@ class DataEngineeringDomainPlugin:
 
         titles = list(
             dict.fromkeys(
-                str(getattr(c, "doc_title", "") or "")
+                clean_brief_title(str(getattr(c, "doc_title", "") or ""))
                 for c in citations
                 if getattr(c, "doc_title", "")
             )
@@ -560,16 +818,20 @@ class DataEngineeringDomainPlugin:
             if titles
             else "Data Engineering Systems Synthesis"
         )
-        lead_quote = str(getattr(citations[0], "verbatim_quote", "")) if citations else findings[0]
+        lead_quote = (
+            clean_display_text(str(getattr(citations[0], "verbatim_quote", "")))
+            if citations and not is_slop_text(str(getattr(citations[0], "verbatim_quote", "")))
+            else findings[0]
+        )
         exec_summary = (
             f"Multi-source synthesis across {len(citations)} verified citation(s) "
-            f"for '{user_prompt.strip()[:140]}': {lead_quote[:180]}"
+            f"for '{user_prompt.strip()}': {lead_quote}"
         )
 
         sub_scopes = sorted(
             {
                 str((getattr(c, "metadata_json", {}) or {}).get("sub_scope", ""))
-                for c in chunks[:3]
+                for c in chunks
                 if isinstance(getattr(c, "metadata_json", None), dict)
                 and (getattr(c, "metadata_json", {}) or {}).get("sub_scope")
             }
@@ -579,9 +841,9 @@ class DataEngineeringDomainPlugin:
             domain_id=domain_id,
             executive_summary=exec_summary,
             formal_expression_or_rule=None,
-            core_findings_and_rules=findings[:4],
-            domain_constraints_and_caveats=caveats[:3],
-            known_risks_and_failure_modes=failures[:3],
+            core_findings_and_rules=findings[: max(10, req_card * 2)],
+            domain_constraints_and_caveats=caveats[:6],
+            known_risks_and_failure_modes=failures[: max(6, req_card)],
             structured_metadata={
                 "domain_id": domain_id,
                 "verified_citations_count": len(citations),

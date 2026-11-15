@@ -32,6 +32,28 @@ export type FrictionVerdict =
   | "UNVERIFIED_FRICTION_WARNING"
   | "FAILS_AFTER_COSTS";
 
+export type ConfidenceBand = "high" | "medium" | "low";
+
+export interface StageConfidence {
+  stage: number;
+  stage_name: string;
+  confidence_score: number;
+  confidence_band: ConfidenceBand;
+  signals: Record<string, number | string | boolean>;
+  summary: string;
+}
+
+export type FacetCoverageStatus = "grounded" | "partial" | "not_found";
+
+export interface QueryFacetCoverage {
+  facet_id: string;
+  facet_query: string;
+  status: FacetCoverageStatus;
+  matched_sources: string[];
+  confidence: number;
+  explanation: string;
+}
+
 export interface PrincipalContext {
   user_id: string;
   role: RoleType;
@@ -110,6 +132,7 @@ export interface DocCitation {
   source_uri: string;
   section_heading: string;
   verbatim_quote: string;
+  full_section_content?: string;
   page_id?: string | null;
   ticket_key?: string | null;
   source_type?: string;
@@ -128,6 +151,10 @@ export interface DomainKnowledgeBrief {
   known_risks_and_failure_modes: string[];
   structured_metadata: Record<string, string | number | boolean>;
   verified_citations: DocCitation[];
+  query_facets?: QueryFacetCoverage[];
+  missing_or_unverified_aspects?: string[];
+  completeness_ratio?: number;
+  synthesis_mode?: "live_qlora_json" | "deterministic_extractive_fallback" | string;
 }
 
 export interface QuantStrategyBrief {
@@ -170,6 +197,11 @@ export interface ContextPack {
   preflight_report: PreFlightValidationReport;
   local_tokens_consumed: number;
   pack_token_count: number;
+  query_facets?: QueryFacetCoverage[];
+  missing_or_unverified_aspects?: string[];
+  completeness_ratio?: number;
+  synthesis_mode?: string;
+  stage_confidences?: StageConfidence[];
 }
 
 export interface InsufficientContextDiagnostic {
@@ -182,6 +214,9 @@ export interface InsufficientContextDiagnostic {
   missing_items: Array<string | { identifier: string; reason?: string }>;
   failure_check: string | null;
   paid_tokens_spent: number;
+  query_facets?: QueryFacetCoverage[];
+  missing_or_unverified_aspects?: string[];
+  stage_confidences?: StageConfidence[];
 }
 
 export interface ScoutTokenSavingsBreakdown {
@@ -206,6 +241,8 @@ export interface SSEStageUpdateData {
   status: "in_progress" | "running" | "completed" | "failed";
   details: string;
   message?: string;
+  confidence?: StageConfidence | null;
+  elapsed_ms?: number | null;
   timestamp: string;
 }
 

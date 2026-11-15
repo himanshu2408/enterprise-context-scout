@@ -28,7 +28,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from context_scout.agents.citation_gate import DocumentCitationGate
 from context_scout.agents.conflict_detector import ConflictDetector
@@ -36,7 +36,10 @@ from context_scout.agents.domain_registry import AdapterPool, AdapterSlot, Domai
 from context_scout.agents.intent_router import (
     QueryIntentClassifier,
     QueryIntentMode,
+    QueryPlan,
     SourceFilter,
+    decompose_query_facets,
+    evaluate_facet_grounding,
     filter_doc_chunks_by_source,
     format_doc_citation_label,
     is_jira_chunk,
@@ -69,7 +72,9 @@ from context_scout.schemas.contracts import (
     PreFlightValidationReport,
     PrincipalContext,
     QuantStrategyBrief,
+    QueryFacetCoverage,
     RoleType,
+    StageConfidence,
     VerbatimCodeSlice,
     build_domain_knowledge_brief_prompt,
     parse_domain_knowledge_brief_json,
@@ -921,7 +926,8 @@ class LocalGemmaClient:
 
         files_by_id: dict[uuid.UUID, CodeFileRecord] = {f.file_id: f for f in visible_files}
 
-        # Identify files explicitly mentioned in prompt
+        # Identify files explicitly mentioned in prompt (including module/directory/repo names)
+        prompt_module_tokens = {w.lower() for w in ident_words if "_" in w and len(w) >= 4}
         mentioned_file_ids = {
             f.file_id
             for f in visible_files
@@ -931,6 +937,11 @@ class LocalGemmaClient:
                 "." in f.file_path.split("/")[-1]
                 and f.file_path.split("/")[-1] in candidates_to_search
             )
+            or any(
+                part.lower() in prompt_module_tokens
+                for part in f.file_path.replace("\\", "/").split("/")[:-1]
+            )
+            or (f.repo_name and f.repo_name.lower() in prompt_module_tokens)
         }
 
         # 1. Match symbols in repository with priority ordering
@@ -1430,11 +1441,32 @@ class LocalGemmaClient:
                     if len(t3_subword) >= 3:
                         break
 
+        plan = decompose_query_facets(user_prompt)
+        target_diversity = max(1, plan.requested_cardinality or len(plan.facets))
+        max_candidates = max(5, target_diversity * 2)
+
         candidate_ordered = t1_exact + t2_file_classes + t2_file_others + t3_subword
-        if len(candidate_ordered) > 5:
+        if target_diversity >= 2 and len(candidate_ordered) > 1:
+            # Diversify across distinct files first so "top N" / multi-facet queries
+            # do not collapse onto N methods from a single file.
+            by_file_primary: list[tuple[ASTSymbolRecord, bool]] = []
+            by_file_rest: list[tuple[ASTSymbolRecord, bool]] = []
+            seen_fids: set[uuid.UUID] = set()
+            for item in candidate_ordered:
+                fid = item[0].file_id
+                if fid not in seen_fids:
+                    seen_fids.add(fid)
+                    by_file_primary.append(item)
+                else:
+                    by_file_rest.append(item)
+            candidate_ordered = by_file_primary + by_file_rest
+
+        if len(candidate_ordered) > max_candidates:
             feedback_items = [item for item in candidate_ordered if item[1]]
             non_feedback = [item for item in candidate_ordered if not item[1]]
-            candidate_ordered = (non_feedback[:1] + feedback_items + non_feedback[1:])[:5]
+            candidate_ordered = (non_feedback[:1] + feedback_items + non_feedback[1:])[
+                :max_candidates
+            ]
 
         for sym, is_feedback_match in candidate_ordered:
             short_name = sym.qualified_name.split(".")[-1]
@@ -1597,8 +1629,9 @@ class LocalGemmaClient:
     def _extract_verified_doc_citations(
         fresh_chunks: list[DocChunkRecord],
         *,
-        max_citations: int = 3,
+        max_citations: int = 8,
         diversify_docs: bool = False,
+        all_chunks: list[DocChunkRecord] | None = None,
     ) -> list[DocCitationSpan]:
         """Extracts verbatim-verified DocCitationSpans from non-stale document chunks."""
 
@@ -1607,16 +1640,33 @@ class LocalGemmaClient:
             if len(s) < 25:
                 return True
             noisy_prefixes = (
+                "#",
                 "\\begin{table",
                 "\\end{table",
                 "\\maketitle",
                 "\\label{",
                 "\\paragraph{}",
+                "\\sys",
                 "%",
                 "```",
                 "---",
+                "|",
+                "<<",
+                "//",
+                "<td",
+                "<tr",
+                "<span",
+                "<table",
+                "<div",
+                "</",
             )
             if any(s.startswith(p) for p in noisy_prefixes):
+                return True
+            if s.startswith("$") and s.endswith("$"):
+                return True
+            if re.match(
+                r"^(?:---|title:\s*|layout:\s*|permalink:\s*|-\s+/docs/|category:\s*)", s, re.I
+            ):
                 return True
             low = s.lower()
             boilerplate_markers = (
@@ -1625,6 +1675,17 @@ class LocalGemmaClient:
                 "spdx-license-identifier",
                 "unless required by applicable law",
                 'distributed on an "as is" basis',
+                "the rest of this paper",
+                "see also",
+                "declaration on generative ai",
+                "{prodname}",
+                "// category:",
+                "\\label{",
+                "\\sys",
+                "<td",
+                "<tr",
+                "<span",
+                "### author",
             )
             return any(m in low for m in boilerplate_markers)
 
@@ -1649,22 +1710,33 @@ class LocalGemmaClient:
             snippet = chk.verbatim_content.strip()
             if not snippet:
                 continue
+            para_blocks = [
+                blk.strip()
+                for blk in re.split(r"\n\s*\n", snippet)
+                if len(blk.strip()) >= 40
+                and not _is_noisy_line(blk.strip().splitlines()[0])
+                and re.search(r"[.!?](?:\s|$)", blk.strip())
+            ]
             clean_lines = [ln.strip() for ln in snippet.splitlines() if not _is_noisy_line(ln)]
+            lead_sentence = snippet.split(".")[0] + "." if "." in snippet else snippet[:400]
             candidates = [
+                *para_blocks,
                 *clean_lines,
-                snippet.split(".")[0] + "." if "." in snippet else snippet[:140],
+                lead_sentence,
                 *[ln.strip() for ln in snippet.splitlines() if len(ln.strip()) >= 20],
-                snippet[:220],
+                snippet[:500],
             ]
             for raw_cand in candidates:
                 cand = (
                     raw_cand
-                    if len(raw_cand) <= 220
-                    else (raw_cand[:220].rsplit(" ", 1)[0].strip() or raw_cand[:220])
+                    if len(raw_cand) <= 500
+                    else (raw_cand[:500].rsplit(" ", 1)[0].strip() or raw_cand[:500])
                 )
                 if not cand:
                     continue
-                cand_cit = _build_doc_citation_span(chk, cand)
+                cand_cit = _build_doc_citation_span(
+                    chk, cand, all_chunks=all_chunks or fresh_chunks
+                )
                 if slicer.verify_doc_citation(
                     citation=cand_cit,
                     chunk_content=chk.verbatim_content,
@@ -1731,18 +1803,37 @@ class LocalGemmaClient:
             else []
         )
         primary_market = target_markets[0] if len(target_markets) == 1 else None
-        chunks = bound_repo.search_visible_doc_chunks(
-            principal=active_principal,
-            domain_id=domain_id,
-            query_text=user_prompt,
-            market_scope=primary_market,
-            limit=40,
-        )
+        plan = decompose_query_facets(user_prompt)
+        if domain_plugin is not None and hasattr(domain_plugin, "expand_query_plan"):
+            plan = domain_plugin.expand_query_plan(plan)
+
+        if len(plan.facets) >= 2 or plan.is_acronym_query:
+            chunks = _stratified_doc_search(
+                bound_repo,
+                principal=active_principal,
+                domain_id=domain_id,
+                plan=plan,
+                market_scope=primary_market,
+                per_facet_limit=8,
+                max_total=16,
+            )
+        else:
+            chunks = bound_repo.search_visible_doc_chunks(
+                principal=active_principal,
+                domain_id=domain_id,
+                query_text=user_prompt,
+                market_scope=primary_market,
+                limit=40,
+            )
 
         fresh_chunks = [c for c in chunks if not bool(getattr(c, "is_stale", False))]
         slicer = DeterministicSlicer()
         chunks_by_id = {str(c.chunk_id): c for c in fresh_chunks}
-        verified_citations = self._extract_verified_doc_citations(fresh_chunks, max_citations=3)
+        verified_citations = self._extract_verified_doc_citations(
+            fresh_chunks,
+            max_citations=max(8, len(plan.facets) * 2),
+            all_chunks=fresh_chunks,
+        )
 
         if not verified_citations:
             logger.info(
@@ -1831,9 +1922,11 @@ class LocalGemmaClient:
         repo: Any = None,
         principal: PrincipalContext | None = None,
         quant_brief: QuantStrategyBrief | None = None,
-    ) -> DomainKnowledgeBrief:
+    ) -> DomainKnowledgeBrief | None:
         """Synthesizes a domain-agnostic DomainKnowledgeBrief for any document/knowledge domain."""
         if quant_brief is not None:
+            if isinstance(quant_brief, DomainKnowledgeBrief):
+                return quant_brief
             metadata: dict[str, str | float | int | bool] = {
                 "domain_id": domain_id,
                 "verified_citations_count": len(quant_brief.verified_citations),
@@ -1892,17 +1985,7 @@ class LocalGemmaClient:
                 )
 
         if repo is None:
-            return DomainKnowledgeBrief(
-                brief_title="Insufficient Verified Corpus Citations",
-                domain_id=domain_id,
-                executive_summary="No verified corpus citations found for prompt.",
-                formal_expression_or_rule=None,
-                core_findings_and_rules=[],
-                domain_constraints_and_caveats=[],
-                known_risks_and_failure_modes=[],
-                structured_metadata={"domain_id": domain_id, "verified_citations_count": 0},
-                verified_citations=[],
-            )
+            return None
 
         bound_repo = repo if isinstance(repo, BoundGraphRepository) else BoundGraphRepository(repo)
         domain_plugin = PluginRegistry.get_domain_plugin(domain_id)
@@ -1916,31 +1999,67 @@ class LocalGemmaClient:
             role=RoleType.ENGINEER,
             allowed_scopes=sorted({"public_eng", *default_scopes}),
         )
-        chunks = bound_repo.search_visible_doc_chunks(
-            principal=active_principal,
-            domain_id=domain_id,
-            query_text=user_prompt,
-            limit=30,
-        )
+        plan = decompose_query_facets(user_prompt)
+        if domain_plugin is not None and hasattr(domain_plugin, "expand_query_plan"):
+            plan = domain_plugin.expand_query_plan(plan)
+
+        if len(plan.facets) >= 2 or plan.is_acronym_query:
+            chunks = _stratified_doc_search(
+                bound_repo,
+                principal=active_principal,
+                domain_id=domain_id,
+                plan=plan,
+                per_facet_limit=6,
+                max_total=12,
+            )
+        else:
+            chunks = bound_repo.search_visible_doc_chunks(
+                principal=active_principal,
+                domain_id=domain_id,
+                query_text=user_prompt,
+                limit=30,
+            )
         fresh_chunks = [c for c in chunks if not bool(getattr(c, "is_stale", False))]
         chunks_by_id = {str(c.chunk_id): c for c in fresh_chunks}
         verified_citations = self._extract_verified_doc_citations(
             fresh_chunks,
-            max_citations=3,
+            max_citations=max(8, len(plan.facets) * 2),
             diversify_docs=True,
+            all_chunks=fresh_chunks,
         )
         if not verified_citations:
-            return DomainKnowledgeBrief(
-                brief_title="Insufficient Verified Corpus Citations",
-                domain_id=domain_id,
-                executive_summary="No verified corpus citations found for prompt.",
-                formal_expression_or_rule=None,
-                core_findings_and_rules=[],
-                domain_constraints_and_caveats=[],
-                known_risks_and_failure_modes=[],
-                structured_metadata={"domain_id": domain_id, "verified_citations_count": 0},
-                verified_citations=[],
-            )
+            return None
+
+        query_facets, missing_aspects, completeness_ratio = _evaluate_query_plan_coverage(
+            plan,
+            doc_chunks=fresh_chunks,
+            code_slices=[],
+            domain_id=domain_id,
+        )
+        # If ALL facets are not_found, abstain cleanly instead of returning unrelated chunks
+        if query_facets and all(f.status == "not_found" for f in query_facets):
+            return None
+
+        def _finalize_kb(
+            kb: DomainKnowledgeBrief,
+            *,
+            mode: Literal["live_qlora_json", "deterministic_extractive_fallback"],
+        ) -> DomainKnowledgeBrief:
+            for cit in kb.verified_citations:
+                if not cit.full_section_content and cit.chunk_id in chunks_by_id:
+                    cit.full_section_content = _stitch_section_content(
+                        chunks_by_id[cit.chunk_id], fresh_chunks
+                    )
+            kb.query_facets = query_facets
+            kb.missing_or_unverified_aspects = missing_aspects
+            kb.completeness_ratio = completeness_ratio
+            kb.synthesis_mode = mode
+            if missing_aspects and "not found" not in kb.executive_summary.lower():
+                kb.executive_summary = (
+                    f"{kb.executive_summary} | Missing from indexed corpus: "
+                    + "; ".join(missing_aspects)
+                )
+            return kb
 
         slicer = DeterministicSlicer()
         if (
@@ -1984,7 +2103,7 @@ class LocalGemmaClient:
                         ).is_valid
                     ]
                     rag_kb.verified_citations = grounded_cits or verified_citations
-                    return rag_kb
+                    return _finalize_kb(rag_kb, mode="live_qlora_json")
             except Exception as exc:
                 logger.warning(
                     "Live MLX DomainKnowledgeBrief RAG synthesis failed (%s); using fallback",
@@ -1999,22 +2118,26 @@ class LocalGemmaClient:
                 verified_citations=verified_citations,
             )
             if isinstance(plugin_res, DomainKnowledgeBrief):
-                return plugin_res
+                return _finalize_kb(plugin_res, mode="deterministic_extractive_fallback")
             if isinstance(plugin_res, QuantStrategyBrief):
-                return self.generate_domain_knowledge_brief(
+                kb_from_quant = self.generate_domain_knowledge_brief(
                     user_prompt=user_prompt,
                     domain_id=domain_id,
                     repo=repo,
                     principal=active_principal,
                     quant_brief=plugin_res,
                 )
+                if kb_from_quant is not None:
+                    return _finalize_kb(kb_from_quant, mode="deterministic_extractive_fallback")
+                return None
 
-        return _build_domain_brief_from_citations(
+        fallback_kb = _build_domain_brief_from_citations(
             user_prompt=user_prompt,
             domain_id=domain_id,
             citations=verified_citations,
             chunks_by_id=chunks_by_id,
         )
+        return _finalize_kb(fallback_kb, mode="deterministic_extractive_fallback")
 
 
 _HYBRID_DOC_META_WORDS: Final[set[str]] = {
@@ -2103,12 +2226,13 @@ def _stage3_details(
     citations_count: int,
     conflicts_count: int,
     elapsed_ms: int,
+    budget_tokens: int = 10_000,
 ) -> str:
     auto_1hop = sum(1 for s in slices if s.auto_expanded_by_ast)
     direct_slices = len(slices) - auto_1hop
     return (
         f"Hydrated {direct_slices} direct slice(s) + {auto_1hop} 1-hop AST dependency slice(s) "
-        f"under 1,500-token budget, verified {citations_count} citation(s), "
+        f"under {budget_tokens:,}-token budget, verified {citations_count} citation(s), "
         f"flagged {conflicts_count} doc-vs-code conflict(s) in {elapsed_ms} ms"
     )
 
@@ -2277,7 +2401,264 @@ def _build_domain_brief_from_citations(
     )
 
 
-def _build_doc_citation_span(chk: DocChunkRecord, verbatim_quote: str) -> DocCitationSpan:
+def _stitch_section_content(
+    chk: DocChunkRecord,
+    all_chunks: list[DocChunkRecord] | None = None,
+) -> str:
+    """Stitches adjacent sibling chunks with the same (doc_id, section_heading)."""
+    base = (chk.verbatim_content or "").strip()
+    if not all_chunks:
+        return base
+    siblings = [
+        c
+        for c in all_chunks
+        if c.doc_id == chk.doc_id
+        and (c.section_heading or "") == (chk.section_heading or "")
+        and (c.verbatim_content or "").strip()
+    ]
+    if len(siblings) <= 1:
+        return base
+    seen_texts: set[str] = set()
+    parts: list[str] = []
+    for sib in siblings:
+        txt = (sib.verbatim_content or "").strip()
+        if txt and txt not in seen_texts:
+            seen_texts.add(txt)
+            parts.append(txt)
+    return "\n\n".join(parts) if parts else base
+
+
+def _stratified_doc_search(
+    bound_repo: BoundGraphRepository | Any,
+    *,
+    principal: PrincipalContext,
+    domain_id: str,
+    plan: QueryPlan,
+    market_scope: Any = None,
+    per_facet_limit: int = 6,
+    max_total: int = 12,
+) -> list[DocChunkRecord]:
+    """Runs per-facet RRF retrieval and round-robin merges so no single facet starves others."""
+    queries: list[str] = (
+        [f.facet_query for f in plan.facets] if plan.facets else [plan.original_query]
+    )
+    if plan.original_query not in queries:
+        queries.append(plan.original_query)
+
+    per_query_results: list[list[DocChunkRecord]] = []
+    for q_text in queries:
+        try:
+            res = bound_repo.search_visible_doc_chunks(
+                principal=principal,
+                domain_id=domain_id,
+                query_text=q_text,
+                market_scope=market_scope,
+                limit=per_facet_limit,
+            )
+            per_query_results.append(list(res))
+        except Exception as exc:
+            logger.debug(
+                "Multi-facet doc search failed for domain '%s' (%s): %s",
+                domain_id,
+                type(exc).__name__,
+                exc,
+            )
+            per_query_results.append([])
+
+    merged: list[DocChunkRecord] = []
+    seen_ids: set[str] = set()
+    max_len = max((len(r) for r in per_query_results), default=0)
+    for idx in range(max_len):
+        for bucket in per_query_results:
+            if idx < len(bucket):
+                chk = bucket[idx]
+                cid = str(chk.chunk_id)
+                if cid not in seen_ids:
+                    seen_ids.add(cid)
+                    merged.append(chk)
+                    if len(merged) >= max_total:
+                        return merged
+    return merged
+
+
+def _evaluate_query_plan_coverage(
+    plan: QueryPlan,
+    *,
+    doc_chunks: list[Any],
+    code_slices: list[Any],
+    domain_id: str,
+) -> tuple[list[QueryFacetCoverage], list[str], float]:
+    """Evaluates per-facet grounding -> (coverages, missing_aspects, completeness_ratio)."""
+    if not plan.facets:
+        return [], [], 1.0
+    coverages: list[QueryFacetCoverage] = []
+    missing_aspects: list[str] = []
+    score_sum = 0.0
+    for facet in plan.facets:
+        cov, missing_msg = evaluate_facet_grounding(
+            facet,
+            doc_chunks=doc_chunks,
+            code_slices=code_slices,
+            domain_id=domain_id,
+        )
+        coverages.append(cov)
+        if missing_msg:
+            missing_aspects.append(missing_msg)
+        if cov.status == "grounded":
+            score_sum += 1.0
+        elif cov.status == "partial":
+            score_sum += 0.5
+    completeness_ratio = round(score_sum / max(1, len(coverages)), 4)
+    return coverages, missing_aspects, completeness_ratio
+
+
+def _compute_stage_confidences(
+    *,
+    principal: PrincipalContext,
+    plan: QueryPlan,
+    normalized_rrf: float,
+    completeness_ratio: float,
+    query_facets: list[QueryFacetCoverage],
+    code_slices: list[Any],
+    citations: list[Any],
+    synthesis_mode: str,
+    preflight_report: PreFlightValidationReport | None,
+    conflicts_count: int = 0,
+    stale_count: int = 0,
+    is_abstention: bool = False,
+    injection_threat_score: float = 0.0,
+) -> list[StageConfidence]:
+    """Computes calibrated Stage 1..4 confidence scores and signal breakdowns."""
+    grounded_count = sum(1 for f in query_facets if f.status == "grounded")
+    total_facets = max(1, len(query_facets) or len(plan.facets))
+    rls_count = len(principal.allowed_scopes)
+
+    s1_score = max(
+        0.0,
+        min(
+            1.0,
+            (1.0 - injection_threat_score) * (0.85 if rls_count > 0 else 0.50) + 0.15,
+        ),
+    )
+    s1 = StageConfidence.from_score(
+        stage=1,
+        stage_name="Stage 1: Security, Auth & Intent",
+        score=s1_score,
+        signals={
+            "rls_scopes_count": rls_count,
+            "injection_threat_score": round(injection_threat_score, 4),
+            "facet_count": len(plan.facets),
+            "requested_cardinality": plan.requested_cardinality or 0,
+        },
+        summary=f"RLS enforced ({rls_count} scopes), {len(plan.facets)} facet(s) parsed.",
+    )
+
+    modality_hits = sum(
+        [
+            1 if code_slices else 0,
+            1 if citations else 0,
+            1 if (normalized_rrf >= 0.55 and (code_slices or citations)) else 0,
+        ]
+    )
+    modality_cov = modality_hits / 3.0
+    if is_abstention or (grounded_count == 0 and not code_slices and not citations):
+        s2_score = min(0.20, 0.20 * normalized_rrf)
+    else:
+        s2_score = 0.45 * normalized_rrf + 0.40 * completeness_ratio + 0.15 * modality_cov
+    s2 = StageConfidence.from_score(
+        stage=2,
+        stage_name="Stage 2: Federated Retrieval",
+        score=s2_score,
+        signals={
+            "normalized_rrf": round(normalized_rrf, 4),
+            "grounded_facets": grounded_count,
+            "total_facets": total_facets,
+            "completeness_ratio": round(completeness_ratio, 4),
+            "modality_coverage": round(modality_cov, 3),
+        },
+        summary=(f"RRF {normalized_rrf:.2f}; {grounded_count}/{total_facets} facets grounded."),
+    )
+
+    ast_closure_count = sum(1 for s in code_slices if getattr(s, "auto_expanded_by_ast", False))
+    sym_res_ratio = (
+        1.0
+        if (
+            preflight_report is not None
+            and preflight_report.check_results.get("check_1_symbol_resolution", True)
+        )
+        else (0.0 if is_abstention else 0.6)
+    )
+    mode_base = (
+        0.94
+        if synthesis_mode == "live_qlora_json"
+        else (0.88 if synthesis_mode in ("ast_extractive", "hybrid_federated") else 0.78)
+    )
+    s3_score = (
+        0.0 if is_abstention else (mode_base * (0.4 + 0.6 * completeness_ratio) * sym_res_ratio)
+    )
+    s3 = StageConfidence.from_score(
+        stage=3,
+        stage_name="Stage 3: Synthesis & AST Closure",
+        score=s3_score,
+        signals={
+            "symbol_resolution_ratio": round(sym_res_ratio, 4),
+            "ast_closure_count": ast_closure_count,
+            "synthesis_mode": synthesis_mode,
+        },
+        summary=f"Mode: {synthesis_mode}; AST closure slices: {ast_closure_count}.",
+    )
+
+    if preflight_report is not None and preflight_report.check_results:
+        checks_total = len(preflight_report.check_results)
+        checks_passed = (
+            0 if is_abstention else sum(1 for ok in preflight_report.check_results.values() if ok)
+        )
+        checks_ratio = checks_passed / max(1, checks_total)
+        gate_ok = (not is_abstention) and preflight_report.passed
+    else:
+        checks_total = 6
+        checks_passed = 0 if is_abstention else 6
+        checks_ratio = 0.0 if is_abstention else 1.0
+        gate_ok = not is_abstention
+
+    conflict_penalty = min(0.20, 0.05 * conflicts_count)
+    stale_penalty = min(0.15, 0.05 * stale_count)
+    s4_score = (
+        0.0
+        if not gate_ok
+        else max(
+            0.0,
+            0.50 * checks_ratio
+            + 0.35 * completeness_ratio
+            + 0.15
+            - conflict_penalty
+            - stale_penalty,
+        )
+    )
+    s4 = StageConfidence.from_score(
+        stage=4,
+        stage_name="Stage 4: Pre-Flight Gate & Audit",
+        score=s4_score,
+        signals={
+            "checks_passed": checks_passed,
+            "checks_total": checks_total,
+            "completeness_ratio": round(completeness_ratio, 4),
+            "conflicts_count": conflicts_count,
+            "stale_excluded_count": stale_count,
+        },
+        summary=(
+            f"Pre-flight {checks_passed}/{checks_total}; completeness {completeness_ratio:.0%}."
+        ),
+    )
+    return [s1, s2, s3, s4]
+
+
+def _build_doc_citation_span(
+    chk: DocChunkRecord,
+    verbatim_quote: str,
+    *,
+    all_chunks: list[DocChunkRecord] | None = None,
+) -> DocCitationSpan:
     """Builds DocCitationSpan with Confluence/Jira provenance extracted from chunk metadata/URI."""
     meta = dict(getattr(chk, "metadata_json", {}) or {})
     source_uri = chk.source_uri or ""
@@ -2310,6 +2691,7 @@ def _build_doc_citation_span(chk: DocChunkRecord, verbatim_quote: str) -> DocCit
         source_uri=source_uri,
         section_heading=chk.section_heading,
         verbatim_quote=verbatim_quote,
+        full_section_content=_stitch_section_content(chk, all_chunks),
         version=_extract_chunk_version(chk),
         page_id=page_id or None,
         ticket_key=ticket_key or None,
@@ -2340,7 +2722,7 @@ def _extract_hybrid_doc_citations(
     doc_chunks: list[DocChunkRecord],
     slicer: DeterministicSlicer,
     validator: PreFlightValidator | None = None,
-    max_citations: int = 3,
+    max_citations: int = 8,
     min_hits_override: int | None = None,
 ) -> list[DocCitationSpan]:
     """Extracts verified non-stale doc citations matching substantive query terms."""
@@ -2401,12 +2783,12 @@ def _extract_hybrid_doc_citations(
         if not snippet:
             continue
         lines = [ln.strip() for ln in snippet.splitlines() if ln.strip()]
-        lead_sentence = snippet.split(".")[0] + "." if "." in snippet else snippet[:140]
+        lead_sentence = snippet.split(".")[0] + "." if "." in snippet else snippet[:400]
         candidates = [*lines, lead_sentence, snippet]
         for cand in candidates:
             if not cand:
                 continue
-            cand_cit = _build_doc_citation_span(chk, cand)
+            cand_cit = _build_doc_citation_span(chk, cand, all_chunks=doc_chunks)
             if (
                 slicer.verify_doc_citation(
                     citation=cand_cit,
@@ -2454,8 +2836,8 @@ class ScoutWorkflow:
         self.repo = repo
         self.slicer = slicer or DeterministicSlicer()
         self.expander = expander or ASTDependencyExpander(
-            max_direct_callers=3,
-            max_expansion_token_budget=1500,
+            max_direct_callers=8,
+            max_expansion_token_budget=10_000,
         )
         self.validator = validator or PreFlightValidator(
             repo=self.repo,
@@ -2753,12 +3135,30 @@ class ScoutWorkflow:
             if source_filter != "all"
             else run_bound_repo
         )
+        count_fn = (
+            getattr(doc_bound_repo, "count_visible_doc_chunks", None)
+            or getattr(getattr(doc_bound_repo, "adapter", None), "count_visible_doc_chunks", None)
+            or getattr(
+                getattr(getattr(doc_bound_repo, "_inner", None), "adapter", None),
+                "count_visible_doc_chunks",
+                None,
+            )
+        )
+        s1_raw_chunks = (
+            filtered_doc_chunks
+            if isinstance(filtered_doc_chunks, list)
+            else doc_bound_repo.list_visible_doc_chunks(principal, domain_id)
+        )
         if isinstance(filtered_doc_chunks, list):
-            s1_raw_chunks = filtered_doc_chunks
+            stale_excluded_s1 = sum(
+                1 for c in filtered_doc_chunks if bool(getattr(c, "is_stale", False))
+            )
+            visible_chunks_s1 = len(filtered_doc_chunks) - stale_excluded_s1
+        elif callable(count_fn):
+            visible_chunks_s1, stale_excluded_s1 = count_fn(principal, domain_id)
         else:
-            s1_raw_chunks = doc_bound_repo.list_visible_doc_chunks(principal, domain_id)
-        stale_excluded_s1 = sum(1 for c in s1_raw_chunks if bool(getattr(c, "is_stale", False)))
-        visible_chunks_s1 = len(s1_raw_chunks) - stale_excluded_s1
+            stale_excluded_s1 = sum(1 for c in s1_raw_chunks if bool(getattr(c, "is_stale", False)))
+            visible_chunks_s1 = len(s1_raw_chunks) - stale_excluded_s1
         s1_ms = max(1, int((time.perf_counter() - s1_t0) * 1000))
         if on_stage_event is not None:
             on_stage_event(
@@ -2870,7 +3270,10 @@ class ScoutWorkflow:
                         principal=principal,
                         quant_brief=None,
                     )
-                    if domain_knowledge_brief.verified_citations:
+                    if (
+                        domain_knowledge_brief is not None
+                        and domain_knowledge_brief.verified_citations
+                    ):
                         supporting_doc_citations = list(domain_knowledge_brief.verified_citations)
                     else:
                         domain_knowledge_brief = None
@@ -2966,7 +3369,7 @@ class ScoutWorkflow:
                     principal=principal,
                     quant_brief=None,
                 )
-                if domain_knowledge_brief.verified_citations:
+                if domain_knowledge_brief is not None and domain_knowledge_brief.verified_citations:
                     supporting_doc_citations = list(domain_knowledge_brief.verified_citations)
                 else:
                     domain_knowledge_brief = None
@@ -3068,6 +3471,31 @@ class ScoutWorkflow:
         if on_stage_event is not None:
             model_label = manifest.base_model_id.split("/")[-1]
             adapter_label = manifest.lora_adapter_id or domain_id
+            s2_has_hits = bool(candidate_pointers or supporting_doc_citations)
+            s2_comp = (
+                domain_knowledge_brief.completeness_ratio
+                if domain_knowledge_brief is not None
+                else (1.0 if s2_has_hits else 0.0)
+            )
+            s2_conf = StageConfidence.from_score(
+                stage=2,
+                stage_name="Stage 2: Federated Retrieval",
+                score=(
+                    (0.45 * normalized_rrf_score + 0.40 * s2_comp + 0.15)
+                    if s2_has_hits
+                    else min(0.20, 0.20 * normalized_rrf_score)
+                ),
+                signals={
+                    "normalized_rrf": round(normalized_rrf_score, 4),
+                    "pointers_count": len(candidate_pointers),
+                    "citations_count": len(supporting_doc_citations or []),
+                    "completeness_ratio": round(s2_comp, 4),
+                },
+                summary=(
+                    f"Retrieved {len(candidate_pointers)} pointer(s) and "
+                    f"{len(supporting_doc_citations or [])} citation(s)."
+                ),
+            )
             on_stage_event(
                 {
                     "event_type": "stage_update",
@@ -3081,6 +3509,7 @@ class ScoutWorkflow:
                         citations_count=len(supporting_doc_citations or []),
                         elapsed_ms=s2_ms,
                     ),
+                    "confidence": s2_conf.model_dump(),
                 }
             )
 
@@ -3192,6 +3621,24 @@ class ScoutWorkflow:
 
         s3_ms = max(1, int((time.perf_counter() - s3_t0) * 1000))
         if on_stage_event is not None:
+            s3_ast_count = sum(1 for s in hydrated_slices if s.auto_expanded_by_ast)
+            s3_has_ctx = bool(hydrated_slices or supporting_doc_citations)
+            s3_mode = (
+                domain_knowledge_brief.synthesis_mode
+                if domain_knowledge_brief is not None
+                else ("ast_extractive" if hydrated_slices else "deterministic_extractive_fallback")
+            )
+            s3_conf = StageConfidence.from_score(
+                stage=3,
+                stage_name="Stage 3: Synthesis & AST Closure",
+                score=(0.88 if s3_mode == "ast_extractive" else 0.78) if s3_has_ctx else 0.0,
+                signals={
+                    "ast_closure_count": s3_ast_count,
+                    "synthesis_mode": s3_mode,
+                    "conflicts_count": len(conflicts),
+                },
+                summary=f"Mode: {s3_mode}; AST closure slices: {s3_ast_count}.",
+            )
             on_stage_event(
                 {
                     "event_type": "stage_update",
@@ -3203,7 +3650,9 @@ class ScoutWorkflow:
                         citations_count=len(supporting_doc_citations or []),
                         conflicts_count=len(conflicts),
                         elapsed_ms=s3_ms,
+                        budget_tokens=self.expander.max_expansion_token_budget,
                     ),
+                    "confidence": s3_conf.model_dump(),
                 }
             )
 
@@ -3216,6 +3665,35 @@ class ScoutWorkflow:
                 f"found in '{domain_id}' for query: '{user_prompt.strip()}'. "
                 "Paid frontier tokens spent: 0."
             )
+            no_ctx_plan = decompose_query_facets(user_prompt)
+            no_ctx_facets = (
+                [
+                    QueryFacetCoverage(
+                        facet_id=f.facet_id,
+                        facet_query=f.facet_query,
+                        status="not_found",
+                        matched_sources=[],
+                        confidence=0.0,
+                        explanation=f"No grounded evidence found in '{domain_id}'.",
+                    )
+                    for f in no_ctx_plan.facets
+                ]
+                if no_ctx_plan.facets
+                else []
+            )
+            no_ctx_confidences = _compute_stage_confidences(
+                principal=principal,
+                plan=no_ctx_plan,
+                normalized_rrf=0.0,
+                completeness_ratio=0.0,
+                query_facets=no_ctx_facets,
+                code_slices=[],
+                citations=[],
+                synthesis_mode="ast_extractive",
+                preflight_report=None,
+                stale_count=stale_excluded_s1,
+                is_abstention=True,
+            )
             if on_stage_event is not None:
                 total_ms = max(1, int((time.perf_counter() - dag_t0) * 1000))
                 on_stage_event(
@@ -3225,6 +3703,7 @@ class ScoutWorkflow:
                         "stage_name": "Stage 4: Pre-Flight Deterministic Validation",
                         "status": "failed",
                         "details": _stage4_failed_details(reason=no_ctx_reason, total_ms=total_ms),
+                        "confidence": no_ctx_confidences[3].model_dump(),
                     }
                 )
             return InsufficientContextDiagnostic(
@@ -3235,6 +3714,9 @@ class ScoutWorkflow:
                 missing_items=[f"domain:{domain_id}:no_verifiable_context"],
                 partial_candidate_files=[],
                 paid_tokens_spent=0,
+                query_facets=no_ctx_facets,
+                missing_or_unverified_aspects=[f.facet_query for f in no_ctx_plan.facets],
+                stage_confidences=no_ctx_confidences,
             )
 
         val_domain = (
@@ -3322,8 +3804,72 @@ class ScoutWorkflow:
                 doc_chunks=filtered_doc_chunks,
             )
 
+        query_plan = decompose_query_facets(user_prompt)
+        if domain_plugin is not None and hasattr(domain_plugin, "expand_query_plan"):
+            query_plan = domain_plugin.expand_query_plan(query_plan)
+
+        if (
+            domain_knowledge_brief is not None
+            and domain_knowledge_brief.query_facets
+            and not hydrated_slices
+        ):
+            pack_facets = list(domain_knowledge_brief.query_facets)
+            pack_missing = list(domain_knowledge_brief.missing_or_unverified_aspects)
+            pack_completeness = float(domain_knowledge_brief.completeness_ratio)
+            pack_synth_mode: Literal[
+                "live_qlora_json",
+                "deterministic_extractive_fallback",
+                "ast_extractive",
+                "hybrid_federated",
+            ] = domain_knowledge_brief.synthesis_mode
+        else:
+            base_eval_chunks = (
+                list(filtered_doc_chunks)
+                if isinstance(filtered_doc_chunks, list)
+                else list(s1_raw_chunks)
+            )
+            eval_doc_chunks: list[Any] = [*(supporting_doc_citations or []), *base_eval_chunks]
+            pack_facets, pack_missing, pack_completeness = _evaluate_query_plan_coverage(
+                query_plan,
+                doc_chunks=eval_doc_chunks,
+                code_slices=hydrated_slices,
+                domain_id=val_domain,
+            )
+            if domain_knowledge_brief is not None:
+                domain_knowledge_brief.query_facets = pack_facets
+                domain_knowledge_brief.missing_or_unverified_aspects = pack_missing
+                domain_knowledge_brief.completeness_ratio = pack_completeness
+                if (
+                    pack_missing
+                    and "not found" not in domain_knowledge_brief.executive_summary.lower()
+                ):
+                    domain_knowledge_brief.executive_summary = (
+                        f"{domain_knowledge_brief.executive_summary} | "
+                        f"Missing from indexed corpus: {'; '.join(pack_missing)}"
+                    )
+                pack_synth_mode = domain_knowledge_brief.synthesis_mode
+            elif hydrated_slices and supporting_doc_citations:
+                pack_synth_mode = "hybrid_federated"
+            elif hydrated_slices:
+                pack_synth_mode = "ast_extractive"
+            else:
+                pack_synth_mode = "deterministic_extractive_fallback"
+
         if not final_report.passed:
             fail_reason = final_report.bounce_back_feedback or "Pre-Flight validation failed"
+            diag_confidences = _compute_stage_confidences(
+                principal=principal,
+                plan=query_plan,
+                normalized_rrf=final_report.normalized_rrf_score,
+                completeness_ratio=0.0,
+                query_facets=pack_facets,
+                code_slices=hydrated_slices,
+                citations=supporting_doc_citations or [],
+                synthesis_mode=pack_synth_mode,
+                preflight_report=final_report,
+                stale_count=stale_excluded_s1,
+                is_abstention=True,
+            )
             if on_stage_event is not None:
                 total_ms = max(1, int((time.perf_counter() - dag_t0) * 1000))
                 on_stage_event(
@@ -3333,17 +3879,82 @@ class ScoutWorkflow:
                         "stage_name": "Stage 4: Pre-Flight Deterministic Validation",
                         "status": "failed",
                         "details": _stage4_failed_details(reason=fail_reason, total_ms=total_ms),
+                        "confidence": diag_confidences[3].model_dump(),
                     }
                 )
             logger.warning(
                 "Stage 3 Pre-Flight check still failed after local bounce-back (trace=%s)",
                 active_trace_id,
             )
-            return self.validator.create_diagnostic(
+            diag = self.validator.create_diagnostic(
                 trace_id=active_trace_id,
                 domain_id=domain_id,
                 report=final_report,
                 partial_candidate_files=list({s.file_path for s in hydrated_slices}),
+            )
+            diag.query_facets = pack_facets
+            diag.missing_or_unverified_aspects = pack_missing
+            diag.stage_confidences = diag_confidences
+            return diag
+
+        prompt_ident_tokens_low = {
+            w.lower() for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", user_prompt)
+        }
+        has_direct_symbol_hit = any(
+            s.qualified_symbol.split(".")[-1].lower() in prompt_ident_tokens_low
+            or s.qualified_symbol.lower() in prompt_ident_tokens_low
+            for s in hydrated_slices
+        )
+        if (
+            pack_facets
+            and all(f.status == "not_found" for f in pack_facets)
+            and not has_direct_symbol_hit
+        ):
+            no_ground_reason = (
+                f"Zero query facets were grounded in indexed corpus '{domain_id}' for query: "
+                f"'{user_prompt.strip()}'. Paid frontier tokens spent: 0."
+            )
+            abstain_confidences = _compute_stage_confidences(
+                principal=principal,
+                plan=query_plan,
+                normalized_rrf=0.0,
+                completeness_ratio=0.0,
+                query_facets=pack_facets,
+                code_slices=[],
+                citations=[],
+                synthesis_mode=pack_synth_mode,
+                preflight_report=final_report,
+                stale_count=stale_excluded_s1,
+                is_abstention=True,
+            )
+            if on_stage_event is not None:
+                total_ms = max(1, int((time.perf_counter() - dag_t0) * 1000))
+                on_stage_event(
+                    {
+                        "event_type": "stage_update",
+                        "stage": 4,
+                        "stage_name": "Stage 4: Pre-Flight Deterministic Validation",
+                        "status": "failed",
+                        "details": _stage4_failed_details(
+                            reason=no_ground_reason, total_ms=total_ms
+                        ),
+                        "confidence": abstain_confidences[3].model_dump(),
+                    }
+                )
+            return InsufficientContextDiagnostic(
+                trace_id=active_trace_id,
+                domain_id=domain_id,
+                reason=no_ground_reason,
+                missing_symbols=[],
+                missing_items=[
+                    *final_report.missing_items,
+                    f"domain:{domain_id}:zero_grounded_facets",
+                ],
+                partial_candidate_files=[],
+                paid_tokens_spent=0,
+                query_facets=pack_facets,
+                missing_or_unverified_aspects=pack_missing,
+                stage_confidences=abstain_confidences,
             )
 
         # =====================================================================
@@ -3358,11 +3969,36 @@ class ScoutWorkflow:
             ),
             "Stage 4: Assembled compiler-complete ImplementationContextPack for handoff",
         ]
+        is_multi_facet_plan = (query_plan.requested_cardinality or 0) >= 2 or len(
+            query_plan.facets
+        ) >= 2
+        if is_multi_facet_plan and hydrated_slices and domain_knowledge_brief is None:
+            for slc in hydrated_slices[:6]:
+                role_tag = "1-hop AST dependency" if slc.auto_expanded_by_ast else "Primary match"
+                plan.append(
+                    f"{role_tag}: {slc.qualified_symbol} "
+                    f"({slc.file_path}:L{slc.start_line}-L{slc.end_line})"
+                )
+        if is_multi_facet_plan and pack_missing:
+            plan.append(
+                "Partial corpus coverage — missing/unverified aspects: " + "; ".join(pack_missing)
+            )
 
         total_slice_chars = sum(len(s.verbatim_code_with_lines) for s in hydrated_slices)
         if supporting_doc_citations:
-            total_slice_chars += sum(len(c.verbatim_quote) for c in supporting_doc_citations)
-        est_pack_tokens = max(1, int(total_slice_chars / 3.8))
+            total_slice_chars += sum(
+                len(c.full_section_content or c.verbatim_quote) for c in supporting_doc_citations
+            )
+        if domain_knowledge_brief is not None:
+            brief_chars = (
+                len(domain_knowledge_brief.brief_title)
+                + len(domain_knowledge_brief.executive_summary)
+                + sum(len(x) for x in domain_knowledge_brief.core_findings_and_rules)
+                + sum(len(x) for x in domain_knowledge_brief.domain_constraints_and_caveats)
+                + sum(len(x) for x in domain_knowledge_brief.known_risks_and_failure_modes)
+            )
+            total_slice_chars += brief_chars
+        est_pack_tokens = min(18_000, max(1, int(total_slice_chars / 3.8)))
         # Measure tokens actually explored/traversed in the AST window
         # rather than the static corpus.
         # This comprises:
@@ -3401,12 +4037,18 @@ class ScoutWorkflow:
                 retrieved_doc_tokens += sum(
                     max(1, int(len(v) / 3.8)) for v in filtered_doc_chunks.values()
                 )
+        elif s1_raw_chunks:
+            retrieved_doc_tokens += sum(
+                max(1, int(len(c.verbatim_content) / 3.8))
+                for c in s1_raw_chunks
+                if not bool(getattr(c, "is_stale", False))
+            )
 
         total_tokens_explored = (
             est_pack_tokens + explored_file_tokens + candidate_symbol_tokens + retrieved_doc_tokens
         )
         if not explored_files and not matched_ast_symbols and supporting_doc_citations:
-            total_tokens_explored = max(est_pack_tokens, 15000)
+            total_tokens_explored = max(total_tokens_explored, est_pack_tokens, 15000)
 
         local_tokens_consumed = max(est_pack_tokens, total_tokens_explored)
 
@@ -3443,6 +4085,20 @@ class ScoutWorkflow:
             )
 
         conflicts = _detect_pack_conflicts(hydrated_slices, conflict_doc_chunks)
+        stage_confidences = _compute_stage_confidences(
+            principal=principal,
+            plan=query_plan,
+            normalized_rrf=final_report.normalized_rrf_score,
+            completeness_ratio=pack_completeness,
+            query_facets=pack_facets,
+            code_slices=hydrated_slices,
+            citations=supporting_doc_citations or [],
+            synthesis_mode=pack_synth_mode,
+            preflight_report=final_report,
+            conflicts_count=len(conflicts),
+            stale_count=stale_excluded_s1,
+            is_abstention=False,
+        )
         pack = ImplementationContextPack(
             trace_id=active_trace_id,
             domain_id=domain_id,
@@ -3451,11 +4107,18 @@ class ScoutWorkflow:
             doc_vs_code_conflicts_detected=conflicts,
             code_slices=hydrated_slices,
             supporting_doc_citations=supporting_doc_citations or [],
-            quant_strategy_spec=quant_brief,
+            quant_strategy_spec=(
+                quant_brief if isinstance(quant_brief, QuantStrategyBrief) else None
+            ),
             domain_knowledge_brief=domain_knowledge_brief,
             preflight_report=final_report,
             local_tokens_consumed=local_tokens_consumed,
             pack_token_count=est_pack_tokens,
+            query_facets=pack_facets,
+            missing_or_unverified_aspects=pack_missing,
+            completeness_ratio=pack_completeness,
+            synthesis_mode=pack_synth_mode,
+            stage_confidences=stage_confidences,
         )
 
         if on_stage_event is not None:
@@ -3472,6 +4135,7 @@ class ScoutWorkflow:
                         local_tokens=local_tokens_consumed,
                         total_ms=total_ms,
                     ),
+                    "confidence": stage_confidences[3].model_dump(),
                 }
             )
 
@@ -3750,8 +4414,8 @@ class FederatedScoutCoordinator:
         self.repo = repo
         self.slicer = slicer or DeterministicSlicer()
         self.expander = expander or ASTDependencyExpander(
-            max_direct_callers=3,
-            max_expansion_token_budget=1500,
+            max_direct_callers=8,
+            max_expansion_token_budget=10_000,
         )
         self.validator = validator or PreFlightValidator(
             repo=self.repo,
@@ -3957,7 +4621,7 @@ class FederatedScoutCoordinator:
                 )
 
         if (
-            quant_brief is not None
+            isinstance(quant_brief, QuantStrategyBrief)
             and quant_brief.friction_verdict == FrictionVerdict.FAILS_AFTER_COSTS
         ):
             logger.warning(
@@ -4118,7 +4782,7 @@ class FederatedScoutCoordinator:
 
         conflicts: list[str] = []
         if (
-            quant_brief is not None
+            isinstance(quant_brief, QuantStrategyBrief)
             and quant_brief.friction_verdict == FrictionVerdict.FAILS_AFTER_COSTS
         ):
             conflicts.append(
@@ -4153,6 +4817,7 @@ class FederatedScoutCoordinator:
                         citations_count=len(citations),
                         conflicts_count=len(conflicts),
                         elapsed_ms=s3_ms,
+                        budget_tokens=self.expander.max_expansion_token_budget,
                     ),
                 }
             )
@@ -4169,7 +4834,9 @@ class FederatedScoutCoordinator:
             code_slices=hydrated_slices,
             user_prompt=user_prompt,
             supporting_doc_citations=citations,
-            quant_strategy_spec=quant_brief,
+            quant_strategy_spec=(
+                quant_brief if isinstance(quant_brief, QuantStrategyBrief) else None
+            ),
             normalized_rrf_score=normalized_rrf_score,
             repo=fed_bound_repo,
             principal=active_principal,
@@ -4240,7 +4907,9 @@ class FederatedScoutCoordinator:
                 code_slices=hydrated_slices,
                 user_prompt=user_prompt,
                 supporting_doc_citations=citations,
-                quant_strategy_spec=quant_brief,
+                quant_strategy_spec=(
+                    quant_brief if isinstance(quant_brief, QuantStrategyBrief) else None
+                ),
                 normalized_rrf_score=normalized_rrf_score,
                 repo=fed_bound_repo,
                 principal=active_principal,
@@ -4332,6 +5001,40 @@ class FederatedScoutCoordinator:
             fed_chunk_records,
             initial_conflicts=conflicts,
         )
+        fed_plan = decompose_query_facets(user_prompt)
+        fed_facets, fed_missing, fed_completeness = _evaluate_query_plan_coverage(
+            fed_plan,
+            doc_chunks=fed_chunk_records,
+            code_slices=hydrated_slices,
+            domain_id=pack_domain,
+        )
+        fed_synth_mode: Literal[
+            "live_qlora_json",
+            "deterministic_extractive_fallback",
+            "ast_extractive",
+            "hybrid_federated",
+        ] = (
+            "hybrid_federated"
+            if (hydrated_slices and citations)
+            else ("ast_extractive" if hydrated_slices else "deterministic_extractive_fallback")
+        )
+        if fed_missing:
+            plan.append(
+                "Partial corpus coverage — missing/unverified aspects: " + "; ".join(fed_missing)
+            )
+        fed_confidences = _compute_stage_confidences(
+            principal=principal,
+            plan=fed_plan,
+            normalized_rrf=report.normalized_rrf_score,
+            completeness_ratio=fed_completeness,
+            query_facets=fed_facets,
+            code_slices=hydrated_slices,
+            citations=citations,
+            synthesis_mode=fed_synth_mode,
+            preflight_report=report,
+            conflicts_count=len(conflicts),
+            is_abstention=False,
+        )
         pack = ImplementationContextPack(
             trace_id=active_trace_id,
             domain_id=pack_domain,
@@ -4340,11 +5043,18 @@ class FederatedScoutCoordinator:
             doc_vs_code_conflicts_detected=conflicts,
             code_slices=hydrated_slices,
             supporting_doc_citations=citations,
-            quant_strategy_spec=quant_brief,
+            quant_strategy_spec=(
+                quant_brief if isinstance(quant_brief, QuantStrategyBrief) else None
+            ),
             domain_knowledge_brief=domain_knowledge_brief,
             preflight_report=report,
             local_tokens_consumed=total_tokens_explored,
             pack_token_count=est_tokens,
+            query_facets=fed_facets,
+            missing_or_unverified_aspects=fed_missing,
+            completeness_ratio=fed_completeness,
+            synthesis_mode=fed_synth_mode,
+            stage_confidences=fed_confidences,
         )
 
         if on_stage_event is not None:
@@ -4361,6 +5071,7 @@ class FederatedScoutCoordinator:
                         local_tokens=total_tokens_explored,
                         total_ms=total_ms,
                     ),
+                    "confidence": fed_confidences[3].model_dump(),
                 }
             )
 

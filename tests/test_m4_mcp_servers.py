@@ -200,8 +200,8 @@ def test_bound_payload_dict_item_clamping() -> None:
 
 
 def test_bound_payload_dict_byte_capping_and_truncation_notice() -> None:
-    """Verifies oversized serialized payloads are truncated to <= 32 KB with notice."""
-    huge_text = "X" * 40_000
+    """Verifies oversized serialized payloads are truncated to <= 128 KB with notice."""
+    huge_text = "X" * 80_000
     oversized = {
         "query": "stress_test",
         "matches": [

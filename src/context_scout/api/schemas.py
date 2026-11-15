@@ -18,6 +18,7 @@ from context_scout.schemas.contracts import (
     PrincipalContext,
     QuantStrategyBrief,
     RoleType,
+    StageConfidence,
 )
 
 
@@ -124,6 +125,8 @@ class SSEStageEvent(BaseModel):
     stage_name: str
     status: Literal["in_progress", "completed", "failed"] = "in_progress"
     details: str
+    confidence: StageConfidence | None = None
+    elapsed_ms: float | None = None
     timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 

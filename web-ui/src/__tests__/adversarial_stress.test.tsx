@@ -245,7 +245,7 @@ describe("Adversarial & Regression Security Tests", () => {
     );
     expect(
       screen.getByTestId("inline-cite-doc-minimal_cite")
-    ).toHaveTextContent("[Minimal Citation · Summary · v1.0]");
+    ).toHaveTextContent("[1] Minimal Citation: Summary (v1.0)");
     expect(screen.queryByTestId("open-diff-modal-btn")).not.toBeInTheDocument();
   });
 

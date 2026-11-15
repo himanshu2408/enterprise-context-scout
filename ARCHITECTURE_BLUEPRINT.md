@@ -467,14 +467,14 @@ When a user asks a code question or submits a feature for Gemini Flash to implem
    - Every vector query executes inside an explicit `async with conn.transaction():` block with `SET LOCAL app.principal_scopes = $1` and `SET LOCAL hnsw.iterative_scan = 'relaxed_order'` (`OPS-01` & `PERF-02`) so RLS never drops HNSW recall or leaks across pooled connections.
 2. **Stage 2 — AST Skeleton Localization (`Gemma-4-26B-A4B-it` + LoRA Adapter 1):**
    - Instead of feeding full 1,000-line files to the Scout, we feed the **AST Skeletons** (`signature_skeleton` + line ranges) of the top files.
-   - The Scout inspects the skeletons, optionally calls `get_symbol_callers(symbol)` or `grep_repo(pattern)` (bounded to max 2 tool turns, with hard pagination $\le 10$ items and $\le 32\text{ KB}$ per MCP response, `SEC-04`), and emits `list[CodeSlicePointer]`.
-3. **Stage 3 — Deterministic 1-Hop AST Auto-Closure (`ASTDependencyExpander`, Bounded per `SEC-03`):**
-   - For every symbol marked `modify_target` by the Scout, Python queries `ast_edges` (`WHERE source_symbol_id = $1 OR target_symbol_id = $1`) under a hard **1,500-token expansion budget** (`MAX_EXPANSION_TOKEN_BUDGET = 1500`) and automatically attaches:
-     - Every internal `USES_TYPE` / `IMPORTS` schema definition (e.g., `OrderRequest`, `MarketTick`, `RiskConfig`).
-     - Up to **3 representative direct `CALLS` callers** (`MAX_DIRECT_CALLERS_PER_SYMBOL = 3`, ranked by call-site diversity) with $\pm 5$ lines so utility functions with 50+ callers never bloat the `ContextPack`.
+   - The Scout inspects the skeletons, optionally calls `get_symbol_callers(symbol)` or `grep_repo(pattern)` (bounded to max 2 tool turns, with hard pagination $\le 25$ items and $\le 128\text{ KB}$ per MCP response, `SEC-04`), and emits `list[CodeSlicePointer]`.
+3. **Stage 3 — Deterministic 2-Hop AST Auto-Closure (`ASTDependencyExpander` & `ContextCompletenessConfig`, Bounded per `SEC-03`):**
+   - For every symbol marked `modify_target` by the Scout, Python queries `ast_edges` (`WHERE source_symbol_id = $1 OR target_symbol_id = $1`) under a **10,000-token expansion budget** (`MAX_EXPANSION_TOKEN_BUDGET = 10_000`, `max_pack_token_budget = 18_000`) and automatically attaches:
+     - Every internal 1-hop + 2-hop `USES_TYPE` / `INHERITS` / `IMPORTS` schema definition (e.g., `OrderRequest`, `MarketTick`, `RiskConfig`).
+     - Up to **8 representative direct `CALLS` callers** (`MAX_DIRECT_CALLERS_PER_SYMBOL = 8`, ranked by call-site diversity) with $\pm 5$ lines so utility functions with 50+ callers never bloat the `ContextPack`.
      - The matching `TESTED_BY` test function signature and fixture setup (resolved via AST imports + `tests/test_<module>.py` naming convention fallback).
 4. **Stage 4 — Deterministic Byte-for-Byte Slicing:**
-   - Python slices `raw_content.splitlines()[start_line - 1 : end_line]`, prefixes each line with `{line_no:4d} | `, and attaches `git_commit_sha`. **The LLM never types out existing code from memory.**
+   - Python slices `raw_content.splitlines()[start_line - 1 : end_line]`, prefixes each line with `{line_no:4d} | `, and attaches `git_commit_sha`. Python classes up to **450 lines** (`DEFAULT_SKELETONIZE_CLASS_LINE_THRESHOLD = 450`) retain full method bodies, and query-matched methods are never skeletonized. **The LLM never types out existing code from memory.**
 
 ---
 

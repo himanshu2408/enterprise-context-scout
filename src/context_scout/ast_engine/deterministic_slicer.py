@@ -21,6 +21,13 @@ class DeterministicSlicer:
     """Byte-exact source line slicer and NFKC quote verification engine (VAL-02)."""
 
     MIN_QUOTE_OVERLAP_RATIO: Final[float] = 1.0
+    DEFAULT_SKELETONIZE_CLASS_LINE_THRESHOLD: Final[int] = 450
+
+    def __init__(
+        self,
+        skeletonize_class_line_threshold: int = DEFAULT_SKELETONIZE_CLASS_LINE_THRESHOLD,
+    ) -> None:
+        self.skeletonize_class_line_threshold = skeletonize_class_line_threshold
 
     def slice_lines(
         self,
@@ -86,12 +93,15 @@ class DeterministicSlicer:
             end_line=pointer.end_line,
         )
         active_query = f"{query_text or ''} {pointer.selection_reason or ''}".strip()
-        if (pointer.end_line - pointer.start_line) > 150 and file_record.language == "python":
+        if (
+            pointer.end_line - pointer.start_line
+        ) > self.skeletonize_class_line_threshold and file_record.language == "python":
             verbatim_code = self._skeletonize_large_python_class(
                 raw_content=file_record.raw_content,
                 start_line=pointer.start_line,
                 end_line=pointer.end_line,
                 query_text=active_query,
+                is_reference_only=(pointer.modification_intent.value == "reference_only"),
             )
         commit_sha = file_record.git_commit_sha or "0000000"
         if len(commit_sha) < 7:
@@ -122,6 +132,7 @@ class DeterministicSlicer:
         end_line: int,
         query_text: str,
         line_number_width: int = 4,
+        is_reference_only: bool = False,
     ) -> str:
         """Preserves class header, __init__, and top query-matched methods while eliding others."""
         all_lines = raw_content.splitlines()
@@ -154,24 +165,77 @@ class DeterministicSlicer:
         if len(method_spans) <= 3:
             return self.slice_lines(raw_content, start_line, end_line, line_number_width)
 
-        q_terms = {w.lower() for w in re.findall(r"[A-Za-z0-9_]{3,}", query_text)}
+        _skeleton_stopwords = {
+            "the",
+            "and",
+            "for",
+            "with",
+            "from",
+            "into",
+            "that",
+            "this",
+            "how",
+            "see",
+            "are",
+            "was",
+            "were",
+            "can",
+            "all",
+            "any",
+            "not",
+            "use",
+            "using",
+            "inspect",
+            "located",
+            "symbol",
+            "user",
+            "task",
+            "selected",
+            "primary",
+            "match",
+            "file",
+            "line",
+            "lines",
+            "method",
+            "class",
+            "function",
+            "object",
+            "src",
+        }
+        q_terms = {
+            w.lower()
+            for w in re.findall(r"[A-Za-z0-9_]{3,}", query_text)
+            if w.lower() not in _skeleton_stopwords
+        }
         scored_methods: list[tuple[int, str]] = []
+        matched_methods: set[str] = set()
         for m_name, m_start, m_end in method_spans:
             if m_name == "__init__":
                 continue
             m_body = "\n".join(selected[m_start : m_end + 1]).lower()
             score = 0
-            if m_name.lower() in q_terms:
+            m_lower = m_name.lower()
+            m_parts = set(m_lower.split("_"))
+            if m_lower in q_terms:
                 score += 10
+                matched_methods.add(m_name)
             for qt in q_terms:
-                if qt in m_name.lower():
+                if len(qt) >= 5 and (qt == m_lower or qt in m_parts):
                     score += 5
+                    matched_methods.add(m_name)
+                elif len(qt) >= 5 and re.search(rf"\b{re.escape(qt)}\s*\(", m_body):
+                    score += 3
+                    matched_methods.add(m_name)
                 elif qt in m_body:
                     score += 1
             scored_methods.append((score, m_name))
 
         scored_methods.sort(key=lambda item: (-item[0], item[1]))
-        keep_names = {name for _, name in scored_methods[:3]}
+        if is_reference_only:
+            keep_names: set[str] = set()
+        else:
+            bounded_matched = {name for _, name in scored_methods[:8] if name in matched_methods}
+            keep_names = {name for _, name in scored_methods[:3]} | bounded_matched
         init_span = next((m for m in method_spans if m[0] == "__init__"), None)
         if init_span is not None and (init_span[2] - init_span[1]) <= 40:
             keep_names.add("__init__")

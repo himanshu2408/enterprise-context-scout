@@ -14,7 +14,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from context_scout.agents.domain_registry import DomainRegistry
-from context_scout.agents.intent_router import SourceFilter, filter_doc_chunks_by_source
+from context_scout.agents.intent_router import (
+    SourceFilter,
+    decompose_query_facets,
+    filter_doc_chunks_by_source,
+)
 from context_scout.agents.scout_workflow import (
     FederatedScoutCoordinator,
     LocalGemmaClient,
@@ -44,6 +48,7 @@ from context_scout.schemas.contracts import (
     ImplementationContextPack,
     InsufficientContextDiagnostic,
     PrincipalContext,
+    StageConfidence,
 )
 from context_scout.security.guardrails import ShieldGemmaGuardrail
 from context_scout.telemetry import ScoutTelemetryTracer
@@ -71,6 +76,7 @@ def _resolve_federated_doc_chunks(
     repo: Any,
     principal: PrincipalContext,
     source_filter: SourceFilter = "all",
+    query_text: str = "",
 ) -> dict[str, str]:
     """Resolves visible doc_chunks from live PostgreSQL or InMemory repository under RLS."""
     primary_plugin = PluginRegistry.get_primary_domain_plugin()
@@ -85,24 +91,42 @@ def _resolve_federated_doc_chunks(
         }
     else:
         chunks_map = {}
-    research_domain_id = (
-        primary_plugin.get_role_domain_ids().get("research", primary_plugin.domain_id)
-        if primary_plugin is not None
-        else "default"
+    role_domains = primary_plugin.get_role_domain_ids() if primary_plugin is not None else {}
+    research_domain_id = role_domains.get(
+        "research", primary_plugin.domain_id if primary_plugin is not None else "default"
     )
-    if hasattr(repo, "list_visible_doc_chunks"):
-        try:
-            visible = repo.list_visible_doc_chunks(principal, research_domain_id)
-            filtered_visible = filter_doc_chunks_by_source(list(visible), source_filter)
-            for chk in filtered_visible[:50]:
-                chunks_map[str(chk.chunk_id)] = chk.verbatim_content
-        except Exception as exc:
-            logger.warning(
-                "Failed loading visible doc chunks for domain '%s' (%s): %s",
-                research_domain_id,
-                type(exc).__name__,
-                exc,
-            )
+    code_domain_id = role_domains.get("code", "")
+    target_domains = list(dict.fromkeys(d for d in (research_domain_id, code_domain_id) if d))
+    for target_dom in target_domains:
+        if query_text.strip() and hasattr(repo, "search_visible_doc_chunks"):
+            try:
+                searched = repo.search_visible_doc_chunks(
+                    principal, target_dom, query_text, limit=12
+                )
+                filtered_searched = filter_doc_chunks_by_source(list(searched), source_filter)
+                for chk in filtered_searched:
+                    chunks_map[str(chk.chunk_id)] = chk.verbatim_content
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "Failed searching visible doc chunks for domain '%s' (%s): %s",
+                    target_dom,
+                    type(exc).__name__,
+                    exc,
+                )
+        if hasattr(repo, "list_visible_doc_chunks"):
+            try:
+                visible = repo.list_visible_doc_chunks(principal, target_dom)
+                filtered_visible = filter_doc_chunks_by_source(list(visible), source_filter)
+                for chk in filtered_visible[:50]:
+                    chunks_map[str(chk.chunk_id)] = chk.verbatim_content
+            except Exception as exc:
+                logger.warning(
+                    "Failed loading visible doc chunks for domain '%s' (%s): %s",
+                    target_dom,
+                    type(exc).__name__,
+                    exc,
+                )
     return chunks_map
 
 
@@ -214,7 +238,10 @@ def query_scout(
     ) as span:
         if request.domain_id == "federated_all":
             fed_doc_chunks = _resolve_federated_doc_chunks(
-                repo, principal, source_filter=request.source_filter
+                repo,
+                principal,
+                source_filter=request.source_filter,
+                query_text=request.query,
             )
             coordinator = FederatedScoutCoordinator(
                 registry=registry,
@@ -321,11 +348,32 @@ async def stream_scout(
         guardrail = ShieldGemmaGuardrail()
         decision = guardrail.evaluate(request.query, principal=principal)
         if not decision.passed:
+            s1_diag = InsufficientContextDiagnostic(
+                trace_id=active_trace_id,
+                domain_id=request.domain_id,
+                reason=f"Prompt injection blocked: {decision.rationale}",
+                failure_check="stage_1_prompt_guard",
+                paid_tokens_spent=0,
+                stage_confidences=[
+                    StageConfidence.from_score(
+                        stage=1,
+                        stage_name="Stage 1: Security, Auth & Intent",
+                        score=0.0,
+                        signals={
+                            "rls_scopes_count": len(principal.allowed_scopes),
+                            "injection_threat_score": 1.0,
+                            "blocked": True,
+                        },
+                        summary=f"Blocked by Stage 1 security guard: {decision.rationale}",
+                    )
+                ],
+            )
             err_event = SSEErrorEvent(
                 stage="guardrails",
                 status="blocked",
                 category="prompt_injection",
                 rationale=decision.rationale,
+                diagnostic=s1_diag,
             )
             yield f"event: error\ndata: {err_event.model_dump_json()}\n\n"
             return
@@ -361,6 +409,7 @@ async def stream_scout(
                         repo,
                         principal,
                         request.source_filter,
+                        request.query,
                     )
                     coordinator = FederatedScoutCoordinator(
                         registry=registry,
@@ -442,6 +491,7 @@ async def stream_scout(
                             stage_name=stage_titles[req_stage],
                             status="completed",
                             details=fill_detail,
+                            elapsed_ms=float(elapsed_ms),
                         )
                         yield f"event: stage_update\ndata: {fill_ev.model_dump_json()}\n\n"
                         completed_stages.add(req_stage)
@@ -456,11 +506,36 @@ async def stream_scout(
                         ev.get("stage_name") or stage_titles.get(stage_num, f"Stage {stage_num}")
                     )
                 )
+                live_elapsed = round((time.perf_counter() - t0) * 1000, 2)
+                raw_conf = ev.get("confidence")
+                stage_conf: StageConfidence | None = (
+                    StageConfidence.model_validate(raw_conf) if isinstance(raw_conf, dict) else None
+                )
+                if stage_conf is None and stage_num == 1:
+                    parsed_plan = decompose_query_facets(request.query)
+                    rls_count = len(principal.allowed_scopes)
+                    stage_conf = StageConfidence.from_score(
+                        stage=1,
+                        stage_name="Stage 1: Security, Auth & Intent",
+                        score=1.0 if rls_count > 0 else 0.65,
+                        signals={
+                            "rls_scopes_count": rls_count,
+                            "injection_threat_score": 0.0,
+                            "facet_count": len(parsed_plan.facets),
+                            "requested_cardinality": parsed_plan.requested_cardinality or 0,
+                        },
+                        summary=(
+                            f"RLS enforced ({rls_count} scopes), "
+                            f"{len(parsed_plan.facets)} facet(s) parsed."
+                        ),
+                    )
                 stage_ev = SSEStageEvent(
                     stage=stage_num,
                     stage_name=resolved_name,
                     status=stage_status,  # type: ignore[arg-type]
                     details=str(ev.get("details") or ""),
+                    confidence=stage_conf,
+                    elapsed_ms=live_elapsed,
                 )
                 yield f"event: stage_update\ndata: {stage_ev.model_dump_json()}\n\n"
 
@@ -513,6 +588,7 @@ async def stream_scout(
 
         latency_ms = max(1, int((time.perf_counter() - t0) * 1000))
         scopes_label = ", ".join(principal.allowed_scopes) if principal.allowed_scopes else "none"
+        conf_by_stage = {c.stage: c for c in getattr(result, "stage_confidences", []) or []}
 
         # Backfill any omitted stage completions (e.g. early abstention before Stage 2/3)
         for req_stage in (1, 2, 3):
@@ -541,7 +617,7 @@ async def stream_scout(
                         direct_slices = len(result.code_slices) - auto_1hop
                         detail = (
                             f"Hydrated {direct_slices} direct slice(s) + {auto_1hop} 1-hop AST "
-                            f"slice(s) under 1,500-token budget, verified "
+                            f"slice(s) under 10,000-token budget, verified "
                             f"{len(result.supporting_doc_citations)} citation(s), flagged "
                             f"{len(result.doc_vs_code_conflicts_detected)} conflict(s) "
                             f"({latency_ms} ms)"
@@ -556,6 +632,8 @@ async def stream_scout(
                     stage_name=stage_titles[req_stage],
                     status="completed",
                     details=detail,
+                    confidence=conf_by_stage.get(req_stage),
+                    elapsed_ms=float(latency_ms),
                 )
                 yield f"event: stage_update\ndata: {fill_ev.model_dump_json()}\n\n"
                 completed_stages.add(req_stage)
@@ -603,6 +681,8 @@ async def stream_scout(
                         f"{result.local_tokens_consumed:,} local tokens explored "
                         f"($0 frontier exploration cost) in {latency_ms} ms"
                     ),
+                    confidence=conf_by_stage.get(4),
+                    elapsed_ms=float(latency_ms),
                 )
                 yield f"event: stage_update\ndata: {s4.model_dump_json()}\n\n"
 
@@ -623,6 +703,8 @@ async def stream_scout(
                     stage_name=stage_titles[4],
                     status="failed",
                     details=f"$0 abstention after {latency_ms} ms: {result.reason}",
+                    confidence=conf_by_stage.get(4),
+                    elapsed_ms=float(latency_ms),
                 )
                 yield f"event: stage_update\ndata: {s4_fail.model_dump_json()}\n\n"
 

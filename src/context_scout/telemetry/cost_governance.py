@@ -128,7 +128,7 @@ OCTOBER_2026_PRICING: Final[dict[str, ModelPricingRecord]] = {
 
 # Default frontier execution target
 DEFAULT_FRONTIER_MODEL: Final[str] = "gemini-3.8-flash"
-DEFAULT_EXPLORATION_TOKEN_KILL_SWITCH: Final[int] = 250_000
+DEFAULT_EXPLORATION_TOKEN_KILL_SWITCH: Final[int] = 1_000_000
 DEFAULT_SESSION_SPEND_CEILING_USD: Final[float] = 25.0
 
 

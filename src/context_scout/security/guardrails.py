@@ -69,8 +69,16 @@ class PromptInjectionSanitizer:
             "disregard_previous_instructions",
         ),
         (
-            re.compile(r"\bsystem\s+prompt\s+override\b", re.IGNORECASE),
+            re.compile(r"\bsystem\s+(?:prompt\s+)?override\b", re.IGNORECASE),
             "system_prompt_override",
+        ),
+        (
+            re.compile(
+                r"\b(?:dump|exfiltrate|leak|print)\s+(?:all\s+)?"
+                r"(?:private\s+keys?|secret\s+keys?|secret\s+credentials?|database_url)\b",
+                re.IGNORECASE,
+            ),
+            "secret_exfiltration_attempt",
         ),
         (
             re.compile(r"\byou\s+are\s+now\s+in\s+dan\s+mode\b", re.IGNORECASE),
@@ -124,6 +132,12 @@ class PromptInjectionSanitizer:
         cleaned = cls.HTML_COMMENT_PATTERN.sub("", text)
         return cls.SCRIPT_BLOCK_PATTERN.sub("", cleaned)
 
+    HTML_ADVERSARIAL_COMMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
+        r"<!--[\s\S]*?\b(?:override|ignore|disregard|system|dump|exfiltrate|leak|"
+        r"private\s+keys?|secret|password|database_url|instruction)\b[\s\S]*?-->",
+        re.IGNORECASE,
+    )
+
     @classmethod
     def scan_injection_signatures(cls, text: str) -> tuple[bool, list[str]]:
         """Scans for adversarial instruction overrides and jailbreak signatures."""
@@ -131,6 +145,8 @@ class PromptInjectionSanitizer:
         for pattern, sig_name in cls.INJECTION_SIGNATURES:
             if pattern.search(text):
                 matched.append(sig_name)
+        if cls.HTML_ADVERSARIAL_COMMENT_PATTERN.search(text):
+            matched.append("html_comment_directive_injection")
         return (len(matched) > 0, matched)
 
     @classmethod

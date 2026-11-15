@@ -27,7 +27,7 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     );
 
     expect(screen.getByTestId("citation-inspector")).toHaveTextContent(
-      "Grounded Answer Workspace"
+      "Grounded Answer & Context Workbench"
     );
 
     rerender(
@@ -76,21 +76,21 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     expect(
       screen.getByTestId("inline-cite-doc-chunk_hawkes_01")
     ).toHaveTextContent(
-      "The role of volume in order book dynamics: a multivariate Hawkes process analysis · 3.2 Excitation Kernel Stability"
+      "[1] The role of volume in order book dynamics: a multivariate Hawkes process analysis: 3.2 Excitation Kernel Stability"
     );
 
-    // Click inline doc citation chip -> switches to Citations & Docs tab and highlights card
+    // Click inline doc citation chip -> switches to Document Sections tab and highlights card
     fireEvent.click(screen.getByTestId("inline-cite-doc-chunk_hawkes_01"));
     expect(screen.getByTestId("quant-strategy-view")).toBeInTheDocument();
     expect(screen.getByTestId("citation-card-chunk_hawkes_01")).toHaveClass(
-      "evidence-card-highlighted"
+      "evidence-item-highlighted"
     );
 
-    // Click inline code slice chip #1 -> switches back to Code Slices tab and highlights slice 1
+    // Click inline code slice chip #1 -> switches back to Code & Dependencies tab and highlights slice 1
     fireEvent.click(screen.getByTestId("inline-cite-code-1"));
     expect(screen.getByTestId("code-slices-view")).toBeInTheDocument();
     expect(screen.getByTestId("code-slice-card-1")).toHaveClass(
-      "evidence-card-highlighted"
+      "evidence-item-highlighted"
     );
     expect(screen.getByTestId("ast-closure-badge")).toBeInTheDocument();
 
@@ -234,7 +234,7 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     );
 
     expect(screen.getByTestId("tab-quant-strategy")).toHaveTextContent(
-      "Citations & Docs (1)"
+      "Document Sections (1)"
     );
     expect(screen.getByTestId("answer-first-hero")).toHaveTextContent(
       "k_cleave = k_0 * exp(-Delta_G / RT)"
@@ -282,7 +282,7 @@ describe("CitationInspector (Answer-First Workspace)", () => {
       screen.getByTestId("inline-cite-doc-chunk_jira_eng412")
     ).toBeInTheDocument();
     expect(screen.getByTestId("tab-code-slices")).toHaveTextContent(
-      "Code Slices (0)"
+      "Code & Dependencies (0)"
     );
 
     rerender(
@@ -325,5 +325,128 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     expect(telemetryView).toHaveTextContent("3,800");
     expect(telemetryView).toHaveTextContent("38,200");
     expect(telemetryView).toHaveTextContent("$0.1528");
+  });
+
+  it("renders unmistakable amber Partial Coverage callout listing missing_or_unverified_aspects and per-facet pills", () => {
+    render(
+      <CitationInspector
+        contextPack={{
+          ...TEST_CODE_PACK,
+          domain_id: "data_engineering_scout",
+          code_slices: [],
+          query_facets: [
+            {
+              facet_id: "f1",
+              facet_query: "Apache Iceberg CoW vs MoR",
+              status: "grounded",
+              matched_sources: ["iceberg_spec.md"],
+              confidence: 0.92,
+              explanation: "Grounded in 2 chunks.",
+            },
+            {
+              facet_id: "f2",
+              facet_query: "Spark AQE skew joins",
+              status: "grounded",
+              matched_sources: ["spark_aqe.md"],
+              confidence: 0.88,
+              explanation: "Grounded in 1 chunk.",
+            },
+            {
+              facet_id: "f3",
+              facet_query: "Oracle Exadata Smart Scan HCC offload",
+              status: "not_found",
+              matched_sources: [],
+              confidence: 0.0,
+              explanation: "No chunks above RRF floor 0.55.",
+            },
+          ],
+          missing_or_unverified_aspects: [
+            "Oracle Exadata Smart Scan HCC offload (no grounded documents above RRF floor)",
+          ],
+          completeness_ratio: 0.67,
+        }}
+        quantSpec={null}
+        tokenSavings={TEST_TOKEN_SAVINGS}
+        principalRole="engineer"
+        onOpenDiffModal={vi.fn()}
+      />
+    );
+
+    const callout = screen.getByTestId("partial-coverage-callout");
+    expect(callout).toHaveTextContent("Partial corpus coverage (2 of 3 facets grounded)");
+    expect(callout).toHaveTextContent("Not found in indexed corpus:");
+    expect(callout).toHaveTextContent("Oracle Exadata Smart Scan HCC offload");
+    expect(screen.getByTestId("preflight-passed-badge")).toHaveTextContent(
+      "Partial Coverage (2/3 facets)"
+    );
+    expect(screen.getByTestId("facet-pill-f1")).toHaveTextContent("Grounded");
+    expect(screen.getByTestId("facet-pill-f3")).toHaveTextContent("Not found");
+  });
+
+  it("renders grouped Code & AST Dependency inspector and full un-truncated full_section_content with highlighted quote", () => {
+    const richPack = {
+      ...TEST_CODE_PACK,
+      code_slices: [
+        TEST_CODE_PACK.code_slices[0], // modify_target
+        TEST_CODE_PACK.code_slices[1], // imported_type
+        {
+          ...TEST_CODE_PACK.code_slices[0],
+          file_path: "execution/router.py",
+          qualified_symbol: "OrderRouter.dispatch",
+          modification_intent: "direct_caller" as const,
+          auto_expanded_by_ast: true,
+        },
+        {
+          ...TEST_CODE_PACK.code_slices[0],
+          file_path: "tests/test_optimizer.py",
+          qualified_symbol: "test_almgren_chriss_slippage",
+          modification_intent: "test_fixture" as const,
+          auto_expanded_by_ast: true,
+        },
+      ],
+      supporting_doc_citations: [
+        {
+          ...TEST_CODE_PACK.supporting_doc_citations[0],
+          full_section_content:
+            "Section intro paragraph. " +
+            TEST_CODE_PACK.supporting_doc_citations[0].verbatim_quote +
+            " Trailing analytical derivation continues in full without truncation.",
+        },
+      ],
+    };
+
+    render(
+      <CitationInspector
+        contextPack={richPack}
+        quantSpec={null}
+        tokenSavings={TEST_TOKEN_SAVINGS}
+        principalRole="engineer"
+        onOpenDiffModal={vi.fn()}
+      />
+    );
+
+    expect(screen.getByTestId("slice-group-modify_target")).toHaveTextContent(
+      "Target Implementation Slices (1)"
+    );
+    expect(screen.getByTestId("slice-group-imported_type")).toHaveTextContent(
+      "Types & Schemas (AST Closure) (1)"
+    );
+    expect(screen.getByTestId("slice-group-direct_caller")).toHaveTextContent(
+      "Direct Callers (AST Closure) (1)"
+    );
+    expect(screen.getByTestId("slice-group-test_fixture")).toHaveTextContent(
+      "Unit Tests (AST Closure) (1)"
+    );
+
+    // Switch to Document Sections tab and expand full section context
+    fireEvent.click(screen.getByTestId("tab-quant-strategy"));
+    fireEvent.click(screen.getByTestId("full-section-toggle-chunk_hawkes_01"));
+    const fullSection = screen.getByTestId(
+      "full-section-content-chunk_hawkes_01"
+    );
+    expect(fullSection).toHaveTextContent("Section intro paragraph.");
+    expect(fullSection).toHaveTextContent(
+      "Trailing analytical derivation continues in full without truncation."
+    );
   });
 });

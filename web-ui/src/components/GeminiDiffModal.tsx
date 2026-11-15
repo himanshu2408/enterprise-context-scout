@@ -236,6 +236,8 @@ export const GeminiDiffModal: React.FC<GeminiDiffModalProps> = ({
 
               {editMode ? (
                 <textarea
+                  id="custom-patch-textarea"
+                  name="custom_patch"
                   className="diff-editor-textarea"
                   rows={12}
                   value={editedDiff}
@@ -308,6 +310,8 @@ export const GeminiDiffModal: React.FC<GeminiDiffModalProps> = ({
         <div className="modal-footer">
           <label className="confirm-checkbox-label">
             <input
+              id="confirm-apply-checkbox"
+              name="confirm_apply"
               type="checkbox"
               checked={confirmed}
               onChange={(e) => setConfirmed(e.target.checked)}

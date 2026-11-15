@@ -1572,7 +1572,7 @@ def sync_custom_domain_corpus_if_needed(
         commit_sha = hashlib.sha1(f"{domain_id}:{rel_path}:{blob_sha}".encode()).hexdigest()
         repo_commit_shas[repo_n] = commit_sha
         lang = effective_langs.get(disk_p.suffix.lower(), "python")
-        file_scopes = ["public_eng", "public_quant", f"repo:{repo_n}"]
+        file_scopes = ["public_eng", f"domain:{domain_id}", f"repo:{repo_n}"]
         repo_uuid = uuid5(NAMESPACE_URL, f"{domain_id}:repo:{repo_n}")
         new_code_files.append(
             CodeFileRecord(
@@ -2353,6 +2353,48 @@ class BoundGraphRepository:
         self._chunks_cache[cache_key] = pg_chunks
         return list(pg_chunks)
 
+    def count_visible_doc_chunks(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+    ) -> tuple[int, int]:
+        """Returns (visible_non_stale_count, stale_count) under RLS without row cap truncation."""
+        if not self._use_pg17():
+            if hasattr(self._repo, "count_visible_doc_chunks"):
+                res = self._repo.count_visible_doc_chunks(principal, domain_id)
+                if isinstance(res, tuple) and len(res) == 2:
+                    return int(res[0]), int(res[1])
+            if self._has_in_memory_domain_records(domain_id) or hasattr(
+                self._repo, "list_visible_doc_chunks"
+            ):
+                all_c = self.list_visible_doc_chunks(principal, domain_id, include_stale=True)
+                stale_c = sum(1 for c in all_c if bool(getattr(c, "is_stale", False)))
+                return len(all_c) - stale_c, stale_c
+        try:
+            with self._pg_tx(principal) as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE is_stale = FALSE),
+                        COUNT(*) FILTER (WHERE is_stale = TRUE)
+                    FROM doc_chunks
+                    WHERE domain_id = %s;
+                    """,
+                    (domain_id,),
+                ).fetchone()
+            if row is not None:
+                return int(str(row[0] or 0)), int(str(row[1] or 0))
+        except Exception as exc:
+            logger.debug(
+                "PG17 count_visible_doc_chunks fallback for '%s' (%s): %s",
+                domain_id,
+                type(exc).__name__,
+                exc,
+            )
+        raw = self.list_visible_doc_chunks(principal, domain_id, include_stale=True)
+        stale_n = sum(1 for c in raw if bool(getattr(c, "is_stale", False)))
+        return len(raw) - stale_n, stale_n
+
     def search_visible_doc_chunks(
         self,
         principal: PrincipalContext,
@@ -2629,10 +2671,7 @@ class PreFlightValidator:
             require_citations_default=False,
             strict_freshness=self.domain_config.confluence_strict_freshness,
         )
-        self.expander = expander or ASTDependencyExpander(
-            max_direct_callers=3,
-            max_expansion_token_budget=1500,
-        )
+        self.expander = expander or ASTDependencyExpander()
         self.min_rrf_score = (
             min_rrf_score
             if min_rrf_score is not None

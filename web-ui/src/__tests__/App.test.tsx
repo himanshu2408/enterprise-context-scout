@@ -189,7 +189,7 @@ describe("App Integration", () => {
     fireEvent.click(screen.getByTestId("domain-card-trading_code_scout"));
     expect(
       screen.getByTestId("domain-card-trading_code_scout")
-    ).toHaveClass("domain-card-active");
+    ).toHaveClass("domain-row-active");
 
     fireEvent.click(screen.getByTestId("source-filter-wiki"));
     expect(screen.getByTestId("console-source-filter-pill")).toHaveTextContent(
@@ -200,7 +200,7 @@ describe("App Integration", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.getByTestId("domain-card-quant_research_scout")
-    ).toHaveClass("domain-card-active");
+    ).toHaveClass("domain-row-active");
 
     // Switch back to all and run a query with both code + wiki + jira citations
     fireEvent.click(screen.getByTestId("source-filter-all"));
@@ -276,6 +276,8 @@ describe("App Integration", () => {
       expect(screen.queryByTestId("answer-first-hero")).not.toBeInTheDocument();
       expect(screen.getByTestId("empty-query-savings")).toBeInTheDocument();
       expect(screen.queryByTestId("gemini-diff-modal")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("shield-gemma-safe-badge")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("check-stage-1")).not.toBeInTheDocument();
     });
   });
 });

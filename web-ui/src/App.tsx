@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useState } from "react";
 import {
   Activity,
   BookOpen,
+  ChevronDown,
+  ChevronRight,
   Code,
   Cpu,
   Database,
@@ -9,6 +11,7 @@ import {
   Layers,
   RefreshCw,
   Shield,
+  SlidersHorizontal,
   Ticket,
 } from "lucide-react";
 import {
@@ -55,12 +58,14 @@ export function App(): React.ReactElement {
     user_id: "demo_engineer",
     role: "engineer",
     allowed_scopes: [...ROLE_DEFAULT_SCOPES.engineer],
-    max_session_paid_tokens: 8000,
+    max_session_paid_tokens: 64000,
   });
   const [selectedDomain, setSelectedDomain] = useState<string>(
     FEDERATED_ALL_DOMAIN_ID
   );
   const [sourceFilter, setSourceFilter] = useState<SourceFilterType>("all");
+  const [scopePanelOpen, setScopePanelOpen] = useState<boolean>(true);
+  const [scopeResetVersion, setScopeResetVersion] = useState<number>(0);
 
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
@@ -179,6 +184,7 @@ export function App(): React.ReactElement {
       setQuantSpec(null);
       setTokenSavings(null);
       setAbstainedDiagnostic(null);
+      setScopeResetVersion((v) => v + 1);
     }
     setPrincipal(next);
   };
@@ -217,7 +223,9 @@ export function App(): React.ReactElement {
     const firstMatch = domains.find((d) =>
       matchesDomainSourceFilter(d, nextFilter)
     );
-    setSelectedDomain(firstMatch ? firstMatch.domain_id : FEDERATED_ALL_DOMAIN_ID);
+    setSelectedDomain(
+      firstMatch ? firstMatch.domain_id : FEDERATED_ALL_DOMAIN_ID
+    );
   };
 
   const hw = health?.hardware_profile;
@@ -229,23 +237,26 @@ export function App(): React.ReactElement {
       <header className="top-bar" data-testid="app-header">
         <div className="brand-block">
           <div className="brand-icon-wrap">
-            <Shield size={20} />
+            <Shield size={18} />
           </div>
           <div>
             <h1 className="brand-title">Enterprise Context Scout</h1>
             <p className="brand-subtitle">
-              Answer-First Federated Engineering &amp; Knowledge Workspace
+              Grounded Engineering &amp; Research Workbench
             </p>
           </div>
         </div>
 
         <div className="header-telemetry-strip">
           {hw ? (
-            <div className="telemetry-chip" data-testid="hardware-profile-chip">
+            <div
+              className="telemetry-chip tabular-num"
+              data-testid="hardware-profile-chip"
+            >
               <Cpu size={14} className="icon-accent" />
               <span>
-                {hw.device} · {hw.unified_memory} · {hw.quantization} ·{" "}
-                {verifiedAdapterCount}/{adapterEntries.length} Adapters · LoRA{" "}
+                {hw.device}, {hw.unified_memory}, {hw.quantization},{" "}
+                {verifiedAdapterCount}/{adapterEntries.length} Adapters, LoRA{" "}
                 {hw.lora_slots_allocated}/{hw.lora_slots_capacity}
               </span>
             </div>
@@ -307,57 +318,89 @@ export function App(): React.ReactElement {
 
       <main className="workspace-stack">
         <section className="top-scope-bar" data-testid="top-scope-bar">
-          <div className="source-filter-bar-row">
-            <span className="field-label scope-inline-label">Source Scope</span>
-            <div
-              className="source-filter-bar"
-              role="group"
-              aria-label="Source filter"
-              data-testid="source-filter-bar"
-            >
-              {SOURCE_FILTERS.map((f) => {
-                const active = sourceFilter === f.id;
-                return (
-                  <button
-                    key={f.id}
-                    type="button"
-                    className={`source-filter-btn ${
-                      active ? "source-filter-btn-active" : ""
-                    }`}
-                    onClick={() => handleSelectSourceFilter(f.id)}
-                    aria-pressed={active}
-                    data-testid={f.testId}
-                  >
-                    {f.id === "all" && <Layers size={13} />}
-                    {f.id === "code" && <Code size={13} />}
-                    {f.id === "wiki" && <BookOpen size={13} />}
-                    {f.id === "jira" && <Ticket size={13} />}
-                    <span>{f.label}</span>
-                  </button>
-                );
-              })}
+          <div className="scope-summary-bar">
+            <div className="scope-summary-text">
+              <SlidersHorizontal size={14} className="icon-accent" />
+              <span>
+                Target: <code>{selectedDomain}</code> | Role:{" "}
+                <strong>{principal.role}</strong> (
+                <code>{principal.allowed_scopes.join(", ")}</code>)
+              </span>
             </div>
+            <button
+              type="button"
+              className="btn-quiet-toggle"
+              onClick={() => setScopePanelOpen((v) => !v)}
+              aria-expanded={scopePanelOpen}
+              data-testid="toggle-scope-bar-btn"
+            >
+              {scopePanelOpen ? (
+                <>
+                  <ChevronDown size={13} /> Hide Scope
+                </>
+              ) : (
+                <>
+                  <ChevronRight size={13} /> Configure Scope
+                </>
+              )}
+            </button>
           </div>
 
-          <div className="scope-controls-grid">
-            <RoleSwitcher
-              principal={principal}
-              onChangePrincipal={handleChangePrincipal}
-              authStatus={authStatus}
-              authError={authError}
-              onRetryAuth={() => setAuthAttempt((n) => n + 1)}
-            />
+          {scopePanelOpen && (
+            <>
+              <div className="source-filter-bar-row">
+                <span className="field-label">Source Scope</span>
+                <div
+                  className="source-filter-bar"
+                  role="group"
+                  aria-label="Source filter"
+                  data-testid="source-filter-bar"
+                >
+                  {SOURCE_FILTERS.map((f) => {
+                    const active = sourceFilter === f.id;
+                    return (
+                      <button
+                        key={f.id}
+                        type="button"
+                        className={`source-filter-btn ${
+                          active ? "source-filter-btn-active" : ""
+                        }`}
+                        onClick={() => handleSelectSourceFilter(f.id)}
+                        aria-pressed={active}
+                        data-testid={f.testId}
+                      >
+                        {f.id === "all" && <Layers size={13} />}
+                        {f.id === "code" && <Code size={13} />}
+                        {f.id === "wiki" && <BookOpen size={13} />}
+                        {f.id === "jira" && <Ticket size={13} />}
+                        <span>{f.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
-            <DomainSelector
-              domains={domains}
-              selectedDomain={selectedDomain}
-              onSelectDomain={setSelectedDomain}
-              sourceFilter={sourceFilter}
-              loading={domainsLoading}
-              error={domainsError}
-              onRetry={() => void loadHealthAndDomains()}
-            />
-          </div>
+              <div className="scope-controls-grid">
+                <RoleSwitcher
+                  principal={principal}
+                  onChangePrincipal={handleChangePrincipal}
+                  authStatus={authStatus}
+                  authError={authError}
+                  onRetryAuth={() => setAuthAttempt((n) => n + 1)}
+                />
+
+                <DomainSelector
+                  domains={domains}
+                  selectedDomain={selectedDomain}
+                  onSelectDomain={setSelectedDomain}
+                  sourceFilter={sourceFilter}
+                  loading={domainsLoading}
+                  error={domainsError}
+                  onRetry={() => void loadHealthAndDomains()}
+                />
+              </div>
+            </>
+          )}
         </section>
 
         <section className="workspace-main">
@@ -365,6 +408,7 @@ export function App(): React.ReactElement {
             selectedDomain={selectedDomain}
             principal={principal}
             sourceFilter={sourceFilter}
+            scopeResetVersion={scopeResetVersion}
             onSelectDomain={setSelectedDomain}
             onContextPackReady={handleContextPackReady}
             onClearContextPack={handleClearContextPack}

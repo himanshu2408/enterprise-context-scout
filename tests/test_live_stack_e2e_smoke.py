@@ -754,7 +754,7 @@ def test_live_engineer_runbook_adr_and_code_sse_stream(
         assert "1 doc chunk(s)" in stage_events[0]["details"]
         assert "ms" in stage_events[0]["details"]
         assert "$0 paid tokens" in stage_events[1]["details"]
-        assert "1,500-token budget" in stage_events[2]["details"]
+        assert "10,000-token budget" in stage_events[2]["details"]
         assert "$0 frontier exploration cost" in stage_events[3]["details"]
 
         assert len(ready_events) == 1

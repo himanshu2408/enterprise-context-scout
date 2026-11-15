@@ -412,16 +412,159 @@ describe("ScoutConsole", () => {
       />
     );
 
+    expect(screen.getByTestId("quick-pick-de_acid")).toBeInTheDocument();
     expect(screen.getByTestId("quick-pick-de_iceberg_cow_mor")).toBeInTheDocument();
-    expect(screen.getByTestId("quick-pick-de_spark_aqe_skew")).toBeInTheDocument();
     expect(screen.getByTestId("quick-pick-de_flink_eos_cdc")).toBeInTheDocument();
     expect(screen.getByTestId("quick-pick-de_dbt_scd2_pg17")).toBeInTheDocument();
     expect(screen.queryByTestId("quick-pick-code_ast")).not.toBeInTheDocument();
 
     const input = screen.getByTestId("scout-query-input") as HTMLTextAreaElement;
-    expect(input.value).toContain("Apache Iceberg Copy-on-Write vs Merge-on-Read");
+    expect(input.value).toContain("what does ACID stands for");
 
     fireEvent.click(screen.getByTestId("quick-pick-de_flink_eos_cdc"));
-    expect(input.value).toContain("Flink two-phase commit exactly-once sink idempotency");
+    expect(input.value).toContain("Debezium PostgreSQL CDC with Apache Iceberg sinks");
+  });
+
+  it("renders calibrated per-stage confidence bars and click-to-inspect signal breakdown across Stages 1-4", async () => {
+    installMockApiFetch({
+      sseEvents: [
+        {
+          event: "stage_update",
+          data: {
+            stage: 1,
+            stage_name: "Identity, RBAC & Prompt Guard",
+            status: "completed",
+            details: "ShieldGemma 2 passed.",
+            elapsed_ms: 14,
+            confidence: {
+              stage: 1,
+              stage_name: "Identity, RBAC & Prompt Guard",
+              confidence_score: 0.98,
+              confidence_band: "high",
+              signals: {
+                hmac_attested: true,
+                injection_threat_score: 0.01,
+                parsed_facets: 3,
+              },
+              summary: "Signed Bearer verified with 3 query facets.",
+            },
+            timestamp: "2026-11-15T12:00:00Z",
+          },
+        },
+        {
+          event: "stage_update",
+          data: {
+            stage: 2,
+            stage_name: "Federated Corpus Retrieval",
+            status: "completed",
+            details: "Retrieved 2 of 3 facets.",
+            elapsed_ms: 82,
+            confidence: {
+              stage: 2,
+              stage_name: "Federated Corpus Retrieval",
+              confidence_score: 0.67,
+              confidence_band: "medium",
+              signals: {
+                normalized_rrf: 0.742,
+                facet_recall_ratio: "2/3",
+                modality_agreement: 3,
+              },
+              summary: "2 of 3 facets matched above RRF floor.",
+            },
+            timestamp: "2026-11-15T12:00:01Z",
+          },
+        },
+        {
+          event: "stage_update",
+          data: {
+            stage: 3,
+            stage_name: "Local Synthesis & AST Closure",
+            status: "completed",
+            details: "AST closure attached.",
+            elapsed_ms: 210,
+            confidence: {
+              stage: 3,
+              stage_name: "Local Synthesis & AST Closure",
+              confidence_score: 0.91,
+              confidence_band: "high",
+              signals: {
+                symbol_resolution_ratio: 1.0,
+                ast_closure_count: 4,
+                synthesis_mode: "live_qlora_json",
+              },
+              summary: "All internal symbols resolved via live QLoRA.",
+            },
+            timestamp: "2026-11-15T12:00:02Z",
+          },
+        },
+        {
+          event: "stage_update",
+          data: {
+            stage: 4,
+            stage_name: "Pre-Flight Grounding & Audit",
+            status: "completed",
+            details: "NFKC quote overlap verified.",
+            elapsed_ms: 245,
+            confidence: {
+              stage: 4,
+              stage_name: "Pre-Flight Grounding & Audit",
+              confidence_score: 0.34,
+              confidence_band: "low",
+              signals: {
+                nfkc_quote_overlap: 0.99,
+                completeness_ratio: 0.67,
+              },
+              summary: "1 requested facet missing from indexed corpus.",
+            },
+            timestamp: "2026-11-15T12:00:03Z",
+          },
+        },
+        {
+          event: "context_pack_ready",
+          data: {
+            status: "ready",
+            pack: TEST_CODE_PACK,
+            token_savings: TEST_TOKEN_SAVINGS,
+            timestamp: "2026-11-15T12:00:03Z",
+          },
+        },
+      ],
+    });
+
+    render(
+      <ScoutConsole
+        selectedDomain="trading_code_scout"
+        principal={TEST_ENGINEER_PRINCIPAL}
+        onContextPackReady={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByTestId("run-scout-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("stage-confidence-badge-1")).toHaveTextContent(
+        "98% High"
+      );
+      expect(screen.getByTestId("stage-confidence-badge-2")).toHaveTextContent(
+        "67% Medium"
+      );
+      expect(screen.getByTestId("stage-confidence-badge-3")).toHaveTextContent(
+        "91% High"
+      );
+      expect(screen.getByTestId("stage-confidence-badge-4")).toHaveTextContent(
+        "34% Low"
+      );
+    });
+
+    expect(screen.getByTestId("stage-confidence-bar-2")).toHaveStyle({
+      width: "67%",
+    });
+
+    // Click Stage 2 to inspect signal breakdown
+    fireEvent.click(screen.getByTestId("stage-toggle-2"));
+    const signalsDrawer = screen.getByTestId("stage-signals-2");
+    expect(signalsDrawer).toHaveTextContent("2 of 3 facets matched above RRF floor.");
+    expect(signalsDrawer).toHaveTextContent("0.742");
+    expect(signalsDrawer).toHaveTextContent("2/3");
   });
 });

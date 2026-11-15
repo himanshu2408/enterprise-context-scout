@@ -28,7 +28,8 @@ export function matchesDomainSourceFilter(
   sourceFilter: SourceFilterType
 ): boolean {
   if (sourceFilter === "all") return true;
-  const descriptor = `${domain.domain_id} ${domain.display_name} ${domain.output_contract}`.toLowerCase();
+  const descriptor =
+    `${domain.domain_id} ${domain.display_name} ${domain.output_contract}`.toLowerCase();
   if (sourceFilter === "code") {
     return (
       domain.primary_truth_source === "code" ||
@@ -49,9 +50,9 @@ export function matchesDomainSourceFilter(
 
 function describeDomain(domain: DomainInfo): string {
   if (domain.primary_truth_source === "document") {
-    return `Verified document & citation grounding · ${domain.output_contract}`;
+    return `Verified document grounding (${domain.output_contract})`;
   }
-  return `AST dependency closure & verbatim code slices · ${domain.output_contract}`;
+  return `AST dependency closure & code slices (${domain.output_contract})`;
 }
 
 export const DomainSelector: React.FC<DomainSelectorProps> = ({
@@ -63,9 +64,9 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
   error = null,
   onRetry,
 }) => {
-  const [expandedMetrics, setExpandedMetrics] = useState<Record<string, boolean>>(
-    {}
-  );
+  const [expandedMetrics, setExpandedMetrics] = useState<
+    Record<string, boolean>
+  >({});
 
   const visibleDomains = useMemo(
     () => domains.filter((d) => matchesDomainSourceFilter(d, sourceFilter)),
@@ -81,11 +82,14 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
   };
 
   return (
-    <section className="panel scope-card domain-scope-card" data-testid="domain-selector">
-      <div className="panel-header panel-header-compact">
-        <div className="panel-title-row">
+    <section
+      className="scope-section domain-scope-section"
+      data-testid="domain-selector"
+    >
+      <div className="scope-section-head">
+        <div className="scope-section-title">
           <Layers size={15} className="icon-accent" />
-          <h2 className="panel-title">Knowledge Domains</h2>
+          <h2 className="section-heading">Knowledge Domains</h2>
         </div>
         <span className="meta-count">
           {loading
@@ -118,24 +122,24 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
         </div>
       )}
 
-      <div className="domain-list domain-list-compact">
+      <div className="domain-list">
         <button
           type="button"
-          className={`domain-card domain-card-compact ${
-            selectedDomain === FEDERATED_ALL_DOMAIN_ID ? "domain-card-active" : ""
+          className={`domain-row ${
+            selectedDomain === FEDERATED_ALL_DOMAIN_ID ? "domain-row-active" : ""
           }`}
           onClick={() => onSelectDomain(FEDERATED_ALL_DOMAIN_ID)}
           data-testid="domain-card-federated_all"
         >
-          <div className="domain-card-top">
+          <div className="domain-row-main">
             <div className="domain-name-row">
               <Layers size={14} className="icon-accent" />
               <span className="domain-title">All Authorized Domains</span>
             </div>
-            <span className="badge badge-info">Auto-Route</span>
+            <span className="status-tag status-tag-info">Auto-route</span>
           </div>
           <p className="domain-desc">
-            Federated search across allowed repos, Confluence docs, and issues.
+            Federated search across allowed repositories, Confluence docs, and issues.
           </p>
         </button>
 
@@ -149,9 +153,13 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
           !error &&
           domains.length > 0 &&
           visibleDomains.length === 0 && (
-            <div className="domain-filter-empty" data-testid="domains-filter-empty">
-              No standalone domain registered for filter <code>{sourceFilter}</code>
-              ; use <strong>All Authorized Domains</strong> for federated retrieval.
+            <div
+              className="domain-filter-empty"
+              data-testid="domains-filter-empty"
+            >
+              No standalone domain registered for filter{" "}
+              <code>{sourceFilter}</code>; use{" "}
+              <strong>All Authorized Domains</strong> for federated retrieval.
             </div>
           )}
 
@@ -163,9 +171,7 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
           return (
             <div
               key={domain.domain_id}
-              className={`domain-card domain-card-compact ${
-                active ? "domain-card-active" : ""
-              }`}
+              className={`domain-row ${active ? "domain-row-active" : ""}`}
               data-testid={`domain-card-${domain.domain_id}`}
               role="button"
               tabIndex={0}
@@ -177,18 +183,18 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
                 }
               }}
             >
-              <div className="domain-card-top">
+              <div className="domain-row-main">
                 <div className="domain-name-row">
                   {isDoc ? (
-                    <BookOpen size={14} className="icon-quant" />
+                    <BookOpen size={14} className="icon-emerald" />
                   ) : (
-                    <Code size={14} className="icon-code" />
+                    <Code size={14} className="icon-accent" />
                   )}
                   <span className="domain-title">{domain.display_name}</span>
                 </div>
                 <span
-                  className={`badge ${
-                    domain.verified ? "badge-success" : "badge-warning"
+                  className={`status-tag ${
+                    domain.verified ? "status-tag-ok" : "status-tag-warn"
                   }`}
                 >
                   <CheckCircle2 size={11} />
@@ -199,10 +205,10 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
               <p className="domain-desc">{describeDomain(domain)}</p>
 
               <div className="domain-meta-row">
-                <span className="domain-id-tag">{domain.domain_id}</span>
+                <code className="domain-id-code">{domain.domain_id}</code>
                 <button
                   type="button"
-                  className="btn-metrics-toggle"
+                  className="btn-quiet-toggle"
                   onClick={(e) => toggleMetrics(domain.domain_id, e)}
                   data-testid={`toggle-adapter-metrics-${domain.domain_id}`}
                 >
@@ -211,13 +217,14 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
                   ) : (
                     <ChevronRight size={12} />
                   )}
-                  <Cpu size={11} /> Adapter telemetry
+                  <Cpu size={11} />
+                  <span>Adapter telemetry</span>
                 </button>
               </div>
 
               {isOpen && (
                 <div
-                  className="adapter-metrics-box"
+                  className="adapter-metrics-drawer"
                   data-testid={`adapter-metrics-${domain.domain_id}`}
                 >
                   <div className="metric-kv">
@@ -227,7 +234,8 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
                   <div className="metric-kv">
                     <span>Rank / Alpha</span>
                     <code>
-                      {domain.qlora_rank !== null && domain.qlora_alpha !== null
+                      {domain.qlora_rank !== null &&
+                      domain.qlora_alpha !== null
                         ? `r=${domain.qlora_rank}, α=${domain.qlora_alpha}`
                         : "N/A (base)"}
                     </code>
