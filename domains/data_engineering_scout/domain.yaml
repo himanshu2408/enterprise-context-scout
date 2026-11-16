@@ -17,3 +17,17 @@ authority_rules:
   freshness_half_life_days: 730
 output_contract: DomainKnowledgeBrief
 source_dir: data/data_engineering
+description: "Data engineering reference docs, distributed databases, lakehouse table formats, streaming pipelines, and SQL engines."
+modalities:
+  - "document"
+lora_enabled: false
+default_scopes:
+  - "public"
+  - "public_eng"
+  - "public_quant"
+  - "domain:data_engineering"
+  - "domain:data_engineering_scout"
+sample_queries:
+  - "What is ACID in relational and transactional databases?"
+  - "What is Apache Iceberg and how does it manage table snapshots and schema evolution?"
+  - "How does Spark Structured Streaming handle watermarking and late-arriving events?"

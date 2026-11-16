@@ -9,12 +9,14 @@ from context_scout.api.routes.health import router as health_router
 from context_scout.api.routes.scout import router as scout_router
 from context_scout.api.routes.telemetry import router as telemetry_router
 from context_scout.api.routes.webhooks import router as webhooks_router
+from context_scout.api.routes.workspace import router as workspace_router
 
 api_router = APIRouter()
 
 api_router.include_router(auth_router)
 api_router.include_router(health_router)
 api_router.include_router(domains_router)
+api_router.include_router(workspace_router)
 api_router.include_router(scout_router)
 api_router.include_router(handoff_router)
 api_router.include_router(telemetry_router)

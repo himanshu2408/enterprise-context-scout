@@ -35,6 +35,7 @@ from context_scout.db.repositories import (
     ASTEdgeRecord,
     ASTNeighborhoodRecord,
     ASTSymbolRecord,
+    CalibratedRankedSearchHit,
     CodeFileRecord,
     DocChunkRecord,
     InMemoryRLSRepository,
@@ -1824,19 +1825,29 @@ class BoundGraphRepository:
         ] = {}
 
     def _use_pg17(self) -> bool:
-        return self._repo is None or isinstance(self._repo, PostgresRLSRepository)
+        if self._conn is not None or self._repo is None:
+            return True
+        if isinstance(self._repo, InMemoryRLSRepository):
+            return False
+        return isinstance(self._repo, PostgresRLSRepository) or hasattr(
+            self._repo, "connection_manager"
+        )
 
     def _has_in_memory_domain_records(self, domain_id: str) -> bool:
-        if not isinstance(self._repo, InMemoryRLSRepository):
-            return False
-        return any(f.domain_id == domain_id for f in self._repo._files.values()) or any(
-            c.domain_id == domain_id for c in self._repo._docs.values()
-        )
+        if isinstance(self._repo, InMemoryRLSRepository):
+            # InMemoryRLSRepository is an isolated dataset; never fall through to live PG17.
+            return self._conn is None
+        return False
 
     @contextmanager
     def _pg_tx(self, principal: PrincipalContext) -> Iterator[Connection[tuple[object, ...]]]:
         if self._conn is not None:
             yield self._conn
+            return
+        conn_mgr = getattr(self._repo, "connection_manager", None)
+        if isinstance(conn_mgr, RLSConnectionManager):
+            with conn_mgr.scoped_transaction(principal) as conn:
+                yield conn
             return
         mgr = RLSConnectionManager(ScoutSettings().db_app_url, use_pool=False)
         with mgr.scoped_transaction(principal) as conn:
@@ -1885,21 +1896,38 @@ class BoundGraphRepository:
             return []
 
     def _query_pg_ast_symbols(
-        self, principal: PrincipalContext, domain_id: str
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        symbol_ids: list[UUID] | None = None,
     ) -> list[ASTSymbolRecord]:
         try:
             with self._pg_tx(principal) as conn:
-                rows = conn.execute(
-                    """
-                    SELECT symbol_id, file_id, domain_id, qualified_name, symbol_kind,
-                           start_line, end_line, signature_skeleton, contextual_summary,
-                           allowed_scopes, repo_id, repo_qualified_id, bare_name
-                    FROM ast_symbols
-                    WHERE domain_id = %s
-                    ORDER BY qualified_name, start_line
-                    """,
-                    (domain_id,),
-                ).fetchall()
+                if symbol_ids:
+                    rows = conn.execute(
+                        """
+                        SELECT symbol_id, file_id, domain_id, qualified_name, symbol_kind,
+                               start_line, end_line, signature_skeleton, contextual_summary,
+                               allowed_scopes, repo_id, repo_qualified_id, bare_name
+                        FROM ast_symbols
+                        WHERE domain_id = %s
+                          AND symbol_id = ANY(%s)
+                        ORDER BY qualified_name, start_line
+                        """,
+                        (domain_id, symbol_ids),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT symbol_id, file_id, domain_id, qualified_name, symbol_kind,
+                               start_line, end_line, signature_skeleton, contextual_summary,
+                               allowed_scopes, repo_id, repo_qualified_id, bare_name
+                        FROM ast_symbols
+                        WHERE domain_id = %s
+                        ORDER BY qualified_name, start_line
+                        """,
+                        (domain_id,),
+                    ).fetchall()
             return [
                 ASTSymbolRecord(
                     symbol_id=UUID(str(r[0])),
@@ -2471,6 +2499,154 @@ class BoundGraphRepository:
         stale_n = sum(1 for c in raw if bool(getattr(c, "is_stale", False)))
         return len(raw) - stale_n, stale_n
 
+    def search_visible_doc_chunks_calibrated(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        query_text: str,
+        market_scope: MarketRegime | None = None,
+        limit: int = 50,
+        min_calibrated_score: float = 0.0,
+    ) -> tuple[list[DocChunkRecord], list[CalibratedRankedSearchHit]]:
+        """Search visible doc chunks returning both records and calibrated hit scores."""
+        if (
+            self._use_pg17()
+            and query_text.strip()
+            and os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() != "1"
+        ):
+            try:
+                query_vec = _embed_query_for_hybrid_rrf(query_text)
+                pg_repo = (
+                    self._repo
+                    if isinstance(self._repo, PostgresRLSRepository)
+                    else PostgresRLSRepository()
+                )
+                with self._pg_tx(principal) as conn:
+                    raw_hits = pg_repo.search_doc_chunks_hybrid_rrf(
+                        conn=conn,
+                        domain_id=domain_id,
+                        query_text=query_text,
+                        query_embedding=query_vec,
+                        market_scope=market_scope,
+                        top_k=limit,
+                        min_calibrated_score=min_calibrated_score,
+                    )
+                cal_hits = [
+                    h
+                    if isinstance(h, CalibratedRankedSearchHit)
+                    else CalibratedRankedSearchHit(
+                        item_id=h.item_id,
+                        qualified_name_or_title=h.qualified_name_or_title,
+                        normalized_rrf_score=h.normalized_rrf_score,
+                        trigram_rank=h.trigram_rank,
+                        bm25_rank=h.bm25_rank,
+                        vector_rank=h.vector_rank,
+                        calibrated_score=h.normalized_rrf_score,
+                        domain_id=domain_id,
+                    )
+                    for h in raw_hits
+                ]
+                if not cal_hits:
+                    # PG17 hybrid search ran and filtered everything below the relevance floor.
+                    return [], []
+                ordered_ids = [str(h.item_id) for h in cal_hits]
+                fetched = self.get_doc_chunks_by_ids(principal, domain_id, ordered_ids)
+                by_id = {str(c.chunk_id): c for c in fetched}
+                ranked_chunks = [by_id[cid] for cid in ordered_ids if cid in by_id]
+                matched_hits = [h for h in cal_hits if str(h.item_id) in by_id]
+                return ranked_chunks[:limit], matched_hits[:limit]
+            except Exception as exc:
+                logger.debug(
+                    "PG17 calibrated hybrid RRF doc search fallback (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
+
+        base_chunks = self.list_visible_doc_chunks(principal, domain_id, market_scope)
+        if not base_chunks and market_scope is not None:
+            base_chunks = self.list_visible_doc_chunks(principal, domain_id, None)
+        if not base_chunks:
+            return [], []
+        if not query_text.strip():
+            return base_chunks[:limit], []
+
+        words = [
+            w.lower()
+            for w in re.findall(r"[A-Za-z0-9_]{2,}", query_text)
+            if w.lower() not in PROMPT_STOPWORDS
+        ]
+        if not words:
+            return base_chunks[:limit], []
+
+        def _score_chunk(chk: DocChunkRecord) -> tuple[int, float]:
+            title_l = chk.doc_title.lower()
+            sec_l = chk.section_heading.lower()
+            body_l = chk.verbatim_content.lower()
+            word_hits = 0
+            s = 0.0
+            for w in words:
+                pat = rf"\b{re.escape(w)}\b"
+                in_title = bool(re.search(pat, title_l))
+                in_sec = bool(re.search(pat, sec_l))
+                in_body = bool(re.search(pat, body_l))
+                if in_title or in_sec or in_body:
+                    word_hits += 1
+                if in_title:
+                    s += 6.0
+                if in_sec:
+                    s += 3.0
+                if in_body:
+                    s += 1.0
+            if market_scope is not None and chk.market_scope == market_scope:
+                s += 5.0
+            return word_hits, s + (chk.authority_weight * 0.1)
+
+        scored_pairs = [(chk, _score_chunk(chk)) for chk in base_chunks]
+        matching_pairs = [
+            (chk, wh, sc) for chk, (wh, sc) in scored_pairs if wh > 0
+        ]
+        if not matching_pairs:
+            # Zero query concepts matched any visible chunk: return empty instead of noise.
+            return [], []
+
+        matching_pairs.sort(key=lambda item: (item[1], item[2]), reverse=True)
+        selected = matching_pairs[:limit]
+        max_possible = max(1.0, len(words) * 1.0)
+        synth_hits = []
+        for idx, (chk, wh, sc) in enumerate(selected):
+            cov = wh / max_possible
+            cal_sc = round(min(0.95, 0.30 + 0.60 * cov), 4)
+            rrf_sc = (
+                round(min(0.96, max(cal_sc, 0.68 + 0.25 * cov)), 4)
+                if (wh >= 2 or wh >= len(words))
+                else round(min(0.95, 0.35 + 0.55 * cov), 4)
+            )
+            synth_hits.append(
+                CalibratedRankedSearchHit(
+                    item_id=chk.chunk_id,
+                    qualified_name_or_title=f"{chk.doc_title} > {chk.section_heading}",
+                    normalized_rrf_score=rrf_sc,
+                    trigram_rank=idx + 1,
+                    bm25_rank=idx + 1,
+                    vector_rank=idx + 1,
+                    cosine_similarity=0.0,
+                    bm25_score=round(sc, 4),
+                    trigram_score=0.0,
+                    raw_rrf_score=rrf_sc,
+                    calibrated_score=cal_sc,
+                    domain_id=domain_id,
+                    lexical_coverage=round(cov, 4),
+                )
+            )
+        if min_calibrated_score > 0.0:
+            filtered = [
+                (chk, hit)
+                for (chk, _wh, _sc), hit in zip(selected, synth_hits, strict=True)
+                if hit.calibrated_score >= min_calibrated_score
+            ]
+            return [c for c, _ in filtered], [h for _, h in filtered]
+        return [chk for chk, _wh, _sc in selected], synth_hits
+
     def search_visible_doc_chunks(
         self,
         principal: PrincipalContext,
@@ -2493,73 +2669,14 @@ class BoundGraphRepository:
             except Exception as e:
                 logger.debug("search_visible_doc_chunks fallback: %s", e)
 
-        if (
-            self._use_pg17()
-            and query_text.strip()
-            and os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() != "1"
-        ):
-            try:
-                query_vec = _embed_query_for_hybrid_rrf(query_text)
-                pg_repo = (
-                    self._repo
-                    if isinstance(self._repo, PostgresRLSRepository)
-                    else PostgresRLSRepository()
-                )
-                with self._pg_tx(principal) as conn:
-                    hits = pg_repo.search_doc_chunks_hybrid_rrf(
-                        conn=conn,
-                        domain_id=domain_id,
-                        query_text=query_text,
-                        query_embedding=query_vec,
-                        market_scope=market_scope,
-                        top_k=limit,
-                    )
-                if hits:
-                    ordered_ids = [str(h.item_id) for h in hits]
-                    fetched = self.get_doc_chunks_by_ids(principal, domain_id, ordered_ids)
-                    by_id = {str(c.chunk_id): c for c in fetched}
-                    ranked_hits = [by_id[cid] for cid in ordered_ids if cid in by_id]
-                    if ranked_hits:
-                        return ranked_hits[:limit]
-            except Exception as exc:
-                logger.debug(
-                    "PG17 hybrid RRF doc search fallback (%s): %s",
-                    type(exc).__name__,
-                    exc,
-                )
-
-        base_chunks = self.list_visible_doc_chunks(principal, domain_id, market_scope)
-        if not base_chunks and market_scope is not None:
-            base_chunks = self.list_visible_doc_chunks(principal, domain_id, None)
-        if not query_text.strip() or not base_chunks:
-            return base_chunks[:limit]
-
-        words = [
-            w.lower()
-            for w in re.findall(r"[A-Za-z0-9]{3,}", query_text)
-            if w.lower() not in PROMPT_STOPWORDS
-        ]
-        if not words:
-            return base_chunks[:limit]
-
-        def _score_chunk(chk: DocChunkRecord) -> float:
-            title_l = chk.doc_title.lower()
-            sec_l = chk.section_heading.lower()
-            body_l = chk.verbatim_content.lower()
-            s = 0.0
-            for w in words:
-                if w in title_l:
-                    s += 6.0
-                if w in sec_l:
-                    s += 3.0
-                if w in body_l:
-                    s += 1.0
-            if market_scope is not None and chk.market_scope == market_scope:
-                s += 5.0
-            return s + (chk.authority_weight * 0.1)
-
-        ranked = sorted(base_chunks, key=_score_chunk, reverse=True)
-        return ranked[:limit]
+        chunks, _ = self.search_visible_doc_chunks_calibrated(
+            principal=principal,
+            domain_id=domain_id,
+            query_text=query_text,
+            market_scope=market_scope,
+            limit=limit,
+        )
+        return chunks
 
     def get_doc_chunks_by_ids(
         self,
@@ -2596,6 +2713,126 @@ class BoundGraphRepository:
         wanted = set(chunk_ids)
         return [c for c in visible if str(c.chunk_id) in wanted]
 
+    def search_visible_ast_symbols_calibrated(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        query_text: str,
+        limit: int = 50,
+        min_calibrated_score: float = 0.0,
+    ) -> tuple[list[ASTSymbolRecord], list[CalibratedRankedSearchHit]]:
+        """Search visible AST symbols returning both records and calibrated hit scores."""
+        if (
+            self._use_pg17()
+            and query_text.strip()
+            and os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() != "1"
+        ):
+            try:
+                query_vec = _embed_query_for_hybrid_rrf(query_text)
+                pg_repo = (
+                    self._repo
+                    if isinstance(self._repo, PostgresRLSRepository)
+                    else PostgresRLSRepository()
+                )
+                with self._pg_tx(principal) as conn:
+                    raw_hits = pg_repo.search_symbols_hybrid_rrf(
+                        conn=conn,
+                        domain_id=domain_id,
+                        query_text=query_text,
+                        query_embedding=query_vec,
+                        top_k=limit,
+                        min_calibrated_score=min_calibrated_score,
+                    )
+                cal_hits = [
+                    h
+                    if isinstance(h, CalibratedRankedSearchHit)
+                    else CalibratedRankedSearchHit(
+                        item_id=h.item_id,
+                        qualified_name_or_title=h.qualified_name_or_title,
+                        normalized_rrf_score=h.normalized_rrf_score,
+                        trigram_rank=h.trigram_rank,
+                        bm25_rank=h.bm25_rank,
+                        vector_rank=h.vector_rank,
+                        calibrated_score=h.normalized_rrf_score,
+                        domain_id=domain_id,
+                    )
+                    for h in raw_hits
+                ]
+                if not cal_hits:
+                    return [], []
+                sym_ids = [h.item_id for h in cal_hits]
+                fetched = self._query_pg_ast_symbols(principal, domain_id, symbol_ids=sym_ids)
+                by_id = {s.symbol_id: s for s in fetched}
+                ranked_syms = [by_id[h.item_id] for h in cal_hits if h.item_id in by_id]
+                matched_hits = [h for h in cal_hits if h.item_id in by_id]
+                return ranked_syms[:limit], matched_hits[:limit]
+            except Exception as exc:
+                logger.debug(
+                    "PG17 calibrated hybrid RRF symbol search fallback (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
+
+        visible = self.list_visible_ast_symbols(principal, domain_id)
+        if not visible:
+            return [], []
+        if not query_text.strip():
+            return visible[:limit], []
+        q_l = query_text.strip().lower()
+        words = [
+            w.lower()
+            for w in re.findall(r"[A-Za-z0-9_]{2,}", query_text)
+            if w.lower() not in PROMPT_STOPWORDS
+        ]
+        matched_pairs: list[tuple[ASTSymbolRecord, float, float, float]] = []
+        for s in visible:
+            hay = f"{s.qualified_name} {s.signature_skeleton} {s.contextual_summary}".lower()
+            short_sym = s.qualified_name.split(".")[-1].lower()
+            exact_short = len(short_sym) >= 3 and bool(
+                re.search(rf"\b{re.escape(short_sym)}\b", q_l)
+            )
+            if q_l in hay or exact_short:
+                matched_pairs.append((s, 0.90, 0.92, 1.0))
+            elif words:
+                hits_n = sum(
+                    1
+                    for w in words
+                    if re.search(rf"\b{re.escape(w)}\b", hay) or (len(w) >= 5 and w in hay)
+                )
+                if hits_n > 0:
+                    cov = hits_n / len(words)
+                    cal_sc = round(min(0.88, 0.25 + 0.60 * cov), 4)
+                    rrf_sc = (
+                        round(min(0.92, max(cal_sc, 0.68 + 0.24 * cov)), 4)
+                        if (hits_n >= 2 or hits_n >= len(words))
+                        else cal_sc
+                    )
+                    matched_pairs.append((s, cal_sc, rrf_sc, round(cov, 4)))
+        matched_pairs.sort(key=lambda item: (item[1], item[2]), reverse=True)
+        selected = matched_pairs[:limit]
+        synth_hits = [
+            CalibratedRankedSearchHit(
+                item_id=sym.symbol_id,
+                qualified_name_or_title=sym.qualified_name,
+                normalized_rrf_score=rrf_sc,
+                trigram_rank=idx + 1,
+                bm25_rank=idx + 1,
+                vector_rank=idx + 1,
+                calibrated_score=cal_sc,
+                domain_id=domain_id,
+                lexical_coverage=cov,
+            )
+            for idx, (sym, cal_sc, rrf_sc, cov) in enumerate(selected)
+        ]
+        if min_calibrated_score > 0.0:
+            filtered = [
+                (sym, hit)
+                for (sym, _cal, _rrf, _cov), hit in zip(selected, synth_hits, strict=True)
+                if hit.calibrated_score >= min_calibrated_score
+            ]
+            return [s for s, _ in filtered], [h for _, h in filtered]
+        return [sym for sym, _cal, _rrf, _cov in selected], synth_hits
+
     def search_visible_ast_symbols(
         self,
         principal: PrincipalContext,
@@ -2615,16 +2852,13 @@ class BoundGraphRepository:
                     return result
             except Exception as e:
                 logger.debug("search_visible_ast_symbols fallback: %s", e)
-        visible = self.list_visible_ast_symbols(principal, domain_id)
-        if not query_text.strip():
-            return visible[:limit]
-        q_l = query_text.strip().lower()
-        matched = [
-            s
-            for s in visible
-            if q_l in s.qualified_name.lower() or q_l in s.signature_skeleton.lower()
-        ]
-        return matched[:limit]
+        syms, _ = self.search_visible_ast_symbols_calibrated(
+            principal=principal,
+            domain_id=domain_id,
+            query_text=query_text,
+            limit=limit,
+        )
+        return syms
 
     def get_code_files_by_ids(
         self,
@@ -4257,6 +4491,26 @@ class PreFlightValidator:
                 "check_6_freshness": check_6_passed,
             }
             all_passed = all(check_results.values())
+            brief_obj = (
+                pack.domain_knowledge_brief if pack is not None else None
+            ) or active_quant
+            if (
+                brief_obj is not None
+                and getattr(brief_obj, "sufficiency_verdict", "sufficient") == "insufficient"
+            ):
+                all_passed = False
+                check_results["check_3_rrf"] = False
+                missing_str = "; ".join(getattr(brief_obj, "missing_aspects", [])[:3])
+                all_missing_items.append(
+                    MissingItemRecord(
+                        kind="citation",
+                        identifier=active_domain,
+                        reason=(
+                            "Synthesized brief marked context insufficient"
+                            + (f": {missing_str}" if missing_str else ".")
+                        ),
+                    )
+                )
             if not active_slices and not all_citations:
                 all_passed = False
                 check_results["check_2_closure"] = False

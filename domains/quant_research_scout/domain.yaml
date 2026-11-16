@@ -20,3 +20,15 @@ authority_rules:
   require_transaction_cost_check: true
   freshness_half_life_days: 730
 output_contract: "QuantStrategyBrief"
+description: "Quantitative finance papers, portfolio optimization, market microstructure, factor alpha, and cross-market execution friction analysis."
+modalities:
+  - "document"
+lora_enabled: false
+default_scopes:
+  - "public_quant"
+  - "quant_restricted"
+  - "corpus:quant_papers"
+sample_queries:
+  - "How does Hierarchical Risk Parity allocate portfolio weights without covariance inversion?"
+  - "What transaction cost and slippage assumptions break high-turnover momentum strategies?"
+  - "How do Hawkes processes model order-flow arrival clustering and spread dynamics?"

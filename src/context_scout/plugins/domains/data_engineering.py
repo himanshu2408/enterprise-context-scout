@@ -11,7 +11,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from context_scout.agents.citation_gate import (
     DocumentCitationGate,
@@ -698,7 +698,10 @@ class DataEngineeringDomainPlugin:
         verified_citations: list[Any],
     ) -> DomainKnowledgeBrief:
         """Synthesizes a complete, un-truncated Data Engineering DomainKnowledgeBrief."""
-        from context_scout.agents.intent_router import decompose_query_facets
+        from context_scout.agents.intent_router import (
+            decompose_query_facets,
+            evaluate_facet_grounding,
+        )
 
         plan = self.expand_query_plan(decompose_query_facets(user_prompt))
         req_card = plan.requested_cardinality or 6
@@ -709,8 +712,20 @@ class DataEngineeringDomainPlugin:
             max_caveats=6,
         )
         citations = list(verified_citations)
+        facet_covs = [
+            evaluate_facet_grounding(
+                facet,
+                doc_chunks=chunks,
+                code_slices=[],
+                domain_id=domain_id,
+            )
+            for facet in plan.facets
+        ]
+        missing_aspects = [msg for _, msg in facet_covs if msg]
+        grounded_count = sum(1 for cov, _ in facet_covs if cov.status == "grounded")
+        partial_count = sum(1 for cov, _ in facet_covs if cov.status == "partial")
 
-        # Acronym expansion adherence (e.g. "what does ACID stands for" -> all 4 properties)
+        # Acronym expansion adherence (only cite lines genuinely present in chunks)
         acronym_findings: list[str] = []
         if plan.is_acronym_query and plan.acronym and plan.acronym in DATA_ENGINEERING_ACRONYMS:
             synonym_map: dict[str, tuple[str, ...]] = {
@@ -776,9 +791,8 @@ class DataEngineeringDomainPlugin:
                 if matched_line:
                     acronym_findings.append(f"{term} ({letter}): {matched_line}")
                 else:
-                    acronym_findings.append(
-                        f"{term} ({letter}): Referenced under {plan.acronym} "
-                        "transactional guarantees."
+                    missing_aspects.append(
+                        f"Missing chunk evidence for {plan.acronym} component '{term} ({letter})'."
                     )
 
         for cit in reversed(citations):
@@ -836,6 +850,18 @@ class DataEngineeringDomainPlugin:
                 and (getattr(c, "metadata_json", {}) or {}).get("sub_scope")
             }
         )
+        if not chunks or not citations or (grounded_count == 0 and partial_count == 0):
+            sufficiency_verdict: Literal["sufficient", "partial", "insufficient"] = "insufficient"
+            completeness_ratio = 0.0
+        elif missing_aspects or partial_count > 0:
+            sufficiency_verdict = "partial"
+            completeness_ratio = round(
+                (grounded_count + 0.5 * partial_count) / max(1, len(plan.facets)), 3
+            )
+        else:
+            sufficiency_verdict = "sufficient"
+            completeness_ratio = 1.0
+
         return DomainKnowledgeBrief(
             brief_title=brief_title,
             domain_id=domain_id,
@@ -851,6 +877,11 @@ class DataEngineeringDomainPlugin:
                 "sub_scopes": ", ".join(sub_scopes) if sub_scopes else "data_engineering",
             },
             verified_citations=citations,
+            missing_or_unverified_aspects=missing_aspects,
+            completeness_ratio=completeness_ratio,
+            sufficiency_verdict=sufficiency_verdict,
+            missing_aspects=missing_aspects,
+            synthesis_mode="deterministic_extractive_fallback",
         )
 
     def extract_brief_metadata(self, brief: Any) -> dict[str, Any]:

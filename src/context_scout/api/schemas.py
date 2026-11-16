@@ -19,6 +19,7 @@ from context_scout.schemas.contracts import (
     QuantStrategyBrief,
     RoleType,
     StageConfidence,
+    StageExecutionTrace,
 )
 
 
@@ -43,12 +44,17 @@ class AuthSessionResponse(BaseModel):
 class HealthHardwareProfile(BaseModel):
     """Hardware and memory profile specification."""
 
-    device: str = "Apple Silicon M5 Pro"
-    unified_memory: str = "48.0 GB"
+    device: str = "Unknown"
+    unified_memory: str = "0.0 GB"
+    memory_gb: float = 0.0
+    arch: str = "unknown"
+    os_name: str = "unknown"
     max_kv_tokens: int = 32768
     quantization: str = "4-bit (MLX)"
-    lora_slots_allocated: int = 2
+    lora_slots_allocated: int = 0
     lora_slots_capacity: int = 4
+    postgres_version: str | None = None
+    runtime_mode: str = "offline_deterministic"
 
 
 class HealthResponse(BaseModel):
@@ -60,14 +66,24 @@ class HealthResponse(BaseModel):
     registered_domains: list[str]
     adapter_pool_status: dict[str, Any]
     hardware_profile: dict[str, Any]
+    runtime_models: dict[str, Any] = Field(default_factory=dict)
     timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class DomainDetail(BaseModel):
-    """DomainPack detail with adapter verification and training metrics."""
+    """DomainPack detail with adapter verification, corpus counts, and training metrics."""
 
     domain_id: str
     display_name: str
+    description: str = ""
+    modalities: list[Literal["code", "document", "issues"]] = Field(default_factory=list)
+    sample_queries: list[str] = Field(default_factory=list)
+    lora_enabled: bool = True
+    default_scopes: list[str] = Field(default_factory=list)
+    doc_chunks_count: int = 0
+    documents_count: int = 0
+    code_files_count: int = 0
+    ast_symbols_count: int = 0
     manifest: DomainPackManifest
     adapter_verification: dict[str, Any]
     training_metrics: dict[str, Any] | None = None
@@ -80,13 +96,47 @@ class DomainsResponse(BaseModel):
     count: int
 
 
+class WorkspaceRolePreset(BaseModel):
+    """Principal role preset with default RBAC scopes exposed by workspace-config."""
+
+    role: RoleType
+    label: str
+    default_scopes: list[str] = Field(default_factory=list)
+
+
+class PipelineStageSpec(BaseModel):
+    """Metadata specification for one of the 4 Context Scout pipeline stages."""
+
+    stage_id: int = Field(ge=1, le=4)
+    number: str
+    title: str
+    summary: str
+    what_happens: str
+    gate_condition: str
+
+
+class WorkspaceConfigResponse(BaseModel):
+    """Dynamic workspace configuration consumed by UI and API clients."""
+
+    domains: list[DomainDetail]
+    federated_option: dict[str, Any]
+    role_presets: list[WorkspaceRolePreset]
+    pipeline_stages: list[PipelineStageSpec]
+    source_filters: list[str]
+    hardware_profile: dict[str, Any]
+    database_connected: bool
+    database_status: str
+    runtime_mode: str
+    timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
 class ScoutStreamRequest(BaseModel):
     """Request payload for scout query or SSE stream."""
 
     query: str = Field(min_length=1, max_length=16_000)
     domain_id: str = Field(default="default")
     trace_id: str | None = None
-    normalized_rrf_score: float = Field(default=0.85, ge=0.0, le=1.0)
+    normalized_rrf_score: float | None = Field(default=None, ge=0.0, le=1.0)
     max_bounce_backs: int = Field(default=1, ge=0, le=3)
     source_filter: Literal["all", "code", "wiki", "jira"] = "all"
 
@@ -115,6 +165,7 @@ class ScoutQueryResponse(BaseModel):
     quant_strategy_spec: QuantStrategyBrief | None = None
     token_savings: ScoutTokenSavingsBreakdown
     trace_attributes: dict[str, Any] = Field(default_factory=dict)
+    stage_traces: list[StageExecutionTrace] = Field(default_factory=list)
 
 
 class SSEStageEvent(BaseModel):
@@ -126,6 +177,7 @@ class SSEStageEvent(BaseModel):
     status: Literal["in_progress", "completed", "failed"] = "in_progress"
     details: str
     confidence: StageConfidence | None = None
+    stage_trace: StageExecutionTrace | None = None
     elapsed_ms: float | None = None
     timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -153,6 +205,7 @@ class SSEContextPackReadyEvent(BaseModel):
     pack: ImplementationContextPack | None = None
     quant_strategy_spec: QuantStrategyBrief | None = None
     token_savings: ScoutTokenSavingsBreakdown
+    stage_traces: list[StageExecutionTrace] = Field(default_factory=list)
     timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 

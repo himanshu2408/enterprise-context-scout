@@ -28,6 +28,7 @@ from context_scout.api.dependencies import (
     get_domain_registry,
     get_local_gemma_client,
     get_principal_context,
+    get_repo_root,
     get_repository,
     get_telemetry_tracer,
 )
@@ -41,7 +42,6 @@ from context_scout.api.schemas import (
     SSEStageEvent,
 )
 from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
-from context_scout.plugins.registry import PluginRegistry
 from context_scout.schemas.contracts import (
     ExecutionMode,
     ExecutionTelemetryRecord,
@@ -49,6 +49,7 @@ from context_scout.schemas.contracts import (
     InsufficientContextDiagnostic,
     PrincipalContext,
     StageConfidence,
+    StageExecutionTrace,
 )
 from context_scout.security.guardrails import ShieldGemmaGuardrail
 from context_scout.telemetry import ScoutTelemetryTracer
@@ -58,17 +59,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Scout"])
 
 _STAGE_TITLES: dict[int, str] = {
-    1: "Stage 1: Hybrid Corpus Retrieval",
-    2: "Stage 2: Local Model Grounded Synthesis",
-    3: "Stage 3: 1-Hop AST Closure & Verification",
-    4: "Stage 4: Pre-Flight Deterministic Validation",
+    1: "Stage 1: Auth, Guardrail & Query Plan",
+    2: "Stage 2: Hybrid Retrieval & AST Closure",
+    3: "Stage 3: Local Gemma-4 Synthesis & Facet Grounding",
+    4: "Stage 4: Pre-Flight Sufficiency Gate",
 }
 
 _FEDERATED_STAGE_TITLES: dict[int, str] = {
-    1: "Stage 1: Research Domain Extraction",
-    2: "Stage 2: Code AST Localization",
-    3: "Stage 3: 1-Hop AST Closure & Scepticism Gate",
-    4: "Stage 4: Pre-Flight Composite Validation",
+    1: "Stage 1: Auth, Guardrail & Query Plan",
+    2: "Stage 2: Multi-Domain Hybrid Retrieval & AST Closure",
+    3: "Stage 3: Local Gemma-4 Synthesis & Facet Grounding",
+    4: "Stage 4: Pre-Flight Sufficiency Gate",
 }
 
 
@@ -78,30 +79,41 @@ def _resolve_federated_doc_chunks(
     source_filter: SourceFilter = "all",
     query_text: str = "",
 ) -> dict[str, str]:
-    """Resolves visible doc_chunks from live PostgreSQL or InMemory repository under RLS."""
-    primary_plugin = PluginRegistry.get_primary_domain_plugin()
-    fallback_chunks = (
-        primary_plugin.get_demo_seed_payloads().get("federated_fallback_chunks", {})
-        if primary_plugin is not None
-        else {}
-    )
-    if source_filter == "all":
-        chunks_map: dict[str, str] = {str(k): str(v) for k, v in fallback_chunks.items()} or {
-            "chk_default_seed": "Default domain fallback verification chunk."
-        }
-    else:
-        chunks_map = {}
-    role_domains = primary_plugin.get_role_domain_ids() if primary_plugin is not None else {}
-    research_domain_id = role_domains.get(
-        "research", primary_plugin.domain_id if primary_plugin is not None else "default"
-    )
-    code_domain_id = role_domains.get("code", "")
-    target_domains = list(dict.fromkeys(d for d in (research_domain_id, code_domain_id) if d))
+    """Resolves visible doc_chunks dynamically across all authorized DomainRegistry domains."""
+    chunks_map: dict[str, str] = {}
+    registry = DomainRegistry(domains_dir=get_repo_root() / "domains")
+    manifests = registry.load_all()
+    principal_scopes = set(principal.allowed_scopes)
+    target_domains: list[str] = []
+    for manifest in manifests.values():
+        domain_scopes = set(manifest.default_scopes or [manifest.domain_id])
+        if "*" in principal_scopes or (principal_scopes & domain_scopes):
+            target_domains.append(manifest.domain_id)
+
     for target_dom in target_domains:
+        if query_text.strip() and hasattr(repo, "search_visible_doc_chunks_calibrated"):
+            try:
+                hits = repo.search_visible_doc_chunks_calibrated(
+                    principal, target_dom, query_text, limit=8
+                )
+                filtered_hits = filter_doc_chunks_by_source(
+                    [h.doc_chunk for h in hits if h.doc_chunk is not None],
+                    source_filter,
+                )
+                for chk in filtered_hits:
+                    chunks_map[str(chk.chunk_id)] = chk.verbatim_content
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "Calibrated doc search failed for domain '%s' (%s): %s",
+                    target_dom,
+                    type(exc).__name__,
+                    exc,
+                )
         if query_text.strip() and hasattr(repo, "search_visible_doc_chunks"):
             try:
                 searched = repo.search_visible_doc_chunks(
-                    principal, target_dom, query_text, limit=12
+                    principal, target_dom, query_text, limit=8
                 )
                 filtered_searched = filter_doc_chunks_by_source(list(searched), source_filter)
                 for chk in filtered_searched:
@@ -118,7 +130,7 @@ def _resolve_federated_doc_chunks(
             try:
                 visible = repo.list_visible_doc_chunks(principal, target_dom)
                 filtered_visible = filter_doc_chunks_by_source(list(visible), source_filter)
-                for chk in filtered_visible[:50]:
+                for chk in filtered_visible[:12]:
                     chunks_map[str(chk.chunk_id)] = chk.verbatim_content
             except Exception as exc:
                 logger.warning(
@@ -237,23 +249,18 @@ def query_scout(
         system="gemma",
     ) as span:
         if request.domain_id == "federated_all":
-            fed_doc_chunks = _resolve_federated_doc_chunks(
-                repo,
-                principal,
-                source_filter=request.source_filter,
-                query_text=request.query,
-            )
             coordinator = FederatedScoutCoordinator(
                 registry=registry,
                 repo=repo,
                 local_client=local_client,
+                federated_domain_id=request.domain_id,
             )
             result = coordinator.run(
                 user_prompt=request.query,
                 principal=principal,
                 trace_id=active_trace_id,
                 normalized_rrf_score=request.normalized_rrf_score,
-                doc_chunks=fed_doc_chunks,
+                doc_chunks=None,
                 max_bounce_backs=request.max_bounce_backs,
                 source_filter=request.source_filter,
             )
@@ -301,6 +308,7 @@ def query_scout(
                 preflight_report=result.preflight_report,
                 quant_strategy_spec=result.quant_strategy_spec,
                 token_savings=savings,
+                stage_traces=list(result.stage_traces),
                 trace_attributes=trace_attrs,
             )
 
@@ -323,6 +331,7 @@ def query_scout(
             preflight_report=None,
             quant_strategy_spec=None,
             token_savings=diagnostic_savings,
+            stage_traces=list(result.stage_traces),
             trace_attributes={
                 "context_scout.preflight_passed": False,
                 "context_scout.diagnostic_reason": result.reason,
@@ -404,17 +413,11 @@ async def stream_scout(
         async def run_worker() -> ImplementationContextPack | InsufficientContextDiagnostic:
             try:
                 if is_federated:
-                    fed_chunks = await asyncio.to_thread(
-                        _resolve_federated_doc_chunks,
-                        repo,
-                        principal,
-                        request.source_filter,
-                        request.query,
-                    )
                     coordinator = FederatedScoutCoordinator(
                         registry=registry,
                         repo=repo,
                         local_client=local_client,
+                        federated_domain_id=request.domain_id,
                     )
                     return await asyncio.to_thread(
                         coordinator.run,
@@ -422,7 +425,7 @@ async def stream_scout(
                         principal=principal,
                         trace_id=active_trace_id,
                         normalized_rrf_score=request.normalized_rrf_score,
-                        doc_chunks=fed_chunks,
+                        doc_chunks=None,
                         max_bounce_backs=request.max_bounce_backs,
                         on_stage_event=push_stage_event,
                         source_filter=request.source_filter,
@@ -529,12 +532,19 @@ async def stream_scout(
                             f"{len(parsed_plan.facets)} facet(s) parsed."
                         ),
                     )
+                raw_trace = ev.get("stage_trace")
+                stage_trace: StageExecutionTrace | None = (
+                    StageExecutionTrace.model_validate(raw_trace)
+                    if isinstance(raw_trace, dict)
+                    else None
+                )
                 stage_ev = SSEStageEvent(
                     stage=stage_num,
                     stage_name=resolved_name,
                     status=stage_status,  # type: ignore[arg-type]
                     details=str(ev.get("details") or ""),
                     confidence=stage_conf,
+                    stage_trace=stage_trace,
                     elapsed_ms=live_elapsed,
                 )
                 yield f"event: stage_update\ndata: {stage_ev.model_dump_json()}\n\n"
@@ -589,6 +599,7 @@ async def stream_scout(
         latency_ms = max(1, int((time.perf_counter() - t0) * 1000))
         scopes_label = ", ".join(principal.allowed_scopes) if principal.allowed_scopes else "none"
         conf_by_stage = {c.stage: c for c in getattr(result, "stage_confidences", []) or []}
+        trace_by_stage = {t.stage: t for t in getattr(result, "stage_traces", []) or []}
 
         # Backfill any omitted stage completions (e.g. early abstention before Stage 2/3)
         for req_stage in (1, 2, 3):
@@ -633,6 +644,7 @@ async def stream_scout(
                     status="completed",
                     details=detail,
                     confidence=conf_by_stage.get(req_stage),
+                    stage_trace=trace_by_stage.get(req_stage),
                     elapsed_ms=float(latency_ms),
                 )
                 yield f"event: stage_update\ndata: {fill_ev.model_dump_json()}\n\n"
@@ -682,6 +694,7 @@ async def stream_scout(
                         f"($0 frontier exploration cost) in {latency_ms} ms"
                     ),
                     confidence=conf_by_stage.get(4),
+                    stage_trace=trace_by_stage.get(4),
                     elapsed_ms=float(latency_ms),
                 )
                 yield f"event: stage_update\ndata: {s4.model_dump_json()}\n\n"
@@ -694,6 +707,7 @@ async def stream_scout(
                 pack=result,
                 quant_strategy_spec=result.quant_strategy_spec,
                 token_savings=savings,
+                stage_traces=list(result.stage_traces),
             )
             yield f"event: context_pack_ready\ndata: {ready_event.model_dump_json()}\n\n"
         else:
@@ -704,6 +718,7 @@ async def stream_scout(
                     status="failed",
                     details=f"$0 abstention after {latency_ms} ms: {result.reason}",
                     confidence=conf_by_stage.get(4),
+                    stage_trace=trace_by_stage.get(4),
                     elapsed_ms=float(latency_ms),
                 )
                 yield f"event: stage_update\ndata: {s4_fail.model_dump_json()}\n\n"

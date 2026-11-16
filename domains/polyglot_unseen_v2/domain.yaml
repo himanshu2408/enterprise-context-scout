@@ -19,3 +19,13 @@ authority_rules:
   freshness_half_life_days: 90
 output_contract: ImplementationContextPack
 source_dir: data/unseen_repos_v2
+description: "Polyglot Python, Go, and TypeScript open-source libraries indexed by AST symbols, call graphs, and type contracts."
+modalities:
+  - "code"
+lora_enabled: true
+default_scopes:
+  - "public_eng"
+sample_queries:
+  - "How does HTTPX configure connection pool limits and keepalive timeouts?"
+  - "How does Starlette dispatch lifespan startup and shutdown events in ASGI apps?"
+  - "How does Pydantic Settings resolve environment variables and .env priority?"
