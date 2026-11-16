@@ -13,6 +13,15 @@ describe("DomainSelector", () => {
     const unseenWithNulls: DomainInfo = {
       domain_id: "polyglot_unseen_v2",
       display_name: "Zero-Shot Verification",
+      description: "Polyglot zero-shot codebase",
+      modalities: ["code"],
+      sample_queries: [],
+      lora_enabled: false,
+      default_scopes: ["public_eng"],
+      doc_chunks_count: 0,
+      documents_count: 0,
+      code_files_count: 10,
+      ast_symbols_count: 120,
       base_model_id: "mlx-community/gemma-4-26b-a4b-it-4bit",
       lora_adapter_id: "polyglot_base",
       lora_adapter_path: "",
@@ -72,7 +81,7 @@ describe("DomainSelector", () => {
     );
     const metricsBox = screen.getByTestId("adapter-metrics-trading_code_scout");
     expect(metricsBox).toHaveTextContent("r=8, α=16");
-    expect(metricsBox).toHaveTextContent("0.02 ms");
+    expect(metricsBox).toHaveTextContent("2 docs · 14 files");
     expect(metricsBox).toHaveTextContent("0.7200");
   });
 

@@ -141,6 +141,24 @@ export function streamScoutWorkflow(options: SSEStreamOptions): () => void {
 
 const SECURITY_GUARDRAIL_TRIGGERED = "SECURITY_GUARDRAIL_TRIGGERED";
 
+    const requestBody: Record<string, unknown> = {
+      query: request.query,
+      domain_id: request.domain_id,
+      source_filter: request.source_filter ?? "all",
+    };
+    if (request.trace_id !== undefined) {
+      requestBody.trace_id = request.trace_id;
+    }
+    if (
+      request.normalized_rrf_score !== undefined &&
+      request.normalized_rrf_score !== null
+    ) {
+      requestBody.normalized_rrf_score = request.normalized_rrf_score;
+    }
+    if (request.max_bounce_backs !== undefined) {
+      requestBody.max_bounce_backs = request.max_bounce_backs;
+    }
+
     let response: Response;
     try {
       response = await fetch("/api/v1/scout/stream", {
@@ -150,14 +168,7 @@ const SECURITY_GUARDRAIL_TRIGGERED = "SECURITY_GUARDRAIL_TRIGGERED";
           Accept: "text/event-stream",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({
-          query: request.query,
-          domain_id: request.domain_id,
-          trace_id: request.trace_id,
-          normalized_rrf_score: request.normalized_rrf_score,
-          max_bounce_backs: request.max_bounce_backs,
-          source_filter: request.source_filter ?? "all",
-        }),
+        body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
     } catch (fetchErr: unknown) {

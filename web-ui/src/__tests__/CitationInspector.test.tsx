@@ -41,8 +41,8 @@ describe("CitationInspector (Answer-First Workspace)", () => {
       />
     );
 
-    expect(screen.getByTestId("citation-inspector")).toHaveTextContent(
-      "local scout abstained safely"
+    expect(screen.getByTestId("abstention-protection-panel")).toHaveTextContent(
+      "Paid Cloud Handoff Blocked ($0.00 spent)"
     );
   });
 

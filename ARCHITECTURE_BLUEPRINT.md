@@ -2,7 +2,7 @@
 ## Principal Architecture Blueprint, Trade-Off Defense & Implementation Specification
 
 **Project Repository:** `enterprise-context-scout`  
-**Last Updated:** 2026-11-15  
+**Last Updated:** 2026-11-16  
 **Target Hardware (Local Dev & Training):** Apple M5 Pro (48 GB Unified Memory)  
 **Target Production Stack (Enterprise GCP):** Google ADK (`google-adk` v2.12.0), Google Gen AI SDK (`google-genai` v2.31.0), Model Context Protocol (`mcp` v2.3.0), Gemma 4 (`26B-A4B-it` / `31B-it` / `12B-it` / `E4B-it`), `EmbeddingGemma 2` (768-dim), `ShieldGemma 2` / Google Cloud Model Armor, PostgreSQL 17 (`pgvector` + `pg_trgm` + FTS + RLS -> Cloud SQL / AlloyDB), and `gemini-3.8-flash` (Fast Execution) / `gemini-4-argon` (Frontier Reasoning).
 
@@ -741,3 +741,20 @@ enterprise-context-scout/
 | **M6: Enterprise Evaluation Harness & OpenTelemetry** | Build the automated eval runner measuring Zero-Touch Sufficiency ($\ge 85\%$), Recall@5, Citation Faithfulness ($100\%$), RBAC zero-leakage, and OTel spans. | `uv run pytest tests/test_m6_eval_harness.py` executes the golden benchmark suite and outputs the Markdown/JSON CI gate report. |
 | **M7: Teacher Distillation & QLoRA Training (`Model 1` & `Model 2`)** | Run `teacher_distiller.py` (with `gemini-3.8-flash` / `gemma-4-31B-it` + deterministic filter) and train both QLoRA adapters (`trading_code_scout` and `quant_research_scout`) on your M5 Pro (`mlx-lm`) + Vertex AI `PEFT` script. | Before-vs-After benchmark report proving QLoRA adapter improves localization/schema pass rate and reduces prompt token overhead. |
 | **M8: FastAPI SSE Backend, Editorial React Workbench UI & `.github/workflows/ci.yml`** | Build the FastAPI streaming API (signed HMAC session auth, 4-stage calibrated SSE confidence, partial-miss facet coverage), strict TypeScript/React editorial workbench (`web-ui/`), and GitHub Actions CI pipeline (`pgvector:pg17` + Vitest). | End-to-end UI + API integration test suite passes (`pytest` + `npm run lint && npm run typecheck && npm run test && npm run build`). |
+
+---
+
+## 13. Stage 9 Architecture Upgrade: True Multi-Domain Federation, 4-Stage Pipeline X-Ray & Hard `$0` Sufficiency Gate (`2026-11-16`)
+
+### 13.1 Backend-Driven Platform Contract (`GET /api/v1/workspace-config`)
+To eliminate UI/backend drift and hardcoded domain lists, the React workbench (`web-ui/src/`) loads its entire runtime topology from `GET /api/v1/workspace-config` and `GET /api/v1/health`:
+- **Dynamic `DomainPack` Discovery:** `DomainRegistry` auto-discovers every `domains/<domain_id>/domain.yaml` manifest (`modalities`, `sample_queries`, `lora_enabled`, `default_scopes`, live PostgreSQL 17 `doc_chunks_count` and `ast_symbols_count`, adapter verification telemetry, and training curves). Adding a 5th custom domain requires **zero React or core Python edits**.
+- **True `federated_all` Probing:** `FederatedScoutCoordinator` probes all authorized `DomainPack`s in PostgreSQL 17 under Forced RLS, fuses calibrated semantic (`EmbeddingGemma 2` 768-d cosine) + lexical (`ts_rank_cd` BM25 + `pg_trgm` title/heading/alias similarity + `market_scope`), and selects the top domain(s) dynamically instead of restricting federation to hardcoded domain IDs.
+- **Role Preset Auto-Hydration:** `role_presets` from `/api/v1/workspace-config` hydrate RBAC scopes onto the active persona at initial mount while preserving manual scope overrides and `unscoped_probe` security testing.
+
+### 13.2 Explicit 4-Stage Pipeline X-Ray (`StageExecutionTrace`)
+Every SSE `stage` event and final response (`ImplementationContextPack` or `InsufficientContextDiagnostic`) emits structured `StageExecutionTrace` telemetry rendered as interactive accordions in the dark obsidian/slate workbench (`#0B0E14` / `#111620`):
+1. **Stage 01 — Auth, Guardrail & Query Plan:** Verifies signed HMAC `PrincipalContext`, runs `ShieldGemma 2` prompt-injection screening, classifies query modality (`code` / `document` / `hybrid`), and decomposes user clauses into anchored `QueryFacet`s.
+2. **Stage 02 — Multi-Domain Hybrid Retrieval & AST Closure:** Executes calibrated PG17 hybrid RRF (`pgvector` HNSW + GIN `fts_doc` + `pg_trgm` + `market_scope`) and 1-2 hop `tree-sitter` AST closure (`USES_TYPE`, `INHERITS`, `IMPORTS`, up to `8` diverse callers, and test fixtures).
+3. **Stage 03 — Local Gemma-4 Full-Chunk Synthesis & Facet Grounding:** Feeds full `verbatim_content` chunks (`<= 1,800` chars per chunk, never 1-sentence excerpts) into local `mlx-community/gemma-4-26b-a4b-it-4bit` (`enable_thinking=False`, control-channel stripped, `lora_enabled: false` on prose research domains where base Gemma-4 achieved `10/10` JSON validity vs `1/10` on old regex-distilled LoRAs; QLoRA active on code AST pointer domains) to produce a structured `DomainKnowledgeBrief` / `QuantStrategyBrief` with explicit `sufficiency_verdict` (`sufficient | partial | insufficient`) and per-facet grounding scores.
+4. **Stage 04 — Pre-Flight Sufficiency Gate (`$0.00 Paid-Model Protection`):** Evaluates 9 deterministic checks (`check_1_syntax`..`check_6_freshness`, `calibrated_relevance_floor >= 0.54`, `sufficiency_verdict != "insufficient"`, and `facet_grounding`). If retrieval falls below the calibrated floor or synthesis marks context `insufficient`, Stage 4 hard-blocks cloud handoff (`paid_tokens_spent = 0`, `final_decision = "abstain_zero_paid"`) and returns `InsufficientContextDiagnostic` listing per-domain probed/rejected counts and missing facets.

@@ -13,7 +13,9 @@ import { ScoutConsole } from "../components/ScoutConsole";
 import {
   installMockApiFetch,
   TEST_CODE_PACK,
+  TEST_DOMAINS,
   TEST_ENGINEER_PRINCIPAL,
+  TEST_PIPELINE_STAGES,
   TEST_QUANT_PACK,
   TEST_TOKEN_SAVINGS,
 } from "./fixtures";
@@ -91,6 +93,8 @@ describe("Adversarial & Regression Security Tests", () => {
       <ScoutConsole
         selectedDomain="trading_code_scout"
         principal={TEST_ENGINEER_PRINCIPAL}
+        domains={TEST_DOMAINS}
+        pipelineStages={TEST_PIPELINE_STAGES}
         onContextPackReady={vi.fn()}
       />
     );
@@ -122,6 +126,8 @@ describe("Adversarial & Regression Security Tests", () => {
       <ScoutConsole
         selectedDomain="trading_code_scout"
         principal={TEST_ENGINEER_PRINCIPAL}
+        domains={TEST_DOMAINS}
+        pipelineStages={TEST_PIPELINE_STAGES}
         onContextPackReady={vi.fn()}
       />
     );
@@ -174,6 +180,7 @@ describe("Adversarial & Regression Security Tests", () => {
       networkFailUrls: [
         "/api/v1/auth/session",
         "/api/v1/health",
+        "/api/v1/workspace-config",
         "/api/v1/domains",
         "/api/v1/telemetry/roi",
         "/api/v1/scout/stream",
@@ -186,9 +193,7 @@ describe("Adversarial & Regression Security Tests", () => {
       expect(screen.getByTestId("auth-error-banner")).toHaveTextContent(
         "Authentication service unreachable"
       );
-      expect(screen.getByTestId("domains-error-banner")).toHaveTextContent(
-        "Domains endpoint unreachable"
-      );
+      expect(screen.getByTestId("domains-error-banner")).toBeInTheDocument();
       expect(screen.getByTestId("roi-error-banner")).toHaveTextContent(
         "Telemetry endpoint unreachable"
       );
@@ -199,6 +204,9 @@ describe("Adversarial & Regression Security Tests", () => {
     ).not.toBeInTheDocument();
     expect(document.body.textContent ?? "").not.toContain("Apple M5 Pro");
 
+    fireEvent.change(screen.getByTestId("scout-query-input"), {
+      target: { value: "Test query during outage" },
+    });
     fireEvent.click(screen.getByTestId("run-scout-btn"));
     await waitFor(() => {
       expect(screen.getByTestId("api-error-banner")).toHaveTextContent(

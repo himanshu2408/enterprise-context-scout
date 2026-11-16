@@ -14,6 +14,7 @@ import {
   ScoutQueryRequest,
   ScoutQueryResponse,
   SourceFilterType,
+  WorkspaceConfigResponse,
 } from "../types/contracts";
 
 export const FEDERATED_ALL_DOMAIN_ID = "federated_all";
@@ -155,7 +156,7 @@ export async function fetchHealth(): Promise<HealthResponse> {
   return (await res.json()) as HealthResponse;
 }
 
-function mapDomainDetailToInfo(detail: BackendDomainDetail): DomainInfo {
+export function mapDomainDetailToInfo(detail: BackendDomainDetail): DomainInfo {
   const manifest = detail.manifest;
   const verification = detail.adapter_verification;
   const metrics = detail.training_metrics ?? {};
@@ -168,9 +169,42 @@ function mapDomainDetailToInfo(detail: BackendDomainDetail): DomainInfo {
           ? metrics.training_loss
           : null;
 
+  const modalities =
+    detail.modalities && detail.modalities.length > 0
+      ? detail.modalities
+      : manifest.modalities && manifest.modalities.length > 0
+        ? manifest.modalities
+        : manifest.authority_rules?.primary_truth_source === "document"
+          ? (["document"] as DomainInfo["modalities"])
+          : (["code"] as DomainInfo["modalities"]);
+
+  const sampleQueries =
+    detail.sample_queries && detail.sample_queries.length > 0
+      ? detail.sample_queries
+      : manifest.sample_queries ?? [];
+
+  const defaultScopes =
+    detail.default_scopes && detail.default_scopes.length > 0
+      ? detail.default_scopes
+      : manifest.default_scopes ?? [];
+
   return {
     domain_id: detail.domain_id,
     display_name: detail.display_name || manifest.display_name || detail.domain_id,
+    description: detail.description ?? manifest.description ?? "",
+    modalities,
+    sample_queries: sampleQueries,
+    lora_enabled:
+      typeof detail.lora_enabled === "boolean"
+        ? detail.lora_enabled
+        : typeof manifest.lora_enabled === "boolean"
+          ? manifest.lora_enabled
+          : true,
+    default_scopes: defaultScopes,
+    doc_chunks_count: detail.doc_chunks_count ?? 0,
+    documents_count: detail.documents_count ?? 0,
+    code_files_count: detail.code_files_count ?? 0,
+    ast_symbols_count: detail.ast_symbols_count ?? 0,
     base_model_id: manifest.base_model_id,
     lora_adapter_id: manifest.lora_adapter_id,
     lora_adapter_path: manifest.lora_adapter_path,
@@ -190,6 +224,32 @@ function mapDomainDetailToInfo(detail: BackendDomainDetail): DomainInfo {
         : null,
     verified: Boolean(verification.is_valid),
   };
+}
+
+export async function fetchWorkspaceConfig(
+  principal: PrincipalContext
+): Promise<WorkspaceConfigResponse> {
+  const token = await ensureBearerToken(principal);
+  let res: Response;
+  try {
+    res = await fetch("/api/v1/workspace-config", {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  } catch (err: unknown) {
+    throw new ApiClientError(
+      0,
+      `Workspace config endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  if (!res.ok) {
+    if (res.status === 401) {
+      clearCachedAuthSession();
+    }
+    throw new ApiClientError(res.status, await parseErrorDetail(res));
+  }
+  return (await res.json()) as WorkspaceConfigResponse;
 }
 
 export async function fetchDomains(): Promise<DomainInfo[]> {
@@ -232,6 +292,24 @@ export async function executeScoutQuery(
   principal: PrincipalContext
 ): Promise<ScoutQueryResponse> {
   const token = await ensureBearerToken(principal);
+  const bodyPayload: Record<string, unknown> = {
+    domain_id: request.domain_id,
+    query: request.query,
+    source_filter: request.source_filter ?? "all",
+  };
+  if (request.trace_id !== undefined) {
+    bodyPayload.trace_id = request.trace_id;
+  }
+  if (
+    request.normalized_rrf_score !== undefined &&
+    request.normalized_rrf_score !== null
+  ) {
+    bodyPayload.normalized_rrf_score = request.normalized_rrf_score;
+  }
+  if (request.max_bounce_backs !== undefined) {
+    bodyPayload.max_bounce_backs = request.max_bounce_backs;
+  }
+
   let res: Response;
   try {
     res = await fetch("/api/v1/scout/query", {
@@ -240,10 +318,7 @@ export async function executeScoutQuery(
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({
-        ...request,
-        source_filter: request.source_filter ?? "all",
-      }),
+      body: JSON.stringify(bodyPayload),
     });
   } catch (err: unknown) {
     throw new ApiClientError(

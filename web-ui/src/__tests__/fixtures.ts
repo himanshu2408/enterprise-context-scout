@@ -9,11 +9,14 @@ import {
   HandoffPreviewResponse,
   HealthResponse,
   InsufficientContextDiagnostic,
+  PipelineStageSpec,
   PrincipalContext,
   ROIMetricsResponse,
   ScoutQueryResponse,
   ScoutTokenSavingsBreakdown,
   SSEStageEvent,
+  StageExecutionTrace,
+  WorkspaceConfigResponse,
 } from "../types/contracts";
 
 export const TEST_ENGINEER_PRINCIPAL: PrincipalContext = {
@@ -73,6 +76,18 @@ export const TEST_BACKEND_DOMAINS: BackendDomainDetail[] = [
   {
     domain_id: "trading_code_scout",
     display_name: "Trading Codebase & Execution AST",
+    description: "AST-aware Python execution & slippage contracts.",
+    modalities: ["code"],
+    sample_queries: [
+      "Inspect AlmgrenChrissExecutionOptimizer and VolatilityForecastResult contracts for slippage calculation.",
+      "Find direct callers of compute_trajectory in execution.",
+    ],
+    lora_enabled: true,
+    default_scopes: ["public_eng"],
+    doc_chunks_count: 5,
+    documents_count: 2,
+    code_files_count: 14,
+    ast_symbols_count: 3443,
     manifest: {
       domain_id: "trading_code_scout",
       display_name: "Trading Codebase & Execution AST",
@@ -88,6 +103,17 @@ export const TEST_BACKEND_DOMAINS: BackendDomainDetail[] = [
   {
     domain_id: "quant_research_scout",
     display_name: "Quantitative Research & Market Papers",
+    description: "Order book dynamics, Hawkes processes, and friction studies.",
+    modalities: ["document"],
+    sample_queries: [
+      "What does the multivariate Hawkes process order book volume research say about branching kernel stability?",
+    ],
+    lora_enabled: false,
+    default_scopes: ["public_quant"],
+    doc_chunks_count: 14188,
+    documents_count: 42,
+    code_files_count: 0,
+    ast_symbols_count: 0,
     manifest: {
       domain_id: "quant_research_scout",
       display_name: "Quantitative Research & Market Papers",
@@ -103,6 +129,17 @@ export const TEST_BACKEND_DOMAINS: BackendDomainDetail[] = [
   {
     domain_id: "polyglot_unseen_v2",
     display_name: "Zero-Shot Domain Verification",
+    description: "Polyglot HTTPX & FastAPI codebase verification.",
+    modalities: ["code"],
+    sample_queries: [
+      "How does HTTPX configure connection pool limits and keepalive timeouts?",
+    ],
+    lora_enabled: true,
+    default_scopes: ["public_eng"],
+    doc_chunks_count: 0,
+    documents_count: 0,
+    code_files_count: 180,
+    ast_symbols_count: 50260,
     manifest: {
       domain_id: "polyglot_unseen_v2",
       display_name: "Zero-Shot Domain Verification",
@@ -128,10 +165,170 @@ export const TEST_BACKEND_DOMAINS: BackendDomainDetail[] = [
   },
 ];
 
+export const TEST_PIPELINE_STAGES: PipelineStageSpec[] = [
+  {
+    stage_id: 1,
+    number: "01",
+    title: "Auth, Guardrail & Query Plan",
+    summary: "Enforce principal RBAC scopes, ShieldGemma screen, and QueryPlan decomposition.",
+    what_happens: "Binds PrincipalContext to PostgreSQL RLS scopes and decomposes concepts into facets.",
+    gate_condition: "Fail closed on security violation or empty authorized scopes ($0).",
+  },
+  {
+    stage_id: 2,
+    number: "02",
+    title: "Multi-Domain Hybrid Retrieval & AST Closure",
+    summary: "Run calibrated PG17 RRF and 1-2 hop AST dependency expansion.",
+    what_happens: "Probes authorized DomainPacks with cosine + BM25 + trigram floor filtering.",
+    gate_condition: "Reject hits below relevance floor; rank domains by calibrated evidence.",
+  },
+  {
+    stage_id: 3,
+    number: "03",
+    title: "Local Gemma-4 Synthesis & Facet Grounding",
+    summary: "Synthesize full-chunk evidence with base Gemma-4 or domain QLoRA.",
+    what_happens: "Feeds full retrieved chunks to local Gemma-4 and scores per-facet grounding.",
+    gate_condition: "Verify sufficiency_verdict and cohesive same-chunk facet grounding.",
+  },
+  {
+    stage_id: 4,
+    number: "04",
+    title: "Pre-Flight Sufficiency Gate",
+    summary: "Deterministic verification gate: $0 abstention or verified handoff.",
+    what_happens: "Audits symbol/file provenance, calibrated retrieval confidence, and facet coverage.",
+    gate_condition: "Abstain with $0 paid_tokens_spent if insufficient or below relevance floor.",
+  },
+];
+
+export const TEST_STAGE_TRACES: StageExecutionTrace[] = [
+  {
+    stage: 1,
+    stage_name: "Auth, Guardrail & Query Plan",
+    status: "completed",
+    elapsed_ms: 12,
+    summary: "Principal engineer authorized; 2 facets decomposed.",
+    principal_id: "test_engineer_01",
+    principal_scopes: ["public_eng", "public_quant"],
+    guardrail_verdict: "SAFE",
+    query_type: "code_architecture",
+    core_subject: "AlmgrenChrissExecutionOptimizer",
+    required_facets: ["slippage calculation", "VolatilityForecastResult"],
+    target_domains: ["trading_code_scout"],
+  },
+  {
+    stage: 2,
+    stage_name: "Multi-Domain Hybrid Retrieval & AST Closure",
+    status: "completed",
+    elapsed_ms: 48,
+    summary: "Selected trading_code_scout (2 accepted hits, 1 AST hop).",
+    ast_one_hop_count: 1,
+    ast_two_hop_count: 0,
+    domain_probes: [
+      {
+        domain_id: "trading_code_scout",
+        display_name: "Trading Codebase & Execution AST",
+        authorized: true,
+        probed_hits: 4,
+        accepted_hits: 2,
+        rejected_hits: 2,
+        max_cosine_similarity: 0.89,
+        max_calibrated_score: 0.91,
+        selected: true,
+        selection_reason: "Highest calibrated code + AST match",
+        top_hits: [
+          {
+            item_id: "hit_opt_1",
+            domain_id: "trading_code_scout",
+            title: "execution/optimizer.py",
+            modality: "code",
+            cosine_similarity: 0.89,
+            bm25_score: 0.84,
+            trigram_score: 0.78,
+            calibrated_score: 0.91,
+            accepted: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    stage: 3,
+    stage_name: "Local Gemma-4 Synthesis & Facet Grounding",
+    status: "completed",
+    elapsed_ms: 140,
+    summary: "Synthesized 2 chunks via trading_code_scout_v1 QLoRA.",
+    model_id: "mlx-community/gemma-4-26b-a4b-it-4bit",
+    adapter_mode: "QLoRA (trading_code_scout_v1)",
+    chunks_fed: 2,
+    local_tokens_read: 42000,
+    sufficiency_verdict: "sufficient",
+    grounded_facets: 2,
+    total_facets: 2,
+  },
+  {
+    stage: 4,
+    stage_name: "Pre-Flight Sufficiency Gate",
+    status: "completed",
+    elapsed_ms: 8,
+    summary: "All deterministic pre-flight checks passed (handoff_ready).",
+    final_decision: "handoff_ready",
+    paid_tokens_spent: 0,
+    checks: [
+      {
+        check_name: "symbol_provenance",
+        passed: true,
+        observed: "2/2 verified",
+        threshold: "100%",
+        details: "All AST symbols anchored to commit SHA",
+      },
+      {
+        check_name: "calibrated_relevance_floor",
+        passed: true,
+        observed: "0.910",
+        threshold: ">= 0.450",
+        details: "Above minimum calibrated floor",
+      },
+    ],
+  },
+];
+
+export const TEST_WORKSPACE_CONFIG: WorkspaceConfigResponse = {
+  domains: TEST_BACKEND_DOMAINS,
+  federated_option: {
+    domain_id: "federated_all",
+    display_name: "All Authorized Domains (Auto-Route)",
+    description: "Dynamically probes all authorized DomainPacks in PostgreSQL 17.",
+  },
+  role_presets: [
+    { role: "engineer", label: "Engineer", default_scopes: ["public_eng", "public_quant"] },
+    { role: "quant_researcher", label: "Quant Researcher", default_scopes: ["public_quant"] },
+    { role: "product_manager", label: "Product Manager", default_scopes: ["public_eng", "public_quant"] },
+    { role: "compliance_officer", label: "Compliance Officer", default_scopes: ["public_eng", "public_quant"] },
+  ],
+  pipeline_stages: TEST_PIPELINE_STAGES,
+  source_filters: ["all", "code", "wiki", "jira"],
+  hardware_profile: TEST_HEALTH_RESPONSE.hardware_profile,
+  database_connected: true,
+  database_status: "PostgreSQL 17.11 RLS Enforced",
+  runtime_mode: "offline_deterministic",
+  timestamp: "2026-11-15T10:00:00Z",
+};
+
 export const TEST_DOMAINS: DomainInfo[] = [
   {
     domain_id: "trading_code_scout",
     display_name: "Trading Codebase & Execution AST",
+    description: "AST-aware Python execution & slippage contracts.",
+    modalities: ["code"],
+    sample_queries: [
+      "Inspect AlmgrenChrissExecutionOptimizer and VolatilityForecastResult contracts for slippage calculation.",
+    ],
+    lora_enabled: true,
+    default_scopes: ["public_eng"],
+    doc_chunks_count: 5,
+    documents_count: 2,
+    code_files_count: 14,
+    ast_symbols_count: 3443,
     base_model_id: "mlx-community/gemma-4-26b-a4b-it-4bit",
     lora_adapter_id: "trading_code_scout_v1",
     lora_adapter_path: "adapters/trading_code_scout",
@@ -147,6 +344,17 @@ export const TEST_DOMAINS: DomainInfo[] = [
   {
     domain_id: "quant_research_scout",
     display_name: "Quantitative Research & Market Papers",
+    description: "Order book dynamics, Hawkes processes, and friction studies.",
+    modalities: ["document"],
+    sample_queries: [
+      "What does the multivariate Hawkes process order book volume research say about branching kernel stability?",
+    ],
+    lora_enabled: false,
+    default_scopes: ["public_quant"],
+    doc_chunks_count: 14188,
+    documents_count: 42,
+    code_files_count: 0,
+    ast_symbols_count: 0,
     base_model_id: "mlx-community/gemma-4-26b-a4b-it-4bit",
     lora_adapter_id: "quant_research_scout_v1",
     lora_adapter_path: "adapters/quant_research_scout",
@@ -438,6 +646,8 @@ export interface MockApiOverrides {
   healthResponse?: HealthResponse;
   domainsStatus?: number;
   domainsDetail?: BackendDomainDetail[];
+  workspaceConfigStatus?: number;
+  workspaceConfigResponse?: WorkspaceConfigResponse;
   roiStatus?: number;
   roiResponse?: ROIMetricsResponse;
   queryResponse?: ScoutQueryResponse;
@@ -504,6 +714,26 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
           JSON.stringify(overrides.healthResponse ?? TEST_HEALTH_RESPONSE),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
+      }
+
+      if (url.endsWith("/api/v1/workspace-config")) {
+        const status =
+          overrides.workspaceConfigStatus ?? overrides.domainsStatus ?? 200;
+        if (status >= 400) {
+          return new Response(
+            JSON.stringify({ detail: "Workspace config failed" }),
+            { status, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        const baseCfg =
+          overrides.workspaceConfigResponse ?? TEST_WORKSPACE_CONFIG;
+        const cfg: WorkspaceConfigResponse = overrides.domainsDetail
+          ? { ...baseCfg, domains: overrides.domainsDetail }
+          : baseCfg;
+        return new Response(JSON.stringify(cfg), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
       }
 
       if (url.endsWith("/api/v1/domains")) {
