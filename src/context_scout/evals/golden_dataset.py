@@ -102,9 +102,8 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
             task_id="CODE-01",
             category=TaskCategory.CODE_LOCALIZATION,
             user_prompt=(
-                "Refactor KalmanHedgeEstimator in pairs_trading_kalman.py to support dynamic "
-                "measurement noise variance R adaptation and verify PairsSpreadSignal "
-                "z-score generation."
+                "How do we dynamically estimate hedge ratios with adaptive measurement noise "
+                "variance and compute spread z-scores for pairs trading?"
             ),
             domain_id="trading_code_scout",
             ground_truth_files=["src/context_scout/trading_strategies/pairs_trading_kalman.py"],
@@ -124,9 +123,8 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
             task_id="CODE-02",
             category=TaskCategory.CODE_LOCALIZATION,
             user_prompt=(
-                "Enhance AlmgrenChrissExecutionOptimizer in almgren_chriss_execution.py "
-                "to integrate non-linear temporary price impact and compute optimal "
-                "liquidation trajectories."
+                "Where do we compute optimal liquidation schedules that account for non-linear "
+                "temporary market impact?"
             ),
             domain_id="trading_code_scout",
             ground_truth_files=["src/context_scout/trading_strategies/almgren_chriss_execution.py"],
@@ -146,8 +144,8 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
             task_id="CODE-03",
             category=TaskCategory.CODE_LOCALIZATION,
             user_prompt=(
-                "Extend OrderFlowImbalanceSignal in order_flow_imbalance.py to compute multi-level "
-                "order flow imbalance across the top 5 levels of the LOB."
+                "How is multi-level limit order book imbalance across the top 5 levels "
+                "aggregated into a trading signal?"
             ),
             domain_id="trading_code_scout",
             ground_truth_files=["src/context_scout/trading_strategies/order_flow_imbalance.py"],
@@ -167,8 +165,8 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
             task_id="CODE-04",
             category=TaskCategory.CODE_LOCALIZATION,
             user_prompt=(
-                "Modify KellyRiskManager in kelly_risk_manager.py to implement Ledoit-Wolf "
-                "covariance shrinkage before computing fractional Kelly portfolio weights."
+                "How do we apply covariance shrinkage before calculating fractional "
+                "portfolio position sizes?"
             ),
             domain_id="trading_code_scout",
             ground_truth_files=["src/context_scout/trading_strategies/kelly_risk_manager.py"],
@@ -186,8 +184,8 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
             task_id="CODE-05",
             category=TaskCategory.CODE_LOCALIZATION,
             user_prompt=(
-                "Update GARCH11Model in volatility_garch.py to fit quasi-maximum likelihood "
-                "parameters and compute multi-step ahead term structure volatility forecasts."
+                "How do we fit quasi-maximum likelihood volatility parameters and compute "
+                "multi-step term structure volatility forecasts?"
             ),
             domain_id="trading_code_scout",
             ground_truth_files=["src/context_scout/trading_strategies/volatility_garch.py"],
@@ -307,44 +305,41 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
         GoldenQuantTask(
             task_id="QUANT-04",
             category=TaskCategory.QUANT_RESEARCH,
-            user_prompt="best way to implement momentum strategy in indian stock market?",
+            user_prompt=(
+                "What transaction cost and liquidity constraints apply to cross-sectional "
+                "momentum strategies on Indian NSE equities?"
+            ),
             domain_id="quant_research_scout",
             target_market=MarketRegime.INDIA_NSE_BSE,
             min_friction_bps=15.0,
             expected_doc_ids=["arxiv:2302.13245"],
-            expected_strategy_name=(
-                "Indian Equity Physical & Cross-Sectional Momentum Strategy (NSE/NIFTY)"
-            ),
+            expected_strategy_name="Cross-Sectional Momentum (India NSE)",
         ),
         GoldenQuantTask(
             task_id="QUANT-05",
             category=TaskCategory.QUANT_RESEARCH,
             user_prompt=(
-                "Compare Hierarchical Risk Parity (HRP) and minimum variance portfolio "
-                "optimization for Indian NIFTY sectors"
+                "Compare hierarchical risk parity against minimum variance portfolio "
+                "allocation under covariance estimation error for Indian equity sectors."
             ),
             domain_id="quant_research_scout",
             target_market=MarketRegime.INDIA_NSE_BSE,
             min_friction_bps=15.0,
             expected_doc_ids=["arxiv:2202.02728", "arxiv:2210.00984", "arxiv:2202.02723"],
-            expected_strategy_name=(
-                "Hierarchical Risk Parity (HRP) & Minimum Variance Portfolio Allocation"
-            ),
+            expected_strategy_name="Portfolio Risk Parity vs Minimum Variance",
         ),
         GoldenQuantTask(
             task_id="QUANT-06",
             category=TaskCategory.QUANT_RESEARCH,
             user_prompt=(
-                "Can deep reinforcement learning or actor-critic trading agents outperform "
-                "in US equity markets?"
+                "Under what market friction regimes do reinforcement learning trading agents "
+                "struggle or succeed in US equity markets?"
             ),
             domain_id="quant_research_scout",
             target_market=MarketRegime.US_NYSE_NASDAQ,
             min_friction_bps=5.0,
             expected_doc_ids=["arxiv:2502.07393", "arxiv:2610.32237"],
-            expected_strategy_name=(
-                "Risk-Sensitive Deep Reinforcement Learning (Actor-Critic / FinRL) Trading Strategy"
-            ),
+            expected_strategy_name="RL Trading Agents Friction Analysis (US)",
         ),
     ]
 
@@ -356,8 +351,8 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
             task_id="FED-01",
             category=TaskCategory.FEDERATED_CROSS_DOMAIN,
             user_prompt=(
-                "Connect academic signature-based optimal execution research with our internal "
-                "AlmgrenChrissExecutionOptimizer and Volatility GARCH model for US equities."
+                "Connect academic optimal execution impact research with our internal "
+                "liquidation schedule and volatility forecasting implementation for US equities."
             ),
             ground_truth_code_files=[
                 "src/context_scout/trading_strategies/almgren_chriss_execution.py",
@@ -376,7 +371,7 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
             category=TaskCategory.FEDERATED_CROSS_DOMAIN,
             user_prompt=(
                 "Connect order book liquidity and herding research to our internal "
-                "OrderFlowImbalanceSignal and KellyRiskManager for European XETRA equities."
+                "order flow signal and portfolio sizing implementation for European XETRA equities."
             ),
             ground_truth_code_files=[
                 "src/context_scout/trading_strategies/order_flow_imbalance.py",
@@ -394,8 +389,8 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
             task_id="FED-03",
             category=TaskCategory.FEDERATED_CROSS_DOMAIN,
             user_prompt=(
-                "best way to implement momentum strategy in indian stock market and "
-                "connect with our GARCH11Model volatility forecasting in volatility_garch.py"
+                "How do Indian equity momentum transaction costs interact with our internal "
+                "conditional volatility forecasting implementation?"
             ),
             ground_truth_code_files=[
                 "src/context_scout/trading_strategies/volatility_garch.py",
@@ -880,6 +875,268 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
     )
 
 
+class UnscriptedMultiDomainTask(BaseModel):
+    """Unscripted natural-language benchmark task with zero filename/classname spoilers."""
+
+    task_id: str
+    domain_id: str
+    user_prompt: str
+    expected_domains: list[str]
+    expected_concepts: list[str] = Field(default_factory=list)
+    expected_abstain: bool = False
+
+
+def get_unscripted_multidomain_suite() -> list[UnscriptedMultiDomainTask]:
+    """Return the 28-prompt Stage 9 Unscripted Multi-Domain Golden & Adversarial Benchmark."""
+    return [
+        # Data Engineering (DE-01..06)
+        UnscriptedMultiDomainTask(
+            task_id="DE-01",
+            domain_id="data_engineering_scout",
+            user_prompt="What is ACID in database transactions?",
+            expected_domains=["data_engineering_scout"],
+            expected_concepts=["atomicity", "consistency", "isolation", "durability"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="DE-02",
+            domain_id="data_engineering_scout",
+            user_prompt="What is Apache Iceberg and how does it handle snapshot isolation?",
+            expected_domains=["data_engineering_scout"],
+            expected_concepts=["iceberg", "snapshot", "table"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="DE-03",
+            domain_id="data_engineering_scout",
+            user_prompt="Explain CAP theorem",
+            expected_domains=["data_engineering_scout"],
+            expected_concepts=["consistency", "availability", "partition"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="DE-04",
+            domain_id="data_engineering_scout",
+            user_prompt="How does PostgreSQL MVCC prevent readers from blocking writers?",
+            expected_domains=["data_engineering_scout"],
+            expected_concepts=["mvcc", "snapshot", "transaction"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="DE-05",
+            domain_id="data_engineering_scout",
+            user_prompt=(
+                "Compare Delta Lake and Apache Iceberg transaction log architectures."
+            ),
+            expected_domains=["data_engineering_scout"],
+            expected_concepts=["delta", "iceberg", "transaction"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="DE-06",
+            domain_id="data_engineering_scout",
+            user_prompt="How does write-ahead logging guarantee durability on crash recovery?",
+            expected_domains=["data_engineering_scout"],
+            expected_concepts=["wal", "write-ahead", "durability"],
+        ),
+        # Polyglot Unseen V2 (POLY-01..06)
+        UnscriptedMultiDomainTask(
+            task_id="POLY-01",
+            domain_id="polyglot_unseen_v2",
+            user_prompt=(
+                "How does our HTTP client manage connection pool limits and keepalive timeouts?"
+            ),
+            expected_domains=["polyglot_unseen_v2"],
+            expected_concepts=["pool", "keepalive", "timeout"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="POLY-02",
+            domain_id="polyglot_unseen_v2",
+            user_prompt=(
+                "Where is ASGI lifespan startup and shutdown event handling implemented?"
+            ),
+            expected_domains=["polyglot_unseen_v2"],
+            expected_concepts=["lifespan", "startup", "shutdown"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="POLY-03",
+            domain_id="polyglot_unseen_v2",
+            user_prompt=(
+                "How are exponential backoff and jitter calculated when retrying "
+                "transient failures?"
+            ),
+            expected_domains=["polyglot_unseen_v2"],
+            expected_concepts=["backoff", "jitter", "retry"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="POLY-04",
+            domain_id="polyglot_unseen_v2",
+            user_prompt=(
+                "How does JWT signature verification reject expired or tampered tokens?"
+            ),
+            expected_domains=["polyglot_unseen_v2"],
+            expected_concepts=["jwt", "signature", "expired"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="POLY-05",
+            domain_id="polyglot_unseen_v2",
+            user_prompt=(
+                "How does structured logging bind per-request context variables across async tasks?"
+            ),
+            expected_domains=["polyglot_unseen_v2"],
+            expected_concepts=["contextvars", "log", "bind"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="POLY-06",
+            domain_id="polyglot_unseen_v2",
+            user_prompt=(
+                "How are TypeScript object schemas parsed and validated with detailed errors?"
+            ),
+            expected_domains=["polyglot_unseen_v2"],
+            expected_concepts=["schema", "parse", "error"],
+        ),
+        # Quant Research (QUANT-01..04)
+        UnscriptedMultiDomainTask(
+            task_id="QUANT-01",
+            domain_id="quant_research_scout",
+            user_prompt=(
+                "What transaction cost and liquidity constraints apply to intraday momentum "
+                "strategies on Indian NSE equities?"
+            ),
+            expected_domains=["quant_research_scout"],
+            expected_concepts=["momentum", "nse", "liquidity"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="QUANT-02",
+            domain_id="quant_research_scout",
+            user_prompt=(
+                "How do high-dimensional factor models address statistical arbitrage on "
+                "German XETRA equities?"
+            ),
+            expected_domains=["quant_research_scout"],
+            expected_concepts=["factor", "arbitrage", "xetra"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="QUANT-03",
+            domain_id="quant_research_scout",
+            user_prompt=(
+                "What execution dynamics govern path-dependent optimal liquidation in "
+                "US equity futures?"
+            ),
+            expected_domains=["quant_research_scout"],
+            expected_concepts=["execution", "liquidation", "futures"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="QUANT-04",
+            domain_id="quant_research_scout",
+            user_prompt=(
+                "Compare hierarchical risk parity against minimum variance portfolio "
+                "allocation under covariance estimation error."
+            ),
+            expected_domains=["quant_research_scout"],
+            expected_concepts=["risk parity", "minimum variance", "covariance"],
+        ),
+        # Trading Code (CODE-01..04)
+        UnscriptedMultiDomainTask(
+            task_id="CODE-01",
+            domain_id="trading_code_scout",
+            user_prompt=(
+                "How do we dynamically estimate hedge ratios and compute spread z-scores "
+                "for pairs trading?"
+            ),
+            expected_domains=["trading_code_scout"],
+            expected_concepts=["hedge", "z-score", "kalman"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="CODE-02",
+            domain_id="trading_code_scout",
+            user_prompt=(
+                "Where do we compute optimal liquidation schedules accounting for "
+                "temporary market impact?"
+            ),
+            expected_domains=["trading_code_scout"],
+            expected_concepts=["liquidation", "impact", "trajectory"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="CODE-03",
+            domain_id="trading_code_scout",
+            user_prompt=(
+                "How is multi-level limit order book imbalance aggregated into a trading signal?"
+            ),
+            expected_domains=["trading_code_scout"],
+            expected_concepts=["imbalance", "order book", "signal"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="CODE-04",
+            domain_id="trading_code_scout",
+            user_prompt=(
+                "How do we apply covariance shrinkage before calculating fractional "
+                "portfolio position sizes?"
+            ),
+            expected_domains=["trading_code_scout"],
+            expected_concepts=["shrinkage", "kelly", "covariance"],
+        ),
+        # Federated All (FED-01..04)
+        UnscriptedMultiDomainTask(
+            task_id="FED-01",
+            domain_id="federated_all",
+            user_prompt="What is ACID?",
+            expected_domains=["data_engineering_scout"],
+            expected_concepts=["atomicity", "consistency", "isolation", "durability"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="FED-02",
+            domain_id="federated_all",
+            user_prompt="What is Apache Iceberg?",
+            expected_domains=["data_engineering_scout"],
+            expected_concepts=["iceberg", "table", "snapshot"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="FED-03",
+            domain_id="federated_all",
+            user_prompt=(
+                "Connect academic optimal execution impact research to our internal "
+                "liquidation schedule implementation."
+            ),
+            expected_domains=["quant_research_scout", "trading_code_scout"],
+            expected_concepts=["execution", "liquidation", "impact"],
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="FED-04",
+            domain_id="federated_all",
+            user_prompt=(
+                "How does our HTTP client configure connection pool limits and keepalive timeouts?"
+            ),
+            expected_domains=["polyglot_unseen_v2"],
+            expected_concepts=["pool", "keepalive", "timeout"],
+        ),
+        # Out-of-Corpus $0 Abstention Traps (ABSTAIN-01..04)
+        UnscriptedMultiDomainTask(
+            task_id="ABSTAIN-01",
+            domain_id="federated_all",
+            user_prompt="What is Quantum Chromodynamics and asymptotic freedom in QCD?",
+            expected_domains=[],
+            expected_abstain=True,
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="ABSTAIN-02",
+            domain_id="polyglot_unseen_v2",
+            user_prompt="How does Cilium eBPF BGP routing work in Kubernetes?",
+            expected_domains=[],
+            expected_abstain=True,
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="ABSTAIN-03",
+            domain_id="federated_all",
+            user_prompt="Explain SAP ABAP BAPI RFC table locking semantics.",
+            expected_domains=[],
+            expected_abstain=True,
+        ),
+        UnscriptedMultiDomainTask(
+            task_id="ABSTAIN-04",
+            domain_id="federated_all",
+            user_prompt="Explain the internal rules of Zorglubian Hyper-Quarks.",
+            expected_domains=[],
+            expected_abstain=True,
+        ),
+    ]
+
+
 __all__ = [
     "GoldenBenchmarkSuite",
     "GoldenCodeTask",
@@ -888,5 +1145,7 @@ __all__ = [
     "PoisonedInjectionPayload",
     "RedTeamRBACQuery",
     "TaskCategory",
+    "UnscriptedMultiDomainTask",
     "get_default_golden_suite",
+    "get_unscripted_multidomain_suite",
 ]

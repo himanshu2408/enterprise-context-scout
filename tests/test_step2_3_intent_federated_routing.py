@@ -405,6 +405,7 @@ def test_all_roles_x_three_intents_no_role_bias_and_verified_packs(role: RoleTyp
         ),
         principal=principal,
         domain_id=_ENTERPRISE_DOMAIN_ID,
+        normalized_rrf_score=0.75,
     )
     assert isinstance(hybrid_result, ImplementationContextPack), hybrid_result
     assert len(hybrid_result.code_slices) >= 1
@@ -473,6 +474,7 @@ def test_federated_coordinator_pure_doc_suppresses_code_slices() -> None:
     result = coordinator.run(
         user_prompt="What is the incident escalation runbook SLA for a feed stall?",
         principal=principal,
+        normalized_rrf_score=0.75,
     )
     assert isinstance(result, ImplementationContextPack), result
     assert result.code_slices == []
@@ -842,6 +844,7 @@ def test_federated_coordinator_populates_code_vs_doc_conflicts() -> None:
             "batch architecture spec"
         ),
         principal=principal,
+        normalized_rrf_score=0.75,
     )
     assert isinstance(result, ImplementationContextPack), result
     assert len(result.code_slices) >= 1

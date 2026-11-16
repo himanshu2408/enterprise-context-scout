@@ -111,10 +111,14 @@ def _cleanup_eval_domain(db_admin_url: str, domain_prefix: str) -> None:
 def pg17_canary() -> Generator[ScoutSettings, None, None]:
     """Snapshots shared PG17 counts and asserts canary invariance after Step 3 tests."""
     settings = ScoutSettings()
+    _cleanup_eval_domain(settings.db_admin_url, "eval_s3test_")
     before = _snapshot_non_eval_counts(settings.db_admin_url)
-    yield settings
-    after = _snapshot_non_eval_counts(settings.db_admin_url)
-    assert before == after, f"Shared PG17 corpus mutated: before={before}, after={after}"
+    try:
+        yield settings
+    finally:
+        _cleanup_eval_domain(settings.db_admin_url, "eval_s3test_")
+        after = _snapshot_non_eval_counts(settings.db_admin_url)
+        assert before == after, f"Shared PG17 corpus mutated: before={before}, after={after}"
 
 
 def test_step3_qualification_reports_exist_and_valid() -> None:
@@ -364,7 +368,7 @@ def test_pg17_confluence_lifecycle_rbac_and_preflight_negative_control(
             validator=PreFlightValidator(repo=pg_repo, min_rrf_score=0.55),
         )
         pack = wf_strict.run(
-            user_prompt="What is the authoritative timeout runbook policy in HTTPX Timeout?",
+            user_prompt="How does HTTPX Timeout configure timeout?",
             principal=eng,
             domain_id=domain_id,
             normalized_rrf_score=0.90,
@@ -379,7 +383,7 @@ def test_pg17_confluence_lifecycle_rbac_and_preflight_negative_control(
         # Negative control proving PreFlightValidator executed: score=0.15 abstains at min=0.55,
         # passes only when gate threshold is weakened to min=0.05.
         diag = wf_strict.run(
-            user_prompt="What is the authoritative timeout runbook policy in HTTPX Timeout?",
+            user_prompt="How does HTTPX Timeout configure timeout?",
             principal=eng,
             domain_id=domain_id,
             normalized_rrf_score=0.15,
@@ -396,7 +400,7 @@ def test_pg17_confluence_lifecycle_rbac_and_preflight_negative_control(
             validator=PreFlightValidator(repo=pg_repo, min_rrf_score=0.05),
         )
         weak_pack = wf_weak.run(
-            user_prompt="What is the authoritative timeout runbook policy in HTTPX Timeout?",
+            user_prompt="How does HTTPX Timeout configure timeout?",
             principal=eng,
             domain_id=domain_id,
             normalized_rrf_score=0.15,
