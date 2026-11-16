@@ -211,55 +211,62 @@ def test_rc3_rc4_cohesive_grounding_rejects_scattered_bag_of_words() -> None:
 
 def test_rc1_rc2_rc7_live_pg17_api_acid_cap_iceberg_and_zero_dollar_abstention() -> None:
     """RC-1, RC-2, RC-7: Live PG17 + FastAPI TestClient across all unscripted probes & $0 trap."""
-    os.environ["SCOUT_ALLOW_INSECURE_DEV_SECRET"] = "true"
-    headers = _auth_headers()
-    with TestClient(create_app()) as client:
-        # 1. /api/v1/workspace-config exposes all 4 domains dynamically
-        cfg_resp = client.get("/api/v1/workspace-config", headers=headers)
-        assert cfg_resp.status_code == 200
-        cfg = cfg_resp.json()
-        domain_ids = {d["domain_id"] for d in cfg["domains"]}
-        assert {
-            "data_engineering_scout",
-            "polyglot_unseen_v2",
-            "quant_research_scout",
-            "trading_code_scout",
-        }.issubset(domain_ids)
+    from context_scout.api import dependencies
 
-        # 2. Unscripted DE queries under federated_all route to data_engineering_scout & pass
-        for q in (
-            "What is ACID",
-            "What is ACID?",
-            "Explain CAP theorem",
-            "What is Apache Iceberg?",
-        ):
-            resp = client.post(
+    os.environ["SCOUT_ALLOW_INSECURE_DEV_SECRET"] = "true"
+    prev_repo = dependencies._shared_repo
+    dependencies._shared_repo = None
+    headers = _auth_headers()
+    try:
+        with TestClient(create_app()) as client:
+            # 1. /api/v1/workspace-config exposes all 4 domains dynamically
+            cfg_resp = client.get("/api/v1/workspace-config", headers=headers)
+            assert cfg_resp.status_code == 200
+            cfg = cfg_resp.json()
+            domain_ids = {d["domain_id"] for d in cfg["domains"]}
+            assert {
+                "data_engineering_scout",
+                "polyglot_unseen_v2",
+                "quant_research_scout",
+                "trading_code_scout",
+            }.issubset(domain_ids)
+
+            # 2. Unscripted DE queries under federated_all route to data_engineering_scout & pass
+            for q in (
+                "What is ACID",
+                "What is ACID?",
+                "Explain CAP theorem",
+                "What is Apache Iceberg?",
+            ):
+                resp = client.post(
+                    "/api/v1/scout/query",
+                    headers=headers,
+                    json={"query": q, "domain_id": "federated_all"},
+                )
+                assert resp.status_code == 200, f"{q}: {resp.text}"
+                body = resp.json()
+                assert body["passed"] is True, f"{q} failed preflight: {body}"
+                assert body["context_pack"]["domain_id"] == "data_engineering_scout", q
+                assert len(body["stage_traces"]) == 4, f"{q} missing 4 stage traces"
+                assert body["stage_traces"][-1]["final_decision"] == "handoff_ready"
+
+            # 3. Genuinely unindexed out-of-corpus trap MUST abstain at $0 paid tokens
+            trap_resp = client.post(
                 "/api/v1/scout/query",
                 headers=headers,
-                json={"query": q, "domain_id": "federated_all"},
+                json={
+                    "query": "Explain the internal rules of Zorglubian Hyper-Quarks",
+                    "domain_id": "federated_all",
+                },
             )
-            assert resp.status_code == 200, f"{q}: {resp.text}"
-            body = resp.json()
-            assert body["passed"] is True, f"{q} failed preflight: {body}"
-            assert body["context_pack"]["domain_id"] == "data_engineering_scout", q
-            assert len(body["stage_traces"]) == 4, f"{q} missing 4 stage traces"
-            assert body["stage_traces"][-1]["final_decision"] == "handoff_ready"
-
-        # 3. Genuinely unindexed out-of-corpus trap MUST abstain at $0 paid tokens
-        trap_resp = client.post(
-            "/api/v1/scout/query",
-            headers=headers,
-            json={
-                "query": "Explain the internal rules of Zorglubian Hyper-Quarks",
-                "domain_id": "federated_all",
-            },
-        )
-        assert trap_resp.status_code == 200
-        trap = trap_resp.json()
-        assert trap["passed"] is False
-        assert trap["diagnostic"] is not None
-        assert trap["diagnostic"]["paid_tokens_spent"] == 0
-        assert trap["diagnostic"]["stage_traces"][-1]["final_decision"] == "abstain_zero_paid"
+            assert trap_resp.status_code == 200
+            trap = trap_resp.json()
+            assert trap["passed"] is False
+            assert trap["diagnostic"] is not None
+            assert trap["diagnostic"]["paid_tokens_spent"] == 0
+            assert trap["diagnostic"]["stage_traces"][-1]["final_decision"] == "abstain_zero_paid"
+    finally:
+        dependencies._shared_repo = prev_repo
 
 
 def test_rc2_stage4_gate_blocks_insufficient_citations_when_stage3_completes() -> None:

@@ -5958,7 +5958,6 @@ class FederatedScoutCoordinator:
                                 query_plan.query_type == "concept_definition"
                                 and not top_is_code
                                 and bool(info.get("is_code"))
-                                and not info.get("doc_records")
                             )
                         )
                     ):

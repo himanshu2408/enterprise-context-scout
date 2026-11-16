@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
@@ -668,13 +669,25 @@ def seed_trading_codebase_and_issues(
             ),
         ),
     ]
+    def _embed_seed_doc(text: str) -> list[float]:
+        if os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() == "1":
+            return generate_deterministic_embedding(text)
+        try:
+            from context_scout.retrieval.embedder import LocalSemanticEmbedder
+
+            return LocalSemanticEmbedder(allow_deterministic_fallback=True).embed_text(
+                text, is_query=False
+            )
+        except Exception:
+            return generate_deterministic_embedding(text)
+
     with mgr.scoped_transaction(quant_seed_principal, enable_hnsw_iterative_scan=False) as q_conn:
         row_qc = q_conn.execute(
             "SELECT count(*) FROM doc_chunks WHERE domain_id = 'quant_research_scout';"
         ).fetchone()
         if row_qc is not None and int(str(row_qc[0])) == 0:
             for q_doc_id, q_title, q_uri, q_scope, q_date, q_sec, q_body in quant_seed_docs:
-                q_emb = generate_deterministic_embedding(f"{q_title} {q_sec} {q_body}")
+                q_emb = _embed_seed_doc(f"{q_title} {q_sec} {q_body}")
                 q_vec = "[" + ",".join(f"{v:.6f}" for v in q_emb) + "]"
                 q_conn.execute(
                     """
@@ -762,7 +775,7 @@ def seed_trading_codebase_and_issues(
         ).fetchone()
         if row_de is not None and int(str(row_de[0])) == 0:
             for de_doc_id, de_title, de_uri, de_sec, de_body in de_seed_docs:
-                de_emb = generate_deterministic_embedding(f"{de_title} {de_sec} {de_body}")
+                de_emb = _embed_seed_doc(f"{de_title} {de_sec} {de_body}")
                 de_vec = "[" + ",".join(f"{v:.6f}" for v in de_emb) + "]"
                 de_conn.execute(
                     """
