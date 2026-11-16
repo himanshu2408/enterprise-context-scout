@@ -816,6 +816,7 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
             if role_name != "product_manager":
                 assert "S3_CANARY_PM_ONLY" not in body
     finally:
+        dependencies.get_domain_registry().unregister(domain_id)
         dependencies._shared_repo = prev_repo
         dependencies._local_gemma_client = prev_client
         if prev_req is None:

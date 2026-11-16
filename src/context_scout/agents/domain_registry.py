@@ -65,6 +65,10 @@ class AdapterPool:
                 raise KeyError(f"Domain '{domain_id}' is not registered in AdapterPool")
             return self._slots[domain_id]
 
+    def unregister_slot(self, domain_id: str) -> None:
+        with self._lock:
+            self._slots.pop(domain_id, None)
+
     def list_slots(self) -> list[AdapterSlot]:
         with self._lock:
             return list(self._slots.values())
@@ -219,6 +223,10 @@ class DomainRegistry:
     def register(self, manifest: DomainPackManifest) -> None:
         self._manifests[manifest.domain_id] = manifest
         self._adapter_pool.register_from_manifest(manifest)
+
+    def unregister(self, domain_id: str) -> None:
+        self._manifests.pop(domain_id, None)
+        self._adapter_pool.unregister_slot(domain_id)
 
     def get(self, domain_id: str) -> DomainPackManifest:
         if domain_id not in self._manifests and self._domains_dir.exists():
