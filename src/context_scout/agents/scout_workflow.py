@@ -5940,8 +5940,8 @@ class FederatedScoutCoordinator:
                         and query_plan.query_type != "concept_definition"
                         and fed_intent_mode
                         in (QueryIntentMode.HYBRID_CODE_AND_DOCS, QueryIntentMode.PURE_CODE)
-                        and (top_score - sc) <= 0.25
-                        and sc >= 0.48
+                        and (top_score - sc) <= 0.45
+                        and sc >= 0.38
                     )
                     if (
                         dom_id == top_id
