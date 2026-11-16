@@ -2633,7 +2633,7 @@ class BoundGraphRepository:
         selected = matching_pairs[:limit]
         max_possible = max(1.0, len(words) * 1.0)
         synth_hits = []
-        for idx, (chk, wh, sc, any_in_title, proper_hits) in enumerate(selected):
+        for idx, (chk, wh, sc, _any_in_title, proper_hits) in enumerate(selected):
             cov = wh / max_possible
             missing_named_entity = bool(
                 (len(proper_nouns) >= 2 and proper_hits * 2 < len(proper_nouns))
@@ -2642,21 +2642,12 @@ class BoundGraphRepository:
             if missing_named_entity:
                 cal_sc = round(min(0.38, 0.20 + 0.30 * cov), 4)
             else:
-                title_boost = 0.10 if (any_in_title and wh >= min(2, len(words))) else 0.0
-                market_boost = (
-                    0.08
-                    if (
-                        chk.market_scope
-                        and any(w in chk.market_scope.lower() for w in words if len(w) >= 3)
-                    )
-                    else 0.0
-                )
                 base_cal = (
                     0.30 + 0.60 * cov
                     if (wh >= 2 or len(words) == 1)
                     else 0.28 + 0.42 * cov
                 )
-                cal_sc = round(min(0.95, base_cal + title_boost + market_boost), 4)
+                cal_sc = round(min(0.95, base_cal), 4)
             rrf_sc = (
                 round(min(0.96, max(cal_sc, 0.68 + 0.25 * cov)), 4)
                 if (not missing_named_entity and (wh >= 2 or wh >= len(words)))
@@ -2855,10 +2846,15 @@ class BoundGraphRepository:
                 )
                 if hits_n > 0:
                     cov = hits_n / len(words)
+                    qname_l = s.qualified_name.lower()
+                    name_hits = sum(1 for w in words if len(w) >= 3 and w in qname_l)
                     pn_hits = sum(1 for pn in sym_proper_nouns if pn in hay)
                     missing_pn = bool(
-                        (len(sym_proper_nouns) >= 2 and pn_hits * 2 < len(sym_proper_nouns))
-                        or (len(sym_proper_nouns) == 1 and pn_hits == 0 and hits_n < 2)
+                        name_hits < 3
+                        and (
+                            (len(sym_proper_nouns) >= 2 and pn_hits * 2 < len(sym_proper_nouns))
+                            or (len(sym_proper_nouns) == 1 and pn_hits == 0 and hits_n < 2)
+                        )
                     )
                     if missing_pn:
                         cal_sc = round(min(0.38, 0.20 + 0.25 * cov), 4)
