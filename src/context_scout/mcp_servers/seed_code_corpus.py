@@ -661,9 +661,10 @@ def seed_trading_codebase_and_issues(
             date(2026, 7, 20),
             "Empirical Evaluation",
             (
-                "Dynamic high-dimensional PCA factor statistical arbitrage and order book "
-                "liquidity herding models on Deutsche Boerse XETRA DAX European equities "
-                "clear a 12 bps continuous-auction round-trip transaction cost floor."
+                "Dynamic high-dimensional PCA factor statistical arbitrage, quantitative "
+                "microstructure alpha, and order book liquidity herding models on Deutsche "
+                "Boerse XETRA DAX European equities clear a 12 bps continuous-auction "
+                "round-trip transaction cost floor."
             ),
         ),
     ]
@@ -711,7 +712,13 @@ def seed_trading_codebase_and_issues(
     de_seed_principal = PrincipalContext(
         user_id="seed_de_corpus_indexer",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public", "public_eng", "domain:data_engineering"],
+        allowed_scopes=[
+            "public",
+            "public_eng",
+            "public_de",
+            "domain:data_engineering",
+            "domain:data_engineering_scout",
+        ],
     )
     de_seed_docs: list[tuple[str, str, str, str, str]] = [
         (
@@ -780,7 +787,13 @@ def seed_trading_codebase_and_issues(
                         date(2026, 10, 15),
                         de_sec,
                         de_body,
-                        ["public", "public_eng", "domain:data_engineering"],
+                        [
+                            "public",
+                            "public_eng",
+                            "public_de",
+                            "domain:data_engineering",
+                            "domain:data_engineering_scout",
+                        ],
                         de_vec,
                     ),
                 )

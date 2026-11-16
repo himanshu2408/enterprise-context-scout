@@ -197,10 +197,29 @@ _DEFINITIONAL_LEAD_RE = re.compile(
     r"describe\s+(?:the\s+)?|define\s+(?:the\s+)?|how\s+does\s+|how\s+do\s+|tell\s+me\s+about\s+)",
     re.IGNORECASE,
 )
-_DEFINITIONAL_TAIL_RE = re.compile(
-    r"\s+(?:stands?\s+for|work|works|mean|means|in\s+databases?|in\s+detail)\s*$",
-    re.IGNORECASE,
+_DEFINITIONAL_TAIL_SUFFIXES: tuple[str, ...] = (
+    " stands for",
+    " stand for",
+    " in databases",
+    " in database",
+    " in detail",
+    " works",
+    " work",
+    " means",
+    " mean",
 )
+
+
+def _strip_definitional_tail(text: str) -> str:
+    """Linear-time O(N) suffix stripper avoiding polynomial regex backtracking on whitespace."""
+    trimmed = text.rstrip()
+    low = trimmed.lower()
+    for suffix in _DEFINITIONAL_TAIL_SUFFIXES:
+        if low.endswith(suffix):
+            head = trimmed[: len(trimmed) - len(suffix)].rstrip()
+            if head:
+                return head
+    return trimmed
 
 _FACET_STOPWORDS: frozenset[str] = frozenset(
     {
@@ -611,7 +630,7 @@ def _infer_query_type_and_subject(
         query_type = "general"
 
     subject = _DEFINITIONAL_LEAD_RE.sub("", cleaned).strip()
-    subject = _DEFINITIONAL_TAIL_RE.sub("", subject).strip()
+    subject = _strip_definitional_tail(subject)
     subject = _strip_trailing_closure_clause(subject).strip(" ,.;:")
     if not subject:
         subject = cleaned
@@ -655,7 +674,7 @@ def decompose_query_facets(prompt: str) -> QueryPlan:
         working = working[len("contrast ") :].strip()
     elif query_type == "concept_definition":
         working = _DEFINITIONAL_LEAD_RE.sub("", working).strip()
-        working = _DEFINITIONAL_TAIL_RE.sub("", working).strip() or working
+        working = _strip_definitional_tail(working) or working
     working = _strip_trailing_closure_clause(working)
     working, has_top_preamble = _strip_top_n_on_preamble(working)
 

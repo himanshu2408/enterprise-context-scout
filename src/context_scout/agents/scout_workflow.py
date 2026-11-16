@@ -5929,10 +5929,22 @@ class FederatedScoutCoordinator:
                     )
                     if (
                         dom_id == top_id
-                        or (dom_id in direct_code_tokens and (top_score - sc) <= 0.25)
+                        or (
+                            query_plan.query_type != "concept_definition"
+                            and dom_id in direct_code_tokens
+                            and (top_score - sc) <= 0.25
+                        )
                         or is_complementary_doc
                         or is_complementary_code
-                        or (top_score - sc) <= max_gap
+                        or (
+                            (top_score - sc) <= max_gap
+                            and not (
+                                query_plan.query_type == "concept_definition"
+                                and not top_is_code
+                                and bool(info.get("is_code"))
+                                and not bool(info.get("is_doc"))
+                            )
+                        )
                     ):
                         kept_ids.append(dom_id)
                 selected_ids = kept_ids

@@ -2577,33 +2577,53 @@ class BoundGraphRepository:
         ]
         if not words:
             return base_chunks[:limit], []
+        proper_nouns = [
+            t.lower()
+            for t in re.findall(r"\b[A-Z][a-z]{3,}\b", query_text.strip()[1:])
+            if t.lower() not in PROMPT_STOPWORDS
+        ]
 
-        def _score_chunk(chk: DocChunkRecord) -> tuple[int, float]:
+        def _score_chunk(chk: DocChunkRecord) -> tuple[int, float, bool, int]:
             title_l = chk.doc_title.lower()
             sec_l = chk.section_heading.lower()
             body_l = chk.verbatim_content.lower()
+            combined_l = f"{title_l} {sec_l} {body_l}"
             word_hits = 0
+            any_in_title = False
             s = 0.0
             for w in words:
-                pat = rf"\b{re.escape(w)}\b"
-                in_title = bool(re.search(pat, title_l))
-                in_sec = bool(re.search(pat, sec_l))
-                in_body = bool(re.search(pat, body_l))
+                stem = w[:-1] if (len(w) >= 5 and w.endswith("s") and not w.endswith("ss")) else w
+                pats: tuple[str, ...] = (
+                    (rf"\b{re.escape(w)}\b",)
+                    if stem == w
+                    else (rf"\b{re.escape(w)}\b", rf"\b{re.escape(stem)}\b")
+                )
+                in_title = any(bool(re.search(p, title_l)) for p in pats)
+                in_sec = any(bool(re.search(p, sec_l)) for p in pats)
+                in_body = any(bool(re.search(p, body_l)) for p in pats)
                 if in_title or in_sec or in_body:
                     word_hits += 1
                 if in_title:
+                    any_in_title = True
                     s += 6.0
                 if in_sec:
                     s += 3.0
                 if in_body:
                     s += 1.0
+            proper_hits = sum(
+                1 for pn in proper_nouns if bool(re.search(rf"\b{re.escape(pn)}\b", combined_l))
+            )
             if market_scope is not None and chk.market_scope == market_scope:
                 s += 5.0
-            return word_hits, s + (chk.authority_weight * 0.1)
+            elif chk.market_scope and any(
+                w in chk.market_scope.lower() for w in words if len(w) >= 3
+            ):
+                s += 4.0
+            return word_hits, s + (chk.authority_weight * 0.1), any_in_title, proper_hits
 
         scored_pairs = [(chk, _score_chunk(chk)) for chk in base_chunks]
         matching_pairs = [
-            (chk, wh, sc) for chk, (wh, sc) in scored_pairs if wh > 0
+            (chk, wh, sc, tit, ph) for chk, (wh, sc, tit, ph) in scored_pairs if wh > 0
         ]
         if not matching_pairs:
             # Zero query concepts matched any visible chunk: return empty instead of noise.
@@ -2613,13 +2633,34 @@ class BoundGraphRepository:
         selected = matching_pairs[:limit]
         max_possible = max(1.0, len(words) * 1.0)
         synth_hits = []
-        for idx, (chk, wh, sc) in enumerate(selected):
+        for idx, (chk, wh, sc, any_in_title, proper_hits) in enumerate(selected):
             cov = wh / max_possible
-            cal_sc = round(min(0.95, 0.30 + 0.60 * cov), 4)
+            missing_named_entity = bool(
+                (len(proper_nouns) >= 2 and proper_hits * 2 < len(proper_nouns))
+                or (len(proper_nouns) == 1 and proper_hits == 0 and wh < 2)
+            )
+            if missing_named_entity:
+                cal_sc = round(min(0.38, 0.20 + 0.30 * cov), 4)
+            else:
+                title_boost = 0.10 if (any_in_title and wh >= min(2, len(words))) else 0.0
+                market_boost = (
+                    0.08
+                    if (
+                        chk.market_scope
+                        and any(w in chk.market_scope.lower() for w in words if len(w) >= 3)
+                    )
+                    else 0.0
+                )
+                base_cal = (
+                    0.30 + 0.60 * cov
+                    if (wh >= 2 or len(words) == 1)
+                    else 0.28 + 0.42 * cov
+                )
+                cal_sc = round(min(0.95, base_cal + title_boost + market_boost), 4)
             rrf_sc = (
                 round(min(0.96, max(cal_sc, 0.68 + 0.25 * cov)), 4)
-                if (wh >= 2 or wh >= len(words))
-                else round(min(0.95, 0.35 + 0.55 * cov), 4)
+                if (not missing_named_entity and (wh >= 2 or wh >= len(words)))
+                else round(min(0.95, max(cal_sc, 0.30 + 0.45 * cov)), 4)
             )
             synth_hits.append(
                 CalibratedRankedSearchHit(
@@ -2641,11 +2682,11 @@ class BoundGraphRepository:
         if min_calibrated_score > 0.0:
             filtered = [
                 (chk, hit)
-                for (chk, _wh, _sc), hit in zip(selected, synth_hits, strict=True)
+                for (chk, _wh, _sc, _tit, _ph), hit in zip(selected, synth_hits, strict=True)
                 if hit.calibrated_score >= min_calibrated_score
             ]
             return [c for c, _ in filtered], [h for _, h in filtered]
-        return [chk for chk, _wh, _sc in selected], synth_hits
+        return [chk for chk, _wh, _sc, _tit, _ph in selected], synth_hits
 
     def search_visible_doc_chunks(
         self,
@@ -2784,12 +2825,25 @@ class BoundGraphRepository:
             for w in re.findall(r"[A-Za-z0-9_]{2,}", query_text)
             if w.lower() not in PROMPT_STOPWORDS
         ]
+        sym_proper_nouns = [
+            t.lower()
+            for t in re.findall(r"\b[A-Z][a-z]{3,}\b", query_text.strip()[1:])
+            if t.lower() not in PROMPT_STOPWORDS
+        ]
         matched_pairs: list[tuple[ASTSymbolRecord, float, float, float]] = []
         for s in visible:
             hay = f"{s.qualified_name} {s.signature_skeleton} {s.contextual_summary}".lower()
-            short_sym = s.qualified_name.split(".")[-1].lower()
-            exact_short = len(short_sym) >= 3 and bool(
-                re.search(rf"\b{re.escape(short_sym)}\b", q_l)
+            raw_leaf = s.qualified_name.split(".")[-1]
+            short_sym = raw_leaf.lower()
+            is_code_style_sym = (
+                "_" in raw_leaf
+                or any(ch.isupper() for ch in raw_leaf[1:])
+                or len(words) <= 1
+            )
+            exact_short = (
+                len(short_sym) >= 3
+                and is_code_style_sym
+                and bool(re.search(rf"\b{re.escape(short_sym)}\b", q_l))
             )
             if q_l in hay or exact_short:
                 matched_pairs.append((s, 0.90, 0.92, 1.0))
@@ -2801,12 +2855,21 @@ class BoundGraphRepository:
                 )
                 if hits_n > 0:
                     cov = hits_n / len(words)
-                    cal_sc = round(min(0.88, 0.25 + 0.60 * cov), 4)
-                    rrf_sc = (
-                        round(min(0.92, max(cal_sc, 0.68 + 0.24 * cov)), 4)
-                        if (hits_n >= 2 or hits_n >= len(words))
-                        else cal_sc
+                    pn_hits = sum(1 for pn in sym_proper_nouns if pn in hay)
+                    missing_pn = bool(
+                        (len(sym_proper_nouns) >= 2 and pn_hits * 2 < len(sym_proper_nouns))
+                        or (len(sym_proper_nouns) == 1 and pn_hits == 0 and hits_n < 2)
                     )
+                    if missing_pn:
+                        cal_sc = round(min(0.38, 0.20 + 0.25 * cov), 4)
+                        rrf_sc = cal_sc
+                    else:
+                        cal_sc = round(min(0.88, 0.25 + 0.60 * cov), 4)
+                        rrf_sc = (
+                            round(min(0.92, max(cal_sc, 0.68 + 0.24 * cov)), 4)
+                            if (hits_n >= 2 or hits_n >= len(words))
+                            else cal_sc
+                        )
                     matched_pairs.append((s, cal_sc, rrf_sc, round(cov, 4)))
         matched_pairs.sort(key=lambda item: (item[1], item[2]), reverse=True)
         selected = matched_pairs[:limit]
