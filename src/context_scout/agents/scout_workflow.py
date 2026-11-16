@@ -5815,7 +5815,16 @@ class FederatedScoutCoordinator:
             )
             selected_ids = sorted(
                 domain_results.keys(),
-                key=lambda d: float(domain_results[d]["max_calibrated_score"]),
+                key=lambda d: (
+                    1
+                    if (
+                        query_plan.query_type == "concept_definition"
+                        and bool(domain_results[d].get("doc_records"))
+                        and not bool(domain_results[d].get("is_code"))
+                    )
+                    else 0,
+                    float(domain_results[d]["max_calibrated_score"]),
+                ),
                 reverse=True,
             )
             if selected_ids:
