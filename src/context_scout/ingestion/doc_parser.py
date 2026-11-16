@@ -29,6 +29,14 @@ _MATH_ENV_NAMES = (
     r"eqnarray|eqnarray\*"
 )
 
+# Display-only math block pattern (excludes inline $...$ so sentences are never split mid-sentence)
+DISPLAY_MATH_BLOCK_PATTERN: Final[re.Pattern[str]] = re.compile(
+    rf"(\\begin\{{(?:{_MATH_ENV_NAMES})\}}.*?\\end\{{(?:{_MATH_ENV_NAMES})\}}|"
+    r"\\\[.*?\\\]|"
+    r"\$\$.*?\$\$)",
+    re.DOTALL,
+)
+
 # Atomic math block pattern: \begin{equation}...\end{equation}, \[...\], $$...$$, $...$
 MATH_BLOCK_PATTERN: Final[re.Pattern[str]] = re.compile(
     rf"(\\begin\{{(?:{_MATH_ENV_NAMES})\}}.*?\\end\{{(?:{_MATH_ENV_NAMES})\}}|"
@@ -37,6 +45,98 @@ MATH_BLOCK_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?<!\\)\$(?!\d+\s)[^\$\n]+?(?<!\\)\$)",
     re.DOTALL,
 )
+
+_LATEX_REF_PREFIX_MAP: Final[dict[str, str]] = {
+    "fig": "Figure",
+    "figure": "Figure",
+    "tab": "Table",
+    "table": "Table",
+    "sec": "Section",
+    "section": "Section",
+    "subsec": "Section",
+    "eq": "Equation",
+    "eqn": "Equation",
+    "thm": "Theorem",
+    "lem": "Lemma",
+    "lemma": "Lemma",
+    "prop": "Proposition",
+    "cor": "Corollary",
+    "def": "Definition",
+    "alg": "Algorithm",
+    "app": "Appendix",
+}
+
+_LICENSE_MARKERS: Final[tuple[str, ...]] = (
+    "apache license",
+    "licensed to the apache software foundation",
+    "spdx-license-identifier",
+    "without warranties or conditions of any kind",
+    "limitations under the license",
+    "permission is hereby granted, free of charge",
+    "redistribution and use in source and binary forms",
+)
+
+
+def clean_latex_artifacts(text: str) -> str:
+    """Strips \\label{...} and expands \\cref/\\autoref/\\ref macros into readable text."""
+    cleaned = re.sub(r"\\label\{[^}]*\}", "", text)
+
+    def _expand_ref(match: re.Match[str]) -> str:
+        macro = match.group(1).lower()
+        target = match.group(2).strip()
+        if ":" in target:
+            prefix, label = target.split(":", 1)
+            human_prefix = _LATEX_REF_PREFIX_MAP.get(prefix.lower(), prefix.capitalize())
+            return f"{human_prefix} {label}"
+        if macro == "eqref":
+            return f"Equation ({target})"
+        return target
+
+    cleaned = re.sub(
+        r"\\(cref|Cref|autoref|eqref|ref)\{([^}]+)\}",
+        _expand_ref,
+        cleaned,
+    )
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned
+
+
+def is_license_or_stub_text(text: str) -> bool:
+    """Returns True if text is empty, punctuation-only stub, or pure license boilerplate."""
+    stripped = text.strip()
+    if not stripped:
+        return True
+    # Strip markdown frontmatter/separators when checking substance
+    body_only = re.sub(r"^---.*?---\s*", "", stripped, flags=re.DOTALL).strip()
+    if not body_only or len(re.findall(r"[A-Za-z0-9]", body_only)) < 12:
+        return True
+
+    low = body_only.lower()
+    if any(marker in low for marker in _LICENSE_MARKERS):
+        non_license_lines = [
+            ln.strip()
+            for ln in body_only.splitlines()
+            if ln.strip()
+            and not any(
+                m in ln.lower()
+                for m in (
+                    *_LICENSE_MARKERS,
+                    "http://www.apache.org/licenses",
+                    "https://www.apache.org/licenses",
+                    "copyright ",
+                    "see the license for the specific",
+                    "you may obtain a copy of the license",
+                    "unless required by applicable law",
+                    "distributed under the license is distributed",
+                )
+            )
+            and ln.strip() not in ("---", "```")
+        ]
+        remaining = " ".join(non_license_lines).strip()
+        if len(remaining) < 140 or len(re.findall(r"[A-Za-z]{3,}", remaining)) < 20:
+            return True
+    return False
+
 
 # Atomic LaTeX tabular pattern
 LATEX_TABLE_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -230,6 +330,8 @@ class LatexDocParser:
             body = re.sub(r"\\documentclass\s*(?:\[[^\]]*\])?\s*\{[^}]*\}", "", body)
             body = re.sub(r"\\(?:begin|end)\s*\{document\}", "", body)
 
+        body = clean_latex_artifacts(body)
+
         matches = list(LATEX_SECTION_PATTERN.finditer(body))
         if not matches:
             formulas = MATH_BLOCK_PATTERN.findall(body)
@@ -284,24 +386,42 @@ class LatexDocParser:
         return sections
 
     def _split_into_atomic_blocks(self, text: str) -> list[str]:
-        """Splits content into atomic blocks: equations and tables remain unbroken."""
+        """Splits content into atomic blocks: display equations and tables remain unbroken.
+
+        Inline $...$ math stays attached to its surrounding paragraph so sentences
+        are never severed mid-sentence.
+        """
         blocks: list[str] = []
         pos = 0
 
-        # Pattern matching either a LaTeX math environment or a LaTeX table
+        # Pattern matching either a display LaTeX math environment or a LaTeX table
         combined_pattern = re.compile(
-            rf"({MATH_BLOCK_PATTERN.pattern}|{LATEX_TABLE_PATTERN.pattern})",
+            rf"({DISPLAY_MATH_BLOCK_PATTERN.pattern}|{LATEX_TABLE_PATTERN.pattern})",
             re.DOTALL,
         )
+
+        def _append_paragraphs(segment: str) -> None:
+            paragraphs = [p.strip() for p in re.split(r"\n\s*\n", segment) if p.strip()]
+            for para in paragraphs:
+                # If a paragraph begins with dangling punctuation immediately after a display
+                # equation (e.g. ". It remains..." or ", where..."), keep the punctuation
+                # attached to the preceding block or merge short continuations.
+                if blocks and re.match(r"^[.,;:!?)\]]+", para):
+                    punct_match = re.match(r"^([.,;:!?)\]]+)\s*(.*)$", para, re.DOTALL)
+                    if punct_match:
+                        blocks[-1] = f"{blocks[-1]}{punct_match.group(1)}"
+                        rest = punct_match.group(2).strip()
+                        if rest:
+                            blocks.append(rest)
+                        continue
+                blocks.append(para)
 
         for match in combined_pattern.finditer(text):
             preceding = text[pos : match.start()].strip()
             if preceding:
-                # Split regular text paragraphs by double newline
-                paragraphs = [p.strip() for p in preceding.split("\n\n") if p.strip()]
-                blocks.extend(paragraphs)
+                _append_paragraphs(preceding)
 
-            # Atomic block (equation or table)
+            # Atomic block (display equation or table)
             block = match.group(0).strip()
             if block:
                 blocks.append(block)
@@ -309,8 +429,7 @@ class LatexDocParser:
 
         trailing = text[pos:].strip()
         if trailing:
-            paragraphs = [p.strip() for p in trailing.split("\n\n") if p.strip()]
-            blocks.extend(paragraphs)
+            _append_paragraphs(trailing)
 
         return blocks
 
@@ -353,6 +472,30 @@ class LatexDocParser:
                     and current_tokens >= min_chunk_tokens
                 ):
                     chunk_text = "\n\n".join(current_blocks)
+                    if not is_license_or_stub_text(chunk_text):
+                        chunks.append(
+                            DocumentChunk(
+                                chunk_id=uuid4(),
+                                doc_id=doc_id,
+                                doc_title=doc_title,
+                                source_uri=source_uri,
+                                market_scope=market_scope,
+                                section_heading=full_heading,
+                                verbatim_content=chunk_text,
+                                formulas_latex=MATH_BLOCK_PATTERN.findall(chunk_text),
+                                tables_markdown=LATEX_TABLE_PATTERN.findall(chunk_text),
+                                token_count_approx=current_tokens,
+                            )
+                        )
+                    current_blocks = [block]
+                    current_tokens = block_tokens
+                else:
+                    current_blocks.append(block)
+                    current_tokens += block_tokens
+
+            if current_blocks:
+                chunk_text = "\n\n".join(current_blocks)
+                if not is_license_or_stub_text(chunk_text):
                     chunks.append(
                         DocumentChunk(
                             chunk_id=uuid4(),
@@ -367,28 +510,6 @@ class LatexDocParser:
                             token_count_approx=current_tokens,
                         )
                     )
-                    current_blocks = [block]
-                    current_tokens = block_tokens
-                else:
-                    current_blocks.append(block)
-                    current_tokens += block_tokens
-
-            if current_blocks:
-                chunk_text = "\n\n".join(current_blocks)
-                chunks.append(
-                    DocumentChunk(
-                        chunk_id=uuid4(),
-                        doc_id=doc_id,
-                        doc_title=doc_title,
-                        source_uri=source_uri,
-                        market_scope=market_scope,
-                        section_heading=full_heading,
-                        verbatim_content=chunk_text,
-                        formulas_latex=MATH_BLOCK_PATTERN.findall(chunk_text),
-                        tables_markdown=LATEX_TABLE_PATTERN.findall(chunk_text),
-                        token_count_approx=current_tokens,
-                    )
-                )
 
         return chunks
 
@@ -424,7 +545,7 @@ class MarkdownTableChunker:
             nonlocal current_lines, current_tokens
             if current_lines:
                 chunk_text = "\n".join(current_lines).strip()
-                if chunk_text:
+                if chunk_text and not is_license_or_stub_text(chunk_text):
                     chunks.append(
                         DocumentChunk(
                             chunk_id=uuid4(),
@@ -520,9 +641,16 @@ class MarkdownTableChunker:
                     in_table = False
 
                 line_tokens = estimate_tokens(line)
-                if (
-                    current_tokens + line_tokens > max_chunk_tokens
-                    and current_tokens >= min_chunk_tokens
+                is_blank = not line.strip()
+                at_sentence_end = (
+                    bool(current_lines)
+                    and bool(current_lines[-1].strip())
+                    and current_lines[-1].rstrip().endswith((".", "!", "?", ":"))
+                )
+                if current_tokens >= min_chunk_tokens and (
+                    (is_blank and current_tokens + line_tokens > max_chunk_tokens - 80)
+                    or (at_sentence_end and current_tokens + line_tokens > max_chunk_tokens)
+                    or current_tokens + line_tokens > max_chunk_tokens + 150
                 ):
                     flush_chunk()
                 current_lines.append(line)
@@ -1173,6 +1301,7 @@ def chunk_custom_domain_document(
 
 
 __all__ = [
+    "DISPLAY_MATH_BLOCK_PATTERN",
     "LATEX_SECTION_PATTERN",
     "LATEX_TABLE_PATTERN",
     "MATH_BLOCK_PATTERN",
@@ -1190,8 +1319,10 @@ __all__ = [
     "ParsedSection",
     "PdfDocParser",
     "chunk_custom_domain_document",
+    "clean_latex_artifacts",
     "estimate_tokens",
     "extract_sgml_docbook_text",
+    "is_license_or_stub_text",
     "parse_asciidoc_to_markdown",
     "parse_rst_to_markdown",
     "strip_mdx_boilerplate",
