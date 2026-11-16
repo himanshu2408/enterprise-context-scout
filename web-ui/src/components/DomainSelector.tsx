@@ -7,16 +7,23 @@ import {
   ChevronRight,
   Code,
   Cpu,
+  Database,
   Layers,
   RefreshCw,
+  Ticket,
 } from "lucide-react";
 import { FEDERATED_ALL_DOMAIN_ID } from "../api/client";
-import { DomainInfo, SourceFilterType } from "../types/contracts";
+import {
+  DomainInfo,
+  FederatedOptionSpec,
+  SourceFilterType,
+} from "../types/contracts";
 
 export interface DomainSelectorProps {
   domains: DomainInfo[];
   selectedDomain: string;
   onSelectDomain: (domainId: string) => void;
+  federatedOption?: FederatedOptionSpec | null;
   sourceFilter?: SourceFilterType;
   loading?: boolean;
   error?: string | null;
@@ -28,6 +35,11 @@ export function matchesDomainSourceFilter(
   sourceFilter: SourceFilterType
 ): boolean {
   if (sourceFilter === "all") return true;
+  if (domain.modalities && domain.modalities.length > 0) {
+    if (sourceFilter === "code") return domain.modalities.includes("code");
+    if (sourceFilter === "wiki") return domain.modalities.includes("document");
+    if (sourceFilter === "jira") return domain.modalities.includes("issues");
+  }
   const descriptor =
     `${domain.domain_id} ${domain.display_name} ${domain.output_contract}`.toLowerCase();
   if (sourceFilter === "code") {
@@ -49,6 +61,9 @@ export function matchesDomainSourceFilter(
 }
 
 function describeDomain(domain: DomainInfo): string {
+  if (domain.description && domain.description.trim()) {
+    return domain.description;
+  }
   if (domain.primary_truth_source === "document") {
     return `Verified document grounding (${domain.output_contract})`;
   }
@@ -59,6 +74,7 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
   domains,
   selectedDomain,
   onSelectDomain,
+  federatedOption,
   sourceFilter = "all",
   loading = false,
   error = null,
@@ -81,6 +97,12 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
     }));
   };
 
+  const federatedLabel =
+    federatedOption?.display_name ?? "All Authorized Domains (Auto-Route)";
+  const federatedDesc =
+    federatedOption?.description ??
+    "Dynamically probes all authorized DomainPacks in PostgreSQL 17, routes to the best domain(s), or abstains at $0.";
+
   return (
     <section
       className="scope-section domain-scope-section"
@@ -91,7 +113,7 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
           <Layers size={15} className="icon-accent" />
           <h2 className="section-heading">Knowledge Domains</h2>
         </div>
-        <span className="meta-count">
+        <span className="meta-count tabular-num">
           {loading
             ? "Syncing..."
             : sourceFilter === "all"
@@ -125,7 +147,7 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
       <div className="domain-list">
         <button
           type="button"
-          className={`domain-row ${
+          className={`domain-row domain-row-federated ${
             selectedDomain === FEDERATED_ALL_DOMAIN_ID ? "domain-row-active" : ""
           }`}
           onClick={() => onSelectDomain(FEDERATED_ALL_DOMAIN_ID)}
@@ -134,13 +156,11 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
           <div className="domain-row-main">
             <div className="domain-name-row">
               <Layers size={14} className="icon-accent" />
-              <span className="domain-title">All Authorized Domains</span>
+              <span className="domain-title">{federatedLabel}</span>
             </div>
-            <span className="status-tag status-tag-info">Auto-route</span>
+            <span className="status-tag status-tag-info">Dynamic Route</span>
           </div>
-          <p className="domain-desc">
-            Federated search across allowed repositories, Confluence docs, and issues.
-          </p>
+          <p className="domain-desc">{federatedDesc}</p>
         </button>
 
         {loading && domains.length === 0 && (
@@ -159,7 +179,7 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
             >
               No standalone domain registered for filter{" "}
               <code>{sourceFilter}</code>; use{" "}
-              <strong>All Authorized Domains</strong> for federated retrieval.
+              <strong>{federatedLabel}</strong> for federated retrieval.
             </div>
           )}
 
@@ -167,6 +187,9 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
           const active = selectedDomain === domain.domain_id;
           const isOpen = Boolean(expandedMetrics[domain.domain_id]);
           const isDoc = domain.primary_truth_source === "document";
+          const cartridgeLabel = domain.lora_enabled
+            ? domain.lora_adapter_id
+            : "Base Gemma-4-26B";
 
           return (
             <div
@@ -198,14 +221,46 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
                   }`}
                 >
                   <CheckCircle2 size={11} />
-                  {domain.verified ? "Verified" : "Unverified"}
+                  {domain.verified ? "Verified" : "Base"}
                 </span>
               </div>
 
               <p className="domain-desc">{describeDomain(domain)}</p>
 
+              <div className="domain-telemetry-badges">
+                {domain.modalities.map((mod) => (
+                  <span
+                    key={mod}
+                    className="modality-pill"
+                    data-testid={`domain-modality-${domain.domain_id}-${mod}`}
+                  >
+                    {mod === "code" && <Code size={10} />}
+                    {mod === "document" && <BookOpen size={10} />}
+                    {mod === "issues" && <Ticket size={10} />}
+                    <span>{mod}</span>
+                  </span>
+                ))}
+                {(domain.doc_chunks_count > 0 || domain.ast_symbols_count > 0) && (
+                  <span
+                    className="pg-count-pill tabular-num"
+                    data-testid={`domain-counts-${domain.domain_id}`}
+                  >
+                    <Database size={10} />
+                    {domain.doc_chunks_count > 0 &&
+                      `${domain.doc_chunks_count.toLocaleString()} chunks`}
+                    {domain.doc_chunks_count > 0 &&
+                      domain.ast_symbols_count > 0 &&
+                      " · "}
+                    {domain.ast_symbols_count > 0 &&
+                      `${domain.ast_symbols_count.toLocaleString()} AST`}
+                  </span>
+                )}
+              </div>
+
               <div className="domain-meta-row">
-                <code className="domain-id-code">{domain.domain_id}</code>
+                <code className="domain-id-code" title={cartridgeLabel}>
+                  {domain.domain_id} · {cartridgeLabel}
+                </code>
                 <button
                   type="button"
                   className="btn-quiet-toggle"
@@ -218,7 +273,7 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
                     <ChevronRight size={12} />
                   )}
                   <Cpu size={11} />
-                  <span>Adapter telemetry</span>
+                  <span>Telemetry</span>
                 </button>
               </div>
 
@@ -228,29 +283,28 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
                   data-testid={`adapter-metrics-${domain.domain_id}`}
                 >
                   <div className="metric-kv">
-                    <span>Adapter</span>
-                    <code>{domain.lora_adapter_id}</code>
+                    <span>Cartridge</span>
+                    <code>{cartridgeLabel}</code>
                   </div>
                   <div className="metric-kv">
                     <span>Rank / Alpha</span>
                     <code>
-                      {domain.qlora_rank !== null &&
+                      {domain.lora_enabled &&
+                      domain.qlora_rank !== null &&
                       domain.qlora_alpha !== null
                         ? `r=${domain.qlora_rank}, α=${domain.qlora_alpha}`
-                        : "N/A (base)"}
+                        : "Base Gemma-4-26B"}
                     </code>
                   </div>
                   <div className="metric-kv">
-                    <span>Hot-Swap Latency</span>
-                    <code>
-                      {domain.hot_swap_latency_ms !== null
-                        ? `${domain.hot_swap_latency_ms} ms`
-                        : "N/A"}
+                    <span>PG17 Corpus</span>
+                    <code className="tabular-num">
+                      {domain.documents_count} docs · {domain.code_files_count} files
                     </code>
                   </div>
                   <div className="metric-kv">
                     <span>Training Loss</span>
-                    <code>
+                    <code className="tabular-num">
                       {domain.training_loss !== null
                         ? domain.training_loss.toFixed(4)
                         : "N/A"}

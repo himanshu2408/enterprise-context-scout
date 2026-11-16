@@ -5,6 +5,7 @@ import logging
 import math
 import re
 from collections import Counter
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 from uuid import UUID
@@ -95,6 +96,264 @@ def _apply_authority_score(base_rrf: float, authority_weight: float) -> float:
     if math.isclose(authority_weight, 1.0, rel_tol=0.0, abs_tol=1e-9):
         return base_rrf
     return round(min(1.0, max(0.0, base_rrf * authority_weight)), 6)
+
+
+@dataclass(frozen=True)
+class CalibratedRankedSearchHit(RankedSearchHit):
+    """RankedSearchHit enriched with real cosine, BM25, trigram, and calibrated scores."""
+
+    cosine_similarity: float = 0.0
+    bm25_score: float = 0.0
+    trigram_score: float = 0.0
+    raw_rrf_score: float = 0.0
+    calibrated_score: float = 0.0
+    domain_id: str = ""
+    lexical_coverage: float = 0.0
+    is_boilerplate: bool = False
+
+
+_CALIBRATION_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "between",
+        "by",
+        "compare",
+        "define",
+        "describe",
+        "do",
+        "does",
+        "empirical",
+        "explain",
+        "failure",
+        "findings",
+        "for",
+        "from",
+        "give",
+        "how",
+        "in",
+        "inspect",
+        "into",
+        "is",
+        "it",
+        "its",
+        "list",
+        "mean",
+        "means",
+        "mitigate",
+        "modes",
+        "of",
+        "on",
+        "or",
+        "reasons",
+        "stand",
+        "stands",
+        "that",
+        "the",
+        "this",
+        "to",
+        "top",
+        "use",
+        "used",
+        "using",
+        "what",
+        "when",
+        "where",
+        "which",
+        "why",
+        "with",
+        "work",
+        "works",
+    }
+)
+
+
+def _extract_substantive_tokens(query_text: str) -> list[str]:
+    raw = [t.lower() for t in re.findall(r"[A-Za-z0-9_]+", query_text)]
+    deduped = list(dict.fromkeys(t for t in raw if len(t) >= 2 and t not in _CALIBRATION_STOPWORDS))
+    return deduped[:16]
+
+
+def _is_license_boilerplate(title: str, section: str, content: str, query_text: str) -> bool:
+    q_low = query_text.lower()
+    if any(k in q_low for k in ("license", "apache", "mit", "copyright", "gpl", "bsd")):
+        return False
+    combined = f"{title} {section} {content[:900]}".lower()
+    if "apache license" in combined and "version 2.0" in combined:
+        return True
+    if "permission is hereby granted, free of charge" in combined and "mit license" in combined:
+        return True
+    return bool("gnu general public license" in combined and "terms and conditions" in combined)
+
+
+def _market_scope_aliases(
+    market_scope: MarketRegime | str | None,
+    domain_id: str | None = None,
+) -> str:
+    """Expand normalized market_scope codes into searchable tokens via active domain plugin."""
+    scope_val = _serialize_market_scope(market_scope) or ""
+    if not scope_val:
+        return ""
+    base_tokens = re.sub(r"[_-]+", " ", scope_val)
+    try:
+        from context_scout.plugins.registry import PluginRegistry
+
+        plugin = PluginRegistry.get_domain_plugin(domain_id) if domain_id else None
+        alias_fn = getattr(plugin, "get_market_scope_aliases", None) if plugin else None
+        if callable(alias_fn):
+            extra = str(alias_fn(scope_val) or "").strip()
+            if extra:
+                return f"{scope_val} {base_tokens} {extra}"
+    except (ImportError, KeyError, AttributeError, RuntimeError) as exc:
+        logger.debug("Plugin scope alias lookup skipped for %s: %s", domain_id, exc)
+    return f"{scope_val} {base_tokens}"
+
+
+def _infer_market_scopes_from_query(
+    query_text: str,
+    domain_id: str | None = None,
+) -> tuple[list[str], str, set[str]]:
+    """Delegate explicit query scope inference and alias lookup to the domain plugin."""
+    if not domain_id:
+        return [], "", set()
+    try:
+        from context_scout.plugins.registry import PluginRegistry
+
+        plugin = PluginRegistry.get_domain_plugin(domain_id)
+        if plugin is None:
+            return [], "", set()
+        infer_fn = getattr(plugin, "infer_explicit_market_scopes", None)
+        alias_fn = getattr(plugin, "get_market_scope_aliases", None)
+        map_fn = getattr(plugin, "get_market_scope_alias_map", None)
+        scopes = [str(s) for s in infer_fn(query_text)] if callable(infer_fn) else []
+        alias_parts = [str(alias_fn(s) or "") for s in scopes] if callable(alias_fn) else []
+        alias_str = " ".join(p for p in alias_parts if p).strip()
+        all_scope_tokens: set[str] = set()
+        if callable(map_fn):
+            raw_map = map_fn()
+            if isinstance(raw_map, dict):
+                for v in raw_map.values():
+                    all_scope_tokens.update(t.lower() for t in re.findall(r"[A-Za-z0-9_]+", str(v)))
+        return scopes, alias_str, all_scope_tokens
+    except (ImportError, KeyError, AttributeError, RuntimeError) as exc:
+        logger.debug("Plugin scope inference skipped for %s: %s", domain_id, exc)
+        return [], "", set()
+
+
+def _decompose_identifier_words(text: str) -> str:
+    """Split CamelCase and snake_case identifiers into space-separated lowercase words."""
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", spaced)
+    spaced = re.sub(r"([A-Za-z])(\d+)", r"\1 \2", spaced)
+    tokens = [t.lower() for t in re.split(r"[^A-Za-z0-9]+", spaced) if t]
+    return " ".join(tokens)
+
+
+def _token_matches_text(tok: str, text: str) -> bool:
+    """Match whole token or 5-char stem prefix for inflectional variants (domain-agnostic)."""
+    if re.search(rf"\b{re.escape(tok)}\b", text):
+        return True
+    if len(tok) >= 5 and tok in text:
+        return True
+    return bool(len(tok) >= 6 and re.search(rf"\b{re.escape(tok[:5])}[a-z]*\b", text))
+
+
+def _compute_calibrated_relevance(
+    *,
+    query_text: str,
+    title: str,
+    section: str,
+    content: str,
+    cosine_similarity: float,
+    bm25_score: float,
+    trigram_score: float,
+    raw_rrf_score: float,
+    authority_weight: float = 1.0,
+    is_code_symbol: bool = False,
+    market_scope: MarketRegime | str | None = None,
+    domain_id: str | None = None,
+    scope_mismatch: bool = False,
+) -> tuple[float, float, bool]:
+    """Compute calibrated [0, 1] relevance score, lexical coverage, and boilerplate flag."""
+    if _is_license_boilerplate(title, section, content, query_text):
+        return 0.0, 0.0, True
+
+    scope_aliases = _market_scope_aliases(market_scope, domain_id=domain_id)
+    tokens = _extract_substantive_tokens(query_text)
+    decomposed_title = _decompose_identifier_words(title) if is_code_symbol else ""
+    decomposed_sec = _decompose_identifier_words(section) if is_code_symbol else ""
+    haystack = (
+        f"{title} {decomposed_title} {section} {decomposed_sec} "
+        f"{scope_aliases} {content[:1800]}"
+    ).lower()
+    actual_title_hay = f"{title} {decomposed_title} {section} {decomposed_sec}".lower()
+    scope_hay = scope_aliases.lower()
+
+    if tokens:
+        matched = 0
+        title_matched = 0
+        scope_matched = 0
+        for tok in tokens:
+            if _token_matches_text(tok, haystack):
+                matched += 1
+            if _token_matches_text(tok, actual_title_hay):
+                title_matched += 1
+            if scope_hay and _token_matches_text(tok, scope_hay):
+                scope_matched += 1
+        lexical_coverage = matched / len(tokens)
+        title_coverage = title_matched / len(tokens)
+        scope_words = {w for w in re.findall(r"[a-z]{4,}", scope_hay)} if scope_hay else set()
+        explicit_scope_in_title = bool(
+            scope_words
+            and title_matched >= 1
+            and any(_token_matches_text(sw, actual_title_hay) for sw in scope_words)
+        )
+        scope_bonus = (0.10 if explicit_scope_in_title else 0.03) if scope_matched > 0 else 0.0
+    else:
+        lexical_coverage = 0.0
+        title_coverage = 0.0
+        scope_bonus = 0.0
+    if scope_mismatch and scope_bonus == 0.0:
+        scope_bonus = -0.06
+
+    cos_clamped = max(0.0, min(1.0, cosine_similarity))
+    bm25_norm = (
+        min(1.0, math.log1p(max(0.0, bm25_score)) / 2.2)
+        if not is_code_symbol
+        else min(1.0, max(0.0, bm25_score) / 0.35)
+    )
+    trgm_norm = min(1.0, max(0.0, trigram_score) / 0.45)
+
+    lex_strength = 0.45 * lexical_coverage + 0.25 * bm25_norm + 0.30 * title_coverage
+    if is_code_symbol and lexical_coverage > 0.0 and (bm25_score > 0.0 or trigram_score >= 0.20):
+        # Text embedders often score raw AST signatures lower on cosine than prose docs;
+        # blend lexical/BM25/trigram evidence proportionally without inflating zero-match hits.
+        eff_cos = max(cos_clamped, min(0.82, 0.85 * lex_strength))
+        calibrated = (
+            0.25 * eff_cos
+            + 0.45 * lex_strength
+            + 0.20 * trgm_norm
+            + 0.10 * max(0.0, min(1.0, raw_rrf_score))
+        )
+    else:
+        calibrated = (
+            0.50 * cos_clamped
+            + 0.30 * lex_strength
+            + 0.10 * trgm_norm
+            + 0.10 * max(0.0, min(1.0, raw_rrf_score))
+            + scope_bonus
+        )
+    if lexical_coverage == 0.0 and bm25_score <= 0.0:
+        calibrated = min(calibrated, cos_clamped * 0.68)
+
+    auth_factor = 0.85 + 0.15 * min(1.0, max(0.0, authority_weight))
+    calibrated = round(min(1.0, max(0.0, calibrated * auth_factor)), 6)
+    return calibrated, round(lexical_coverage, 4), False
 
 
 def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
@@ -1196,52 +1455,65 @@ class PostgresRLSRepository:
         market_scope: MarketRegime | str | None = None,
         top_k: int = 5,
         include_stale: bool = False,
+        min_calibrated_score: float = 0.0,
     ) -> list[RankedSearchHit]:
         vec_literal = "[" + ",".join(f"{v:.6f}" for v in query_embedding) + "]"
         market_str = _serialize_market_scope(market_scope)
         candidate_pool = max(100, top_k * 10)
         penalty_rank = candidate_pool + 1
-        filler_words = {
-            "what",
-            "does",
-            "stand",
-            "stands",
-            "mean",
-            "means",
-            "compare",
-            "list",
-            "top",
-            "explain",
-            "describe",
-            "inspect",
-            "give",
-            "how",
-            "when",
-            "where",
-            "why",
-            "which",
-            "mitigate",
-            "empirical",
-            "findings",
-            "reasons",
-            "failure",
-            "modes",
-        }
-        raw_tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9_]+", query_text)]
-        content_tokens = list(
-            dict.fromkeys(t for t in raw_tokens if len(t) >= 2 and t not in filler_words)
-        )[:16]
+        content_tokens = _extract_substantive_tokens(query_text)
         and_query = " ".join(content_tokens) if content_tokens else query_text.strip()
         or_query = " OR ".join(content_tokens) if content_tokens else query_text.strip()
         trgm_query = and_query or query_text.strip()
-        query = """
+        if market_str is None:
+            inferred_markets, inferred_alias_str, market_tokens_set = (
+                _infer_market_scopes_from_query(query_text, domain_id=domain_id)
+            )
+        else:
+            inferred_markets, inferred_alias_str, market_tokens_set = [], "", set()
+        non_market_tokens = [t for t in content_tokens if t not in market_tokens_set]
+        non_market_or = " OR ".join(non_market_tokens) if non_market_tokens else or_query
+        market_only_query = bool(inferred_markets and not non_market_tokens)
+        title_fts_expr = (
+            "setweight(to_tsvector('english', "
+            "COALESCE(doc_title, '') || ' ' || COALESCE(section_heading, '')), 'A')"
+        )
+        meta_scope_expr = (
+            "COALESCE(market_scope::text, '') || ' ' || "
+            "REPLACE(COALESCE(market_scope::text, ''), '_', ' ') || ' ' || "
+            "CASE WHEN sh.markets <> '{}'::text[] AND market_scope::text = ANY(sh.markets) "
+            "THEN sh.aliases ELSE '' END"
+        )
+        trgm_small_expr = (
+            "COALESCE(doc_title, '') || ' ' || COALESCE(section_heading, '') || ' ' || "
+            f"{meta_scope_expr} || ' ' || LEFT(verbatim_content, 1200)"
+        )
+        trgm_title_expr = (
+            "COALESCE(doc_title, '') || ' ' || COALESCE(section_heading, '') || ' ' || "
+            f"{meta_scope_expr}"
+        )
+        fts_market_clause = (
+            """
+                          OR (
+                              sh.markets <> '{}'::text[]
+                              AND market_scope::text = ANY(sh.markets)
+                          )
+            """
+            if market_only_query
+            else ""
+        )
+        query = f"""
             WITH domain_size AS (
                 SELECT COUNT(*) AS cnt
                 FROM doc_chunks
                 WHERE domain_id = %s
             ),
+            scope_hint AS (
+                SELECT %s::text[] AS markets, %s::text AS aliases, %s::text AS nm_or
+            ),
             fts_ranked AS (
                 SELECT chunk_id,
+                       fts_score,
                        ROW_NUMBER() OVER (
                            ORDER BY fts_score DESC, chunk_id
                        ) AS fts_rank
@@ -1250,13 +1522,35 @@ class PostgresRLSRepository:
                            (
                                ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) * 3.0
                                + ts_rank_cd(fts_doc, websearch_to_tsquery('english', %s))
+                               + ts_rank_cd(
+                                   {title_fts_expr},
+                                   websearch_to_tsquery('english', sh.nm_or)
+                               ) * 2.5
+                               + CASE
+                                   WHEN sh.markets <> '{{}}'::text[]
+                                        AND market_scope::text = ANY(sh.markets)
+                                        AND to_tsvector(
+                                            'english',
+                                            COALESCE(doc_title, '')
+                                            || ' ' || COALESCE(section_heading, '')
+                                        ) @@ websearch_to_tsquery('english', sh.nm_or)
+                                   THEN 0.50
+                                   WHEN sh.markets <> '{{}}'::text[]
+                                        AND market_scope::text = ANY(sh.markets)
+                                   THEN 0.25
+                                   ELSE 0.0
+                                 END
                            ) * authority_weight AS fts_score
                     FROM doc_chunks
+                    CROSS JOIN scope_hint sh
                     WHERE domain_id = %s
                       AND (%s::text IS NULL OR market_scope = %s)
                       AND authority_weight > 0.0
                       AND (%s OR NOT is_stale)
-                      AND fts_doc @@ websearch_to_tsquery('english', %s)
+                      AND (
+                          fts_doc @@ websearch_to_tsquery('english', %s)
+                          {fts_market_clause}
+                      )
                       AND (
                           (SELECT cnt FROM domain_size) <= 50
                           OR (
@@ -1271,6 +1565,7 @@ class PostgresRLSRepository:
             ),
             vec_ranked AS (
                 SELECT chunk_id,
+                       vec_dist,
                        ROW_NUMBER() OVER (
                            ORDER BY vec_dist ASC, chunk_id
                        ) AS vec_rank
@@ -1295,6 +1590,7 @@ class PostgresRLSRepository:
             ),
             trgm_ranked AS (
                 SELECT chunk_id,
+                       trgm_score,
                        ROW_NUMBER() OVER (
                            ORDER BY trgm_score DESC, chunk_id
                        ) AS trgm_rank
@@ -1303,19 +1599,26 @@ class PostgresRLSRepository:
                            (
                                word_similarity(
                                    %s,
-                                   doc_title || ' ' || section_heading
-                                   || ' ' || LEFT(verbatim_content, 1200)
+                                   CASE
+                                       WHEN (SELECT cnt FROM domain_size) <= 50
+                                       THEN {trgm_small_expr}
+                                       ELSE {trgm_title_expr}
+                                   END
                                ) * authority_weight
                            ) AS trgm_score
                     FROM doc_chunks
+                    CROSS JOIN scope_hint sh
                     WHERE domain_id = %s
                       AND (%s::text IS NULL OR market_scope = %s)
                       AND authority_weight > 0.0
                       AND (%s OR NOT is_stale)
                       AND word_similarity(
                               %s,
-                              doc_title || ' ' || section_heading
-                              || ' ' || LEFT(verbatim_content, 1200)
+                              CASE
+                                  WHEN (SELECT cnt FROM domain_size) <= 50
+                                  THEN {trgm_small_expr}
+                                  ELSE {trgm_title_expr}
+                              END
                           ) >= 0.20
                       AND (
                           (SELECT cnt FROM domain_size) <= 50
@@ -1340,7 +1643,15 @@ class PostgresRLSRepository:
                    COALESCE(f.fts_rank, %s) AS fts_rank,
                    COALESCE(v.vec_rank, %s) AS vec_rank,
                    COALESCE(t.trgm_rank, %s) AS trgm_rank,
-                   d.authority_weight
+                   d.authority_weight,
+                   COALESCE(f.fts_score, 0.0) AS fts_score,
+                   GREATEST(
+                       0.0, 1.0 - COALESCE(v.vec_dist, (d.embedding <=> %s::vector))
+                   ) AS vec_cos,
+                   COALESCE(t.trgm_score, 0.0) AS trgm_score,
+                   LEFT(d.verbatim_content, 1800) AS content_preview,
+                   (SELECT cnt FROM domain_size) AS domain_cnt,
+                   d.market_scope::text AS market_scope_val
             FROM candidate_ids c
             JOIN doc_chunks d ON d.chunk_id = c.chunk_id
             LEFT JOIN fts_ranked f ON d.chunk_id = f.chunk_id
@@ -1353,6 +1664,9 @@ class PostgresRLSRepository:
         """
         params = (
             domain_id,
+            inferred_markets,
+            inferred_alias_str,
+            non_market_or,
             and_query,
             or_query,
             domain_id,
@@ -1378,13 +1692,14 @@ class PostgresRLSRepository:
             penalty_rank,
             penalty_rank,
             penalty_rank,
+            vec_literal,
             domain_id,
             market_str,
             market_str,
             include_stale,
         )
         rows = conn.execute(query, params).fetchall()
-        scored_hits: list[tuple[float, float, float, RankedSearchHit]] = []
+        scored_hits: list[tuple[float, float, float, CalibratedRankedSearchHit]] = []
         for r in rows:
             chunk_id = UUID(str(r[0]))
             doc_title = str(r[1])
@@ -1393,19 +1708,73 @@ class PostgresRLSRepository:
             vec_rank = int(str(r[4]))
             trgm_rank = int(str(r[5]))
             auth_weight = float(str(r[6]))
+            fts_score = float(str(r[7]))
+            vec_cos = float(str(r[8]))
+            trgm_score = float(str(r[9]))
+            content_preview = str(r[10] or "")
+            domain_cnt = int(str(r[11]))
+            row_market_scope = str(r[12]) if r[12] is not None else None
+            is_scope_mismatch = bool(
+                market_str is None
+                and inferred_markets
+                and row_market_scope
+                and row_market_scope not in inferred_markets
+                and _market_scope_aliases(row_market_scope, domain_id=domain_id)
+            )
+
             base_rrf = compute_normalized_rrf(
                 [trgm_rank, fts_rank, vec_rank], num_modalities=3, k=60
             )
             weighted_score = _apply_authority_score(base_rrf, auth_weight)
-            hit = RankedSearchHit(
+            calibrated_score, lexical_cov, is_boiler = _compute_calibrated_relevance(
+                query_text=query_text,
+                title=doc_title,
+                section=section_heading,
+                content=content_preview,
+                cosine_similarity=vec_cos,
+                bm25_score=fts_score,
+                trigram_score=trgm_score,
+                raw_rrf_score=base_rrf,
+                authority_weight=auth_weight,
+                market_scope=row_market_scope,
+                domain_id=domain_id,
+                scope_mismatch=is_scope_mismatch,
+            )
+
+            if is_boiler and domain_cnt > 50:
+                continue
+            if domain_cnt > 50:
+                passes_floor = (
+                    (vec_cos >= 0.46 and (lexical_cov > 0.0 or not content_tokens))
+                    or (
+                        lexical_cov >= 0.34
+                        and (vec_cos >= 0.18 or fts_score > 0.0 or trgm_score >= 0.18)
+                    )
+                    or (fts_score >= 0.10 and lexical_cov > 0.0)
+                )
+                if not passes_floor:
+                    continue
+            if min_calibrated_score > 0.0 and calibrated_score < min_calibrated_score:
+                continue
+
+            hit = CalibratedRankedSearchHit(
                 item_id=chunk_id,
                 qualified_name_or_title=f"{doc_title} > {section_heading}",
                 normalized_rrf_score=weighted_score,
                 trigram_rank=trgm_rank,
                 bm25_rank=fts_rank,
                 vector_rank=vec_rank,
+                cosine_similarity=round(vec_cos, 6),
+                bm25_score=round(fts_score, 6),
+                trigram_score=round(trgm_score, 6),
+                raw_rrf_score=round(base_rrf, 6),
+                calibrated_score=calibrated_score,
+                domain_id=domain_id,
+                lexical_coverage=lexical_cov,
+                is_boilerplate=is_boiler,
             )
-            scored_hits.append((weighted_score, base_rrf * auth_weight, auth_weight, hit))
+            rank_key = calibrated_score if domain_cnt > 50 else weighted_score
+            scored_hits.append((rank_key, weighted_score, auth_weight, hit))
         scored_hits.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
         return [item[3] for item in scored_hits[:top_k]]
 
@@ -1416,28 +1785,42 @@ class PostgresRLSRepository:
         query_text: str,
         query_embedding: list[float],
         top_k: int = 5,
+        min_calibrated_score: float = 0.0,
     ) -> list[RankedSearchHit]:
         """Executes 3-way Hybrid RRF over PostgreSQL ast_symbols (GIN trigram + FTS + HNSW)."""
         vec_literal = "[" + ",".join(f"{v:.6f}" for v in query_embedding) + "]"
         candidate_pool = max(100, top_k * 10)
         penalty_rank = candidate_pool + 1
+        content_tokens = _extract_substantive_tokens(query_text)
+        fts_query = " OR ".join(content_tokens) if content_tokens else query_text.strip()
         query = """
-            WITH fts_ranked AS (
+            WITH domain_size AS (
+                SELECT COUNT(*) AS cnt
+                FROM ast_symbols
+                WHERE domain_id = %s
+            ),
+            fts_ranked AS (
                 SELECT symbol_id,
+                       fts_score,
                        ROW_NUMBER() OVER (
-                           ORDER BY ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) DESC,
-                                    symbol_id
+                           ORDER BY fts_score DESC, symbol_id
                        ) AS fts_rank
                 FROM (
-                    SELECT symbol_id, fts_doc
+                    SELECT symbol_id,
+                           (
+                               ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) * 2.0
+                               + ts_rank_cd(fts_doc, websearch_to_tsquery('english', %s))
+                           ) AS fts_score
                     FROM ast_symbols
                     WHERE domain_id = %s
-                    ORDER BY ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) DESC, symbol_id
+                      AND fts_doc @@ websearch_to_tsquery('english', %s)
+                    ORDER BY fts_score DESC, symbol_id
                     LIMIT %s
                 ) fts_sub
             ),
             vec_ranked AS (
                 SELECT symbol_id,
+                       vec_dist,
                        ROW_NUMBER() OVER (
                            ORDER BY vec_dist ASC, symbol_id
                        ) AS vec_rank
@@ -1451,6 +1834,7 @@ class PostgresRLSRepository:
             ),
             trgm_ranked AS (
                 SELECT symbol_id,
+                       trgm_score,
                        ROW_NUMBER() OVER (
                            ORDER BY trgm_score DESC, symbol_id
                        ) AS trgm_rank
@@ -1476,7 +1860,15 @@ class PostgresRLSRepository:
             SELECT s.symbol_id, s.qualified_name,
                    COALESCE(f.fts_rank, %s) AS fts_rank,
                    COALESCE(v.vec_rank, %s) AS vec_rank,
-                   COALESCE(t.trgm_rank, %s) AS trgm_rank
+                   COALESCE(t.trgm_rank, %s) AS trgm_rank,
+                   COALESCE(f.fts_score, 0.0) AS fts_score,
+                   GREATEST(
+                       0.0, 1.0 - COALESCE(v.vec_dist, (s.embedding <=> %s::vector))
+                   ) AS vec_cos,
+                   COALESCE(t.trgm_score, 0.0) AS trgm_score,
+                   s.signature_skeleton,
+                   LEFT(COALESCE(s.contextual_summary, ''), 600) AS summary_preview,
+                   (SELECT cnt FROM domain_size) AS domain_cnt
             FROM candidate_ids c
             JOIN ast_symbols s ON s.symbol_id = c.symbol_id
             LEFT JOIN fts_ranked f ON s.symbol_id = f.symbol_id
@@ -1485,9 +1877,11 @@ class PostgresRLSRepository:
             WHERE s.domain_id = %s;
         """
         params = (
-            query_text,
             domain_id,
             query_text,
+            fts_query,
+            domain_id,
+            fts_query,
             candidate_pool,
             vec_literal,
             domain_id,
@@ -1500,31 +1894,76 @@ class PostgresRLSRepository:
             penalty_rank,
             penalty_rank,
             penalty_rank,
+            vec_literal,
             domain_id,
         )
         rows = conn.execute(query, params).fetchall()
-        hits: list[RankedSearchHit] = []
+        hits: list[CalibratedRankedSearchHit] = []
         for r in rows:
             sym_id = UUID(str(r[0]))
             qual_name = str(r[1])
             fts_rank = int(str(r[2]))
             vec_rank = int(str(r[3]))
             trgm_rank = int(str(r[4]))
+            fts_score = float(str(r[5]))
+            vec_cos = float(str(r[6]))
+            trgm_score = float(str(r[7]))
+            sig_skeleton = str(r[8] or "")
+            summary_preview = str(r[9] or "")
+            domain_cnt = int(str(r[10]))
+
             norm_rrf = compute_normalized_rrf(
                 [trgm_rank, fts_rank, vec_rank], num_modalities=3, k=60
             )
+            calibrated_score, lexical_cov, _ = _compute_calibrated_relevance(
+                query_text=query_text,
+                title=qual_name,
+                section=sig_skeleton,
+                content=summary_preview,
+                cosine_similarity=vec_cos,
+                bm25_score=fts_score,
+                trigram_score=trgm_score,
+                raw_rrf_score=norm_rrf,
+                authority_weight=1.0,
+                is_code_symbol=True,
+            )
+            if domain_cnt > 50:
+                passes_floor = (
+                    (vec_cos >= 0.48 and (lexical_cov > 0.0 or trgm_score >= 0.25))
+                    or (
+                        lexical_cov >= 0.34
+                        and (vec_cos >= 0.18 or fts_score > 0.0 or trgm_score >= 0.18)
+                    )
+                    or (fts_score >= 0.10 and lexical_cov > 0.0)
+                    or (trgm_score >= 0.32 and lexical_cov > 0.0)
+                )
+                if not passes_floor:
+                    continue
+            if min_calibrated_score > 0.0 and calibrated_score < min_calibrated_score:
+                continue
+
             hits.append(
-                RankedSearchHit(
+                CalibratedRankedSearchHit(
                     item_id=sym_id,
                     qualified_name_or_title=qual_name,
                     normalized_rrf_score=norm_rrf,
                     trigram_rank=trgm_rank,
                     bm25_rank=fts_rank,
                     vector_rank=vec_rank,
+                    cosine_similarity=round(vec_cos, 6),
+                    bm25_score=round(fts_score, 6),
+                    trigram_score=round(trgm_score, 6),
+                    raw_rrf_score=round(norm_rrf, 6),
+                    calibrated_score=calibrated_score,
+                    domain_id=domain_id,
+                    lexical_coverage=lexical_cov,
                 )
             )
-        hits.sort(key=lambda h: h.normalized_rrf_score, reverse=True)
-        return hits[:top_k]
+        hits.sort(
+            key=lambda h: (h.calibrated_score, h.normalized_rrf_score),
+            reverse=True,
+        )
+        return list(hits[:top_k])
 
     def record_execution_telemetry(
         self, conn: Connection[tuple[object, ...]], record: ExecutionTelemetryRecord
@@ -2314,6 +2753,7 @@ class InMemoryRLSRepository:
         query_text: str,
         query_embedding: list[float],
         top_k: int = 5,
+        min_calibrated_score: float = 0.0,
     ) -> list[RankedSearchHit]:
         """Executes RLS-filtered 3-way Normalized RRF (trigram, BM25, cosine similarity)."""
         visible = self.list_visible_ast_symbols(principal, domain_id)
@@ -2321,59 +2761,116 @@ class InMemoryRLSRepository:
             return []
 
         q_lower = query_text.lower()
-        q_tokens = set(q_lower.split())
+        q_tokens = _extract_substantive_tokens(query_text) or list(set(q_lower.split()))
 
         # 1. Trigram / Substring similarity rank
+        trgm_raw = {
+            s.symbol_id: max(
+                _trigram_similarity(s.qualified_name, query_text),
+                _trigram_similarity(s.signature_skeleton, query_text),
+            )
+            for s in visible
+        }
         trgm_scored = sorted(
             visible,
             key=lambda s: (
                 1.0 if q_lower in s.qualified_name.lower() else 0.0,
-                sum(1 for t in q_tokens if t in s.qualified_name.lower()),
+                sum(
+                    1
+                    for t in q_tokens
+                    if _token_matches_text(
+                        t,
+                        f"{s.qualified_name.lower()} "
+                        f"{_decompose_identifier_words(s.qualified_name)}",
+                    )
+                ),
+                trgm_raw[s.symbol_id],
             ),
             reverse=True,
         )
         trgm_ranks = {s.symbol_id: idx + 1 for idx, s in enumerate(trgm_scored)}
 
-        # 2. BM25 / Lexical token overlap rank
+        # 2. BM25 / Lexical token overlap rank (with CamelCase/snake_case decomposition)
+        decomposed_cache = {
+            s.symbol_id: (
+                f"{s.qualified_name} {_decompose_identifier_words(s.qualified_name)} "
+                f"{s.signature_skeleton} {_decompose_identifier_words(s.signature_skeleton)} "
+                f"{s.contextual_summary}"
+            )
+            for s in visible
+        }
+        corpus_texts = [decomposed_cache[s.symbol_id] for s in visible]
+        bm25_model = BM25Okapi(corpus_texts)
+        bm25_raw_list = bm25_model.get_scores(query_text)
+        bm25_raw = {visible[i].symbol_id: float(bm25_raw_list[i]) for i in range(len(visible))}
         bm25_scored = sorted(
             visible,
-            key=lambda s: sum(
-                1
-                for t in q_tokens
-                if t
-                in (f"{s.qualified_name} {s.signature_skeleton} {s.contextual_summary}").lower()
+            key=lambda s: (
+                sum(
+                    1
+                    for t in q_tokens
+                    if _token_matches_text(t, decomposed_cache[s.symbol_id].lower())
+                ),
+                bm25_raw[s.symbol_id],
             ),
             reverse=True,
         )
         bm25_ranks = {s.symbol_id: idx + 1 for idx, s in enumerate(bm25_scored)}
 
         # 3. Dense Vector cosine similarity rank
+        vec_raw = {
+            s.symbol_id: _cosine_similarity(s.embedding, query_embedding) for s in visible
+        }
         vec_scored = sorted(
             visible,
-            key=lambda s: _cosine_similarity(s.embedding, query_embedding),
+            key=lambda s: vec_raw[s.symbol_id],
             reverse=True,
         )
         vec_ranks = {s.symbol_id: idx + 1 for idx, s in enumerate(vec_scored)}
 
-        hits: list[RankedSearchHit] = []
+        hits: list[CalibratedRankedSearchHit] = []
         for sym in visible:
             r_trgm = trgm_ranks[sym.symbol_id]
             r_bm25 = bm25_ranks[sym.symbol_id]
             r_vec = vec_ranks[sym.symbol_id]
             norm_rrf = compute_normalized_rrf([r_trgm, r_bm25, r_vec], num_modalities=3, k=60)
+            calibrated_score, lexical_cov, _ = _compute_calibrated_relevance(
+                query_text=query_text,
+                title=sym.qualified_name,
+                section=sym.signature_skeleton,
+                content=sym.contextual_summary or "",
+                cosine_similarity=vec_raw[sym.symbol_id],
+                bm25_score=bm25_raw[sym.symbol_id],
+                trigram_score=trgm_raw[sym.symbol_id],
+                raw_rrf_score=norm_rrf,
+                authority_weight=1.0,
+                is_code_symbol=True,
+            )
+            if min_calibrated_score > 0.0 and calibrated_score < min_calibrated_score:
+                continue
             hits.append(
-                RankedSearchHit(
+                CalibratedRankedSearchHit(
                     item_id=sym.symbol_id,
                     qualified_name_or_title=sym.qualified_name,
                     normalized_rrf_score=norm_rrf,
                     trigram_rank=r_trgm,
                     bm25_rank=r_bm25,
                     vector_rank=r_vec,
+                    cosine_similarity=round(vec_raw[sym.symbol_id], 6),
+                    bm25_score=round(bm25_raw[sym.symbol_id], 6),
+                    trigram_score=round(trgm_raw[sym.symbol_id], 6),
+                    raw_rrf_score=round(norm_rrf, 6),
+                    calibrated_score=calibrated_score,
+                    domain_id=domain_id,
+                    lexical_coverage=lexical_cov,
                 )
             )
 
-        hits.sort(key=lambda h: h.normalized_rrf_score, reverse=True)
-        return hits[:top_k]
+        hits.sort(
+            key=lambda h: (h.calibrated_score, h.normalized_rrf_score),
+            reverse=True,
+        )
+        return list(hits[:top_k])
 
     def search_doc_chunks_hybrid_rrf(
         self,
@@ -2384,6 +2881,7 @@ class InMemoryRLSRepository:
         market_scope: MarketRegime | str | None = None,
         top_k: int = 5,
         include_stale: bool = False,
+        min_calibrated_score: float = 0.0,
     ) -> list[RankedSearchHit]:
         """Executes RLS-filtered 3-way Normalized RRF over doc_chunks.
 
@@ -2402,9 +2900,13 @@ class InMemoryRLSRepository:
         if not visible:
             return []
 
-        # 1. Lexical BM25 rank over (header + heading + content)
+        # 1. Lexical BM25 rank over (title + market aliases + header + heading + content)
         corpus_texts = [
-            f"{d.contextual_header} {d.section_heading} {d.verbatim_content}" for d in visible
+            (
+                f"{d.doc_title} {_market_scope_aliases(d.market_scope, domain_id=domain_id)} "
+                f"{d.contextual_header} {d.section_heading} {d.verbatim_content}"
+            )
+            for d in visible
         ]
         bm25_model = BM25Okapi(corpus_texts)
         bm25_scores = bm25_model.get_scores(query_text)
@@ -2418,26 +2920,56 @@ class InMemoryRLSRepository:
 
         # 3. Trigram / Substring & Authority similarity rank
         trgm_scores = [
-            _trigram_similarity(d.verbatim_content, query_text) * d.authority_weight
+            _trigram_similarity(
+                f"{d.doc_title} {_market_scope_aliases(d.market_scope, domain_id=domain_id)} "
+                f"{d.section_heading} {d.verbatim_content}",
+                query_text,
+            )
+            * d.authority_weight
             for d in visible
         ]
         trgm_order = sorted(range(len(visible)), key=lambda i: trgm_scores[i], reverse=True)
         trgm_ranks = {visible[idx].chunk_id: rank + 1 for rank, idx in enumerate(trgm_order)}
 
-        scored_hits: list[tuple[float, float, float, RankedSearchHit]] = []
-        for d in visible:
+        scored_hits: list[tuple[float, float, float, CalibratedRankedSearchHit]] = []
+        for idx, d in enumerate(visible):
             r_trgm = trgm_ranks[d.chunk_id]
             r_bm25 = bm25_ranks[d.chunk_id]
             r_vec = vec_ranks[d.chunk_id]
             base_rrf = compute_normalized_rrf([r_trgm, r_bm25, r_vec], num_modalities=3, k=60)
             weighted_score = _apply_authority_score(base_rrf, d.authority_weight)
-            hit = RankedSearchHit(
+            calibrated_score, lexical_cov, is_boiler = _compute_calibrated_relevance(
+                query_text=query_text,
+                title=d.doc_title,
+                section=d.section_heading,
+                content=d.verbatim_content,
+                cosine_similarity=float(vec_scores[idx]),
+                bm25_score=float(bm25_scores[idx]),
+                trigram_score=float(trgm_scores[idx]),
+                raw_rrf_score=base_rrf,
+                authority_weight=d.authority_weight,
+                market_scope=d.market_scope,
+                domain_id=domain_id,
+            )
+            if is_boiler and len(visible) > 25:
+                continue
+            if min_calibrated_score > 0.0 and calibrated_score < min_calibrated_score:
+                continue
+            hit = CalibratedRankedSearchHit(
                 item_id=d.chunk_id,
                 qualified_name_or_title=f"{d.doc_title} > {d.section_heading}",
                 normalized_rrf_score=weighted_score,
                 trigram_rank=r_trgm,
                 bm25_rank=r_bm25,
                 vector_rank=r_vec,
+                cosine_similarity=round(float(vec_scores[idx]), 6),
+                bm25_score=round(float(bm25_scores[idx]), 6),
+                trigram_score=round(float(trgm_scores[idx]), 6),
+                raw_rrf_score=round(base_rrf, 6),
+                calibrated_score=calibrated_score,
+                domain_id=domain_id,
+                lexical_coverage=lexical_cov,
+                is_boilerplate=is_boiler,
             )
             scored_hits.append(
                 (weighted_score, base_rrf * d.authority_weight, d.authority_weight, hit)

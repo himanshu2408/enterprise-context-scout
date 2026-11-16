@@ -11,6 +11,8 @@ export type RoleType =
 
 export type SourceFilterType = "all" | "code" | "wiki" | "jira";
 
+export type DomainModality = "code" | "document" | "issues";
+
 export type MarketRegime =
   | "IN_NSE"
   | "DE_XETRA"
@@ -34,6 +36,8 @@ export type FrictionVerdict =
 
 export type ConfidenceBand = "high" | "medium" | "low";
 
+export type SufficiencyVerdict = "sufficient" | "partial" | "insufficient";
+
 export interface StageConfidence {
   stage: number;
   stage_name: string;
@@ -41,6 +45,74 @@ export interface StageConfidence {
   confidence_band: ConfidenceBand;
   signals: Record<string, number | string | boolean>;
   summary: string;
+}
+
+export interface RetrievalHitTrace {
+  item_id: string;
+  domain_id: string;
+  title: string;
+  modality: DomainModality;
+  cosine_similarity: number;
+  bm25_score: number;
+  trigram_score: number;
+  calibrated_score: number;
+  accepted: boolean;
+  rejection_reason?: string | null;
+}
+
+export interface DomainProbeTrace {
+  domain_id: string;
+  display_name: string;
+  authorized: boolean;
+  probed_hits: number;
+  accepted_hits: number;
+  rejected_hits: number;
+  max_cosine_similarity: number;
+  max_calibrated_score: number;
+  selected: boolean;
+  selection_reason: string;
+  top_hits: RetrievalHitTrace[];
+}
+
+export interface PreFlightCheckLedgerItem {
+  check_name: string;
+  passed: boolean;
+  observed: string;
+  threshold: string;
+  details: string;
+}
+
+export interface StageExecutionTrace {
+  stage: number;
+  stage_name: string;
+  status: "in_progress" | "completed" | "failed";
+  elapsed_ms?: number | null;
+  summary: string;
+  principal_id?: string | null;
+  principal_scopes?: string[];
+  guardrail_verdict?: string | null;
+  query_type?: string | null;
+  core_subject?: string | null;
+  required_facets?: string[];
+  target_domains?: string[];
+  domain_probes?: DomainProbeTrace[];
+  ast_one_hop_count?: number | null;
+  ast_two_hop_count?: number | null;
+  model_id?: string | null;
+  adapter_mode?: string | null;
+  chunks_fed?: number | null;
+  local_tokens_read?: number | null;
+  sufficiency_verdict?: SufficiencyVerdict | null;
+  grounded_facets?: number | null;
+  total_facets?: number | null;
+  checks?: PreFlightCheckLedgerItem[];
+  final_decision?:
+    | "handoff_ready"
+    | "abstain_zero_paid"
+    | "bounce_back"
+    | "blocked"
+    | null;
+  paid_tokens_spent?: number | null;
 }
 
 export type FacetCoverageStatus = "grounded" | "partial" | "not_found";
@@ -78,10 +150,15 @@ export interface AuthSessionResponse {
 export interface HealthHardwareProfile {
   device: string;
   unified_memory: string;
+  memory_gb?: number;
+  arch?: string;
+  os_name?: string;
   max_kv_tokens: number;
   quantization: string;
   lora_slots_allocated: number;
   lora_slots_capacity: number;
+  postgres_version?: string | null;
+  runtime_mode?: string;
 }
 
 export interface AdapterVerificationStatus {
@@ -104,7 +181,29 @@ export interface HealthResponse {
   registered_domains: string[];
   adapter_pool_status: Record<string, AdapterVerificationStatus>;
   hardware_profile: HealthHardwareProfile;
+  runtime_models?: Record<string, unknown>;
   timestamp: string;
+}
+
+export interface WorkspaceRolePreset {
+  role: RoleType;
+  label: string;
+  default_scopes: string[];
+}
+
+export interface PipelineStageSpec {
+  stage_id: number;
+  number: string;
+  title: string;
+  summary: string;
+  what_happens: string;
+  gate_condition: string;
+}
+
+export interface FederatedOptionSpec {
+  domain_id: string;
+  display_name: string;
+  description: string;
 }
 
 export interface CodeSlicePointer {
@@ -154,7 +253,13 @@ export interface DomainKnowledgeBrief {
   query_facets?: QueryFacetCoverage[];
   missing_or_unverified_aspects?: string[];
   completeness_ratio?: number;
-  synthesis_mode?: "live_qlora_json" | "deterministic_extractive_fallback" | string;
+  sufficiency_verdict?: SufficiencyVerdict;
+  missing_aspects?: string[];
+  synthesis_mode?:
+    | "live_qlora_json"
+    | "live_base_gemma4_json"
+    | "deterministic_extractive_fallback"
+    | string;
 }
 
 export interface QuantStrategyBrief {
@@ -171,6 +276,9 @@ export interface QuantStrategyBrief {
   market_specific_caveats: string[];
   known_failure_regimes: string[];
   verified_citations: DocCitation[];
+  sufficiency_verdict?: SufficiencyVerdict;
+  missing_aspects?: string[];
+  synthesis_mode?: string;
 }
 
 export interface PreFlightValidationReport {
@@ -202,6 +310,7 @@ export interface ContextPack {
   completeness_ratio?: number;
   synthesis_mode?: string;
   stage_confidences?: StageConfidence[];
+  stage_traces?: StageExecutionTrace[];
 }
 
 export interface InsufficientContextDiagnostic {
@@ -217,6 +326,7 @@ export interface InsufficientContextDiagnostic {
   query_facets?: QueryFacetCoverage[];
   missing_or_unverified_aspects?: string[];
   stage_confidences?: StageConfidence[];
+  stage_traces?: StageExecutionTrace[];
 }
 
 export interface ScoutTokenSavingsBreakdown {
@@ -242,6 +352,7 @@ export interface SSEStageUpdateData {
   details: string;
   message?: string;
   confidence?: StageConfidence | null;
+  stage_trace?: StageExecutionTrace | null;
   elapsed_ms?: number | null;
   timestamp: string;
 }
@@ -265,6 +376,7 @@ export interface SSEContextPackReadyData {
   pack: ContextPack | null;
   quant_strategy_spec?: QuantStrategyBrief | null;
   token_savings: ScoutTokenSavingsBreakdown;
+  stage_traces?: StageExecutionTrace[];
   timestamp: string;
 }
 
@@ -345,6 +457,15 @@ export interface ROIMetricsResponse {
 export interface DomainInfo {
   domain_id: string;
   display_name: string;
+  description: string;
+  modalities: DomainModality[];
+  sample_queries: string[];
+  lora_enabled: boolean;
+  default_scopes: string[];
+  doc_chunks_count: number;
+  documents_count: number;
+  code_files_count: number;
+  ast_symbols_count: number;
   base_model_id: string;
   lora_adapter_id: string;
   lora_adapter_path: string;
@@ -364,6 +485,11 @@ export interface BackendDomainManifest {
   base_model_id: string;
   lora_adapter_id: string;
   lora_adapter_path: string;
+  description?: string;
+  modalities?: DomainModality[];
+  sample_queries?: string[];
+  lora_enabled?: boolean;
+  default_scopes?: string[];
   authority_rules?: {
     primary_truth_source?: "code" | "document";
   };
@@ -373,6 +499,15 @@ export interface BackendDomainManifest {
 export interface BackendDomainDetail {
   domain_id: string;
   display_name: string;
+  description?: string;
+  modalities?: DomainModality[];
+  sample_queries?: string[];
+  lora_enabled?: boolean;
+  default_scopes?: string[];
+  doc_chunks_count?: number;
+  documents_count?: number;
+  code_files_count?: number;
+  ast_symbols_count?: number;
   manifest: BackendDomainManifest;
   adapter_verification: AdapterVerificationStatus;
   training_metrics: Record<string, unknown> | null;
@@ -383,11 +518,24 @@ export interface DomainsResponse {
   count: number;
 }
 
+export interface WorkspaceConfigResponse {
+  domains: BackendDomainDetail[];
+  federated_option: FederatedOptionSpec;
+  role_presets: WorkspaceRolePreset[];
+  pipeline_stages: PipelineStageSpec[];
+  source_filters: SourceFilterType[];
+  hardware_profile: HealthHardwareProfile;
+  database_connected: boolean;
+  database_status: string;
+  runtime_mode: string;
+  timestamp: string;
+}
+
 export interface ScoutQueryRequest {
   domain_id: string;
   query: string;
   trace_id?: string;
-  normalized_rrf_score?: number;
+  normalized_rrf_score?: number | null;
   max_bounce_backs?: number;
 }
 
@@ -402,4 +550,5 @@ export interface ScoutQueryResponse {
   quant_strategy_spec: QuantStrategyBrief | null;
   token_savings: ScoutTokenSavingsBreakdown;
   trace_attributes: Record<string, unknown>;
+  stage_traces?: StageExecutionTrace[];
 }

@@ -25,6 +25,7 @@ for f in files:
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
+        env={**os.environ, "SCOUT_EMBEDDING_DEVICE": "cpu"},
     )
     try:
         stdout_s, stderr_s = proc.communicate(timeout=timeout_s)

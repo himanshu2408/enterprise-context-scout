@@ -1,10 +1,16 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { KeyRound, Lock, RotateCcw, ShieldCheck, User } from "lucide-react";
-import { PrincipalContext, RoleType } from "../types/contracts";
+import {
+  PrincipalContext,
+  RoleType,
+  WorkspaceRolePreset,
+} from "../types/contracts";
 
 export interface RoleSwitcherProps {
   principal: PrincipalContext;
   onChangePrincipal: (next: PrincipalContext) => void;
+  rolePresets?: WorkspaceRolePreset[];
+  availableScopes?: string[];
   authStatus?: "authenticating" | "ready" | "error";
   authError?: string | null;
   onRetryAuth?: () => void;
@@ -17,51 +23,79 @@ export const ROLE_DEFAULT_SCOPES: Record<RoleType, string[]> = {
   compliance_officer: ["public_eng", "public_quant"],
 };
 
-const ROLE_OPTIONS: Array<{
-  role: RoleType;
-  label: string;
-  subtitle: string;
-}> = [
+const ROLE_SUBTITLES: Record<RoleType, string> = {
+  engineer: "Code, AST & Sandbox Patch",
+  quant_researcher: "Papers, Formulas & Specs",
+  product_manager: "Read-Only Architecture",
+  compliance_officer: "Audit & Grounding Checks",
+};
+
+const FALLBACK_ROLE_PRESETS: WorkspaceRolePreset[] = [
   {
     role: "engineer",
     label: "Engineer",
-    subtitle: "Code, AST & Sandbox Patch",
+    default_scopes: ROLE_DEFAULT_SCOPES.engineer,
   },
   {
     role: "quant_researcher",
-    label: "Quant / Research",
-    subtitle: "Papers, Formulas & Specs",
+    label: "Quant Researcher",
+    default_scopes: ROLE_DEFAULT_SCOPES.quant_researcher,
   },
   {
     role: "product_manager",
     label: "Product Manager",
-    subtitle: "Read-Only Architecture",
+    default_scopes: ROLE_DEFAULT_SCOPES.product_manager,
   },
   {
     role: "compliance_officer",
-    label: "Compliance",
-    subtitle: "Audit & Grounding Checks",
+    label: "Compliance Officer",
+    default_scopes: ROLE_DEFAULT_SCOPES.compliance_officer,
   },
-];
-
-const AVAILABLE_SCOPES: Array<{ scope: string; label: string }> = [
-  { scope: "public_eng", label: "public_eng" },
-  { scope: "public_quant", label: "public_quant" },
-  { scope: "restricted_risk", label: "restricted_risk" },
 ];
 
 export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
   principal,
   onChangePrincipal,
+  rolePresets,
+  availableScopes,
   authStatus = "ready",
   authError = null,
   onRetryAuth,
 }) => {
+  const presets = useMemo(
+    () =>
+      rolePresets && rolePresets.length > 0
+        ? rolePresets
+        : FALLBACK_ROLE_PRESETS,
+    [rolePresets]
+  );
+
+  const resolvedScopes = useMemo(() => {
+    const set = new Set<string>(["public_eng", "public_quant", "restricted_risk"]);
+    for (const preset of presets) {
+      for (const sc of preset.default_scopes) {
+        if (sc) set.add(sc);
+      }
+    }
+    for (const sc of availableScopes ?? []) {
+      if (sc) set.add(sc);
+    }
+    return Array.from(set);
+  }, [presets, availableScopes]);
+
+  const getDefaultScopesForRole = (role: RoleType): string[] => {
+    const matched = presets.find((p) => p.role === role);
+    if (matched && matched.default_scopes.length > 0) {
+      return [...matched.default_scopes];
+    }
+    return [...(ROLE_DEFAULT_SCOPES[role] ?? ["public_eng"])];
+  };
+
   const handleRoleSelect = (nextRole: RoleType): void => {
     onChangePrincipal({
       ...principal,
       role: nextRole,
-      allowed_scopes: [...ROLE_DEFAULT_SCOPES[nextRole]],
+      allowed_scopes: getDefaultScopesForRole(nextRole),
     });
   };
 
@@ -90,7 +124,7 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
   const handleResetDefaultScopes = (): void => {
     onChangePrincipal({
       ...principal,
-      allowed_scopes: [...ROLE_DEFAULT_SCOPES[principal.role]],
+      allowed_scopes: getDefaultScopesForRole(principal.role),
     });
   };
 
@@ -173,8 +207,10 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
         <div className="role-pills-block">
           <span className="field-label">Role Persona</span>
           <div className="role-grid">
-            {ROLE_OPTIONS.map((opt) => {
+            {presets.map((opt) => {
               const active = principal.role === opt.role;
+              const subtitle =
+                ROLE_SUBTITLES[opt.role] ?? opt.default_scopes.join(", ");
               return (
                 <button
                   key={opt.role}
@@ -183,10 +219,10 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
                   onClick={() => handleRoleSelect(opt.role)}
                   data-testid={`role-btn-${opt.role}`}
                   aria-pressed={active}
-                  title={opt.subtitle}
+                  title={subtitle}
                 >
                   <span className="role-btn-title">{opt.label}</span>
-                  <span className="role-btn-sub">{opt.subtitle}</span>
+                  <span className="role-btn-sub">{subtitle}</span>
                 </button>
               );
             })}
@@ -198,7 +234,7 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
         <div className="scope-rls-controls">
           <span className="field-label">RLS Scopes</span>
           <div className="scope-chips-row">
-            {AVAILABLE_SCOPES.map(({ scope, label }) => {
+            {resolvedScopes.map((scope) => {
               const selected = principal.allowed_scopes.includes(scope);
               return (
                 <button
@@ -209,7 +245,7 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
                   data-testid={`scope-chip-${scope}`}
                   aria-pressed={selected}
                 >
-                  {label}
+                  {scope}
                 </button>
               );
             })}

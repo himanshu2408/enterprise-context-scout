@@ -169,6 +169,11 @@ class DomainPackManifest(BaseModel):
         "QuantStrategyBrief",
         "DomainKnowledgeBrief",
     ]
+    description: str = Field(default="")
+    modalities: list[Literal["code", "document", "issues"]] = Field(default_factory=list)
+    sample_queries: list[str] = Field(default_factory=list)
+    lora_enabled: bool = Field(default=True)
+    default_scopes: list[str] = Field(default_factory=list)
 
     @field_validator("base_model_id", "contextualizer_model_id", "embedding_model_id")
     @classmethod
@@ -244,6 +249,79 @@ class StageConfidence(BaseModel):
         )
 
 
+class RetrievalHitTrace(BaseModel):
+    """Per-hit retrieval calibration metrics recorded in Stage 2 traces."""
+
+    item_id: str
+    domain_id: str
+    title: str
+    modality: Literal["code", "document", "issues"] = "document"
+    cosine_similarity: float = 0.0
+    bm25_score: float = 0.0
+    trigram_score: float = 0.0
+    calibrated_score: float = 0.0
+    accepted: bool = True
+    rejection_reason: str | None = None
+
+
+class DomainProbeTrace(BaseModel):
+    """Per-domain retrieval probing telemetry during Stage 2."""
+
+    domain_id: str
+    display_name: str = ""
+    authorized: bool = True
+    probed_hits: int = 0
+    accepted_hits: int = 0
+    rejected_hits: int = 0
+    max_cosine_similarity: float = 0.0
+    max_calibrated_score: float = 0.0
+    selected: bool = False
+    selection_reason: str = ""
+    top_hits: list[RetrievalHitTrace] = Field(default_factory=list)
+
+
+class PreFlightCheckLedgerItem(BaseModel):
+    """Single deterministic Stage 4 pre-flight check observation."""
+
+    check_name: str
+    passed: bool
+    observed: str
+    threshold: str
+    details: str = ""
+
+
+class StageExecutionTrace(BaseModel):
+    """Structured per-stage execution trace for SSE events and final packs."""
+
+    stage: int = Field(ge=1, le=4)
+    stage_name: str
+    status: Literal["in_progress", "completed", "failed"] = "completed"
+    elapsed_ms: float | None = None
+    summary: str = ""
+    principal_id: str | None = None
+    principal_scopes: list[str] = Field(default_factory=list)
+    guardrail_verdict: str | None = None
+    query_type: str | None = None
+    core_subject: str | None = None
+    required_facets: list[str] = Field(default_factory=list)
+    target_domains: list[str] = Field(default_factory=list)
+    domain_probes: list[DomainProbeTrace] = Field(default_factory=list)
+    ast_one_hop_count: int | None = None
+    ast_two_hop_count: int | None = None
+    model_id: str | None = None
+    adapter_mode: str | None = None
+    chunks_fed: int | None = None
+    local_tokens_read: int | None = None
+    sufficiency_verdict: Literal["sufficient", "partial", "insufficient"] | None = None
+    grounded_facets: int | None = None
+    total_facets: int | None = None
+    checks: list[PreFlightCheckLedgerItem] = Field(default_factory=list)
+    final_decision: Literal[
+        "handoff_ready", "abstain_zero_paid", "bounce_back", "blocked"
+    ] | None = None
+    paid_tokens_spent: int | None = None
+
+
 class QueryFacetCoverage(BaseModel):
     """Per-facet grounding status for multi-part, comparison, or Top-N queries."""
 
@@ -303,9 +381,13 @@ class DomainKnowledgeBrief(BaseModel):
     query_facets: list[QueryFacetCoverage] = Field(default_factory=list)
     missing_or_unverified_aspects: list[str] = Field(default_factory=list)
     completeness_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
-    synthesis_mode: Literal["live_qlora_json", "deterministic_extractive_fallback"] = (
-        "deterministic_extractive_fallback"
-    )
+    sufficiency_verdict: Literal["sufficient", "partial", "insufficient"] = "sufficient"
+    missing_aspects: list[str] = Field(default_factory=list)
+    synthesis_mode: Literal[
+        "live_qlora_json",
+        "live_base_gemma4_json",
+        "deterministic_extractive_fallback",
+    ] = "deterministic_extractive_fallback"
 
 
 def build_domain_knowledge_brief_prompt(
@@ -402,6 +484,13 @@ class QuantStrategyBrief(BaseModel):
     market_specific_caveats: list[str] = Field(min_length=1)
     known_failure_regimes: list[str] = Field(min_length=1)
     verified_citations: list[DocCitationSpan] = Field(min_length=1)
+    sufficiency_verdict: Literal["sufficient", "partial", "insufficient"] = "sufficient"
+    missing_aspects: list[str] = Field(default_factory=list)
+    synthesis_mode: Literal[
+        "live_qlora_json",
+        "live_base_gemma4_json",
+        "deterministic_extractive_fallback",
+    ] = "deterministic_extractive_fallback"
 
     @model_validator(mode="after")
     def _enforce_scepticism_gate(self) -> "QuantStrategyBrief":
@@ -554,6 +643,7 @@ class InsufficientContextDiagnostic(BaseModel):
     query_facets: list[QueryFacetCoverage] = Field(default_factory=list)
     missing_or_unverified_aspects: list[str] = Field(default_factory=list)
     stage_confidences: list[StageConfidence] = Field(default_factory=list)
+    stage_traces: list[StageExecutionTrace] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _sync_missing_items_and_symbols(self) -> "InsufficientContextDiagnostic":
@@ -615,11 +705,13 @@ class ImplementationContextPack(BaseModel):
     completeness_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
     synthesis_mode: Literal[
         "live_qlora_json",
+        "live_base_gemma4_json",
         "deterministic_extractive_fallback",
         "ast_extractive",
         "hybrid_federated",
     ] = "ast_extractive"
     stage_confidences: list[StageConfidence] = Field(default_factory=list)
+    stage_traces: list[StageExecutionTrace] = Field(default_factory=list)
 
     @field_validator("code_slices")
     @classmethod
@@ -719,6 +811,8 @@ __all__ = [
     "DocSpanPointer",
     "DomainConfig",
     "DomainKnowledgeBrief",
+    "DomainPackManifest",
+    "DomainProbeTrace",
     "ExecutionMode",
     "ExecutionTelemetryRecord",
     "ExtractiveDiscoveryPack",
@@ -732,14 +826,17 @@ __all__ = [
     "MissingItemRecord",
     "ModificationIntent",
     "PatchExecutionResult",
+    "PreFlightCheckLedgerItem",
     "PreFlightValidationReport",
     "PrincipalContext",
     "QuantStrategyBrief",
     "QueryFacetCoverage",
     "RawQuoteItem",
+    "RetrievalHitTrace",
     "RoleType",
     "ScoutConfig",
     "StageConfidence",
+    "StageExecutionTrace",
     "VerbatimCodeSlice",
     "build_domain_knowledge_brief_prompt",
     "compute_normalized_rrf",

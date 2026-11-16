@@ -310,14 +310,35 @@ class DeterministicSlicer:
         return re.findall(r"\w+|[^\w\s]", text)
 
     @staticmethod
-    def _strip_comments_and_strings(code: str, file_path: str = "") -> tuple[str, bool]:
+    def _is_prose_apostrophe(text: str, idx: int) -> bool:
+        """Return True when ``text[idx] == "'"`` is an English contraction/possessive apostrophe."""
+        if idx <= 0 or not text[idx - 1].isalnum():
+            return False
+        n = len(text)
+        if idx + 1 < n and text[idx + 1].isalnum():
+            return True
+        return text[idx - 1] in "sS" and (
+            idx + 1 == n or text[idx + 1].isspace() or text[idx + 1] in '.,;:!?)}]"-'
+        )
+
+    @staticmethod
+    def _strip_comments_and_strings(
+        code: str,
+        file_path: str = "",
+        *,
+        is_doc_prose: bool = False,
+    ) -> tuple[str, bool]:
         """Strips comments and string literals across Python, TypeScript, and C#.
+
+        When ``is_doc_prose=True``, prose hashtags (``#42``, ``C#``) and English
+        contraction/possessive apostrophes (``Brewer's``, ``O'Brien``, ``patients'``)
+        are treated as prose characters rather than comment/string delimiters.
 
         Returns:
             (sanitized_code, has_unclosed_quote_or_comment)
         """
         ext = file_path.lower()
-        is_hash_comment_lang = not ext.endswith(
+        is_hash_comment_lang = not is_doc_prose and not ext.endswith(
             (".ts", ".tsx", ".js", ".jsx", ".cs", ".java", ".c", ".cpp")
         )
 
@@ -389,8 +410,12 @@ class DeterministicSlicer:
                 i = j
                 chars.append(" ")
                 continue
-            # Single-quoted string literal '...'
+            # Single-quoted string literal '...' (or prose apostrophe in doc mode)
             if code[i] == "'":
+                if is_doc_prose and DeterministicSlicer._is_prose_apostrophe(code, i):
+                    chars.append(code[i])
+                    i += 1
+                    continue
                 j = i + 1
                 closed = False
                 while j < n:
@@ -398,6 +423,15 @@ class DeterministicSlicer:
                         j += 2
                         continue
                     if code[j] == "'":
+                        if (
+                            is_doc_prose
+                            and j > i + 1
+                            and code[j - 1].isalnum()
+                            and j + 1 < n
+                            and code[j + 1].isalnum()
+                        ):
+                            j += 1
+                            continue
                         closed = True
                         j += 1
                         break
@@ -435,8 +469,16 @@ class DeterministicSlicer:
 
         return "".join(chars), has_unclosed_quote
 
-    def _has_unclosed_delimiters(self, text: str, file_path: str = "") -> bool:
-        cleaned, unclosed_quote = self._strip_comments_and_strings(text, file_path=file_path)
+    def _has_unclosed_delimiters(
+        self,
+        text: str,
+        file_path: str = "",
+        *,
+        is_doc_prose: bool = False,
+    ) -> bool:
+        cleaned, unclosed_quote = self._strip_comments_and_strings(
+            text, file_path=file_path, is_doc_prose=is_doc_prose
+        )
         if unclosed_quote:
             return True
         # Strip standard half-open mathematical interval notation (e.g., "[0, T)", "(0, 1]")
@@ -459,6 +501,7 @@ class DeterministicSlicer:
         min_overlap_ratio: float = MIN_QUOTE_OVERLAP_RATIO,
         strict: bool = False,
         reject_absent_tokens: bool = False,
+        is_doc_prose: bool = False,
     ) -> QuoteVerificationResult:
         """Verifies quote against source text using NFKC normalization and token overlap.
 
@@ -473,7 +516,7 @@ class DeterministicSlicer:
         norm_source = self.normalize_text(source_text)
 
         # Check for unclosed syntax delimiters (truncated statements)
-        if self._has_unclosed_delimiters(norm_quote):
+        if self._has_unclosed_delimiters(norm_quote, is_doc_prose=is_doc_prose):
             res = QuoteVerificationResult(
                 is_valid=False,
                 token_overlap_ratio=0.5,
@@ -543,6 +586,7 @@ class DeterministicSlicer:
             source_text=chunk_content,
             min_overlap_ratio=min_overlap_ratio,
             reject_absent_tokens=reject_absent_tokens,
+            is_doc_prose=True,
         )
 
 

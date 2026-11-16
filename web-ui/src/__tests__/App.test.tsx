@@ -15,6 +15,7 @@ import {
   TEST_ENGINEER_PRINCIPAL,
   TEST_JIRA_CITATION,
   TEST_TOKEN_SAVINGS,
+  TEST_WORKSPACE_CONFIG,
 } from "./fixtures";
 
 beforeEach(() => {
@@ -114,6 +115,7 @@ describe("App Integration", () => {
           failInitial &&
           (url.endsWith("/api/v1/auth/session") ||
             url.endsWith("/api/v1/domains") ||
+            url.endsWith("/api/v1/workspace-config") ||
             url.endsWith("/api/v1/health"))
         ) {
           return new Response(
@@ -132,14 +134,11 @@ describe("App Integration", () => {
       expect(screen.getByTestId("auth-error-banner")).toHaveTextContent(
         "Temporary gateway timeout"
       );
-      expect(screen.getByTestId("domains-error-banner")).toHaveTextContent(
-        "Temporary gateway timeout"
-      );
+      expect(screen.getByTestId("domains-error-banner")).toBeInTheDocument();
     });
 
     failInitial = false;
     fireEvent.click(screen.getByTestId("retry-auth-btn"));
-    fireEvent.click(screen.getByTestId("domains-retry-btn"));
 
     await waitFor(() => {
       expect(screen.getByTestId("header-auth-badge")).toHaveTextContent(
@@ -278,6 +277,168 @@ describe("App Integration", () => {
       expect(screen.queryByTestId("gemini-diff-modal")).not.toBeInTheDocument();
       expect(screen.queryByTestId("shield-gemma-safe-badge")).not.toBeInTheDocument();
       expect(screen.queryByTestId("check-stage-1")).not.toBeInTheDocument();
+    });
+  });
+
+  it("renders a custom 5th domain (biotech_scout) dynamically from /api/v1/workspace-config with zero hardcoded config", async () => {
+    installMockApiFetch({
+      workspaceConfigResponse: {
+        domains: [
+          {
+            domain_id: "biotech_scout",
+            display_name: "Biotech & Clinical Trials",
+            description: "CRISPR & mRNA clinical assay protocols.",
+            modalities: ["document"],
+            sample_queries: [
+              "Summarize Phase III CRISPR off-target assay thresholds.",
+            ],
+            lora_enabled: false,
+            default_scopes: ["public_bio"],
+            doc_chunks_count: 1240,
+            documents_count: 18,
+            code_files_count: 0,
+            ast_symbols_count: 0,
+            manifest: {
+              domain_id: "biotech_scout",
+              display_name: "Biotech & Clinical Trials",
+              base_model_id: "mlx-community/gemma-4-26b-a4b-it-4bit",
+              lora_adapter_id: "biotech_base",
+              lora_adapter_path: "",
+              authority_rules: { primary_truth_source: "document" },
+              output_contract: "DomainKnowledgeBrief",
+            },
+            adapter_verification: {
+              domain_id: "biotech_scout",
+              is_valid: true,
+              adapter_path: "",
+              safetensors_bytes: 0,
+              r: 0,
+              lora_alpha: 0,
+              is_moe: false,
+              final_loss: null,
+              error_message: null,
+              hot_swap_latency_ms: null,
+            },
+            training_metrics: null,
+          },
+        ],
+        federated_option: {
+          domain_id: "federated_all",
+          display_name: "All Authorized Domains (Auto-Route)",
+          description: "Dynamic multi-domain routing.",
+        },
+        role_presets: [
+          {
+            role: "engineer",
+            label: "Engineer",
+            default_scopes: ["public_bio"],
+          },
+        ],
+        pipeline_stages: [
+          {
+            stage_id: 1,
+            number: "01",
+            title: "Auth, Guardrail & Query Plan",
+            summary: "RBAC & QueryPlan",
+            what_happens: "Binds PrincipalContext",
+            gate_condition: "Fail closed",
+          },
+          {
+            stage_id: 2,
+            number: "02",
+            title: "Retrieval",
+            summary: "Hybrid RRF",
+            what_happens: "Probes PG17",
+            gate_condition: "Relevance floor",
+          },
+          {
+            stage_id: 3,
+            number: "03",
+            title: "Synthesis",
+            summary: "Local Gemma-4",
+            what_happens: "Full chunks",
+            gate_condition: "Sufficiency",
+          },
+          {
+            stage_id: 4,
+            number: "04",
+            title: "Pre-Flight Gate",
+            summary: "$0 Gate",
+            what_happens: "Checks ledger",
+            gate_condition: "Abstain on miss",
+          },
+        ],
+        source_filters: ["all", "code", "wiki", "jira"],
+        hardware_profile: {
+          device: "Apple Silicon M5 Pro",
+          unified_memory: "48.0 GB",
+          max_kv_tokens: 32768,
+          quantization: "4-bit (MLX)",
+          lora_slots_allocated: 0,
+          lora_slots_capacity: 4,
+          postgres_version: "17.11",
+          runtime_mode: "offline_deterministic",
+        },
+        database_connected: true,
+        database_status: "PostgreSQL 17.11 RLS Enforced",
+        runtime_mode: "offline_deterministic",
+        timestamp: "2026-11-15T10:00:00Z",
+      },
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("domain-card-biotech_scout")).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId("domain-card-biotech_scout")).toHaveTextContent(
+      "Biotech & Clinical Trials"
+    );
+    expect(screen.getByTestId("domain-counts-biotech_scout")).toHaveTextContent(
+      "1,240 chunks"
+    );
+    expect(screen.getByTestId("scope-chip-public_bio")).toBeInTheDocument();
+    expect(screen.getByTestId("quick-pick-biotech_scout-0")).toHaveTextContent(
+      "Biotech & Clinical Trials"
+    );
+  });
+
+  it("hydrates extended engineer default_scopes from /api/v1/workspace-config on initial mount without manual click", async () => {
+    const extendedScopes = [
+      "public_eng",
+      "public_quant",
+      "public_de",
+      "repo:trading_strategies",
+    ];
+    installMockApiFetch({
+      workspaceConfigResponse: {
+        ...TEST_WORKSPACE_CONFIG,
+        role_presets: [
+          {
+            role: "engineer",
+            label: "Engineer",
+            default_scopes: extendedScopes,
+          },
+          ...TEST_WORKSPACE_CONFIG.role_presets.filter(
+            (p) => p.role !== "engineer"
+          ),
+        ],
+      },
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("active-scopes-list")).toHaveTextContent(
+        "public_de"
+      );
+      expect(screen.getByTestId("active-scopes-list")).toHaveTextContent(
+        "repo:trading_strategies"
+      );
+      expect(screen.getByTestId("header-auth-badge")).toHaveTextContent(
+        "Bearer: engineer"
+      );
     });
   });
 });

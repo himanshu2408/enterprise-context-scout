@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-11-07T22:58:50.181226+00:00",
+  "timestamp": "2026-11-16T08:47:24.479968+00:00",
   "all_passed": true,
   "metrics": {
     "zero_touch_sufficiency_rate": {
@@ -151,24 +151,24 @@
       "comparator": "==",
       "passed": true,
       "details": {
-        "total_code_slices": 49,
-        "valid_code_slices": 49,
-        "total_doc_citations": 18,
-        "valid_doc_citations": 18,
+        "total_code_slices": 75,
+        "valid_code_slices": 75,
+        "total_doc_citations": 144,
+        "valid_doc_citations": 144,
         "failures": []
       }
     },
     "frontier_token_savings_ratio": {
       "metric_id": "frontier_token_savings_ratio",
       "display_name": "Frontier Token Savings Ratio",
-      "measured_value": 99.19,
+      "measured_value": 87.37,
       "target_threshold": 80.0,
       "comparator": ">=",
       "passed": true,
       "details": {
-        "total_context_pack_tokens_sent": 28782,
-        "total_local_tokens_explored": 3557388,
-        "tokens_saved": 3528606
+        "total_context_pack_tokens_sent": 67871,
+        "total_local_tokens_explored": 537543,
+        "tokens_saved": 469672
       }
     },
     "rbac_zero_leakage_rate": {
@@ -523,7 +523,8 @@
             "guardrail_passed": false,
             "injection_signatures": [
               "ignore_previous_instructions",
-              "system_prompt_override"
+              "system_prompt_override",
+              "html_comment_directive_injection"
             ],
             "redacted_tokens": [],
             "sanitized_differs": true,
@@ -600,7 +601,8 @@
             "category": "indirect_github_issue",
             "guardrail_passed": false,
             "injection_signatures": [
-              "ignore_previous_instructions"
+              "ignore_previous_instructions",
+              "html_comment_directive_injection"
             ],
             "redacted_tokens": [],
             "sanitized_differs": true,
@@ -610,7 +612,7 @@
       }
     }
   },
-  "summary": "Milestone 6 Evaluation Pipeline: ALL GATES PASSED\nZero-Touch Sufficiency Rate: 100.0% (Target: 85.0%) -> PASS\nFile & Symbol Recall@5: 100.0% (Target: 90.0%) -> PASS\nVerbatim Citation Faithfulness: 100.0% (Target: 100.0%) -> PASS\nFrontier Token Savings Ratio: 99.19% (Target: 80.0%) -> PASS\nRBAC Zero-Leakage Rate: 100.0% (Target: 100.0%) -> PASS\nPrompt-Injection Block Rate: 100.0% (Target: 95.0%) -> PASS\nTotal duration: 7462ms, OpenTelemetry spans captured: 45",
-  "total_duration_ms": 7462,
+  "summary": "Milestone 6 Evaluation Pipeline: ALL GATES PASSED\nZero-Touch Sufficiency Rate: 100.0% (Target: 85.0%) -> PASS\nFile & Symbol Recall@5: 100.0% (Target: 90.0%) -> PASS\nVerbatim Citation Faithfulness: 100.0% (Target: 100.0%) -> PASS\nFrontier Token Savings Ratio: 87.37% (Target: 80.0%) -> PASS\nRBAC Zero-Leakage Rate: 100.0% (Target: 100.0%) -> PASS\nPrompt-Injection Block Rate: 100.0% (Target: 95.0%) -> PASS\nTotal duration: 17181ms, OpenTelemetry spans captured: 45",
+  "total_duration_ms": 17181,
   "telemetry_spans_count": 45
 }

@@ -24,3 +24,16 @@ authority_rules:
   require_transaction_cost_check: false
   freshness_half_life_days: 90
 output_contract: "ImplementationContextPack"
+description: "C++, Python, and Rust algorithmic trading execution engines, order routing, risk controls, and incident post-mortems."
+modalities:
+  - "code"
+  - "document"
+  - "issues"
+lora_enabled: true
+default_scopes:
+  - "public_eng"
+  - "repo:trading_strategies"
+sample_queries:
+  - "How does the order router enforce pre-trade risk limits before dispatching orders?"
+  - "Where are slippage and market impact costs calculated during execution?"
+  - "Why did the matching engine emit duplicate fills during reconnect recovery?"

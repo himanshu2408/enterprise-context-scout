@@ -13,7 +13,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from context_scout.agents.citation_gate import (
     DocumentCitationGate,
@@ -290,6 +290,32 @@ class FinanceDomainPlugin:
             target_markets.append(MarketRegime.US_NYSE_NASDAQ)
         return target_markets
 
+    def infer_explicit_market_scopes(self, prompt: str) -> list[str]:
+        """Infer explicit market scope values only when named in the query (no default)."""
+        q_low = prompt.lower()
+        inferred: list[str] = []
+        if re.search(r"\b(nse|in_nse|india|indian|nifty|bse|sensex)\b", q_low):
+            inferred.append(MarketRegime.INDIA_NSE_BSE.value)
+        if re.search(r"\b(xetra|de_xetra|dax|frankfurt|german|germany|eurex)\b", q_low):
+            inferred.append(MarketRegime.GERMANY_XETRA_DAX.value)
+        if re.search(r"\b(nyse|nasdaq|us_equity|sp500|cme|mnq)\b", q_low):
+            inferred.append(MarketRegime.US_NYSE_NASDAQ.value)
+        return inferred
+
+    def get_market_scope_alias_map(self) -> dict[str, str]:
+        """Return mapping from normalized MarketRegime code to searchable exchange/region terms."""
+        return {
+            MarketRegime.INDIA_NSE_BSE.value: "IN_NSE NSE India NIFTY BSE",
+            MarketRegime.GERMANY_XETRA_DAX.value: "DE_XETRA XETRA Germany DAX",
+            MarketRegime.US_NYSE_NASDAQ.value: "US_EQUITY NYSE NASDAQ US equity",
+        }
+
+    def get_market_scope_aliases(self, market_scope: MarketRegime | str | None) -> str:
+        """Expand a MarketRegime code into searchable geographic and exchange aliases."""
+        raw_val = market_scope.value if isinstance(market_scope, MarketRegime) else market_scope
+        key = str(raw_val or "").strip().upper()
+        return self.get_market_scope_alias_map().get(key, key)
+
     def synthesize_research_brief(
         self,
         user_prompt: str,
@@ -302,25 +328,67 @@ class FinanceDomainPlugin:
         target_markets = self.infer_market_scopes(user_prompt)
         top_chk = chunks[0] if chunks else None
 
-        assumed_bps: float | None = 12.0
-        if MarketRegime.INDIA_NSE_BSE in target_markets:
-            assumed_bps = 25.0
-
+        from context_scout.agents.intent_router import (
+            decompose_query_facets,
+            evaluate_facet_grounding,
+        )
         from context_scout.plugins.domains.data_engineering import (
             clean_brief_title,
             clean_display_text,
             is_slop_text,
         )
+        from context_scout.schemas.contracts import evaluate_market_friction_floor
 
         clean_top_title = (
-            clean_brief_title(str(top_chk.doc_title), default="Verified Empirical Research")
+            clean_brief_title(str(top_chk.doc_title), default="Retrieved Document Context")
             if top_chk is not None
-            else "Verified Empirical Research"
+            else "No Retrieved Document Context"
+        )
+        clean_sec = (
+            clean_brief_title(str(getattr(top_chk, "section_heading", "") or ""), default="")
+            if top_chk is not None
+            else ""
         )
         strategy_name = (
-            f"{clean_top_title} Synthesis" if top_chk else "Verified Empirical Research Strategy"
+            f"{clean_top_title} — {clean_sec}"
+            if top_chk is not None and clean_sec
+            else (f"{clean_top_title} Synthesis" if top_chk is not None else "Insufficient Context")
         )
-        signal_latex = r"E[Y \mid X] = f_{\theta}(\text{DomainContext})"
+
+        combined_text = "\n".join(str(getattr(c, "verbatim_content", "") or "") for c in chunks)
+        math_match = re.search(r"\$\$?([^\$\n]{4,160})\$\$?", combined_text)
+        signal_latex = (
+            math_match.group(1).strip()
+            if math_match
+            else r"\text{Derived strictly from retrieved evidence (no explicit equation in chunk)}"
+        )
+
+        # Parse quantitative metrics strictly from retrieved text; never fabricate numbers.
+        bps_match = re.search(
+            r"(\d+(?:\.\d+)?)\s*(?:bps|basis\s+points?)", combined_text, re.IGNORECASE
+        )
+        assumed_bps: float | None = float(bps_match.group(1)) if bps_match else None
+
+        sharpe_match = re.search(
+            r"Sharpe(?:\s+ratio)?\s*(?:of|=|:)?\s*(-?\d+(?:\.\d+)?)",
+            combined_text,
+            re.IGNORECASE,
+        )
+        sharpe_ratio: float | None = float(sharpe_match.group(1)) if sharpe_match else None
+
+        dd_match = re.search(
+            r"max(?:imum)?\s+drawdown\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)\s*%",
+            combined_text,
+            re.IGNORECASE,
+        )
+        max_dd_pct: float | None = float(dd_match.group(1)) if dd_match else None
+
+        period_match = re.search(
+            r"\b((?:19|20)\d{2}\s*[-\u2013]\s*(?:19|20)\d{2})\b", combined_text
+        )
+        sample_period_years: str = (
+            period_match.group(1).replace("\u2013", "-") if period_match else "unspecified"
+        )
 
         # Extract real empirical findings, caveats, and failure regimes from retrieved chunks
         extracted_rules: list[str] = []
@@ -393,143 +461,76 @@ class FinanceDomainPlugin:
             extracted_rules[:6]
             if extracted_rules
             else [
-                f"Grounded in verified citation from {clean_top_title}",
-                "Evaluate empirical signal calibration against out-of-sample regime shifts",
-                "Enforce strict risk limits and drawdown controls",
+                f"Retrieved evidence from {clean_top_title} "
+                "did not yield explicit entry/exit rules."
             ]
         )
         market_caveats = (
             extracted_caveats[:5]
             if extracted_caveats
             else [
-                "Requires empirical validation across historical market regimes",
-                "Transaction friction and execution latency must be evaluated",
+                "No explicit market friction or constraint clauses extracted from retrieved chunks."
             ]
         )
         failure_regimes = (
             extracted_failures[:5]
             if extracted_failures
             else [
-                "High volatility macroeconomic announcement windows",
-                "Flash liquidity withdrawal regimes",
+                "No explicit failure regime clauses extracted from retrieved chunks."
             ]
         )
-        sharpe_ratio: float | None = 2.0
-        max_dd_pct: float | None = 5.0
 
         if domain_id != DOMAIN_ID_FINANCE and top_chk is not None:
-            clean_sec = clean_brief_title(str(top_chk.section_heading or ""), default="")
-            strategy_name = (
-                f"{clean_top_title} — {clean_sec}"
-                if clean_sec
-                else f"{clean_top_title} Empirical Synthesis"
-            )
             target_markets = [MarketRegime.GLOBAL_MULTI]
-            sharpe_ratio = None
-            max_dd_pct = None
-            assumed_bps = None
-            combined_text = "\n".join(c.verbatim_content for c in chunks)
-            math_match = re.search(r"\$\$?([^\$\n]{4,120})\$\$?", combined_text)
-            if math_match:
-                signal_latex = math_match.group(1).strip()
-        elif "momentum" in prompt_lower:
-            if MarketRegime.INDIA_NSE_BSE in target_markets:
-                strategy_name = (
-                    "Indian Equity Physical & Cross-Sectional Momentum Strategy (NSE/NIFTY)"
-                )
-                signal_latex = (
-                    r"p^1_{t,k} = m_i \cdot v_{i,t} = "
-                    r"\frac{1}{\sigma_i} \cdot \ln\left(\frac{P_{i,t}}{P_{i,t-k}}\right)"
-                )
-                entry_exit_rules = [
-                    (
-                        "Rank NIFTY universe over lookback J (2-8 weeks) by "
-                        "volatility-scaled log return velocity R(t)"
-                    ),
-                    (
-                        "Enter top-decile physical momentum portfolio when expected "
-                        "alpha exceeds 25.0 bps friction hurdle"
-                    ),
-                    (
-                        "Rebalance on holding horizon K (1-8 weeks) with 15.0 bps "
-                        "NSE statutory STT and impact floor"
-                    ),
-                ]
-                market_caveats = [
-                    (
-                        "Indian NSE equity delivery incurs statutory 10-15 bps STT plus "
-                        "exchange and brokerage fees (>=15.0 bps floor)"
-                    ),
-                    (
-                        "High-frequency daily turnover (J, K in 1-7 days) degrades net "
-                        "Sharpe unless filtered by liquidity mass"
-                    ),
-                ]
-                failure_regimes = [
-                    "Sharp post-RBI policy or fiscal announcement momentum crash reversals",
-                    "High-volatility sideways dispersion regimes across mid-cap NSE constituents",
-                ]
-                sharpe_ratio = 1.84
-                max_dd_pct = 11.6
-            else:
-                strategy_name = "Volatility-Scaled Cross-Sectional & Intraday Momentum Strategy"
-                signal_latex = (
-                    r"\alpha^{\text{mom}}_t = \text{sign}(r_{t-k:t}) \cdot "
-                    r"\frac{|r_{t-k:t}|}{\hat{\sigma}_t} \cdot "
-                    r"\mathbb{I}(\text{Vol}_t > \text{Vol}_{\text{med}})"
-                )
-                entry_exit_rules = [
-                    (
-                        "Enter in direction of volatility-normalized return when "
-                        "signal exceeds +1.5 sigma"
-                    ),
-                    "Scale position size inversely with realized volatility sigma_t",
-                    "Exit at horizon K or trailing volatility stop-loss",
-                ]
-        elif any(k in prompt_lower for k in ("portfolio", "hrp", "optimization", "variance")):
-            strategy_name = "Hierarchical Risk Parity (HRP) & Minimum Variance Portfolio Allocation"
-            signal_latex = (
-                r"w_i^{\text{HRP}} = \frac{\tilde{w}_i}{\sum_j \tilde{w}_j}, "
-                r"\quad D_{i,j} = \sqrt{\frac{1}{2}(1 - \rho_{i,j})}"
-            )
-        elif any(k in prompt_lower for k in ("pair", "cointegration", "stat arb")):
-            strategy_name = "Cointegration-Driven Statistical Arbitrage Pair-Trading Strategy"
-            signal_latex = r"Z_t = \frac{(P_{1,t} - \beta P_{2,t}) - \mu_s}{\sigma_s}"
-        elif any(
-            k in prompt_lower
-            for k in ("reinforcement", "actor-critic", "finrl", "deep learning", "agent")
-        ):
-            strategy_name = (
-                "Risk-Sensitive Deep Reinforcement Learning (Actor-Critic / FinRL) Trading Strategy"
-            )
-            signal_latex = (
-                r"J(\theta) = \mathbb{E}_{\pi_\theta}\left[\sum_{t=0}^T \gamma^t "
-                r"\left(r_t - \lambda \cdot \text{CVaR}_\alpha(r_t) - "
-                r"c \cdot |\Delta w_t|\right)\right]"
-            )
-        elif any(k in prompt_lower for k in ("hawkes", "branching", "queue")):
-            strategy_name = "Hawkes Process & Order Flow Imbalance Microstructure Strategy"
-            signal_latex = (
-                r"\lambda_m(t) = \mu_m + \sum_{n=1}^M \int_0^t \alpha_{mn} "
-                r"e^{-\beta_{mn}(t-s)} dN_n(s)"
-            )
-        elif "ofi" in prompt_lower or "order flow" in prompt_lower:
-            strategy_name = "Order Flow Imbalance Alpha & Micro-Price Strategy"
 
+        plan = decompose_query_facets(user_prompt)
+        facet_covs = [
+            evaluate_facet_grounding(
+                facet,
+                doc_chunks=chunks,
+                code_slices=[],
+                domain_id=domain_id,
+            )
+            for facet in plan.facets
+        ]
+        grounded_count = sum(1 for cov, _ in facet_covs if cov.status == "grounded")
+        partial_count = sum(1 for cov, _ in facet_covs if cov.status == "partial")
+        missing_aspects = [msg for _, msg in facet_covs if msg]
+
+        if not chunks or not verified_citations or (grounded_count == 0 and partial_count == 0):
+            sufficiency_verdict: Literal["sufficient", "partial", "insufficient"] = "insufficient"
+        elif missing_aspects or partial_count > 0:
+            sufficiency_verdict = "partial"
+        else:
+            sufficiency_verdict = "sufficient"
+
+        if (
+            target_markets == [MarketRegime.GLOBAL_MULTI]
+            and assumed_bps is None
+            and sharpe_ratio is None
+        ):
+            friction_verdict = FrictionVerdict.REALISTIC_FRICTION
+        else:
+            friction_verdict = evaluate_market_friction_floor(target_markets, assumed_bps)
+
+        _ = prompt_lower
         return QuantStrategyBrief(
             strategy_name=strategy_name,
             target_markets=target_markets,
             is_intraday_futures=False,
             mathematical_signal_latex=signal_latex,
             entry_exit_rules=entry_exit_rules,
-            sample_period_years="2020-2024",
+            sample_period_years=sample_period_years,
             reported_sharpe_ratio=sharpe_ratio,
             reported_max_drawdown_pct=max_dd_pct,
             transaction_cost_bps_assumed=assumed_bps,
-            friction_verdict=FrictionVerdict.REALISTIC_FRICTION,
+            friction_verdict=friction_verdict,
             market_specific_caveats=market_caveats,
             known_failure_regimes=failure_regimes,
             verified_citations=verified_citations,
+            sufficiency_verdict=sufficiency_verdict,
+            missing_aspects=missing_aspects,
+            synthesis_mode="deterministic_extractive_fallback",
         )
 
     def extract_brief_metadata(self, brief: Any) -> dict[str, Any]:

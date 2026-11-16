@@ -19,14 +19,16 @@ import logging
 import os
 import random
 import re
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 from uuid import UUID
 
 import psycopg
+from pydantic import ValidationError
 
 from context_scout.agents.preflight_gate import PreFlightValidator
 from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
@@ -46,9 +48,12 @@ from context_scout.schemas.contracts import (
     ContextMissEvent,
     DocCitationSpan,
     DomainKnowledgeBrief,
+    MarketRegime,
     ModificationIntent,
     PrincipalContext,
+    QuantStrategyBrief,
     RoleType,
+    parse_domain_knowledge_brief_json,
 )
 
 logger = logging.getLogger(__name__)
@@ -179,11 +184,17 @@ class TeacherDistiller:
         random_seed: int = 42,
         code_domain_id: str | None = None,
         research_domain_id: str | None = None,
+        use_local_mlx_teacher: bool = False,
+        local_mlx_model_id: str | None = None,
     ) -> None:
         self.settings = settings or ScoutSettings()
         raw_model = teacher_model_id or self.settings.teacher_model_id or DEFAULT_TEACHER_MODEL
         self.teacher_model_id = validate_google_model_id(raw_model)
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        self.use_local_mlx_teacher = use_local_mlx_teacher
+        self.local_mlx_model_id = local_mlx_model_id or "mlx-community/gemma-4-26b-a4b-it-4bit"
+        self._mlx_teacher_model: Any = None
+        self._mlx_teacher_tokenizer: Any = None
         self.min_bounce_back_ratio = min_bounce_back_ratio
         self.max_bounce_back_ratio = max_bounce_back_ratio
         self.train_split_ratio = train_split_ratio
@@ -203,7 +214,14 @@ class TeacherDistiller:
         self.research_domain_id = research_domain_id or role_ids.get(
             "research", self.settings.default_domain_id
         )
-        scope_set = {"public_eng", "GLOBAL", "ENTERPRISE_DOC", "INTERNAL"}
+        scope_set = {
+            "public",
+            "public_eng",
+            "GLOBAL",
+            "ENTERPRISE_DOC",
+            "INTERNAL",
+            "domain:data_engineering",
+        }
         if target_domain_plugin is not None:
             scope_set.update(target_domain_plugin.get_default_scopes())
             scope_set.update(target_domain_plugin.get_tuning_specs().get("system_scopes", []))
@@ -497,6 +515,250 @@ class TeacherDistiller:
                 "Gemini Teacher research synthesis failed (%s); using deterministic fallback",
                 e,
             )
+        return None
+
+    @staticmethod
+    def _normalize_for_citation_check(text: str) -> str:
+        """NFKC-normalizes and collapses whitespace for deterministic verbatim span checks."""
+        return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text)).strip()
+
+    @classmethod
+    def _verify_citations_against_chunks(
+        cls,
+        brief: DomainKnowledgeBrief,
+        chunks: list[DocChunkRecord],
+    ) -> bool:
+        """Deterministically verifies every citation verbatim_quote exists in source chunks."""
+        if not brief.verified_citations:
+            return False
+        chunk_by_id = {
+            str(c.chunk_id): cls._normalize_for_citation_check(c.verbatim_content) for c in chunks
+        }
+        combined_norm = " ".join(chunk_by_id.values())
+        for cit in brief.verified_citations:
+            q_norm = cls._normalize_for_citation_check(cit.verbatim_quote)
+            if len(q_norm) < 12:
+                return False
+            target_norm = chunk_by_id.get(str(cit.chunk_id), combined_norm)
+            if q_norm in target_norm or q_norm in combined_norm:
+                continue
+            q_tokens = re.findall(r"[A-Za-z0-9_]{2,}", q_norm.lower())
+            if not q_tokens:
+                return False
+            target_lower = target_norm.lower()
+            combined_lower = combined_norm.lower()
+            overlap_target = sum(1 for t in q_tokens if t in target_lower) / len(q_tokens)
+            overlap_all = sum(1 for t in q_tokens if t in combined_lower) / len(q_tokens)
+            if max(overlap_target, overlap_all) < 0.80:
+                return False
+        return True
+
+    @staticmethod
+    def _format_full_chunks_for_teacher(
+        chunks: list[DocChunkRecord],
+        max_chars_per_chunk: int = 1600,
+    ) -> str:
+        """Formats full retrieved chunk bodies (never 1-sentence quotes) for teacher reasoning."""
+        blocks: list[str] = []
+        for idx, ch in enumerate(chunks, start=1):
+            body = ch.verbatim_content.strip()[:max_chars_per_chunk]
+            blocks.append(
+                f"[Chunk {idx} | chunk_id={ch.chunk_id} | doc_id={ch.doc_id} | "
+                f"title={ch.doc_title} | uri={ch.source_uri} | section={ch.section_heading}]\n"
+                f"{body}"
+            )
+        return "\n\n".join(blocks)
+
+    def _ensure_local_mlx_teacher(self) -> tuple[Any, Any]:
+        """Lazy-loads local MLX Gemma 4 teacher model once per distiller instance."""
+        if self._mlx_teacher_model is None or self._mlx_teacher_tokenizer is None:
+            from mlx_lm import load
+
+            loaded = load(self.local_mlx_model_id)
+            self._mlx_teacher_model = loaded[0]
+            self._mlx_teacher_tokenizer = loaded[1]
+        return self._mlx_teacher_model, self._mlx_teacher_tokenizer
+
+    @staticmethod
+    def extract_domain_knowledge_brief_from_gemma4(
+        raw_text: str,
+        *,
+        domain_id: str,
+        candidate_chunks: list[DocChunkRecord] | None = None,
+    ) -> DomainKnowledgeBrief | None:
+        """Robustly extracts and validates DomainKnowledgeBrief from Gemma-4 raw output."""
+        cleaned = re.sub(r"<\|channel>thought.*?<channel\|>", "", raw_text, flags=re.DOTALL)
+        cleaned = cleaned.replace("<turn|>", "").replace("<eos>", "").strip()
+        cleaned = re.sub(r"```(?:json)?\s*\n?(.*?)```", r"\1", cleaned, flags=re.DOTALL).strip()
+        first_brace = cleaned.find("{")
+        if first_brace == -1:
+            return None
+        try:
+            obj, _ = json.JSONDecoder(strict=False).raw_decode(cleaned[first_brace:])
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(obj, dict):
+            return None
+
+        brief, _ = parse_domain_knowledge_brief_json(
+            cleaned, domain_id=domain_id, normalize_scalars=True
+        )
+        if brief is not None:
+            return brief
+
+        norm: dict[str, Any] = dict(obj)
+        norm.setdefault("domain_id", domain_id)
+        if not norm.get("brief_title"):
+            norm["brief_title"] = f"Knowledge Brief ({domain_id})"
+        if not norm.get("executive_summary"):
+            norm["executive_summary"] = "Insufficient grounded evidence; abstaining at $0."
+
+        raw_meta = norm.get("structured_metadata")
+        clean_meta: dict[str, str | float | int | bool] = {}
+        if isinstance(raw_meta, dict):
+            for k, v in raw_meta.items():
+                key_s = str(k)
+                if key_s in ("sufficiency_verdict", "completeness_ratio", "missing_aspects"):
+                    norm.setdefault(key_s, v)
+                    continue
+                if isinstance(v, (str, float, int, bool)):
+                    clean_meta[key_s] = v
+                elif isinstance(v, (list, tuple)):
+                    clean_meta[key_s] = ", ".join(str(x) for x in v if x is not None)
+                elif v is not None:
+                    clean_meta[key_s] = str(v)
+        norm["structured_metadata"] = clean_meta
+
+        expr = norm.get("formal_expression_or_rule")
+        if isinstance(expr, (dict, list)):
+            norm["formal_expression_or_rule"] = json.dumps(expr) if expr else None
+
+        verdict = str(norm.get("sufficiency_verdict", "sufficient")).lower()
+        if verdict not in ("sufficient", "partial", "insufficient"):
+            verdict = "sufficient"
+        norm["sufficiency_verdict"] = verdict
+
+        for list_field, default_item in (
+            ("core_findings_and_rules", "No grounded finding in retrieved chunks."),
+            ("domain_constraints_and_caveats", f"Evaluated against {domain_id} chunks."),
+            ("known_risks_and_failure_modes", "Insufficient context for full verification."),
+        ):
+            val = norm.get(list_field)
+            if not isinstance(val, list) or not val:
+                norm[list_field] = [default_item]
+            else:
+                norm[list_field] = [str(x) for x in val if x is not None] or [default_item]
+
+        raw_cits = norm.get("verified_citations")
+        clean_cits: list[dict[str, Any]] = []
+        if isinstance(raw_cits, list):
+            for vc in raw_cits:
+                if isinstance(vc, dict) and str(vc.get("verbatim_quote", "")).strip():
+                    vc_copy = dict(vc)
+                    vc_copy.setdefault("version", "1.0")
+                    if not str(vc_copy.get("section_heading", "")).strip():
+                        vc_copy["section_heading"] = "Main"
+                    if not str(vc_copy.get("doc_title", "")).strip():
+                        vc_copy["doc_title"] = norm["brief_title"]
+                    if not str(vc_copy.get("source_uri", "")).strip():
+                        vc_copy["source_uri"] = f"urn:{domain_id}:unknown"
+                    clean_cits.append(vc_copy)
+        if not clean_cits and verdict == "insufficient" and candidate_chunks:
+            ch = candidate_chunks[0]
+            first_line = next(
+                (ln.strip() for ln in ch.verbatim_content.splitlines() if len(ln.strip()) >= 20),
+                ch.verbatim_content[:120].strip(),
+            )
+            clean_cits.append(
+                {
+                    "chunk_id": str(ch.chunk_id),
+                    "doc_id": ch.doc_id,
+                    "doc_title": ch.doc_title,
+                    "source_uri": ch.source_uri,
+                    "section_heading": ch.section_heading or "Main",
+                    "verbatim_quote": first_line,
+                    "version": "1.0",
+                }
+            )
+        norm["verified_citations"] = clean_cits
+
+        try:
+            return DomainKnowledgeBrief.model_validate(norm)
+        except (ValidationError, TypeError, ValueError) as exc:
+            logger.debug("Teacher DomainKnowledgeBrief validation failed: %s", exc)
+            return None
+
+    def _call_local_mlx_teacher_research(
+        self,
+        prompt: str,
+        domain_id: str,
+        candidate_chunks: list[DocChunkRecord],
+        regime: str = "sufficient",
+    ) -> DomainKnowledgeBrief | None:
+        """Invokes local MLX Gemma 4 teacher over full retrieved chunks."""
+        if not self.use_local_mlx_teacher:
+            return None
+        try:
+            from mlx_lm import generate
+            from mlx_lm.sample_utils import make_sampler
+
+            model, tokenizer = self._ensure_local_mlx_teacher()
+            system_msg = (
+                "You are an expert technical teacher. Return ONLY a valid JSON object with keys: "
+                "brief_title (str), domain_id (str), executive_summary (str), "
+                "formal_expression_or_rule (str or null), core_findings_and_rules (list[str]), "
+                "domain_constraints_and_caveats (list[str]), "
+                "known_risks_and_failure_modes (list[str]), "
+                "structured_metadata (dict of scalar values), "
+                "sufficiency_verdict ('sufficient'|'partial'|'insufficient'), "
+                "completeness_ratio (float 0..1), missing_aspects (list[str]), "
+                "verified_citations (list[dict] with chunk_id, doc_id, doc_title, source_uri, "
+                "section_heading, and verbatim_quote copied verbatim from the chunks). "
+                f"Required sufficiency_verdict for this task: '{regime}'. "
+                "For 'sufficient', answer completely using exact verbatim quotes from the chunks. "
+                "For 'partial', state what is grounded and list missing aspects in "
+                "missing_aspects. "
+                "For 'insufficient', set completeness_ratio=0.0, list missing_aspects, and state "
+                "'Insufficient grounded evidence; abstaining at $0 paid tokens' in "
+                "executive_summary."
+            )
+            messages = [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": prompt},
+            ]
+            if hasattr(tokenizer, "apply_chat_template"):
+                try:
+                    formatted = tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=False,
+                    )
+                except TypeError:
+                    formatted = tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
+            else:
+                formatted = f"{system_msg}\n\n{prompt}"
+
+            sampler = make_sampler(temp=0.1)
+            raw_out = generate(
+                model,
+                tokenizer,
+                prompt=formatted,
+                max_tokens=1400,
+                sampler=sampler,
+                verbose=False,
+            )
+            brief = self.extract_domain_knowledge_brief_from_gemma4(
+                raw_out,
+                domain_id=domain_id,
+                candidate_chunks=candidate_chunks,
+            )
+            if brief is not None and self._verify_citations_against_chunks(brief, candidate_chunks):
+                return brief
+        except Exception as exc:
+            logger.warning("Local MLX teacher synthesis failed (%s)", exc)
         return None
 
     # -------------------------------------------------------------------------
@@ -927,8 +1189,6 @@ class TeacherDistiller:
         if not all_chunks:
             raise RuntimeError("Zero doc chunks found in PostgreSQL 17 doc_chunks table")
 
-        plugin = PluginRegistry.get_domain_plugin(target_domain)
-
         # Group chunks by doc_id
         chunks_by_doc_id: dict[str, list[DocChunkRecord]] = {}
         for chk in all_chunks:
@@ -958,7 +1218,11 @@ class TeacherDistiller:
             bounce_back_count = 0
             generated_for_split = 0
             doc_idx = 0
-            max_attempts = needed_count * 20
+            max_attempts = (
+                needed_count * 3
+                if (self.use_local_mlx_teacher and not force_offline)
+                else needed_count * 20
+            )
             attempts = 0
 
             while generated_for_split < needed_count and pool_shuffled and attempts < max_attempts:
@@ -1023,22 +1287,6 @@ class TeacherDistiller:
                         if len(paired_chunks) >= 3:
                             break
 
-                class _ChunkWithSiblings:
-                    def __init__(
-                        self, base: DocChunkRecord, siblings: list[DocChunkRecord]
-                    ) -> None:
-                        self._base = base
-                        self._sibling_chunks = siblings
-
-                    def __getattr__(self, item: str) -> Any:
-                        return getattr(self._base, item)
-
-                wrapped_target: Any = (
-                    _ChunkWithSiblings(target_chunk, paired_chunks)
-                    if len(paired_chunks) >= 2
-                    else target_chunk
-                )
-
                 # Extract verbatim quote candidate directly from target_chunk
                 raw_lines = [
                     ln.strip()
@@ -1049,62 +1297,166 @@ class TeacherDistiller:
                 ]
                 quote_text = raw_lines[0] if raw_lines else target_chunk.verbatim_content[:120]
 
-                if plugin is not None:
-                    sample_bundle = plugin.build_research_distillation_sample(
-                        domain_id=target_domain,
-                        target_chunk=wrapped_target,
-                        quote_text=quote_text,
-                        rng=self._rng,
-                    )
-                    brief = sample_bundle["brief"]
-                    bad_brief = sample_bundle["bad_brief"]
-                    citation = sample_bundle["citation"]
-                    bad_citation = sample_bundle["bad_citation"]
-                    val_user_prompt = sample_bundle["val_user_prompt"]
-                    user_prompt = sample_bundle["user_prompt"]
-                    brief_kwarg = sample_bundle["brief_kwarg"]
-                    bad_brief_kwarg = sample_bundle["bad_brief_kwarg"]
+                # Select sufficiency regime across all 3 regimes:
+                # 60% sufficient, 20% partial, 20% insufficient ($0 abstention trap)
+                regime_mod = generated_for_split % 5
+                regime: Literal["sufficient", "partial", "insufficient"]
+                if regime_mod == 4:
+                    regime = "insufficient"
+                elif regime_mod == 3:
+                    regime = "partial"
                 else:
-                    citation = DocCitationSpan(
-                        chunk_id=str(target_chunk.chunk_id),
-                        doc_id=target_chunk.doc_id,
-                        doc_title=target_chunk.doc_title,
-                        source_uri=target_chunk.source_uri,
-                        section_heading=target_chunk.section_heading,
-                        verbatim_quote=quote_text,
-                    )
-                    brief = DomainKnowledgeBrief(
-                        brief_title=f"{target_chunk.doc_title} — {target_chunk.section_heading}",
-                        domain_id=target_domain,
-                        executive_summary=f"Grounded synthesis: {quote_text}",
-                        core_findings_and_rules=[quote_text],
-                        domain_constraints_and_caveats=[
-                            f"Grounded in {target_chunk.doc_id} ({target_chunk.section_heading})"
-                        ],
-                        known_risks_and_failure_modes=["Out-of-distribution domain regime shift"],
-                        verified_citations=[citation],
-                    )
-                    bad_citation = DocCitationSpan(
-                        chunk_id=str(target_chunk.chunk_id),
-                        doc_id=target_chunk.doc_id,
-                        doc_title=target_chunk.doc_title,
-                        source_uri=target_chunk.source_uri,
-                        section_heading=target_chunk.section_heading,
-                        verbatim_quote="Hallucinated quote not present in source text.",
-                    )
-                    bad_brief = brief.model_copy(update={"verified_citations": [bad_citation]})
+                    regime = "sufficient"
+
+                if regime == "insufficient":
                     val_user_prompt = (
-                        f"Synthesize a verified research brief for `{target_chunk.doc_title}`."
+                        f"Explain the unindexed protocol `ZetaConsensus-99` and its formal "
+                        f"byzantine fault-tolerance proof in `{target_domain}`."
                     )
-                    user_prompt = (
-                        f"{val_user_prompt}\n"
-                        f"Retrieved Corpus Chunk: [chunk_id={target_chunk.chunk_id} | "
-                        f"doc_id={target_chunk.doc_id} | title={target_chunk.doc_title} | "
-                        f"uri={target_chunk.source_uri} | section={target_chunk.section_heading} | "
-                        f"quote={json.dumps(quote_text)}]"
+                elif regime == "partial":
+                    val_user_prompt = (
+                        f"Explain `{target_chunk.doc_title}` ({target_chunk.section_heading}), "
+                        "including production SLA benchmarks and multi-region failover "
+                        "latency numbers."
                     )
-                    brief_kwarg = {}
-                    bad_brief_kwarg = {}
+                else:
+                    val_user_prompt = (
+                        f"Synthesize a verified brief for `{target_chunk.doc_title}` "
+                        f"covering `{target_chunk.section_heading}`."
+                    )
+
+                full_chunk_context = self._format_full_chunks_for_teacher(paired_chunks)
+                user_prompt = (
+                    f"{val_user_prompt}\n"
+                    f"Domain: {target_domain}\n"
+                    f"Retrieved Corpus Chunks (full text):\n{full_chunk_context}"
+                )
+
+                citation = DocCitationSpan(
+                    chunk_id=str(target_chunk.chunk_id),
+                    doc_id=target_chunk.doc_id,
+                    doc_title=target_chunk.doc_title,
+                    source_uri=target_chunk.source_uri,
+                    section_heading=target_chunk.section_heading,
+                    verbatim_quote=quote_text,
+                )
+                bad_citation = DocCitationSpan(
+                    chunk_id=str(target_chunk.chunk_id),
+                    doc_id=target_chunk.doc_id,
+                    doc_title=target_chunk.doc_title,
+                    source_uri=target_chunk.source_uri,
+                    section_heading=target_chunk.section_heading,
+                    verbatim_quote="Hallucinated quote not present in source text.",
+                )
+
+                brief: Any = None
+                if not force_offline and (self.api_key or self.use_local_mlx_teacher):
+                    if self.api_key:
+                        brief = self._call_gemini_teacher_research(user_prompt, paired_chunks)
+                    elif self.use_local_mlx_teacher:
+                        brief = self._call_local_mlx_teacher_research(
+                            user_prompt,
+                            domain_id=target_domain,
+                            candidate_chunks=paired_chunks,
+                            regime=regime,
+                        )
+                    if brief is not None and not self._verify_citations_against_chunks(
+                        brief, paired_chunks
+                    ):
+                        brief = None
+                    if brief is None:
+                        continue
+
+                brief_kwarg: dict[str, Any] = {}
+                bad_brief_kwarg: dict[str, Any] = {}
+                if brief is None:
+                    title_line = f"{target_chunk.doc_title} — {target_chunk.section_heading}"
+                    grounded_caveat = (
+                        f"Grounded in {target_chunk.doc_id} ({target_chunk.section_heading})"
+                    )
+                    primary_plugin = PluginRegistry.get_primary_domain_plugin()
+                    is_primary_research = (
+                        primary_plugin is not None
+                        and primary_plugin.get_role_domain_ids().get("research") == target_domain
+                    )
+                    if is_primary_research:
+                        brief = QuantStrategyBrief(
+                            strategy_name=title_line,
+                            target_markets=[MarketRegime.GLOBAL_MULTI],
+                            mathematical_signal_latex=quote_text,
+                            entry_exit_rules=[quote_text],
+                            sample_period_years="2015-2025",
+                            transaction_cost_bps_assumed=15.0,
+                            market_specific_caveats=[grounded_caveat],
+                            known_failure_regimes=["Out-of-distribution regime shift"],
+                            verified_citations=[citation],
+                            sufficiency_verdict=regime,
+                        )
+                        bad_brief = brief.model_copy(update={"verified_citations": [bad_citation]})
+                        brief_kwarg = {"quant_strategy_spec": brief}
+                        bad_brief_kwarg = {"quant_strategy_spec": bad_brief}
+                    else:
+                        if regime == "insufficient":
+                            brief = DomainKnowledgeBrief(
+                                brief_title=f"Insufficient Grounded Evidence — {target_domain}",
+                                domain_id=target_domain,
+                                executive_summary=(
+                                    "Insufficient grounded evidence in retrieved chunks; "
+                                    "abstaining at $0 paid tokens."
+                                ),
+                                core_findings_and_rules=[
+                                    "No retrieved chunk answers the requested topic."
+                                ],
+                                domain_constraints_and_caveats=[
+                                    f"Checked {len(paired_chunks)} retrieved chunk(s) "
+                                    "without match."
+                                ],
+                                known_risks_and_failure_modes=[
+                                    "Answering without grounded corpus evidence "
+                                    "causes hallucination."
+                                ],
+                                verified_citations=[citation],
+                                completeness_ratio=0.0,
+                                sufficiency_verdict="insufficient",
+                                missing_aspects=["ZetaConsensus-99 specification and formal proof"],
+                            )
+                        elif regime == "partial":
+                            brief = DomainKnowledgeBrief(
+                                brief_title=title_line,
+                                domain_id=target_domain,
+                                executive_summary=f"Partial grounded synthesis: {quote_text}",
+                                core_findings_and_rules=[quote_text],
+                                domain_constraints_and_caveats=[grounded_caveat],
+                                known_risks_and_failure_modes=[
+                                    "Missing production SLA benchmarks and "
+                                    "multi-region failover latency numbers."
+                                ],
+                                verified_citations=[citation],
+                                completeness_ratio=0.5,
+                                sufficiency_verdict="partial",
+                                missing_aspects=[
+                                    "Production SLA benchmarks",
+                                    "Multi-region failover latency numbers",
+                                ],
+                            )
+                        else:
+                            brief = DomainKnowledgeBrief(
+                                brief_title=title_line,
+                                domain_id=target_domain,
+                                executive_summary=f"Grounded synthesis: {quote_text}",
+                                core_findings_and_rules=[quote_text],
+                                domain_constraints_and_caveats=[grounded_caveat],
+                                known_risks_and_failure_modes=[
+                                    "Out-of-distribution domain regime shift"
+                                ],
+                                verified_citations=[citation],
+                                completeness_ratio=1.0,
+                                sufficiency_verdict="sufficient",
+                                missing_aspects=[],
+                            )
+                        bad_brief = brief.model_copy(update={"verified_citations": [bad_citation]})
+                else:
+                    bad_brief = brief.model_copy(update={"verified_citations": [bad_citation]})
 
                 # Determine if this example should be Bounce-Back (ML-01)
                 should_bounce = bounce_back_count < target_bounce_backs

@@ -405,6 +405,7 @@ def test_all_roles_x_three_intents_no_role_bias_and_verified_packs(role: RoleTyp
         ),
         principal=principal,
         domain_id=_ENTERPRISE_DOMAIN_ID,
+        normalized_rrf_score=0.75,
     )
     assert isinstance(hybrid_result, ImplementationContextPack), hybrid_result
     assert len(hybrid_result.code_slices) >= 1
@@ -473,6 +474,7 @@ def test_federated_coordinator_pure_doc_suppresses_code_slices() -> None:
     result = coordinator.run(
         user_prompt="What is the incident escalation runbook SLA for a feed stall?",
         principal=principal,
+        normalized_rrf_score=0.75,
     )
     assert isinstance(result, ImplementationContextPack), result
     assert result.code_slices == []
@@ -842,6 +844,7 @@ def test_federated_coordinator_populates_code_vs_doc_conflicts() -> None:
             "batch architecture spec"
         ),
         principal=principal,
+        normalized_rrf_score=0.75,
     )
     assert isinstance(result, ImplementationContextPack), result
     assert len(result.code_slices) >= 1
@@ -852,3 +855,21 @@ def test_federated_coordinator_populates_code_vs_doc_conflicts() -> None:
         "CODE_VS_DOC_ENDPOINT_DRIFT (batch)" in item
         for item in result.doc_vs_code_conflicts_detected
     ), result.doc_vs_code_conflicts_detected
+
+
+def test_definitional_tail_stripping_is_linear_time_redos_safe() -> None:
+    """Regression guard for CodeQL ReDoS alerts on pathological whitespace strings."""
+    import time
+
+    from context_scout.agents.intent_router import decompose_query_facets
+
+    adversarial_spaces = "What does ACID" + (" " * 100_000) + "not_a_tail?"
+    t0 = time.perf_counter()
+    plan = decompose_query_facets(adversarial_spaces)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert elapsed_ms < 250.0, f"Polynomial backtracking detected: {elapsed_ms:.1f}ms"
+    assert plan.query_type == "concept_definition"
+
+    clean_plan = decompose_query_facets("What does ACID stand for?")
+    assert clean_plan.core_subject == "ACID"
+    assert clean_plan.is_acronym_query is True

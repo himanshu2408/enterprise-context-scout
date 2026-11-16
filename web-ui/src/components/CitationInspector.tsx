@@ -302,18 +302,123 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
   };
 
   if (!contextPack) {
+    if (abstainedDiagnostic) {
+      const stage2Trace = abstainedDiagnostic.stage_traces?.find(
+        (t) => t.stage === 2
+      );
+      const probedDomains = stage2Trace?.domain_probes ?? [];
+      const missingAspectsList = [
+        ...abstainedDiagnostic.missing_symbols,
+        ...(abstainedDiagnostic.missing_or_unverified_aspects ?? []),
+        ...abstainedDiagnostic.missing_items.map((item) =>
+          typeof item === "string"
+            ? item
+            : `${item.identifier}${item.reason ? ` — ${item.reason}` : ""}`
+        ),
+      ];
+      const uniqueMissing = Array.from(new Set(missingAspectsList));
+
+      return (
+        <section
+          className="abstention-protection-panel"
+          data-testid="citation-inspector"
+        >
+          <div
+            className="abstention-panel-inner"
+            data-testid="abstention-protection-panel"
+          >
+            <div className="abstention-panel-header">
+              <div className="abstention-title-group">
+                <ShieldCheck size={20} className="icon-emerald" />
+                <div>
+                  <h3 className="abstention-title">
+                    Insufficient Grounded Evidence in Indexed Corpus — Paid
+                    Cloud Handoff Blocked ($0.00 spent)
+                  </h3>
+                  <p className="abstention-subtitle">
+                    Pre-flight gate abstained safely before invoking any paid
+                    frontier model.
+                  </p>
+                </div>
+              </div>
+              <span className="status-tag status-tag-ok tabular-num">
+                ${abstainedDiagnostic.paid_tokens_spent.toFixed(2)} Paid Spend
+              </span>
+            </div>
+
+            <div className="abstention-reason-box">
+              <strong>Diagnostic:</strong> {abstainedDiagnostic.reason}
+              {abstainedDiagnostic.failure_check && (
+                <div className="abstention-gate-line">
+                  Gate check:{" "}
+                  <code>{abstainedDiagnostic.failure_check}</code>
+                </div>
+              )}
+            </div>
+
+            <div className="abstention-grid">
+              <div className="abstention-card">
+                <h4>Domains Searched</h4>
+                {probedDomains.length > 0 ? (
+                  <ul className="abstention-list">
+                    {probedDomains.map((p) => (
+                      <li key={p.domain_id}>
+                        <code>{p.domain_id}</code>:{" "}
+                        <span className="tabular-num">
+                          {p.probed_hits} probed, {p.accepted_hits} accepted,{" "}
+                          {p.rejected_hits} rejected (max cal{" "}
+                          {p.max_calibrated_score.toFixed(2)})
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="abstention-meta">
+                    Probed scope: <code>{abstainedDiagnostic.domain_id}</code>
+                  </p>
+                )}
+              </div>
+
+              <div className="abstention-card">
+                <h4>Missing Concepts &amp; Unverified Facets</h4>
+                {uniqueMissing.length > 0 ? (
+                  <ul className="abstention-list">
+                    {uniqueMissing.map((item, idx) => (
+                      <li key={idx}>
+                        <code>{item}</code>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="abstention-meta">
+                    No retrieved chunks met the calibrated relevance floor inside
+                    your authorized scopes.
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="abstention-resolution">
+              <strong>How to resolve:</strong> Index the target repository or
+              documentation into PostgreSQL 17, verify your active RBAC scopes
+              cover the target corpus, or narrow your query to indexed symbols
+              and concepts.
+            </div>
+          </div>
+        </section>
+      );
+    }
+
     return (
-      <section
-        className="workbench-empty"
-        data-testid="citation-inspector"
-      >
+      <section className="workbench-empty" data-testid="citation-inspector">
         <div className="empty-state-content">
           <Sparkles size={24} className="icon-accent" />
           <h3>Grounded Answer &amp; Context Workbench</h3>
           <p>
-            {abstainedDiagnostic
-              ? `The local scout abstained safely ($${abstainedDiagnostic.paid_tokens_spent.toFixed(2)} paid tokens spent) because verified evidence was insufficient inside your authorized scopes: ${abstainedDiagnostic.reason}`
-              : "Select your persona, RBAC scopes, and domain, then run a query above. Local Gemma 4 + EmbeddingGemma 2 will assemble an un-truncated Answer-First brief backed by verbatim AST code slices and full document sections."}
+            Select your persona, RBAC scopes, and domain, then run a query
+            above. Local Gemma 4 + EmbeddingGemma 2 will assemble an
+            un-truncated Answer-First brief backed by verbatim AST code slices
+            and full document sections.
           </p>
         </div>
       </section>
@@ -334,14 +439,21 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
 
   const queryFacets: QueryFacetCoverage[] =
     contextPack.query_facets ?? brief?.query_facets ?? [];
-  const missingAspects: string[] =
-    contextPack.missing_or_unverified_aspects ??
-    brief?.missing_or_unverified_aspects ??
-    [];
+  const missingAspects: string[] = Array.from(
+    new Set([
+      ...(contextPack.missing_or_unverified_aspects ?? []),
+      ...(brief?.missing_or_unverified_aspects ?? []),
+      ...(brief?.missing_aspects ?? []),
+      ...(resolvedQuant?.missing_aspects ?? []),
+    ])
+  );
+  const sufficiencyVerdict =
+    brief?.sufficiency_verdict ?? resolvedQuant?.sufficiency_verdict;
   const groundedFacetCount = queryFacets.filter(
     (f) => f.status === "grounded"
   ).length;
   const hasPartialOrMissing =
+    sufficiencyVerdict === "partial" ||
     missingAspects.length > 0 ||
     queryFacets.some((f) => f.status === "not_found" || f.status === "partial");
   const completenessRatio =
@@ -1037,6 +1149,37 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
                   {contextPack.preflight_report.bounce_back_feedback}
                 </div>
               )}
+
+              {(() => {
+                const s4 = contextPack.stage_traces?.find(
+                  (t) => t.stage === 4
+                );
+                if (!s4 || !s4.checks || s4.checks.length === 0) return null;
+                return (
+                  <div
+                    className="checks-ledger-table"
+                    data-testid="inspector-preflight-ledger"
+                  >
+                    {s4.checks.map((chk) => (
+                      <div key={chk.check_name} className="check-ledger-row">
+                        <span
+                          className={`status-tag ${
+                            chk.passed ? "status-tag-ok" : "status-tag-danger"
+                          }`}
+                        >
+                          {chk.passed ? "PASS" : "FAIL"}
+                        </span>
+                        <span className="check-ledger-name">
+                          {chk.check_name}
+                        </span>
+                        <span className="check-ledger-obs tabular-num">
+                          {chk.observed} (req: {chk.threshold})
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
           )}
 

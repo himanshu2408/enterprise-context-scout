@@ -7,6 +7,8 @@ on ``principal.role`` to block documentation or force code dumps onto doc querie
 
 from __future__ import annotations
 
+import logging
+import math
 import re
 from collections.abc import Mapping
 from datetime import date, datetime
@@ -18,6 +20,8 @@ from pydantic import BaseModel, ConfigDict
 if TYPE_CHECKING:
     from context_scout.db.schema import DocChunkRecord
     from context_scout.schemas.contracts import DocCitationSpan, QueryFacetCoverage
+
+logger = logging.getLogger(__name__)
 
 SourceFilter = Literal["all", "code", "wiki", "jira"]
 
@@ -131,7 +135,7 @@ _DOC_KEYWORD_RE = re.compile(
     r"architecture|architectural|guideline|guidelines|compliance|audit|"
     r"governance|documentation|docs|confluence|jira|wiki|adr|rfc|"
     r"research|paper|papers|specification|spec|formula|formulas|equation|equations|"
-    r"signal|strategy|strategies|handbook|on-call|oncall|handbook|sop|"
+    r"handbook|on-call|oncall|sop|"
     r"approval|changelog|decision\s+record|who\s+owns"
     r")\b",
     re.IGNORECASE,
@@ -156,6 +160,66 @@ _ACRONYM_PROPERTIES_RE = re.compile(
     r"(?:properties|principles|guarantees|acronym)\b",
     re.IGNORECASE,
 )
+_STANDALONE_ACRONYM_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,7})\b")
+_NON_DOMAIN_ACRONYMS: frozenset[str] = frozenset(
+    {
+        "IN",
+        "DE",
+        "US",
+        "UK",
+        "EU",
+        "OR",
+        "AND",
+        "THE",
+        "FOR",
+        "NOT",
+        "TOP",
+        "HOW",
+        "WHY",
+        "WHO",
+        "WHAT",
+        "WHEN",
+        "ALL",
+        "ANY",
+        "VS",
+        "IS",
+        "IT",
+        "TO",
+        "OF",
+        "ON",
+        "AT",
+        "BY",
+        "AS",
+    }
+)
+_DEFINITIONAL_LEAD_RE = re.compile(
+    r"^(?:what\s+(?:is|are)\s+(?:an?\s+|the\s+)?|what\s+does\s+|explain\s+(?:the\s+)?|"
+    r"describe\s+(?:the\s+)?|define\s+(?:the\s+)?|how\s+does\s+|how\s+do\s+|tell\s+me\s+about\s+)",
+    re.IGNORECASE,
+)
+_DEFINITIONAL_TAIL_SUFFIXES: tuple[str, ...] = (
+    " stands for",
+    " stand for",
+    " in databases",
+    " in database",
+    " in detail",
+    " works",
+    " work",
+    " means",
+    " mean",
+)
+
+
+def _strip_definitional_tail(text: str) -> str:
+    """Linear-time O(N) suffix stripper avoiding polynomial regex backtracking on whitespace."""
+    trimmed = text.rstrip()
+    low = trimmed.lower()
+    for suffix in _DEFINITIONAL_TAIL_SUFFIXES:
+        if low.endswith(suffix):
+            head = trimmed[: len(trimmed) - len(suffix)].rstrip()
+            if head:
+                return head
+    return trimmed
 
 _FACET_STOPWORDS: frozenset[str] = frozenset(
     {
@@ -199,6 +263,13 @@ _FACET_STOPWORDS: frozenset[str] = frozenset(
         "against",
         "explain",
         "describe",
+        "implement",
+        "create",
+        "build",
+        "write",
+        "show",
+        "find",
+        "locate",
         "list",
         "give",
         "top",
@@ -251,11 +322,21 @@ class FacetSpec(BaseModel):
 
 
 class QueryPlan(BaseModel):
-    """Deterministic query decomposition plan (cardinality, acronym, and sub-facets)."""
+    """Structured query decomposition plan (intent, core subject, cardinality, and facets)."""
 
     model_config = ConfigDict(frozen=True)
 
     original_query: str
+    query_type: Literal[
+        "concept_definition",
+        "architecture_comparison",
+        "code_implementation",
+        "incident_runbook",
+        "multi_hop_research_to_code",
+        "general",
+    ] = "general"
+    core_subject: str = ""
+    expanded_queries: list[str] = []
     requested_cardinality: int | None = None
     is_acronym_query: bool = False
     acronym: str | None = None
@@ -473,8 +554,91 @@ def _split_question_clauses(text: str) -> list[str]:
     return clauses
 
 
+def _infer_query_type_and_subject(
+    prompt: str,
+) -> tuple[
+    Literal[
+        "concept_definition",
+        "architecture_comparison",
+        "code_implementation",
+        "incident_runbook",
+        "multi_hop_research_to_code",
+        "general",
+    ],
+    str,
+]:
+    """Domain-agnostic syntactic classification of query type and core subject."""
+    cleaned = " ".join(prompt.strip().split()).rstrip("?!. ")
+    low = cleaned.lower()
+
+    has_code_markers = bool(
+        _CODE_CAMEL_CASE_RE.search(cleaned)
+        or _CODE_SNAKE_CASE_RE.search(cleaned)
+        or any(
+            k in low
+            for k in (
+                "codebase",
+                "class ",
+                "function",
+                "method",
+                "callers",
+                "ast ",
+                "file path",
+                "line ",
+                "module",
+                "signature",
+            )
+        )
+    )
+    has_research_markers = any(
+        k in low for k in ("paper", "research", "formula", "equation", "empirical", "theory")
+    )
+    has_issue_markers = any(
+        k in low
+        for k in (
+            "bug",
+            "issue",
+            "incident",
+            "post-mortem",
+            "postmortem",
+            "reconnect",
+            "duplicate",
+            "crash",
+            "outage",
+            "root cause",
+        )
+    )
+
+    if has_research_markers and (has_code_markers or has_issue_markers):
+        query_type: Literal[
+            "concept_definition",
+            "architecture_comparison",
+            "code_implementation",
+            "incident_runbook",
+            "multi_hop_research_to_code",
+            "general",
+        ] = "multi_hop_research_to_code"
+    elif any(k in low for k in ("compare ", "contrast ", " versus ", " vs ", "difference between")):
+        query_type = "architecture_comparison"
+    elif has_issue_markers:
+        query_type = "incident_runbook"
+    elif has_code_markers:
+        query_type = "code_implementation"
+    elif _DEFINITIONAL_LEAD_RE.match(cleaned) or " stand for" in low:
+        query_type = "concept_definition"
+    else:
+        query_type = "general"
+
+    subject = _DEFINITIONAL_LEAD_RE.sub("", cleaned).strip()
+    subject = _strip_definitional_tail(subject)
+    subject = _strip_trailing_closure_clause(subject).strip(" ,.;:")
+    if not subject:
+        subject = cleaned
+    return query_type, subject
+
+
 def decompose_query_facets(prompt: str) -> QueryPlan:
-    """Deterministically decomposes a prompt into cardinality, acronym, and sub-facets."""
+    """Decomposes a prompt into query type, core subject, expanded queries, and sub-facets."""
     cleaned = " ".join(prompt[:4096].strip().split())
     stripped = cleaned.rstrip("?!. ")
 
@@ -487,12 +651,20 @@ def decompose_query_facets(prompt: str) -> QueryPlan:
                 requested_cardinality = val
                 break
 
+    query_type, core_subject = _infer_query_type_and_subject(stripped)
+
     acronym: str | None = None
     is_acronym_query = False
     acr_m = _ACRONYM_STAND_FOR_RE.search(stripped) or _ACRONYM_PROPERTIES_RE.search(stripped)
     if acr_m:
         is_acronym_query = True
         acronym = acr_m.group(1).upper()
+    elif query_type == "concept_definition":
+        for cand in _STANDALONE_ACRONYM_RE.findall(stripped):
+            if cand not in _NON_DOMAIN_ACRONYMS:
+                is_acronym_query = True
+                acronym = cand
+                break
 
     # Strip trailing AST closure / meta-clauses so they don't become bogus lexical facets
     working = stripped
@@ -500,6 +672,9 @@ def decompose_query_facets(prompt: str) -> QueryPlan:
         working = working[len("compare ") :].strip()
     elif working.lower().startswith("contrast "):
         working = working[len("contrast ") :].strip()
+    elif query_type == "concept_definition":
+        working = _DEFINITIONAL_LEAD_RE.sub("", working).strip()
+        working = _strip_definitional_tail(working) or working
     working = _strip_trailing_closure_clause(working)
     working, has_top_preamble = _strip_top_n_on_preamble(working)
 
@@ -547,7 +722,7 @@ def decompose_query_facets(prompt: str) -> QueryPlan:
     }
     for rf in raw_facets:
         fq = rf[4:].strip() if rf.lower().startswith("and ") else rf.strip()
-        if len(fq) < 4:
+        if len(fq) < 2:
             continue
         if fq.lower() in skip_exact:
             continue
@@ -570,19 +745,178 @@ def decompose_query_facets(prompt: str) -> QueryPlan:
         facets = [
             FacetSpec(
                 facet_id="facet_1",
-                facet_query=stripped or prompt.strip(),
+                facet_query=core_subject or stripped or prompt.strip(),
                 key_terms=terms,
                 expected_source_kind=_classify_facet_source_kind(stripped),
             )
         ]
 
+    expanded_queries: list[str] = []
+    for candidate in (
+        core_subject,
+        f"{acronym} definition properties" if acronym else "",
+        f"{core_subject} architecture overview"
+        if query_type == "concept_definition" and core_subject and len(core_subject.split()) <= 5
+        else "",
+    ):
+        c_clean = candidate.strip()
+        if c_clean and c_clean.lower() != stripped.lower() and c_clean not in expanded_queries:
+            expanded_queries.append(c_clean)
+
     return QueryPlan(
         original_query=prompt,
+        query_type=query_type,
+        core_subject=core_subject,
+        expanded_queries=expanded_queries[:3],
         requested_cardinality=requested_cardinality,
         is_acronym_query=is_acronym_query,
         acronym=acronym,
         facets=facets,
     )
+
+
+_COMPARISON_CUE_RE = re.compile(
+    r"\b(?:vs\.?|versus|compare|comparison|difference|differences|contrast)\b",
+    re.IGNORECASE,
+)
+
+
+def anchor_llm_query_plan(
+    prompt: str,
+    llm_plan: QueryPlan,
+    base_plan: QueryPlan,
+) -> QueryPlan:
+    """Anchors an LLM-produced QueryPlan strictly to clauses/terms present in prompt.
+
+    Prevents live LLM query planners from inventing unasked comparisons or extra facets
+    (e.g. 'standard vs enterprise-tier') while preserving extra terms in expanded_queries.
+    """
+    merged_expansions: list[str] = list(
+        dict.fromkeys([*base_plan.expanded_queries, *llm_plan.expanded_queries])
+    )
+    prompt_has_comparison = bool(_COMPARISON_CUE_RE.search(prompt))
+
+    if base_plan.is_acronym_query:
+        return QueryPlan(
+            original_query=base_plan.original_query,
+            query_type=llm_plan.query_type or base_plan.query_type,
+            core_subject=base_plan.core_subject,
+            expanded_queries=merged_expansions[:5],
+            requested_cardinality=base_plan.requested_cardinality,
+            is_acronym_query=True,
+            acronym=base_plan.acronym,
+            facets=list(base_plan.facets),
+        )
+
+    prompt_tokens: set[str] = {
+        tok.lower()
+        for tok in re.findall(r"[A-Za-z0-9_]{2,}", prompt)
+        if tok.lower() not in _FACET_STOPWORDS
+    }
+    for f in base_plan.facets:
+        prompt_tokens.update(t.lower() for t in f.key_terms if t)
+
+    def _term_anchored(term: str) -> bool:
+        t = term.lower()
+        if t in prompt_tokens:
+            return True
+        if len(t) >= 5:
+            return any(
+                len(pt) >= 5
+                and (t.startswith(pt[:5]) or pt.startswith(t[:5]) or t in pt or pt in t)
+                for pt in prompt_tokens
+            )
+        return False
+
+    anchored_facets: list[FacetSpec] = []
+    demoted_expansions: list[str] = []
+    for f in llm_plan.facets:
+        if not prompt_has_comparison and _COMPARISON_CUE_RE.search(f.facet_query):
+            demoted_expansions.append(f.facet_query)
+            continue
+        f_terms = [t.lower() for t in f.key_terms if t]
+        if not f_terms:
+            demoted_expansions.append(f.facet_query)
+            continue
+        anchored_hits = sum(1 for t in f_terms if _term_anchored(t))
+        unanchored_hits = len(f_terms) - anchored_hits
+        min_needed = 1 if len(f_terms) == 1 else max(2, math.ceil((len(f_terms) * 2) / 3))
+        if anchored_hits >= min_needed and unanchored_hits <= 1:
+            anchored_facets.append(f)
+        else:
+            demoted_expansions.append(f.facet_query)
+
+    is_single_clause = (
+        len(base_plan.facets) == 1
+        and not prompt_has_comparison
+        and not re.search(r"\b(?:and|or)\b|,|;", prompt, re.IGNORECASE)
+        and prompt.count("?") <= 1
+    )
+    if (is_single_clause and len(anchored_facets) != 1) or not anchored_facets:
+        anchored_facets = list(base_plan.facets)
+    else:
+        anchored_terms = {t.lower() for f in anchored_facets for t in f.key_terms}
+        base_terms = {t.lower() for f in base_plan.facets for t in f.key_terms}
+        if (
+            prompt_tokens
+            and len(anchored_terms & prompt_tokens) < len(base_terms & prompt_tokens)
+            and (len(anchored_terms & prompt_tokens) / max(1, len(prompt_tokens))) < 0.65
+        ):
+            for bf in reversed(base_plan.facets):
+                if not any(
+                    len(set(bf.key_terms) & set(af.key_terms))
+                    >= max(1, (len(bf.key_terms) * 2) // 3)
+                    for af in anchored_facets
+                ):
+                    anchored_facets.insert(0, bf)
+
+    # Re-index facet_id sequentially
+    final_facets = [
+        FacetSpec(
+            facet_id=f"facet_{idx}",
+            facet_query=f.facet_query,
+            key_terms=list(f.key_terms),
+            expected_source_kind=f.expected_source_kind,
+            is_acronym_component=f.is_acronym_component,
+        )
+        for idx, f in enumerate(anchored_facets, start=1)
+    ]
+
+    all_expansions = list(
+        dict.fromkeys([*merged_expansions, *demoted_expansions])
+    )[:5]
+    safe_subject = (
+        base_plan.core_subject
+        if (
+            not llm_plan.core_subject.strip()
+            or (not prompt_has_comparison and _COMPARISON_CUE_RE.search(llm_plan.core_subject))
+        )
+        else llm_plan.core_subject.strip()
+    )
+    return QueryPlan(
+        original_query=prompt,
+        query_type=llm_plan.query_type or base_plan.query_type,
+        core_subject=safe_subject,
+        expanded_queries=all_expansions,
+        requested_cardinality=base_plan.requested_cardinality,
+        is_acronym_query=base_plan.is_acronym_query,
+        acronym=base_plan.acronym,
+        facets=final_facets,
+    )
+
+
+def plan_query_with_llm(prompt: str, llm_client: Any = None) -> QueryPlan:
+    """Uses structured Gemma-4 planning when live MLX is enabled, else deterministic plan."""
+    base_plan = decompose_query_facets(prompt)
+    if llm_client is None or not hasattr(llm_client, "decompose_query_json"):
+        return base_plan
+    try:
+        planned = llm_client.decompose_query_json(prompt, fallback_plan=base_plan)
+        if isinstance(planned, QueryPlan) and planned.facets:
+            return anchor_llm_query_plan(prompt, planned, base_plan)
+    except Exception as exc:
+        logger.debug("LLM query planning skipped (%s): %s", type(exc).__name__, exc)
+    return base_plan
 
 
 def evaluate_facet_grounding(
@@ -652,21 +986,108 @@ def evaluate_facet_grounding(
         )
 
     best_hits = 0
+    best_cohesive_hits = 0
     matched_terms_overall: set[str] = set()
+    matched_acronyms_strict: set[str] = set()
     matched_sources: list[str] = []
 
-    def _scan_text(text: str, source_label: str) -> None:
-        nonlocal best_hits
+    uppercase_acronyms = [
+        tok
+        for tok in re.findall(r"\b([A-Z][A-Z0-9]{1,7})\b", facet.facet_query)
+        if tok not in _NON_DOMAIN_ACRONYMS and tok.lower() in terms
+    ]
+    explicit_identifiers = [
+        tok.lower()
+        for tok in re.findall(
+            r"\b([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+|[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]+)\b",
+            facet.facet_query,
+        )
+        if tok.lower() in terms
+    ]
+
+    def _expand_market_scope_aliases(market_scope_obj: object) -> str:
+        raw_val = getattr(market_scope_obj, "value", market_scope_obj)
+        s_val = str(raw_val or "").strip()
+        if not s_val:
+            return ""
+        base_tokens = re.sub(r"[_-]+", " ", s_val)
+        try:
+            from context_scout.plugins.registry import PluginRegistry
+
+            plugin = PluginRegistry.get_domain_plugin(domain_id)
+            alias_fn = getattr(plugin, "get_market_scope_aliases", None) if plugin else None
+            if callable(alias_fn):
+                extra = str(alias_fn(s_val) or "").strip()
+                if extra:
+                    return f"{s_val} {base_tokens} {extra}"
+        except (ImportError, KeyError, AttributeError, RuntimeError) as exc:
+            logger.debug("Plugin market-scope alias lookup skipped for %s: %s", domain_id, exc)
+        return f"{s_val} {base_tokens}"
+
+    def _has_proximity_cohesion(raw_text: str, active_terms: list[str]) -> bool:
+        """Verify multi-term concepts co-occur within a tight 16-word window or title/heading."""
+        if len(active_terms) <= 1:
+            return True
+        words = re.findall(r"[A-Za-z0-9]+", raw_text.lower())
+        if not words:
+            return False
+        positions: dict[str, list[int]] = {t: [] for t in active_terms}
+        for idx, w in enumerate(words):
+            for t in active_terms:
+                if w == t or (len(t) >= 5 and t in w):
+                    positions[t].append(idx)
+        present = [t for t in active_terms if positions[t]]
+        if len(present) < min(2, len(active_terms)):
+            return False
+        if len(present) == 2:
+            p0, p1 = positions[present[0]], positions[present[1]]
+            return any(abs(a - b) <= 16 for a in p0 for b in p1)
+        # For 3+ term facets, require at least two pairs within 28 words inside the same chunk
+        close_pairs = 0
+        for i in range(len(present)):
+            for j in range(i + 1, len(present)):
+                pos_i, pos_j = positions[present[i]], positions[present[j]]
+                if any(abs(a - b) <= 28 for a in pos_i for b in pos_j):
+                    close_pairs += 1
+        return close_pairs >= 1
+
+    def _scan_text(text: str, source_label: str, *, header_text: str = "") -> None:
+        nonlocal best_hits, best_cohesive_hits
         low = text.lower()
+        low_norm = re.sub(r"[_-]+", " ", low)
         hits_here = {
-            t for t in terms if re.search(rf"\b{re.escape(t)}\b", low) or (len(t) >= 5 and t in low)
+            t
+            for t in terms
+            if re.search(rf"\b{re.escape(t)}\b", low_norm) or (len(t) >= 5 and t in low_norm)
         }
-        if hits_here:
-            matched_terms_overall.update(hits_here)
-            if len(hits_here) > best_hits:
-                best_hits = len(hits_here)
-            if source_label not in matched_sources and len(hits_here) >= min(2, len(terms)):
-                matched_sources.append(source_label)
+        if not hits_here:
+            return
+
+        # Strict acronym verification: uppercase acronym (e.g. CAP, ACID) must appear as
+        # uppercase in body/header OR its lowercase form must appear in doc_title/section_heading
+        header_low = re.sub(r"[_-]+", " ", header_text.lower())
+        text_norm = re.sub(r"[_-]+", " ", text)
+        for acr in uppercase_acronyms:
+            if re.search(rf"\b{re.escape(acr)}\b", text_norm) or re.search(
+                rf"\b{re.escape(acr.lower())}\b", header_low
+            ):
+                matched_acronyms_strict.add(acr.lower())
+
+        matched_terms_overall.update(hits_here)
+        if len(hits_here) > best_hits:
+            best_hits = len(hits_here)
+
+        is_cohesive = len(hits_here) == 1 or (
+            header_text and sum(1 for t in hits_here if t in header_low) >= min(2, len(hits_here))
+        ) or _has_proximity_cohesion(text, list(hits_here))
+        if is_cohesive and len(hits_here) > best_cohesive_hits:
+            best_cohesive_hits = len(hits_here)
+
+        if source_label not in matched_sources and (
+            (len(hits_here) >= min(2, len(terms)) and is_cohesive)
+            or (len(terms) == 1 and len(hits_here) == 1)
+        ):
+            matched_sources.append(source_label)
 
     if facet.expected_source_kind != "code" or not code_slices:
         for chk in doc_chunks:
@@ -676,29 +1097,31 @@ def evaluate_facet_grounding(
                 title_low = str(getattr(chk, "doc_title", "") or "").lower()
                 if "issue" not in uri_low and "issue" not in title_low and "#" not in title_low:
                     continue
-            label = str(
-                getattr(chk, "doc_title", "")
-                or getattr(chk, "doc_id", "")
-                or getattr(chk, "chunk_id", "")
-            )
+            doc_title = str(getattr(chk, "doc_title", "") or "")
+            sec_head = str(getattr(chk, "section_heading", "") or "")
+            scope_aliases = _expand_market_scope_aliases(getattr(chk, "market_scope", None))
+            label = str(doc_title or getattr(chk, "doc_id", "") or getattr(chk, "chunk_id", ""))
             txt = (
-                f"{getattr(chk, 'doc_title', '')}\n"
-                f"{getattr(chk, 'section_heading', '')}\n"
+                f"{doc_title}\n"
+                f"{sec_head}\n"
+                f"{scope_aliases}\n"
                 f"{getattr(chk, 'verbatim_content', '')}\n"
                 f"{getattr(chk, 'full_section_content', '')}\n"
                 f"{getattr(chk, 'verbatim_quote', '')}"
             )
-            _scan_text(txt, label)
+            _scan_text(txt, label, header_text=f"{doc_title} {sec_head} {scope_aliases}")
 
     if facet.expected_source_kind in ("code", "any") or (not matched_terms_overall and code_slices):
         for slc in code_slices:
-            label = str(getattr(slc, "file_path", "") or getattr(slc, "qualified_symbol", ""))
+            qsym = str(getattr(slc, "qualified_symbol", "") or "")
+            fpath = str(getattr(slc, "file_path", "") or "")
+            label = str(fpath or qsym)
             txt = (
-                f"{getattr(slc, 'file_path', '')}\n"
-                f"{getattr(slc, 'qualified_symbol', '')}\n"
+                f"{fpath}\n"
+                f"{qsym}\n"
                 f"{getattr(slc, 'verbatim_code_with_lines', '')}"
             )
-            _scan_text(txt, label)
+            _scan_text(txt, label, header_text=f"{fpath} {qsym}")
 
     total_terms = len(terms)
     coverage_ratio = len(matched_terms_overall) / total_terms
@@ -751,23 +1174,38 @@ def evaluate_facet_grounding(
                 None,
             )
 
-    uppercase_acronyms = [
-        tok.lower()
-        for tok in re.findall(r"\b[A-Z][A-Z0-9]{2,}\b", facet.facet_query)
-        if tok.lower() in terms
+    missing_acronyms = [
+        acr.lower()
+        for acr in uppercase_acronyms
+        if acr.lower() not in matched_acronyms_strict
+        and (
+            acr.lower() in matched_terms_overall
+            or total_terms <= 3
+            or coverage_ratio < 0.75
+        )
     ]
-    missing_acronyms = [acr for acr in uppercase_acronyms if acr not in matched_terms_overall]
 
-    if total_terms == 1:
-        is_grounded = best_hits == 1 and not missing_acronyms
-        is_partial = not is_grounded and best_hits >= 1
-    elif total_terms <= 3:
-        is_grounded = coverage_ratio >= 0.75 and not missing_acronyms and best_hits >= 2
-        is_partial = not is_grounded and coverage_ratio > 0.0 and (best_hits >= 1)
+    missing_identifiers = [
+        ident
+        for ident in explicit_identifiers
+        if ident not in matched_terms_overall
+    ]
+
+    if missing_acronyms or missing_identifiers:
+        is_grounded = False
+        is_partial = False
+    elif total_terms == 1:
+        is_grounded = best_hits == 1
+        is_partial = False
+    elif total_terms == 2:
+        is_grounded = best_cohesive_hits >= 2 and coverage_ratio >= 1.0
+        is_partial = not is_grounded and best_cohesive_hits >= 1 and best_hits >= 2
     else:
-        is_grounded = coverage_ratio >= 0.75 and not missing_acronyms and best_hits >= 2
+        is_grounded = coverage_ratio >= 0.65 and best_cohesive_hits >= 2 and best_hits >= 2
         is_partial = (
-            not is_grounded and coverage_ratio > 0.0 and (best_hits >= 2 or coverage_ratio >= 0.34)
+            not is_grounded
+            and coverage_ratio > 0.0
+            and (best_cohesive_hits >= 2 or (best_hits >= 2 and coverage_ratio >= 0.5))
         )
 
     if is_grounded:
@@ -1126,10 +1564,12 @@ __all__ = [
     "QueryIntentMode",
     "QueryPlan",
     "SourceFilter",
+    "anchor_llm_query_plan",
     "decompose_query_facets",
     "evaluate_facet_grounding",
     "filter_doc_chunks_by_source",
     "format_doc_citation_label",
     "is_jira_chunk",
     "is_wiki_chunk",
+    "plan_query_with_llm",
 ]

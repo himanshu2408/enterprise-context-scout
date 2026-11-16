@@ -1,8 +1,8 @@
 # Milestone 6 CI/CD Quality Gate & OpenTelemetry Evaluation Report
 
-**Evaluation Timestamp**: `2026-11-07T22:58:50.181226+00:00`  
+**Evaluation Timestamp**: `2026-11-16T08:47:24.479968+00:00`  
 **Overall CI/CD Pipeline Verdict**: **✅ PASSED**  
-**Execution Runtime**: `7462 ms`  
+**Execution Runtime**: `17181 ms`  
 **OpenTelemetry Spans Collected**: `45`  
 
 ---
@@ -14,7 +14,7 @@
 | Zero-Touch Sufficiency Rate | `100.0%` | `>= 85.0%` | ✅ PASS |
 | File & Symbol Recall@5 | `100.0%` | `>= 90.0%` | ✅ PASS |
 | Verbatim Citation Faithfulness | `100.0%` | `== 100.0%` | ✅ PASS |
-| Frontier Token Savings Ratio | `99.19%` | `>= 80.0%` | ✅ PASS |
+| Frontier Token Savings Ratio | `87.37%` | `>= 80.0%` | ✅ PASS |
 | RBAC Zero-Leakage Rate | `100.0%` | `== 100.0%` | ✅ PASS |
 | Prompt-Injection Block Rate | `100.0%` | `>= 95.0%` | ✅ PASS |
 
@@ -41,7 +41,7 @@
 - Token overlap $\ge 0.98$ for all citations with zero hallucinated tokens.
 
 ### 2.4 Frontier Token Savings Ratio
-- **Target**: $\ge 80.0\%$ | **Measured**: `99.19%`
+- **Target**: $\ge 80.0\%$ | **Measured**: `87.37%`
 - **Result**: `PASS`
 - Measures the reduction in tokens sent to paid frontier models compared to raw dumping.
 - Achieved token reduction safely protects enterprise session budgets.
@@ -66,16 +66,16 @@
 - **GenAI Conventions**: Adheres strictly to `gen_ai.system`, `gen_ai.request.model`,
   `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.operation.name`.
 - **Operational Spans**:
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `a7c3fa511a0cabf3b8aacb44ea1eeb6a`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `a7c3fa511a0cabf3b8aacb44ea1eeb6a`)
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `d7486738693933323aac3007e7311478`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `d7486738693933323aac3007e7311478`)
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `3135c95070b98d20bbc3090a1230dd86`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `3135c95070b98d20bbc3090a1230dd86`)
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `97e204f5421ea28785bb621fd59ce8cc`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `97e204f5421ea28785bb621fd59ce8cc`)
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `3ac14e20db7f9858ae6043ea589585e2`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `3ac14e20db7f9858ae6043ea589585e2`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `14dc4b90f1825a1f2e04afa93719c3aa`)
+- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `14dc4b90f1825a1f2e04afa93719c3aa`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `8d221309498a87fc8fdfee8361fdfcec`)
+- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `8d221309498a87fc8fdfee8361fdfcec`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `b31c78c61aeb852fb6209db44e8ae853`)
+- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `b31c78c61aeb852fb6209db44e8ae853`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `438b0cff176f10a80be5c65f06971c38`)
+- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `438b0cff176f10a80be5c65f06971c38`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `9217648c8c9a42143c0fd1afa4d14a38`)
+- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `9217648c8c9a42143c0fd1afa4d14a38`)
 
 ---
 

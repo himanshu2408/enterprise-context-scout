@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import threading
 from typing import TYPE_CHECKING, Any, Final
 
 from context_scout.config import ScoutSettings, validate_google_model_id
@@ -15,10 +17,39 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GOOGLE_EMBEDDING_MODEL: Final[str] = "google/embeddinggemma-2"
 EXPECTED_EMBEDDING_DIM: Final[int] = 768
+_TORCH_EMBED_LOCK: Final[threading.Lock] = threading.Lock()
+_EMBEDDER_MODEL_CACHE: dict[tuple[str, str], SentenceTransformer] = {}
 
 
 def resolve_torch_device() -> str:
-    """Selects Apple Silicon MPS acceleration if available, falling back to CPU."""
+    """Selects embedding torch device, honoring SCOUT_EMBEDDING_DEVICE & MLX lock."""
+    explicit = os.environ.get("SCOUT_EMBEDDING_DEVICE", "").strip().lower()
+    if explicit == "cpu":
+        return "cpu"
+    if explicit in ("mps", "cuda"):
+        try:
+            import torch
+
+            if (
+                explicit == "mps"
+                and torch.backends.mps.is_available()
+                and torch.backends.mps.is_built()
+            ):
+                return "mps"
+            if explicit == "cuda" and torch.cuda.is_available():
+                return "cuda"
+        except ImportError as exc:
+            logger.debug(
+                "torch unavailable for requested device '%s' (%s); falling back to CPU",
+                explicit,
+                type(exc).__name__,
+            )
+        return "cpu"
+
+    if os.environ.get("CONTEXT_SCOUT_USE_LIVE_MLX", "").strip() == "1":
+        # Avoid concurrent torch.mps + libmlx Metal command-buffer races on Apple Silicon.
+        return "cpu"
+
     try:
         import torch
 
@@ -50,58 +81,66 @@ class LocalSemanticEmbedder:
         self.device = device or resolve_torch_device()
         self.allow_deterministic_fallback = allow_deterministic_fallback
         self._model: SentenceTransformer | None = None
+        self._lock: threading.Lock = _TORCH_EMBED_LOCK
 
     def _load_model(self) -> SentenceTransformer:
-        """Lazy-loads SentenceTransformer model onto designated device."""
-        if self._model is not None:
-            return self._model
+        """Lazy-loads SentenceTransformer model onto designated device under lock."""
+        with self._lock:
+            if self._model is not None:
+                return self._model
+            cache_key = (self.model_id, self.device)
+            cached = _EMBEDDER_MODEL_CACHE.get(cache_key)
+            if cached is not None:
+                self._model = cached
+                return cached
 
-        try:
-            import torch
-            from sentence_transformers import SentenceTransformer
-
-            # Use bfloat16 on MPS/CUDA if supported, otherwise float32
-            torch_dtype = torch.bfloat16 if self.device in ("mps", "cuda") else torch.float32
-            logger.info(
-                "Loading semantic embedding model '%s' on device '%s'...",
-                self.model_id,
-                self.device,
-            )
             try:
-                self._model = SentenceTransformer(
-                    self.model_id,
-                    device=self.device,
-                    model_kwargs={"torch_dtype": torch_dtype},
-                    local_files_only=True,
-                )
-            except Exception as exc:
-                logger.debug(
-                    "Local SentenceTransformer cache miss for %s (%s): %s; trying remote",
-                    self.model_id,
-                    type(exc).__name__,
-                    exc,
-                )
-                self._model = SentenceTransformer(
-                    self.model_id,
-                    device=self.device,
-                    model_kwargs={"torch_dtype": torch_dtype},
-                )
-            if hasattr(self._model, "max_seq_length"):
-                self._model.max_seq_length = 2048
-            return self._model
-        except Exception as err:
-            if self.allow_deterministic_fallback:
-                logger.warning(
-                    "Failed to load '%s' on %s (%s). Falling back to deterministic embedding.",
+                import torch
+                from sentence_transformers import SentenceTransformer
+
+                # Use bfloat16 on MPS/CUDA if supported, otherwise float32
+                torch_dtype = torch.bfloat16 if self.device in ("mps", "cuda") else torch.float32
+                logger.info(
+                    "Loading semantic embedding model '%s' on device '%s'...",
                     self.model_id,
                     self.device,
-                    err,
                 )
-                raise
-            raise RuntimeError(
-                f"Unable to initialize Google embedding model '{self.model_id}' "
-                f"on {self.device}: {err}"
-            ) from err
+                try:
+                    self._model = SentenceTransformer(
+                        self.model_id,
+                        device=self.device,
+                        model_kwargs={"torch_dtype": torch_dtype},
+                        local_files_only=True,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Local SentenceTransformer cache miss for %s (%s): %s; trying remote",
+                        self.model_id,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    self._model = SentenceTransformer(
+                        self.model_id,
+                        device=self.device,
+                        model_kwargs={"torch_dtype": torch_dtype},
+                    )
+                if hasattr(self._model, "max_seq_length"):
+                    self._model.max_seq_length = 2048
+                _EMBEDDER_MODEL_CACHE[cache_key] = self._model
+                return self._model
+            except Exception as err:
+                if self.allow_deterministic_fallback:
+                    logger.warning(
+                        "Failed to load '%s' on %s (%s). Falling back to deterministic embedding.",
+                        self.model_id,
+                        self.device,
+                        err,
+                    )
+                    raise
+                raise RuntimeError(
+                    f"Unable to initialize Google embedding model '{self.model_id}' "
+                    f"on {self.device}: {err}"
+                ) from err
 
     def embed_text(self, text: str, is_query: bool = False) -> list[float]:
         """Encodes a single text string into an L2-normalized 768-dim float vector."""
@@ -122,41 +161,42 @@ class LocalSemanticEmbedder:
 
         import torch
 
-        if torch.backends.mps.is_available():
-            torch.mps.empty_cache()
-
-        kwargs: dict[str, Any] = {
-            "batch_size": batch_size,
-            "normalize_embeddings": True,
-            "show_progress_bar": False,
-        }
-        if hasattr(model, "prompts") and model.prompts:
-            if is_query and "query" in model.prompts:
-                kwargs["prompt_name"] = "query"
-            elif not is_query and "document" in model.prompts:
-                kwargs["prompt_name"] = "document"
-
-        try:
-            raw_embeddings = model.encode(cleaned, **kwargs)
-        except Exception as err:
-            logger.warning(
-                "Encode on device '%s' failed (%s); completing batch on CPU",
-                self.device,
-                err,
-            )
-            if torch.backends.mps.is_available():
+        with self._lock:
+            if self.device == "mps" and torch.backends.mps.is_available():
                 torch.mps.empty_cache()
-            if hasattr(model, "to"):
-                model = model.to("cpu")
-                self._model = model
-            self.device = "cpu"
-            cpu_kwargs = dict(kwargs)
-            cpu_kwargs["device"] = "cpu"
-            cpu_kwargs["batch_size"] = min(batch_size, 8)
-            raw_embeddings = model.encode(cleaned, **cpu_kwargs)
-        finally:
-            if torch.backends.mps.is_available():
-                torch.mps.empty_cache()
+
+            kwargs: dict[str, Any] = {
+                "batch_size": batch_size,
+                "normalize_embeddings": True,
+                "show_progress_bar": False,
+            }
+            if hasattr(model, "prompts") and model.prompts:
+                if is_query and "query" in model.prompts:
+                    kwargs["prompt_name"] = "query"
+                elif not is_query and "document" in model.prompts:
+                    kwargs["prompt_name"] = "document"
+
+            try:
+                raw_embeddings = model.encode(cleaned, **kwargs)
+            except Exception as err:
+                logger.warning(
+                    "Encode on device '%s' failed (%s); completing batch on CPU",
+                    self.device,
+                    err,
+                )
+                if self.device == "mps" and torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+                if hasattr(model, "to"):
+                    model = model.to("cpu")
+                    self._model = model
+                self.device = "cpu"
+                cpu_kwargs = dict(kwargs)
+                cpu_kwargs["device"] = "cpu"
+                cpu_kwargs["batch_size"] = min(batch_size, 8)
+                raw_embeddings = model.encode(cleaned, **cpu_kwargs)
+            finally:
+                if self.device == "mps" and torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
 
         vectors: list[list[float]] = []
         for vec in raw_embeddings:

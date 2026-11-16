@@ -8,7 +8,9 @@ from context_scout.evals.golden_dataset import (
     PoisonedInjectionPayload,
     RedTeamRBACQuery,
     TaskCategory,
+    UnscriptedMultiDomainTask,
     get_default_golden_suite,
+    get_unscripted_multidomain_suite,
 )
 from context_scout.evals.harness import (
     EvaluationGateThresholds,
@@ -30,7 +32,9 @@ __all__ = [
     "PoisonedInjectionPayload",
     "RedTeamRBACQuery",
     "TaskCategory",
+    "UnscriptedMultiDomainTask",
     "generate_markdown_report",
     "get_default_golden_suite",
+    "get_unscripted_multidomain_suite",
     "main",
 ]

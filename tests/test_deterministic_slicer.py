@@ -187,3 +187,59 @@ def test_doc_citation_span_integration(
     res = slicer.verify_doc_citation(citation, chunk_content)
     assert res.is_valid is True
     assert res.token_overlap_ratio == 1.0
+
+
+def test_doc_citation_handles_english_apostrophes_and_still_rejects_unclosed_quotes(
+    slicer: DeterministicSlicer,
+) -> None:
+    """Prose apostrophes must not trigger TRUNCATED_QUOTE; unclosed quotes still fail."""
+    chunk_content = (
+        "Brewer's theorem and O'Brien-Fleming alpha-spending boundaries govern "
+        "sequential monitoring of patients' outcomes in clinical trials. "
+        "Note 'unclosed literal in quote and \"unclosed double quote and (see Section 2.1"
+    )
+    for prose_quote in (
+        (
+            "Brewer's theorem and O'Brien-Fleming alpha-spending boundaries govern "
+            "sequential monitoring of patients' outcomes."
+        ),
+        "O'Brien-Fleming alpha-spending boundaries",
+        "patients' outcomes in clinical trials.",
+    ):
+        # Use exact substring of chunk_content
+        exact_quote = prose_quote.rstrip(".") if prose_quote not in chunk_content else prose_quote
+        prose_citation = DocCitationSpan(
+            chunk_id=str(uuid.uuid4()),
+            doc_id="arxiv:2401.11111",
+            doc_title="Sequential Monitoring Bounds",
+            source_uri="https://arxiv.org/abs/2401.11111",
+            section_heading="Boundaries",
+            verbatim_quote=exact_quote,
+        )
+        prose_res = slicer.verify_doc_citation(prose_citation, chunk_content)
+        assert prose_res.is_valid is True, f"Failed on {exact_quote!r}: {prose_res}"
+        assert prose_res.error_code is None
+
+    # Genuine unclosed delimiters/quotes in doc prose must still fail with TRUNCATED_QUOTE
+    for bad_quote in (
+        "Note 'unclosed literal in quote",
+        (
+            "Brewer's theorem and O'Brien-Fleming alpha-spending boundaries govern "
+            "sequential monitoring of patients' outcomes in clinical trials. "
+            "Note 'unclosed literal in quote"
+        ),
+        'Note "unclosed double quote',
+        "(see Section 2.1",
+    ):
+        bad_citation = DocCitationSpan(
+            chunk_id=str(uuid.uuid4()),
+            doc_id="arxiv:2401.11111",
+            doc_title="Sequential Monitoring Bounds",
+            source_uri="https://arxiv.org/abs/2401.11111",
+            section_heading="Boundaries",
+            verbatim_quote=bad_quote,
+        )
+        bad_res = slicer.verify_doc_citation(bad_citation, chunk_content)
+        assert bad_res.is_valid is False
+        assert bad_res.error_code == SlicerErrorCode.TRUNCATED_QUOTE
+

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   BookOpen,
@@ -17,9 +17,10 @@ import {
 import {
   exchangeAuthSession,
   FEDERATED_ALL_DOMAIN_ID,
-  fetchDomains,
   fetchHealth,
   fetchROIMetrics,
+  fetchWorkspaceConfig,
+  mapDomainDetailToInfo,
 } from "./api/client";
 import { CitationInspector } from "./components/CitationInspector";
 import {
@@ -40,6 +41,7 @@ import {
   ROIMetricsResponse,
   ScoutTokenSavingsBreakdown,
   SourceFilterType,
+  WorkspaceConfigResponse,
 } from "./types/contracts";
 
 const SOURCE_FILTERS: Array<{
@@ -70,9 +72,12 @@ export function App(): React.ReactElement {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
 
+  const [workspaceConfig, setWorkspaceConfig] =
+    useState<WorkspaceConfigResponse | null>(null);
   const [domains, setDomains] = useState<DomainInfo[]>([]);
   const [domainsLoading, setDomainsLoading] = useState<boolean>(true);
   const [domainsError, setDomainsError] = useState<string | null>(null);
+  const [configAttempt, setConfigAttempt] = useState<number>(0);
 
   const [roiMetrics, setRoiMetrics] = useState<ROIMetricsResponse | null>(null);
   const [roiLoading, setRoiLoading] = useState<boolean>(true);
@@ -91,40 +96,19 @@ export function App(): React.ReactElement {
   const [abstainedDiagnostic, setAbstainedDiagnostic] =
     useState<InsufficientContextDiagnostic | null>(null);
   const [diffModalOpen, setDiffModalOpen] = useState<boolean>(false);
+  const initialScopesHydratedRef = useRef<boolean>(false);
 
-  const loadHealthAndDomains = useCallback(async (): Promise<void> => {
-    setDomainsLoading(true);
+  const loadHealth = useCallback(async (): Promise<void> => {
     setHealthError(null);
-    setDomainsError(null);
-
-    const [healthRes, domainsRes] = await Promise.allSettled([
-      fetchHealth(),
-      fetchDomains(),
-    ]);
-
-    if (healthRes.status === "fulfilled") {
-      setHealth(healthRes.value);
-    } else {
+    try {
+      const h = await fetchHealth();
+      setHealth(h);
+    } catch (err: unknown) {
       setHealth(null);
       setHealthError(
-        healthRes.reason instanceof Error
-          ? healthRes.reason.message
-          : "Health endpoint unavailable"
+        err instanceof Error ? err.message : "Health endpoint unavailable"
       );
     }
-
-    if (domainsRes.status === "fulfilled") {
-      setDomains(domainsRes.value);
-    } else {
-      setDomains([]);
-      setDomainsError(
-        domainsRes.reason instanceof Error
-          ? domainsRes.reason.message
-          : "Domains endpoint unavailable"
-      );
-    }
-
-    setDomainsLoading(false);
   }, []);
 
   const loadRoi = useCallback(async (): Promise<void> => {
@@ -143,19 +127,63 @@ export function App(): React.ReactElement {
   }, []);
 
   useEffect(() => {
-    void loadHealthAndDomains();
+    void loadHealth();
     void loadRoi();
-  }, [loadHealthAndDomains, loadRoi]);
+  }, [loadHealth, loadRoi]);
 
   useEffect(() => {
     let cancelled = false;
     setAuthStatus("authenticating");
     setAuthError(null);
+    setDomainsLoading(true);
+    setDomainsError(null);
 
     void exchangeAuthSession(principal)
-      .then(() => {
+      .then(async () => {
         if (cancelled) return;
         setAuthStatus("ready");
+        try {
+          const cfg = await fetchWorkspaceConfig(principal);
+          if (cancelled) return;
+          setWorkspaceConfig(cfg);
+          setDomains(cfg.domains.map(mapDomainDetailToInfo));
+          setDomainsError(null);
+          if (!initialScopesHydratedRef.current) {
+            initialScopesHydratedRef.current = true;
+            const matchedPreset = cfg.role_presets.find(
+              (r) => r.role === principal.role
+            );
+            if (matchedPreset && matchedPreset.default_scopes.length > 0) {
+              const sameLength =
+                matchedPreset.default_scopes.length ===
+                principal.allowed_scopes.length;
+              const sameSet =
+                sameLength &&
+                matchedPreset.default_scopes.every((s) =>
+                  principal.allowed_scopes.includes(s)
+                );
+              if (!sameSet) {
+                setPrincipal((prev) => ({
+                  ...prev,
+                  allowed_scopes: [...matchedPreset.default_scopes],
+                }));
+              }
+            }
+          }
+        } catch (cfgErr: unknown) {
+          if (cancelled) return;
+          setWorkspaceConfig(null);
+          setDomains([]);
+          setDomainsError(
+            cfgErr instanceof Error
+              ? cfgErr.message
+              : "Workspace config unavailable"
+          );
+        } finally {
+          if (!cancelled) {
+            setDomainsLoading(false);
+          }
+        }
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -165,14 +193,18 @@ export function App(): React.ReactElement {
             ? err.message
             : "Signed Bearer authentication failed."
         );
+        setDomains([]);
+        setDomainsError("Authentication required to load workspace domains.");
+        setDomainsLoading(false);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [principal, authAttempt]);
+  }, [principal, authAttempt, configAttempt]);
 
   const handleChangePrincipal = (next: PrincipalContext): void => {
+    initialScopesHydratedRef.current = true;
     if (next.role !== "engineer") {
       setDiffModalOpen(false);
     }
@@ -228,9 +260,27 @@ export function App(): React.ReactElement {
     );
   };
 
-  const hw = health?.hardware_profile;
+  const availableDomainScopes = useMemo(() => {
+    const scopes = new Set<string>();
+    for (const d of domains) {
+      for (const sc of d.default_scopes) {
+        if (sc) scopes.add(sc);
+      }
+    }
+    return Array.from(scopes);
+  }, [domains]);
+
+  const hw = health?.hardware_profile ?? workspaceConfig?.hardware_profile;
   const adapterEntries = Object.values(health?.adapter_pool_status ?? {});
   const verifiedAdapterCount = adapterEntries.filter((a) => a.is_valid).length;
+  const dbConnected =
+    health?.database_connected ?? workspaceConfig?.database_connected ?? false;
+  const dbStatus =
+    health?.database_status ?? workspaceConfig?.database_status ?? "";
+  const pgVersionLabel = hw?.postgres_version
+    ? `PG ${hw.postgres_version} RLS`
+    : "PG17 RLS Connected";
+  const runtimeMode = hw?.runtime_mode ?? workspaceConfig?.runtime_mode;
 
   return (
     <div className="app-shell">
@@ -242,7 +292,7 @@ export function App(): React.ReactElement {
           <div>
             <h1 className="brand-title">Enterprise Context Scout</h1>
             <p className="brand-subtitle">
-              Grounded Engineering &amp; Research Workbench
+              Local-First Grounded Engineering &amp; Research Workbench
             </p>
           </div>
         </div>
@@ -255,9 +305,12 @@ export function App(): React.ReactElement {
             >
               <Cpu size={14} className="icon-accent" />
               <span>
-                {hw.device}, {hw.unified_memory}, {hw.quantization},{" "}
-                {verifiedAdapterCount}/{adapterEntries.length} Adapters, LoRA{" "}
-                {hw.lora_slots_allocated}/{hw.lora_slots_capacity}
+                {hw.device}, {hw.unified_memory}, {hw.quantization}
+                {adapterEntries.length > 0
+                  ? `, ${verifiedAdapterCount}/${adapterEntries.length} Adapters`
+                  : ""}
+                {`, LoRA ${hw.lora_slots_allocated}/${hw.lora_slots_capacity}`}
+                {runtimeMode ? ` · ${runtimeMode}` : ""}
               </span>
             </div>
           ) : (
@@ -269,18 +322,16 @@ export function App(): React.ReactElement {
 
           <div
             className={`telemetry-chip ${
-              health?.database_connected
-                ? "telemetry-chip-ok"
-                : "telemetry-chip-danger"
+              dbConnected ? "telemetry-chip-ok" : "telemetry-chip-danger"
             }`}
             data-testid="health-db-badge"
           >
             <Database size={14} />
             <span>
-              {health
-                ? health.database_connected
-                  ? "PG17 RLS Connected"
-                  : `DB Disconnected (${health.database_status})`
+              {health || workspaceConfig
+                ? dbConnected
+                  ? pgVersionLabel
+                  : `DB Disconnected (${dbStatus})`
                 : "PG17 Status Pending"}
             </span>
           </div>
@@ -384,19 +435,28 @@ export function App(): React.ReactElement {
                 <RoleSwitcher
                   principal={principal}
                   onChangePrincipal={handleChangePrincipal}
+                  rolePresets={workspaceConfig?.role_presets}
+                  availableScopes={availableDomainScopes}
                   authStatus={authStatus}
                   authError={authError}
-                  onRetryAuth={() => setAuthAttempt((n) => n + 1)}
+                  onRetryAuth={() => {
+                    if (!health) void loadHealth();
+                    setAuthAttempt((n) => n + 1);
+                  }}
                 />
 
                 <DomainSelector
                   domains={domains}
                   selectedDomain={selectedDomain}
                   onSelectDomain={setSelectedDomain}
+                  federatedOption={workspaceConfig?.federated_option}
                   sourceFilter={sourceFilter}
                   loading={domainsLoading}
                   error={domainsError}
-                  onRetry={() => void loadHealthAndDomains()}
+                  onRetry={() => {
+                    void loadHealth();
+                    setConfigAttempt((n) => n + 1);
+                  }}
                 />
               </div>
             </>
@@ -407,6 +467,8 @@ export function App(): React.ReactElement {
           <ScoutConsole
             selectedDomain={selectedDomain}
             principal={principal}
+            domains={domains}
+            pipelineStages={workspaceConfig?.pipeline_stages}
             sourceFilter={sourceFilter}
             scopeResetVersion={scopeResetVersion}
             onSelectDomain={setSelectedDomain}
