@@ -50,7 +50,7 @@ CREATE POLICY rls_code_files_scope ON code_files
 ## 3. Prompt-Injection Defense, Secret Redaction & `$0.00` Paid-Model Protection
 
 - **Input & Retrieved-Content Guardrails (`src/context_scout/security/guardrails.py`):**
-  - `PromptInjectionSanitizer` + `ShieldGemmaGuardrail`: Blocks system-prompt overrides, delimiter breakouts, HTML-comment split injections (pre- and post-comment stripping), Unicode bidi directionality spoofing, and LaTeX comment steganography (`18/18` active attack payloads blocked).
+  - `PromptInjectionSanitizer` + `ShieldGemmaGuardrail`: Local runtime executes deterministic regex, Unicode-bidi, and comment-stripping rules (`evaluate_deterministic_fallback()`, `used_fallback=True`), blocking system-prompt overrides, delimiter breakouts, HTML-comment split injections, Unicode bidi directionality spoofing, and LaTeX comment steganography (`18/18` known signature payloads blocked). **Important limitation:** Because local Stage 1 does not run live neural `ShieldGemma 2` weights, novel paraphrased prompt injections without known trigger signatures are not caught by Stage 1 regexes; defense-in-depth relies on SQL `FORCE RLS`, identity-free read-only MCP tool schemas, and `<untrusted_retrieved_data>` delimiter framing (with Google Cloud Model Armor / neural `ShieldGemma 2` as the production target).
   - `SecretRedactor`: Redacts high-entropy API keys, JWTs, AWS credentials, and PEM private keys before context leaves the retrieval boundary (`4/4` secret-extraction payloads neutralized; `22/22` combined security gate).
   - `frame_untrusted_content`: Wraps all retrieved code slices, issues, and document chunks in `<untrusted_retrieved_data>` delimiters with random nonces so retrieved text is never treated as instructions.
 - **`$0.00` Paid-Model Protection (Abstention Gate):**
@@ -68,7 +68,7 @@ CREATE POLICY rls_code_files_scope ON code_files
 | **Embeddings (`768-dim`)** | Local `google/embeddinggemma-2` (`SCOUT_EMBEDDING_DEVICE=cpu` alongside MLX) | **Vertex AI `gemini-embedding-001`** or self-hosted `embeddinggemma-2` on GKE |
 | **Multi-Tenant Storage & RLS** | Docker / Homebrew PostgreSQL 17 (`pgvector`, `pg_trgm`, `FORCE RLS`, `scout_app_user`) | **Cloud SQL for PostgreSQL 17** or **AlloyDB** with `FORCE RLS` + IAM database authentication |
 | **Identity & Principal Binding** | `POST /api/v1/auth/session` + HMAC-SHA256 Bearer / `X-Principal-Signature` | **Google Cloud IAP / Okta OIDC JWT** validated at API Gateway $\rightarrow$ signed `PrincipalContext` |
-| **Input/Output Guardrails** | Local `ShieldGemma 2` + `PromptInjectionSanitizer` + `SecretRedactor` | **Google Cloud Model Armor** + Cloud Sensitive Data Protection (SDP) |
+| **Input/Output Guardrails** | Local deterministic `PromptInjectionSanitizer` + `SecretRedactor` (`ShieldGemmaGuardrail` fallback) | **Google Cloud Model Armor** + neural `ShieldGemma 2` + Cloud SDP |
 | **Paid Implementation Model** | `gemini-3.8-flash` / `gemini-4-argon` via `google-genai` SDK (`>=2.31.0`) | **Vertex AI Gemini API** (`gemini-3.8-flash` / `gemini-4-argon`) with VPC Service Controls |
 | **CI/CD & Cloud Auth** | GitHub Actions [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | Keyless **Workload Identity Federation (WIF)** OIDC $\rightarrow$ Artifact Registry $\rightarrow$ Cloud Run |
 

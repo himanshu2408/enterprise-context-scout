@@ -30,7 +30,7 @@ Every query emits structured `StageExecutionTrace` and `StageConfidence` objects
 
 1. **Stage 1 — Auth, Guardrail & Query Plan (`Auth, Guardrail & Query Plan`):**
    - **Principal Binding:** Extracts `PrincipalContext` out-of-band (`user_id`, `role`, `allowed_scopes`, `max_session_paid_tokens`) and binds it to PostgreSQL 17 via `RLSConnectionManager` (`SET LOCAL app.principal_scopes`).
-   - **Input Guardrail:** Screens the raw query through `PromptInjectionSanitizer` and `ShieldGemmaGuardrail` (`src/context_scout/security/guardrails.py`).
+   - **Input Guardrail:** Screens the raw query through `PromptInjectionSanitizer` and `SecretRedactor` via `ShieldGemmaGuardrail.evaluate_deterministic_fallback()` (`src/context_scout/security/guardrails.py`). Note: local runtime executes deterministic regex/Unicode/secret rules (`used_fallback=True`) rather than live neural `ShieldGemma 2` weights; novel paraphrased injections rely on SQL `FORCE RLS` and `<untrusted_retrieved_data>` framing.
    - **Structured Query Planning:** Decomposes multi-part queries (`"top N"`, multi-entity comparisons, acronyms) into `query_type`, `core_subject`, `required_facets`, and candidate `target_domains`. Fails closed at `$0` if `allowed_scopes` is empty or an injection payload is detected.
 2. **Stage 2 — Multi-Domain Hybrid Retrieval & AST Closure (`Multi-Domain Hybrid Retrieval & AST Closure`):**
    - When `domain_id="federated_all"`, probes all principal-authorized `DomainPack`s in PostgreSQL 17 and records per-domain `DomainProbeTrace` and per-hit `RetrievalHitTrace` telemetry (`cosine_similarity`, `bm25_score`, `trigram_score`, `calibrated_score`, `accepted`, `rejection_reason`).
@@ -66,7 +66,7 @@ Each stage computes a `StageConfidence` (`confidence_score` in `[0.0, 1.0]`, `co
 ```mermaid
 flowchart LR
     Git["Git Repo + Working Tree"] --> Merkle["GitMerkleIndexer (<50ms Blob-SHA Diff)"]
-    Merkle -->|"Changed files only"| AST["ASTExtractor (11 Languages, tree-sitter)"]
+    Merkle -->|"Changed files only"| AST["ASTExtractor (tree-sitter: Py/TS/TSX/JS/C#/HCL; regex fallback: Go/RS/Java/SQL/YAML)"]
     AST --> Linker["CrossBoundaryContractLinker (Routes, DTOs, SQL, CI/TF)"]
     AST --> PG["PostgreSQL 17 (code_files, ast_symbols, ast_edges)"]
     Linker --> PG
@@ -77,7 +77,7 @@ flowchart LR
 ```
 
 - **Git Blob-SHA Merkle Sync (`src/context_scout/ingestion/git_merkle_indexer.py`):** Compares `git ls-tree -r HEAD` blob SHAs against `code_files.git_blob_sha` and overlays uncommitted working-tree edits (`M`), untracked files (`??`), and deletions (`D`) via `git --no-optional-locks status --porcelain -unormal` in `<50 ms` (`~22 ms` warm in-memory, `~37.4 ms` live PG17). Supports `isolate_by_commit=True` using `git cat-file -p <commit>:<path>` for historical PR benchmarking without checkout collisions.
-- **11-Language `tree-sitter` AST Extraction (`src/context_scout/ast_engine/extractor.py` & `src/context_scout/plugins/`):** Extracts `function`, `class`, `method`, `interface`, and `type_alias` nodes plus directed edges (`CALLS`, `IMPORTS`, `USES_TYPE`, `INHERITS`, `TESTED_BY`) across Python, TypeScript, TSX, JavaScript/JSX, Go, Rust, Java, C# (`tree-sitter-c-sharp`), SQL DDL/RLS, Terraform HCL, and CI/K8s YAML.
+- **Polyglot AST & Fallback Extraction (`src/context_scout/ast_engine/extractor.py` & `src/context_scout/plugins/`):** Extracts `function`, `class`, `method`, `interface`, and `type_alias` nodes plus directed edges (`CALLS`, `IMPORTS`, `USES_TYPE`, `INHERITS`, `TESTED_BY`). Full `tree-sitter` grammars (with fail-closed syntax-error diagnostics) cover **Python, TypeScript, TSX, JavaScript/JSX, C# (`tree-sitter-c-sharp`), and Terraform HCL (`tree-sitter-hcl`)**, while **Go, Rust, Java, SQL DDL/RLS, and CI/K8s YAML** currently use lightweight structural regex/block extractors (`low_confidence_fallback=True`).
 - **Identifier Word Decomposition & Stemming:** Splits `camelCase` and `snake_case` identifiers into sub-tokens alongside morphological stem expansion so conceptual queries match compound symbol names without dense-vector smearing.
 - **1-Hop & 2-Hop `ASTDependencyExpander` (`src/context_scout/ast_engine/dependency_expander.py`):** Configured via `ContextCompletenessConfig` (`src/context_scout/ast_engine/models.py`):
   - `MAX_DIRECT_CALLERS_PER_SYMBOL = 8` diverse callers across distinct files.
@@ -94,7 +94,7 @@ flowchart LR
   - `LatexDocParser`: Resolves `\input`/`\include`/`\subfile` includes and keeps display/inline math (`equation`, `align`, `gather`, `multline`, `$$...$$`) and `table`/`tabular` floats intact as atomic chunks while tracking `\section`/`\subsection` breadcrumbs.
   - `PdfDocParser`: `pypdf` extraction with NUL-byte sanitization and section heading detection.
   - `MarkdownTableChunker` & Markup Strippers: Preserves GitHub-flavored Markdown tables with fenced code-block guards, plus clean parsing for `.md`, `.mdx`, `.adoc`, `.sgml`, `.rst`, `.html`, `.json`, and `.csv`.
-- **Contextual Headers (`src/context_scout/ingestion/contextualizer.py`):** Prepends a 50-token situated context prefix generated by `google/gemma-4-E4B-it` (with `DeterministicContextualizer` offline fallback for CI) before embedding.
+- **Contextual Headers (`src/context_scout/ingestion/contextualizer.py`):** Supports an optional HTTP `google/gemma-4-E4B-it` 50-token header client, while the indexed local PostgreSQL 17 corpora (`31,704` DE + `14,188` Quant chunks) use `DeterministicContextualizer` section/metadata breadcrumbs before 768-d embedding.
 - **3-Way Hybrid RRF (`src/context_scout/db/repositories.py`, `bm25.py`):** Fuses 768-dim `google/embeddinggemma-2` cosine similarity (`embedding <=> %s::vector`), PostgreSQL `tsvector` BM25 (`websearch_to_tsquery` + `ts_rank_cd`), and `pg_trgm` (`word_similarity`) weighted by `authority_weight`, `market_scope`, and `doc_title`, normalized to `[0.0, 1.0]` (`k = 60`).
 - **Calibrated Relevance Filtering:** `CALIBRATED_RELEVANCE_FLOOR = 0.34` filters weak cosine/BM25 noise before Stage 3 synthesis; license headers and boilerplate chunks (`is_license_or_stub_text`) are rejected deterministically.
 - **Confluence Version Supersession & `ConflictDetector` (`src/context_scout/agents/conflict_detector.py`):** Enforces monotonic `version_number` supersession (older versions marked `is_stale=True` with `superseded_by` links) and flags contradictions between current code/AST implementations and stale RFCs or deprecated wiki pages.

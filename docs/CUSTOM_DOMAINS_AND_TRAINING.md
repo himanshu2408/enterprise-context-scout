@@ -91,16 +91,16 @@ uv run context-scout init-domain \
   --source-dir /path/to/your/repos-or-docs
 ```
 
-### 2.1 Codebase Ingestion (Git Merkle + 11-Language AST)
+### 2.1 Codebase Ingestion (Git Merkle + Polyglot AST / Structural Extractors)
 `uv run context-scout sync --domain-id <domain_id>` invokes `GitMerkleIndexer` (`src/context_scout/ingestion/git_merkle_indexer.py`):
 - Diffs `git ls-tree -r HEAD` blob SHAs against `code_files.git_blob_sha` and skips unchanged files.
 - Overlays uncommitted edits (`M`), untracked files (`??`), and deletions (`D`) via `git --no-optional-locks status --porcelain -unormal` in `<50 ms`.
-- Parses changed files with `ASTExtractor` (Python, TypeScript/TSX, JS/JSX, Go, Rust, Java, C#, SQL, Terraform, YAML, Markdown) and links cross-service contracts via `CrossBoundaryContractLinker`.
+- Parses changed files with `ASTExtractor` (full `tree-sitter` grammars for Python, TypeScript/TSX, JS/JSX, C#, and Terraform HCL; lightweight regex/block extractors for Go, Rust, Java, SQL, YAML, and Markdown) and links cross-service contracts via `CrossBoundaryContractLinker`.
 
 ### 2.2 Multi-Format Document Ingestion & Corpus Hygiene
 `context-scout sync` and `src/context_scout/ingestion/doc_parser.py` ingest `.pdf`, `.md`, `.mdx`, `.adoc`, `.sgml`, `.tex`, `.rst`, `.json`, `.csv`, and `.html` files into PostgreSQL 17 `doc_chunks`:
 - Preserves LaTeX math environments and Markdown/HTML tables intact (`LatexDocParser`, `MarkdownTableChunker`).
-- Prepends 50-token contextual headers (`google/gemma-4-E4B-it`) and embeds with 768-d `google/embeddinggemma-2` (`SCOUT_EMBEDDING_DEVICE=cpu` when running alongside MLX).
+- Prepends situated breadcrumb/metadata headers (`DeterministicContextualizer` by default; optional `google/gemma-4-E4B-it` HTTP contextualizer) and embeds with 768-d `google/embeddinggemma-2` (`SCOUT_EMBEDDING_DEVICE=cpu` when running alongside MLX).
 - **Corpus Hygiene & Enrichment (`scripts/clean_and_enrich_corpus.py`):** Scrubs raw `.tex` proof noise, SGML/DocBook markup, and license/stub boilerplate from `doc_chunks`, and can ingest clean open-source foundational reference pages before re-indexing:
   ```bash
   .venv/bin/python scripts/clean_and_enrich_corpus.py --clean --enrich --verify
