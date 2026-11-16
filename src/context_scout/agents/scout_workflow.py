@@ -5869,12 +5869,19 @@ class FederatedScoutCoordinator:
                             key=lambda d: (
                                 1
                                 if (
-                                    d in direct_code_tokens
+                                    query_plan.query_type != "concept_definition"
+                                    and d in direct_code_tokens
                                     and (
                                         top_raw_score
                                         - float(domain_results[d]["max_calibrated_score"])
                                     )
                                     <= 0.05
+                                )
+                                else 0,
+                                1
+                                if (
+                                    query_plan.query_type == "concept_definition"
+                                    and bool(domain_results[d].get("doc_records"))
                                 )
                                 else 0,
                                 float(domain_results[d]["max_calibrated_score"]),
