@@ -134,7 +134,7 @@ def get_domain_counts(conn: psycopg.Connection[tuple[object, ...]]) -> dict[str,
         cur.execute(
             "SELECT domain_id, count(*) FROM doc_chunks GROUP BY domain_id ORDER BY domain_id;"
         )
-        return {str(row[0]): int(row[1]) for row in cur.fetchall()}
+        return {str(row[0]): int(str(row[1])) for row in cur.fetchall()}
 
 
 def clean_doc_chunks(settings: ScoutSettings) -> dict[str, dict[str, int]]:

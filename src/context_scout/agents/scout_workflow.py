@@ -37,6 +37,7 @@ from context_scout.agents.conflict_detector import ConflictDetector
 from context_scout.agents.domain_registry import AdapterPool, AdapterSlot, DomainRegistry
 from context_scout.agents.intent_router import (
     QueryIntentClassifier,
+    QueryIntentDecision,
     QueryIntentMode,
     QueryPlan,
     SourceFilter,
@@ -1629,7 +1630,12 @@ class LocalGemmaClient:
             "codebase",
             "trading",
             "calculate",
+            "calculating",
             "compute",
+            "computing",
+            "apply",
+            "applies",
+            "applying",
             "implemented",
             "implementation",
             "explain",
@@ -1637,36 +1643,56 @@ class LocalGemmaClient:
             "describe",
             "model",
             "models",
+            "account",
+            "step",
+            "steps",
+            "multi",
+            "into",
+            "top",
+            "across",
+            "before",
+            "after",
+            "internal",
         }
         nl_stopwords = PROMPT_STOPWORDS - {"help"}
+        excluded_nl = nl_stopwords | generic_terms
         base_nl_terms = list(
             dict.fromkeys(
                 w.lower()
                 for t_raw in candidates_to_search
                 for w in re.split(r"[_\-\./]+", t_raw)
-                if len(w) >= 3
-                and w.lower() not in nl_stopwords
-                and w.lower() not in generic_terms
-                and not w.isdigit()
+                if len(w) >= 3 and w.lower() not in excluded_nl and not w.isdigit()
             )
         )
+        # Map each morphological variant back to its canonical base query term
+        # so stem expansion never double-counts a single query word.
+        nl_term_groups: dict[str, str] = {w_item: w_item for w_item in base_nl_terms}
         nl_terms = list(base_nl_terms)
+
+        def _add_variant(variant: str, root_term: str) -> None:
+            if len(variant) >= 4 and variant not in excluded_nl and variant not in nl_term_groups:
+                nl_term_groups[variant] = root_term
+                nl_terms.append(variant)
+
         for w_item in base_nl_terms:
+            if w_item.endswith("ies") and len(w_item) >= 6:
+                _add_variant(w_item[:-3] + "y", w_item)
+            elif w_item.endswith("s") and not w_item.endswith("ss") and len(w_item) >= 5:
+                _add_variant(w_item[:-1], w_item)
             if w_item.endswith("ing") and len(w_item) >= 6:
-                stem_e = w_item[:-3] + "e"
-                stem_raw = w_item[:-3]
-                if len(stem_e) >= 4 and stem_e not in nl_terms:
-                    nl_terms.append(stem_e)
-                if len(stem_raw) >= 4 and stem_raw not in nl_terms:
-                    nl_terms.append(stem_raw)
+                _add_variant(w_item[:-3] + "e", w_item)
+                _add_variant(w_item[:-3], w_item)
+            if w_item.endswith("ed") and len(w_item) >= 5:
+                _add_variant(w_item[:-1], w_item)
+                _add_variant(w_item[:-2], w_item)
+            if w_item.endswith("al") and len(w_item) >= 6:
+                _add_variant(w_item[:-2], w_item)
             if w_item in ("decompression", "decompress", "compressed", "compression"):
                 for syn in ("decoder", "decoders", "decompress"):
-                    if syn not in nl_terms:
-                        nl_terms.append(syn)
+                    _add_variant(syn, w_item)
             if w_item in ("urlencode", "urlencoded"):
                 for syn in ("urlencode_safe", "queryparams"):
-                    if syn not in nl_terms:
-                        nl_terms.append(syn)
+                    _add_variant(syn, w_item)
         title_terms = {
             w.lower()
             for w in re.findall(r"[A-Za-z0-9]+", first_line)
@@ -1733,12 +1759,42 @@ class LocalGemmaClient:
                 continue
             if "paper_harvester" in sym.qualified_name and "harvest" not in user_prompt.lower():
                 continue
-            if ".evals." in sym.qualified_name and "eval" not in user_prompt.lower():
+            if (
+                ".evals." in sym.qualified_name or sym.qualified_name.startswith("evals.")
+            ) and "eval" not in user_prompt.lower():
                 continue
-            short_l = sym.qualified_name.split(".")[-1].lower()
+            short_raw = sym.qualified_name.split(".")[-1]
+            short_l = short_raw.lower()
             qual_l = sym.qualified_name.lower()
-            sig_l = sym.signature_skeleton.lower()
             sum_l = sym.contextual_summary.lower()
+
+            def _split_camel_snake(val: str) -> set[str]:
+                sp = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", val)
+                sp = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", sp)
+                return {t.lower() for t in re.split(r"[^A-Za-z0-9]+", sp) if len(t) >= 2}
+
+            short_words = _split_camel_snake(short_raw)
+            file_rel = files_by_id[sym.file_id].file_path if sym.file_id in files_by_id else ""
+            path_words = _split_camel_snake(file_rel) - {
+                "src",
+                "py",
+                "ts",
+                "tsx",
+                "context",
+                "scout",
+            }
+            sig_words = _split_camel_snake(sym.signature_skeleton)
+            sum_words = _split_camel_snake(sym.contextual_summary)
+
+            def _word_match_kind(term: str, words: set[str]) -> int:
+                if term in words:
+                    return 2
+                if len(term) >= 4 and any(
+                    w.startswith(term) or (len(w) >= 5 and w[:5] == term[:5] and len(term) >= 5)
+                    for w in words
+                ):
+                    return 1
+                return 0
             body_l = ""
             if (
                 not is_large_multi_repo
@@ -1788,6 +1844,7 @@ class LocalGemmaClient:
                 "request",
                 "requests",
             }
+            matched_base_terms: set[str] = set()
             for term in nl_terms:
                 if len(term) < 4 and term not in {
                     "url",
@@ -1805,31 +1862,49 @@ class LocalGemmaClient:
                     continue
                 term_weight = 1.5 if term in title_terms else 1.0
                 term_hit = False
-                if term in short_l:
-                    score += 6.0 * term_weight
+                short_kind = _word_match_kind(term, short_words)
+                if short_kind == 2:
+                    score += 9.0 * term_weight
                     term_hit = True
                     if term not in generic_action_verbs:
                         short_term_hits += 1
                     if term in title_terms and term not in generic_action_verbs:
                         title_in_short = True
+                elif short_kind == 1 or term in short_l:
+                    score += (5.5 if short_kind == 1 else 3.0) * term_weight
+                    term_hit = True
+                    if term not in generic_action_verbs:
+                        short_term_hits += 1
+                    if short_kind == 1 and term in title_terms and term not in generic_action_verbs:
+                        title_in_short = True
+                elif _word_match_kind(term, path_words) > 0:
+                    score += 5.0 * term_weight
+                    term_hit = True
                 elif term in qual_l:
-                    score += 3.5 * term_weight
+                    score += 2.5 * term_weight
                     term_hit = True
-                if term in sig_l:
-                    score += 2.0 * term_weight
+                sig_kind = _word_match_kind(term, sig_words)
+                if sig_kind > 0:
+                    score += (3.0 if sig_kind == 2 else 2.0) * term_weight
                     term_hit = True
-                if term in sum_l:
-                    score += (12.0 if "[dispatch " in sum_l else 1.5) * term_weight
+                sum_kind = _word_match_kind(term, sum_words)
+                if sum_kind > 0 or term in sum_l:
+                    sum_pts = 12.0 if "[dispatch " in sum_l else (3.5 if sum_kind == 2 else 2.0)
+                    score += sum_pts * term_weight
                     term_hit = True
                 if body_l and term in body_search_terms and term in body_l:
                     score += 3.0 * term_weight
                     term_hit = True
                 if term_hit:
-                    matched_terms += 1
+                    root_t = nl_term_groups.get(term, term)
+                    matched_base_terms.add(root_t)
+            matched_terms = len(matched_base_terms)
             if title_in_short:
-                score += 8.0
+                score += 6.0
             if short_term_hits >= 2:
                 score += 14.0
+            if matched_terms >= 2:
+                score += 10.0 * (matched_terms - 1)
             if (
                 body_l
                 and ("windows" in prompt_l_clean or "winerror" in prompt_l_clean)
@@ -1880,12 +1955,46 @@ class LocalGemmaClient:
                         score += 12.0
                     else:
                         score *= 0.35
-                score += matched_terms * 4.0
+                score += matched_terms * 5.0
                 if sym.symbol_kind in ("class", "interface"):
-                    score += 2.5
+                    score += 4.0
                 elif sym.symbol_kind == "type_alias":
                     score -= 4.0
+                elif (
+                    sym.symbol_kind in ("function", "method")
+                    and (sym.end_line - sym.start_line) > 250
+                ):
+                    score -= 12.0
                 scored_nl.append((score, sym))
+        # Module/file-level concept consensus: reward symbols whose file covers multiple
+        # distinct query concepts so single-word cross-file noise does not drown cohesive modules.
+        if scored_nl:
+            file_best_terms: dict[uuid.UUID, int] = {}
+            file_sym_count: dict[uuid.UUID, int] = {}
+            for _sc, s_obj in scored_nl:
+                file_sym_count[s_obj.file_id] = file_sym_count.get(s_obj.file_id, 0) + 1
+                approx_terms = 0
+                combined_l = (
+                    f"{s_obj.qualified_name} {s_obj.signature_skeleton} {s_obj.contextual_summary}"
+                ).lower()
+                for b_term in base_nl_terms:
+                    if len(b_term) >= 4 and (
+                        b_term in combined_l or (len(b_term) >= 5 and b_term[:5] in combined_l)
+                    ):
+                        approx_terms += 1
+                if approx_terms > file_best_terms.get(s_obj.file_id, 0):
+                    file_best_terms[s_obj.file_id] = approx_terms
+            boosted_nl: list[tuple[float, ASTSymbolRecord]] = []
+            for sc, s_obj in scored_nl:
+                f_terms = file_best_terms.get(s_obj.file_id, 0)
+                f_syms = file_sym_count.get(s_obj.file_id, 0)
+                consensus_bonus = 0.0
+                if f_terms >= 2 or f_syms >= 2:
+                    consensus_bonus = (
+                        6.0 * min(4, max(0, f_terms - 1)) + 3.0 * min(3, max(0, f_syms - 1))
+                    )
+                boosted_nl.append((sc + consensus_bonus, s_obj))
+            scored_nl = boosted_nl
         scored_nl.sort(key=lambda item: (-item[0], item[1].qualified_name))
         if scored_nl:
             existing_t1_ids = {s.symbol_id for s, _ in t1_exact}
@@ -5013,9 +5122,7 @@ class ScoutWorkflow:
 
         total_slice_chars = sum(len(s.verbatim_code_with_lines) for s in hydrated_slices)
         if supporting_doc_citations:
-            total_slice_chars += sum(
-                len(c.full_section_content or c.verbatim_quote) for c in supporting_doc_citations
-            )
+            total_slice_chars += sum(len(c.verbatim_quote) for c in supporting_doc_citations)
         if domain_knowledge_brief is not None:
             brief_chars = (
                 len(domain_knowledge_brief.brief_title)
@@ -6065,6 +6172,34 @@ class FederatedScoutCoordinator:
             has_visible_code=bool(visible_files),
             has_visible_docs=bool(active_chunks),
         )
+        if (
+            source_filter == "all"
+            and intent_decision.mode == QueryIntentMode.PURE_CODE
+            and doc_candidates
+            and bool(active_chunks)
+            and not re.search(
+                r"\b[A-Za-z0-9_./-]+\.(?:py|ts|tsx|js|jsx|sql|go|rs|java)\b",
+                user_prompt,
+            )
+            and (
+                not top_is_code
+                or any(
+                    d != code_domain
+                    and float(domain_results[d]["max_calibrated_score"]) >= 0.45
+                    for d in doc_candidates
+                )
+            )
+        ):
+            intent_decision = QueryIntentDecision(
+                mode=QueryIntentMode.HYBRID_CODE_AND_DOCS,
+                source_filter=source_filter,
+                needs_code=True,
+                needs_docs=True,
+                reason=(
+                    "Multi-domain probe selected above-floor doc and code domains; "
+                    "retaining hybrid synthesis."
+                ),
+            )
 
         quant_brief: QuantStrategyBrief | None = None
         domain_knowledge_brief: DomainKnowledgeBrief | None = None

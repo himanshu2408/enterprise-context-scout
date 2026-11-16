@@ -135,7 +135,7 @@ _DOC_KEYWORD_RE = re.compile(
     r"architecture|architectural|guideline|guidelines|compliance|audit|"
     r"governance|documentation|docs|confluence|jira|wiki|adr|rfc|"
     r"research|paper|papers|specification|spec|formula|formulas|equation|equations|"
-    r"signal|strategy|strategies|handbook|on-call|oncall|handbook|sop|"
+    r"handbook|on-call|oncall|sop|"
     r"approval|changelog|decision\s+record|who\s+owns"
     r")\b",
     re.IGNORECASE,

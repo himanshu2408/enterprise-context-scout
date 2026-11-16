@@ -21,7 +21,10 @@ from context_scout.db.repositories import (
     PostgresRLSRepository,
 )
 from context_scout.db.session import RLSConnectionManager
-from context_scout.ingestion.git_merkle_indexer import generate_deterministic_embedding
+from context_scout.ingestion.git_merkle_indexer import (
+    LANG_MAP,
+    generate_deterministic_embedding,
+)
 from context_scout.schemas.contracts import PrincipalContext, RoleType
 
 logger = logging.getLogger(__name__)
@@ -157,6 +160,22 @@ def seed_trading_codebase_and_issues(
                     'gemma4_26b_quant_research',
                     'document',
                     180,
+                    '{}'::jsonb
+                ),
+                (
+                    'data_engineering_scout',
+                    'Data Engineering & Distributed Systems',
+                    'gemma4_26b_data_engineering',
+                    'document',
+                    180,
+                    '{}'::jsonb
+                ),
+                (
+                    'polyglot_unseen_v2',
+                    'Polyglot OSS Codebase Scout',
+                    'gemma4_26b_polyglot_unseen_v2',
+                    'code',
+                    90,
                     '{}'::jsonb
                 )
             ON CONFLICT (domain_id) DO NOTHING;
@@ -320,7 +339,7 @@ def seed_trading_codebase_and_issues(
             )
             total_issues += 1
 
-        # 5. Keep all src/context_scout/*.py files and AST symbols/edges synced with disk
+        # 5. Prune deleted files and re-sync all indexed/source files with disk
         existing_file_rows = conn.execute(
             """
             SELECT file_id, file_path, git_blob_sha
@@ -329,9 +348,36 @@ def seed_trading_codebase_and_issues(
             """,
             (domain_id, repo_name),
         ).fetchall()
-        existing_files: dict[str, tuple[UUID, str]] = {
-            str(r[1]): (UUID(str(r[0])), str(r[2])) for r in existing_file_rows
-        }
+        existing_files: dict[str, tuple[UUID, str]] = {}
+        pruned_deleted = 0
+        for r in existing_file_rows:
+            fid = UUID(str(r[0]))
+            rel_existing = str(r[1])
+            blob_existing = str(r[2])
+            if not (root / rel_existing).is_file():
+                conn.execute(
+                    """
+                    DELETE FROM ast_edges
+                    WHERE domain_id = %s
+                      AND (
+                          source_symbol_id IN (SELECT symbol_id FROM ast_symbols WHERE file_id = %s)
+                          OR target_symbol_id IN (
+                              SELECT symbol_id FROM ast_symbols WHERE file_id = %s
+                          )
+                      );
+                    """,
+                    (domain_id, fid, fid),
+                )
+                conn.execute(
+                    "DELETE FROM ast_symbols WHERE domain_id = %s AND file_id = %s;",
+                    (domain_id, fid),
+                )
+                repo.delete_code_file(conn, fid)
+                pruned_deleted += 1
+            else:
+                existing_files[rel_existing] = (fid, blob_existing)
+        if pruned_deleted > 0:
+            logger.info("Pruned %d deleted code_files rows from %s", pruned_deleted, domain_id)
 
         existing_sym_rows = conn.execute(
             """
@@ -358,17 +404,35 @@ def seed_trading_codebase_and_issues(
                 short_name_map[short].append(sym_id)
 
         extra_edges_pending: list[tuple[list[ParsedEdge], dict[str, UUID]]] = []
-        extra_py_candidates = list(sorted((root / "src" / "context_scout").rglob("*.py")))
+        sync_paths_by_rel: dict[str, Path] = {}
+        for rel_existing in sorted(existing_files):
+            sync_paths_by_rel[rel_existing] = root / rel_existing
+        for src_py in sorted((root / "src" / "context_scout").rglob("*.py")):
+            sync_paths_by_rel[src_py.relative_to(root).as_posix()] = src_py
         has_non_src_files = any(not fp.startswith("src/") for fp in existing_files)
         if not has_non_src_files and (root / "tests").is_dir():
-            extra_py_candidates.extend(sorted((root / "tests").rglob("*.py")))
-        for extra_py in extra_py_candidates:
-            rel_p = extra_py.relative_to(root).as_posix()
+            for test_py in sorted((root / "tests").rglob("*.py")):
+                sync_paths_by_rel[test_py.relative_to(root).as_posix()] = test_py
+
+        for rel_p, extra_path in sorted(sync_paths_by_rel.items()):
             if rel_p.startswith("src/context_scout/trading_strategies/"):
                 continue
-            raw_c = extra_py.read_text(encoding="utf-8")
+            raw_c = extra_path.read_text(encoding="utf-8", errors="replace")
             new_blob = _git_blob_sha(raw_c)
-            symbols, edges = extractor.parse_source(raw_c, "python", file_path=rel_p)
+            lang = LANG_MAP.get(extra_path.suffix.lower())
+            if lang is not None:
+                try:
+                    symbols, edges = extractor.parse_source(raw_c, lang, file_path=rel_p)
+                except Exception as exc:
+                    logger.debug(
+                        "Skipping AST re-parse for %s (%s): %s",
+                        rel_p,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    symbols, edges = [], []
+            else:
+                symbols, edges = [], []
             parsed_sym_tuples = {(ps.qualified_name, ps.start_line, ps.end_line) for ps in symbols}
             existing_entry = existing_files.get(rel_p)
             existing_fid = existing_entry[0] if existing_entry else None
@@ -376,10 +440,14 @@ def seed_trading_codebase_and_issues(
             if (
                 existing_fid is not None
                 and existing_blob == new_blob
-                and existing_sym_tuples_by_file.get(existing_fid, set()) == parsed_sym_tuples
+                and (
+                    lang is None
+                    or existing_sym_tuples_by_file.get(existing_fid, set()) == parsed_sym_tuples
+                )
             ):
                 continue
 
+            file_lang = lang or (extra_path.suffix.lstrip(".").lower() or "text")
             row_fid = conn.execute(
                 """
                 INSERT INTO code_files (
@@ -387,10 +455,11 @@ def seed_trading_codebase_and_issues(
                     git_commit_sha, git_blob_sha, language,
                     allowed_scopes, raw_content, line_count
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, 'python', %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (domain_id, repo_name, file_path) DO UPDATE SET
                     git_commit_sha = EXCLUDED.git_commit_sha,
                     git_blob_sha = EXCLUDED.git_blob_sha,
+                    language = EXCLUDED.language,
                     raw_content = EXCLUDED.raw_content,
                     line_count = EXCLUDED.line_count,
                     indexed_at = NOW()
@@ -403,6 +472,7 @@ def seed_trading_codebase_and_issues(
                     rel_p,
                     rev_cmd,
                     new_blob,
+                    file_lang,
                     ["public_eng"],
                     raw_c,
                     len(raw_c.splitlines()),
@@ -633,6 +703,85 @@ def seed_trading_codebase_and_issues(
                         q_body,
                         ["public_quant"],
                         q_vec,
+                    ),
+                )
+
+    # 7. Ensure baseline open-source data_engineering_scout chunks exist on fresh CI DBs ONLY
+    #    (strict no-op when doc_chunks already exist for data_engineering_scout).
+    de_seed_principal = PrincipalContext(
+        user_id="seed_de_corpus_indexer",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public", "public_eng", "domain:data_engineering"],
+    )
+    de_seed_docs: list[tuple[str, str, str, str, str]] = [
+        (
+            "de-seed:acid-transactions",
+            "ACID Transaction Properties in Distributed Storage",
+            "https://en.wikipedia.org/wiki/ACID",
+            "ACID Guarantees",
+            (
+                "ACID stands for Atomicity, Consistency, Isolation, and Durability in "
+                "database transaction processing. Atomicity guarantees all-or-nothing "
+                "execution, Consistency preserves schema invariants, Isolation prevents "
+                "concurrent anomalies, and Durability persists committed state."
+            ),
+        ),
+        (
+            "de-seed:cap-theorem",
+            "CAP Theorem and Distributed Consistency Trade-offs",
+            "https://en.wikipedia.org/wiki/CAP_theorem",
+            "Consistency vs Availability",
+            (
+                "The CAP theorem states that a distributed data store cannot simultaneously "
+                "guarantee Consistency (linearizability), Availability, and Partition "
+                "Tolerance during a network partition, forcing CP or AP designs."
+            ),
+        ),
+        (
+            "de-seed:apache-iceberg",
+            "Apache Iceberg Open Table Format Specification",
+            "https://iceberg.apache.org/spec/",
+            "Table Format Architecture",
+            (
+                "Apache Iceberg is an open table format for huge analytic datasets supporting "
+                "ACID transactions, snapshot isolation, time travel, hidden partitioning, "
+                "and full schema evolution across cloud object stores."
+            ),
+        ),
+    ]
+    with mgr.scoped_transaction(de_seed_principal, enable_hnsw_iterative_scan=False) as de_conn:
+        row_de = de_conn.execute(
+            "SELECT count(*) FROM doc_chunks WHERE domain_id = 'data_engineering_scout';"
+        ).fetchone()
+        if row_de is not None and int(str(row_de[0])) == 0:
+            for de_doc_id, de_title, de_uri, de_sec, de_body in de_seed_docs:
+                de_emb = generate_deterministic_embedding(f"{de_title} {de_sec} {de_body}")
+                de_vec = "[" + ",".join(f"{v:.6f}" for v in de_emb) + "]"
+                de_conn.execute(
+                    """
+                    INSERT INTO doc_chunks (
+                        chunk_id, domain_id, doc_id, doc_title, source_uri,
+                        market_scope, published_date, authority_weight,
+                        section_heading, contextual_header, verbatim_content,
+                        metadata_json, allowed_scopes, embedding
+                    )
+                    VALUES (
+                        %s, 'data_engineering_scout', %s, %s, %s,
+                        NULL, %s, 1.0,
+                        %s, 'Data Engineering Seed [data_engineering_scout]', %s,
+                        '{}'::jsonb, %s, %s::vector
+                    );
+                    """,
+                    (
+                        uuid4(),
+                        de_doc_id,
+                        de_title,
+                        de_uri,
+                        date(2026, 10, 15),
+                        de_sec,
+                        de_body,
+                        ["public", "public_eng", "domain:data_engineering"],
+                        de_vec,
                     ),
                 )
 

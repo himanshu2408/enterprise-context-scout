@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Generator
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -190,7 +191,7 @@ def test_unscripted_answerable_multidomain(
             or (data.get("diagnostic") or {}).get("stage_traces")
             or []
         )
-        stage2 = next(
+        stage2: dict[str, Any] = next(
             (st for st in traces if st.get("stage") == 2),
             {},
         )

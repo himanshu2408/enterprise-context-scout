@@ -245,6 +245,15 @@ def _infer_market_scopes_from_query(
         return [], "", set()
 
 
+def _decompose_identifier_words(text: str) -> str:
+    """Split CamelCase and snake_case identifiers into space-separated lowercase words."""
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", spaced)
+    spaced = re.sub(r"([A-Za-z])(\d+)", r"\1 \2", spaced)
+    tokens = [t.lower() for t in re.split(r"[^A-Za-z0-9]+", spaced) if t]
+    return " ".join(tokens)
+
+
 def _token_matches_text(tok: str, text: str) -> bool:
     """Match whole token or 5-char stem prefix for inflectional variants (domain-agnostic)."""
     if re.search(rf"\b{re.escape(tok)}\b", text):
@@ -276,8 +285,13 @@ def _compute_calibrated_relevance(
 
     scope_aliases = _market_scope_aliases(market_scope, domain_id=domain_id)
     tokens = _extract_substantive_tokens(query_text)
-    haystack = f"{title} {section} {scope_aliases} {content[:1800]}".lower()
-    actual_title_hay = f"{title} {section}".lower()
+    decomposed_title = _decompose_identifier_words(title) if is_code_symbol else ""
+    decomposed_sec = _decompose_identifier_words(section) if is_code_symbol else ""
+    haystack = (
+        f"{title} {decomposed_title} {section} {decomposed_sec} "
+        f"{scope_aliases} {content[:1800]}"
+    ).lower()
+    actual_title_hay = f"{title} {decomposed_title} {section} {decomposed_sec}".lower()
     scope_hay = scope_aliases.lower()
 
     if tokens:
@@ -2761,17 +2775,31 @@ class InMemoryRLSRepository:
             visible,
             key=lambda s: (
                 1.0 if q_lower in s.qualified_name.lower() else 0.0,
-                sum(1 for t in q_tokens if t in s.qualified_name.lower()),
+                sum(
+                    1
+                    for t in q_tokens
+                    if _token_matches_text(
+                        t,
+                        f"{s.qualified_name.lower()} "
+                        f"{_decompose_identifier_words(s.qualified_name)}",
+                    )
+                ),
                 trgm_raw[s.symbol_id],
             ),
             reverse=True,
         )
         trgm_ranks = {s.symbol_id: idx + 1 for idx, s in enumerate(trgm_scored)}
 
-        # 2. BM25 / Lexical token overlap rank
-        corpus_texts = [
-            f"{s.qualified_name} {s.signature_skeleton} {s.contextual_summary}" for s in visible
-        ]
+        # 2. BM25 / Lexical token overlap rank (with CamelCase/snake_case decomposition)
+        decomposed_cache = {
+            s.symbol_id: (
+                f"{s.qualified_name} {_decompose_identifier_words(s.qualified_name)} "
+                f"{s.signature_skeleton} {_decompose_identifier_words(s.signature_skeleton)} "
+                f"{s.contextual_summary}"
+            )
+            for s in visible
+        }
+        corpus_texts = [decomposed_cache[s.symbol_id] for s in visible]
         bm25_model = BM25Okapi(corpus_texts)
         bm25_raw_list = bm25_model.get_scores(query_text)
         bm25_raw = {visible[i].symbol_id: float(bm25_raw_list[i]) for i in range(len(visible))}
@@ -2781,8 +2809,7 @@ class InMemoryRLSRepository:
                 sum(
                     1
                     for t in q_tokens
-                    if t
-                    in (f"{s.qualified_name} {s.signature_skeleton} {s.contextual_summary}").lower()
+                    if _token_matches_text(t, decomposed_cache[s.symbol_id].lower())
                 ),
                 bm25_raw[s.symbol_id],
             ),
@@ -2817,6 +2844,7 @@ class InMemoryRLSRepository:
                 trigram_score=trgm_raw[sym.symbol_id],
                 raw_rrf_score=norm_rrf,
                 authority_weight=1.0,
+                is_code_symbol=True,
             )
             if min_calibrated_score > 0.0 and calibrated_score < min_calibrated_score:
                 continue
@@ -2839,7 +2867,7 @@ class InMemoryRLSRepository:
             )
 
         hits.sort(
-            key=lambda h: (h.normalized_rrf_score, h.calibrated_score),
+            key=lambda h: (h.calibrated_score, h.normalized_rrf_score),
             reverse=True,
         )
         return list(hits[:top_k])

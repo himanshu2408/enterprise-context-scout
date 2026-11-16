@@ -279,7 +279,6 @@ def test_rc2_stage4_gate_blocks_insufficient_citations_when_stage3_completes() -
         output_contract="DomainKnowledgeBrief",
         lora_enabled=False,
         default_scopes=["public"],
-        allowed_roles=[RoleType.ENGINEER],
         authority_rules=AuthorityRules(primary_truth_source="document"),
     )
     registry.register(manifest)
@@ -289,7 +288,6 @@ def test_rc2_stage4_gate_blocks_insufficient_citations_when_stage3_completes() -
         user_id="stage4_mutation_guard_user",
         role=RoleType.ENGINEER,
         allowed_scopes=["public"],
-        active_domain="quantum_lab_scout",
     )
     repo.insert_doc_chunk(
         principal,
@@ -344,7 +342,6 @@ def test_rc2_stage4_gate_blocks_insufficient_citations_when_stage3_completes() -
         user_id="stage4_mutation_guard_user",
         role=RoleType.ENGINEER,
         allowed_scopes=["public"],
-        active_domain="federated_all",
     )
     coord = FederatedScoutCoordinator(registry=registry, repo=repo, local_client=local_client)
     fed_events: list[dict[str, object]] = []
