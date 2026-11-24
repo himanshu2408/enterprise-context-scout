@@ -102,38 +102,26 @@ from context_scout.tuning.train_peft_lora import (
 )
 
 
-def _b64u_int(val: int) -> str:
-    raw = val.to_bytes((val.bit_length() + 7) // 8 or 1, "big")
-    import base64
-
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-
-def _gen_ec_p256(kid: str) -> tuple[ec.EllipticCurvePrivateKey, dict[str, Any]]:
-    priv = ec.generate_private_key(ec.SECP256R1())
-    pub = priv.public_key().public_numbers()
-    return priv, {
-        "kty": "EC",
-        "crv": "P-256",
-        "alg": "ES256",
-        "use": "sig",
-        "kid": kid,
-        "x": _b64u_int(pub.x),
-        "y": _b64u_int(pub.y),
-    }
+def _gen_ec_p256(
+    kid: str,
+    *,
+    priv: ec.EllipticCurvePrivateKey | None = None,
+) -> tuple[ec.EllipticCurvePrivateKey, dict[str, Any]]:
+    priv = priv or ec.generate_private_key(ec.SECP256R1())
+    pub_jwk: dict[str, Any] = jwt.algorithms.ECAlgorithm.to_jwk(priv.public_key(), as_dict=True)
+    pub_jwk["kid"] = kid
+    pub_jwk["use"] = "sig"
+    pub_jwk["alg"] = "ES256"
+    return priv, pub_jwk
 
 
 def _gen_rsa_2048(kid: str) -> tuple[rsa.RSAPrivateKey, dict[str, Any]]:
     priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    pub = priv.public_key().public_numbers()
-    return priv, {
-        "kty": "RSA",
-        "alg": "RS256",
-        "use": "sig",
-        "kid": kid,
-        "n": _b64u_int(pub.n),
-        "e": _b64u_int(pub.e),
-    }
+    pub_jwk: dict[str, Any] = jwt.algorithms.RSAAlgorithm.to_jwk(priv.public_key(), as_dict=True)
+    pub_jwk["kid"] = kid
+    pub_jwk["use"] = "sig"
+    pub_jwk["alg"] = "RS256"
+    return priv, pub_jwk
 
 
 def _verified_pack(domain_id: str = "code_architecture_scout") -> ImplementationContextPack:
@@ -334,85 +322,90 @@ def test_asi03_cross_tenant_iap_oidc_header_override_and_rbac_injection_blocked(
     priv_ec, jwk_ec = _gen_ec_p256("asi03-iap-k1")
     aud = "/projects/123456/global/backendServices/scout-asi03"
     cache = get_global_jwks_cache()
-    cache.clear()
-    monkeypatch.setattr(cache, "_jwks_loader", lambda _u: {"keys": [jwk_ec]})
-    monkeypatch.setenv("SCOUT_IAP_EXPECTED_AUDIENCE", aud)
-    monkeypatch.setenv("SCOUT_IAP_ISSUER", CLOUD_IAP_ISSUER)
-    monkeypatch.delenv("SCOUT_IAP_ALLOWED_HOSTED_DOMAINS", raising=False)
-    monkeypatch.delenv("SCOUT_IAP_JWKS_URL", raising=False)
+    try:
+        cache.clear()
+        monkeypatch.setattr(cache, "_jwks_loader", lambda _u: {"keys": [jwk_ec]})
+        monkeypatch.setenv("SCOUT_IAP_EXPECTED_AUDIENCE", aud)
+        monkeypatch.setenv("SCOUT_IAP_ISSUER", CLOUD_IAP_ISSUER)
+        monkeypatch.delenv("SCOUT_IAP_ALLOWED_HOSTED_DOMAINS", raising=False)
+        monkeypatch.delenv("SCOUT_IAP_JWKS_URL", raising=False)
 
-    iap_jwt = jwt.encode(
-        {
-            "iss": CLOUD_IAP_ISSUER,
-            "aud": aud,
-            "sub": "accounts.google.com:42",
-            "email": "alice@acme.example.com",
-            "scout_tenant_id": str(tenant_a),
-            "iat": now - 5,
-            "exp": now + 300,
-        },
-        priv_ec,
-        algorithm="ES256",
-        headers={"kid": "asi03-iap-k1"},
-    )
-    client = TestClient(app)
-    res_iap = client.get(
-        "/api/v1/auth/me",
-        headers={
-            "X-Goog-IAP-JWT-Assertion": iap_jwt,
-            "X-Principal-Tenant-Id": str(tenant_b),
-        },
-    )
-    assert res_iap.status_code == 200
-    assert res_iap.json()["tenant_id"] == str(tenant_a)
+        iap_jwt = jwt.encode(
+            {
+                "iss": CLOUD_IAP_ISSUER,
+                "aud": aud,
+                "sub": "accounts.google.com:42",
+                "email": "alice@acme.example.com",
+                "scout_tenant_id": str(tenant_a),
+                "iat": now - 5,
+                "exp": now + 300,
+            },
+            priv_ec,
+            algorithm="ES256",
+            headers={"kid": "asi03-iap-k1"},
+        )
+        client = TestClient(app)
+        res_iap = client.get(
+            "/api/v1/auth/me",
+            headers={
+                "X-Goog-IAP-JWT-Assertion": iap_jwt,
+                "X-Principal-Tenant-Id": str(tenant_b),
+            },
+        )
+        assert res_iap.status_code == 200
+        assert res_iap.json()["tenant_id"] == str(tenant_a)
 
-    # 2. GAP-01 via HTTP /api/v1/auth/me with OIDC RS256 JWT
-    priv_rsa, jwk_rsa = _gen_rsa_2048("asi03-oidc-k1")
-    cache.clear()
-    monkeypatch.setattr(cache, "_jwks_loader", lambda _u: {"keys": [jwk_ec, jwk_rsa]})
-    monkeypatch.setenv("SCOUT_OIDC_PROVIDER", "generic")
-    monkeypatch.setenv("SCOUT_OIDC_ISSUER", "https://sso.acme.example.com")
-    monkeypatch.setenv("SCOUT_OIDC_AUDIENCE", "scout-api")
-    monkeypatch.setenv("SCOUT_OIDC_JWKS_URL", "https://sso.acme.example.com/.well-known/jwks.json")
-    oidc_jwt = jwt.encode(
-        {
-            "iss": "https://sso.acme.example.com",
-            "aud": "scout-api",
-            "sub": "oidc-u1",
-            "email": "bob@acme.example.com",
-            "tenant_id": str(tenant_a),
-            "iat": now - 5,
-            "exp": now + 300,
-        },
-        priv_rsa,
-        algorithm="RS256",
-        headers={"kid": "asi03-oidc-k1"},
-    )
-    res_oidc = client.get(
-        "/api/v1/auth/me",
-        headers={
-            "Authorization": f"Bearer {oidc_jwt}",
-            "X-Principal-Tenant-Id": str(tenant_b),
-        },
-    )
-    assert res_oidc.status_code == 200
-    assert res_oidc.json()["tenant_id"] == str(tenant_a)
+        # 2. GAP-01 via HTTP /api/v1/auth/me with OIDC RS256 JWT
+        priv_rsa, jwk_rsa = _gen_rsa_2048("asi03-oidc-k1")
+        cache.clear()
+        monkeypatch.setattr(cache, "_jwks_loader", lambda _u: {"keys": [jwk_ec, jwk_rsa]})
+        monkeypatch.setenv("SCOUT_OIDC_PROVIDER", "generic")
+        monkeypatch.setenv("SCOUT_OIDC_ISSUER", "https://sso.acme.example.com")
+        monkeypatch.setenv("SCOUT_OIDC_AUDIENCE", "scout-api")
+        monkeypatch.setenv(
+            "SCOUT_OIDC_JWKS_URL", "https://sso.acme.example.com/.well-known/jwks.json"
+        )
+        oidc_jwt = jwt.encode(
+            {
+                "iss": "https://sso.acme.example.com",
+                "aud": "scout-api",
+                "sub": "oidc-u1",
+                "email": "bob@acme.example.com",
+                "tenant_id": str(tenant_a),
+                "iat": now - 5,
+                "exp": now + 300,
+            },
+            priv_rsa,
+            algorithm="RS256",
+            headers={"kid": "asi03-oidc-k1"},
+        )
+        res_oidc = client.get(
+            "/api/v1/auth/me",
+            headers={
+                "Authorization": f"Bearer {oidc_jwt}",
+                "X-Principal-Tenant-Id": str(tenant_b),
+            },
+        )
+        assert res_oidc.status_code == 200
+        assert res_oidc.json()["tenant_id"] == str(tenant_a)
 
-    # Programmatic conflicting tenant override fails closed with 403
-    iap_verifier = CloudIAPVerifier(expected_audience=aud, jwks_cache=cache)
-    with pytest.raises(AuthVerificationError) as err_iap:
-        iap_verifier.verify(iap_jwt, tenant_id=tenant_b)
-    assert err_iap.value.status_code == 403
+        # Programmatic conflicting tenant override fails closed with 403
+        iap_verifier = CloudIAPVerifier(expected_audience=aud, jwks_cache=cache)
+        with pytest.raises(AuthVerificationError) as err_iap:
+            iap_verifier.verify(iap_jwt, tenant_id=tenant_b)
+        assert err_iap.value.status_code == 403
 
-    oidc_verifier = OIDCJWKSVerifier(
-        issuer="https://sso.acme.example.com",
-        audience="scout-api",
-        jwks_url="https://sso.acme.example.com/.well-known/jwks.json",
-        jwks_cache=cache,
-    )
-    with pytest.raises(AuthVerificationError) as err_oidc:
-        oidc_verifier.verify(oidc_jwt, tenant_id=tenant_b)
-    assert err_oidc.value.status_code == 403
+        oidc_verifier = OIDCJWKSVerifier(
+            issuer="https://sso.acme.example.com",
+            audience="scout-api",
+            jwks_url="https://sso.acme.example.com/.well-known/jwks.json",
+            jwks_cache=cache,
+        )
+        with pytest.raises(AuthVerificationError) as err_oidc:
+            oidc_verifier.verify(oidc_jwt, tenant_id=tenant_b)
+        assert err_oidc.value.status_code == 403
+    finally:
+        cache.clear()
 
     # 3. GAP-02: recursive & expanded FORBIDDEN_TOOL_ARGUMENTS
     for bad_arg in (
@@ -435,6 +428,57 @@ def test_asi03_cross_tenant_iap_oidc_header_override_and_rbac_injection_blocked(
     assert gate.is_tool_allowed("code_architecture_scout", "code_repo_mcp:search_ast_symbols")
     assert gate.is_tool_allowed("code_architecture_scout", "search_ast_symbols")
     assert not gate.is_tool_allowed("code_architecture_scout", "evil_server:search_ast_symbols")
+
+
+def test_asi03_ec_p256_leading_zero_coordinates_jwk_padding_regression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: P-256 keys with leading-zero x/y bytes serialize to 32-byte RFC 7518 JWKs."""
+    aud = "/projects/123456/global/backendServices/scout-asi03-pad"
+    tenant_a = uuid.uuid4()
+    now = int(time.time())
+    cache = get_global_jwks_cache()
+    active_keys: list[dict[str, Any]] = []
+    monkeypatch.setattr(cache, "_jwks_loader", lambda _u: {"keys": list(active_keys)})
+    monkeypatch.setenv("SCOUT_IAP_EXPECTED_AUDIENCE", aud)
+    monkeypatch.setenv("SCOUT_IAP_ISSUER", CLOUD_IAP_ISSUER)
+    monkeypatch.delenv("SCOUT_IAP_ALLOWED_HOSTED_DOMAINS", raising=False)
+    monkeypatch.delenv("SCOUT_IAP_JWKS_URL", raising=False)
+
+    client = TestClient(app)
+    try:
+        # Scalar 379 yields a 31-byte unpadded x; scalar 43 yields a 31-byte unpadded y.
+        for scalar in (379, 43):
+            kid = f"asi03-pad-{scalar}"
+            derived_priv = ec.derive_private_key(scalar, ec.SECP256R1())
+            priv_ec, jwk_ec = _gen_ec_p256(kid, priv=derived_priv)
+            active_keys[:] = [jwk_ec]
+            cache.clear()
+
+            iap_jwt = jwt.encode(
+                {
+                    "iss": CLOUD_IAP_ISSUER,
+                    "aud": aud,
+                    "sub": f"accounts.google.com:{scalar}",
+                    "email": "alice@acme.example.com",
+                    "scout_tenant_id": str(tenant_a),
+                    "iat": now - 5,
+                    "exp": now + 300,
+                },
+                priv_ec,
+                algorithm="ES256",
+                headers={"kid": kid},
+            )
+            res = client.get("/api/v1/auth/me", headers={"X-Goog-IAP-JWT-Assertion": iap_jwt})
+            assert res.status_code == 200
+            assert res.json()["tenant_id"] == str(tenant_a)
+
+            for coord in ("x", "y"):
+                raw_coord = str(jwk_ec[coord])
+                padded_b64 = raw_coord + "=" * (-len(raw_coord) % 4)
+                assert len(base64.urlsafe_b64decode(padded_b64)) == 32
+    finally:
+        cache.clear()
 
 
 # =============================================================================
