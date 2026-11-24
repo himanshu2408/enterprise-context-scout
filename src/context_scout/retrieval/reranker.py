@@ -62,6 +62,8 @@ def _split_camel_case(segment: str) -> list[str]:
                 i += 1
         parts.append(segment[start:i])
     return parts
+
+
 _STOPWORDS: Final[frozenset[str]] = frozenset(
     {
         "the",

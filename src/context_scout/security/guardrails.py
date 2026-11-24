@@ -625,7 +625,10 @@ def _strip_tokens_linear(
                 pos = n
                 break
             if next_idx > pos:
-                push_str(text[pos:next_idx])
+                if not strip_chat_delimiters and untrusted_tag_prefix_re is None:
+                    out.extend(text[pos:next_idx])
+                else:
+                    push_str(text[pos:next_idx])
                 pos = next_idx
 
         ch = head_str[head_pos] if head_pos < len(head_str) else text[pos]
@@ -634,7 +637,8 @@ def _strip_tokens_linear(
             continue
 
         if ch == "<":
-            c2 = peek_str(2)[1:2]
+            in_text = head_pos >= len(head_str)
+            c2 = (text[pos + 1] if pos + 1 < n else "") if in_text else peek_str(2)[1:2]
             if strip_comments and c2 == "!" and peek_str(4) == "<!--":
                 if no_closer_in_text and head_pos >= len(head_str):
                     push_str("<!--")
@@ -665,7 +669,7 @@ def _strip_tokens_linear(
                     advance_cur(7)
                     continue
 
-            if untrusted_tag_prefix_re is not None:
+            if untrusted_tag_prefix_re is not None and (c2 in ("/", "u", "U") or c2.isspace()):
                 m_tag = match_regex_at_cur(untrusted_tag_prefix_re, window_len=256)
                 if m_tag is not None:
                     m_len = match_end_len(m_tag)
@@ -686,7 +690,10 @@ def _strip_tokens_linear(
                     continue
 
             push_char("<")
-            advance_cur(1)
+            if in_text:
+                pos += 1
+            else:
+                advance_cur(1)
             continue
 
         if ch == ">":
@@ -1355,6 +1362,8 @@ class PromptInjectionSanitizer:
             strip_comments=True,
             strip_scripts=True,
         )
+        if cleaned == text:
+            return cleaned, len(pre_comment_sigs) > 0, list(dict.fromkeys(pre_comment_sigs))
         _, post_comment_sigs = cls.scan_injection_signatures(cleaned)
         signatures = list(dict.fromkeys([*pre_comment_sigs, *post_comment_sigs]))
         return cleaned, len(signatures) > 0, signatures

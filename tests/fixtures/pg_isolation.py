@@ -742,6 +742,76 @@ def _seed_polyglot_unseen_v2(
         ),
     )
 
+    # 4. Go chi router mux.go (Mux.Use + Mux.ServeHTTP) for clean-checkout A-POLY-01 parity
+    chi_file_id = uuid5(NAMESPACE_URL, f"{domain_id}:go-chi/chi:mux.go")
+    chi_src = (
+        "package chi\n\n"
+        'import "net/http"\n\n'
+        "type Mux struct {\n"
+        "    middlewares []func(http.Handler) http.Handler\n"
+        "    handler     http.Handler\n"
+        "}\n\n"
+        "func (mx *Mux) Use(middlewares ...func(http.Handler) http.Handler) {\n"
+        "    mx.middlewares = append(mx.middlewares, middlewares...)\n"
+        "}\n\n"
+        "func (mx *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {\n"
+        "    mx.handler.ServeHTTP(w, r)\n"
+        "}\n"
+    )
+    repo.insert_code_file(
+        conn,
+        CodeFileRecord(
+            file_id=chi_file_id,
+            domain_id=domain_id,
+            repo_name="go-chi/chi",
+            file_path="mux.go",
+            git_commit_sha=commit_sha,
+            git_blob_sha=_git_blob_sha(chi_src),
+            language="go",
+            allowed_scopes=scopes,
+            raw_content=chi_src,
+            line_count=len(chi_src.splitlines()),
+        ),
+    )
+    mux_use_id = uuid5(NAMESPACE_URL, f"{domain_id}:chi.Mux.Use")
+    mux_serve_id = uuid5(NAMESPACE_URL, f"{domain_id}:chi.Mux.ServeHTTP")
+    repo.insert_ast_symbol(
+        conn,
+        ASTSymbolRecord(
+            symbol_id=mux_use_id,
+            file_id=chi_file_id,
+            domain_id=domain_id,
+            qualified_name="chi.Mux.Use",
+            symbol_kind="method",
+            start_line=10,
+            end_line=12,
+            signature_skeleton="func (mx *Mux) Use(middlewares ...func(http.Handler) http.Handler)",
+            contextual_summary="Appends HTTP middleware handlers onto the chi Mux stack.",
+            allowed_scopes=scopes,
+            embedding=_embed_fixture_text(
+                "Go chi router mux.go Mux.Use compose middleware handlers"
+            ),
+        ),
+    )
+    repo.insert_ast_symbol(
+        conn,
+        ASTSymbolRecord(
+            symbol_id=mux_serve_id,
+            file_id=chi_file_id,
+            domain_id=domain_id,
+            qualified_name="chi.Mux.ServeHTTP",
+            symbol_kind="method",
+            start_line=14,
+            end_line=16,
+            signature_skeleton="func (mx *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request)",
+            contextual_summary="Dispatches HTTP requests through chi Mux routes and middleware.",
+            allowed_scopes=scopes,
+            embedding=_embed_fixture_text(
+                "Go chi router mux.go Mux.ServeHTTP dispatch HTTP routes"
+            ),
+        ),
+    )
+
 
 def ensure_pg17_schema_and_seed_corpora(
     db_admin_url: str,
@@ -806,6 +876,91 @@ def ensure_pg17_schema_and_seed_corpora(
             ).fetchone()
             if _row_count(code_arch_row) < 43:
                 _seed_code_architecture_scout(conn, repo, repo_root)
+
+            mr42_row = conn.execute(
+                "SELECT count(*) FROM ref_snapshots "
+                "WHERE domain_id = 'code_architecture_scout' AND ref_name = 'mr/42'"
+            ).fetchone()
+            if _row_count(mr42_row) == 0:
+                from context_scout.db.repositories import (
+                    OverlayFileDeltaRecord,
+                    RefSnapshotRecord,
+                )
+
+                reconciler_path = repo_root / "src/context_scout/ops/state_reconciler.py"
+                if reconciler_path.is_file():
+                    base_content = reconciler_path.read_text(encoding="utf-8", errors="ignore")
+                    overlay_addition = (
+                        "\n\n"
+                        "def verify_pitr_overlay_watermark_lag(\n"
+                        "    pg_lsn_lag_seconds: float,\n"
+                        "    max_allowed_lag_seconds: float = 30.0,\n"
+                        ") -> bool:\n"
+                        '    """MR !42 CoW overlay guard bounding PITR watermark lag."""\n'
+                        "    return 0.0 <= pg_lsn_lag_seconds <= max_allowed_lag_seconds\n"
+                    )
+                    overlay_content = base_content.rstrip("\n") + overlay_addition
+                    base_lines = len(base_content.rstrip("\n").splitlines())
+                    mr_snapshot_id = uuid5(
+                        NAMESPACE_URL,
+                        f"{DEFAULT_TENANT_ID}:code_architecture_scout:mr_snapshot:42",
+                    )
+                    base_sha = _git_blob_sha(base_content)
+                    head_sha = _git_blob_sha(overlay_content)
+                    repo.upsert_ref_snapshot(
+                        conn,
+                        RefSnapshotRecord(
+                            snapshot_id=mr_snapshot_id,
+                            domain_id="code_architecture_scout",
+                            repo_name="enterprise-context-scout",
+                            ref_name="mr/42",
+                            ref_kind="merge_request",
+                            base_commit_sha=base_sha,
+                            head_commit_sha=head_sha,
+                            allowed_scopes=["public_eng"],
+                            mr_iid="42",
+                            state="open",
+                            metadata_json={
+                                "title": "feat(ops): bound PITR watermark lag in StateReconciler",
+                                "seeded_by": "pg_isolation_bootstrap",
+                            },
+                            tenant_id=DEFAULT_TENANT_ID,
+                        ),
+                    )
+                    repo.upsert_overlay_file_delta(
+                        conn,
+                        OverlayFileDeltaRecord(
+                            delta_id=uuid5(
+                                NAMESPACE_URL,
+                                f"{DEFAULT_TENANT_ID}:code_architecture_scout:mr_delta:42:state_reconciler.py",
+                            ),
+                            snapshot_id=mr_snapshot_id,
+                            domain_id="code_architecture_scout",
+                            repo_name="enterprise-context-scout",
+                            file_path="src/context_scout/ops/state_reconciler.py",
+                            change_type="modified",
+                            allowed_scopes=["public_eng"],
+                            previous_file_path="src/context_scout/ops/state_reconciler.py",
+                            base_blob_sha=base_sha,
+                            overlay_blob_sha=head_sha,
+                            language="python",
+                            raw_content=overlay_content,
+                            line_count=len(overlay_content.splitlines()),
+                            symbols_json=[
+                                {
+                                    "qualified_name": (
+                                        "context_scout.ops.state_reconciler."
+                                        "verify_pitr_overlay_watermark_lag"
+                                    ),
+                                    "name": "verify_pitr_overlay_watermark_lag",
+                                    "symbol_kind": "function",
+                                    "start_line": base_lines + 3,
+                                    "end_line": len(overlay_content.splitlines()),
+                                }
+                            ],
+                            tenant_id=DEFAULT_TENANT_ID,
+                        ),
+                    )
 
             ent_docs_row = conn.execute(
                 "SELECT count(*) FROM doc_chunks WHERE domain_id = 'enterprise_docs_scout'"

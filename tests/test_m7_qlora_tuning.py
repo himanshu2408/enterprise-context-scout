@@ -342,7 +342,69 @@ class TestLocalQLoRATrainingExecution:
             )
 
     def test_training_loss_decrease_and_adapter_export(self, tmp_path: Path) -> None:
-        """Verifies native mlx-lm gradient descent, loss reduction, and safetensors export."""
+        """Verifies native mlx-lm (Apple Silicon) or PyTorch/PEFT rsLoRA (Linux x86_64)."""
+        import importlib.util
+
+        output_dir = tmp_path / "adapters" / "test_gemma4_26b"
+        train_jsonl = Path("domains/code_architecture_scout/tuning/train.jsonl")
+        valid_jsonl = Path("domains/code_architecture_scout/tuning/valid.jsonl")
+
+        if importlib.util.find_spec("mlx_lm") is None:
+            from context_scout.tuning.teacher_distiller import generate_synthetic_canaries
+            from context_scout.tuning.train_peft_lora import (
+                PEFTRsLoRATrainer,
+                PEFTTrainingConfig,
+            )
+
+            canaries = generate_synthetic_canaries(
+                domain_id="code_architecture_scout",
+                seed=42,
+                count=10,
+            )
+            canaries_path = tmp_path / "canaries.json"
+            canaries_path.write_text(
+                json.dumps([c.to_dict() for c in canaries], indent=2),
+                encoding="utf-8",
+            )
+            peft_cfg = PEFTTrainingConfig(
+                domain_id="code_architecture_scout",
+                training_scope_ceiling=["public_eng"],
+                base_model_id=DEFAULT_MOE_MODEL_ID,
+                r=8,
+                lora_alpha=16,
+                sft_steps=10,
+                dpo_steps=0,
+                learning_rate=5e-3,
+                max_seq_length=128,
+            )
+            peft_trainer = PEFTRsLoRATrainer(peft_cfg, use_gpu_lock=False)
+            peft_result = peft_trainer.train(
+                train_jsonl=train_jsonl,
+                valid_jsonl=valid_jsonl,
+                canaries_json=canaries_path,
+                output_adapter_dir=output_dir,
+                artifact_id="code_architecture_scout_linux_ci",
+                allow_offline_tiny_model=True,
+                register_in_db=False,
+                activate_in_db=False,
+            )
+            assert peft_result.dry_run_passed is True
+            assert peft_result.safetensors_path.exists()
+            assert peft_result.adapter_config_path.exists()
+            assert peft_result.sft_final_loss < peft_result.sft_initial_loss, (
+                f"Expected loss decrease: initial={peft_result.sft_initial_loss}, "
+                f"final={peft_result.sft_final_loss}"
+            )
+            tensors = load_file(str(peft_result.safetensors_path))
+            assert len(tensors) > 0
+            assert not any("router" in k.lower() for k in tensors)
+            lora_b_tensors = [v for k, v in tensors.items() if "lora_b" in k.lower()]
+            assert any(t.norm().item() > 0.0 for t in lora_b_tensors)
+            with open(peft_result.adapter_config_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            assert cfg.get("use_rslora") is True
+            return
+
         from mlx_lm.models import llama as mlx_llama
 
         class _ByteChatTokenizer:
@@ -375,7 +437,6 @@ class TestLocalQLoRATrainingExecution:
             )
             return mlx_llama.Model(args), _ByteChatTokenizer()
 
-        output_dir = tmp_path / "adapters" / "test_gemma4_26b"
         lock_file = tmp_path / "test_trainer.lock"
         loader = None if os.environ.get("CONTEXT_SCOUT_USE_LIVE_MLX") == "1" else _fake_mlx_loader
 
@@ -385,9 +446,6 @@ class TestLocalQLoRATrainingExecution:
             lock_timeout=5.0,
             mlx_model_loader=loader,
         )
-
-        train_jsonl = Path("domains/code_architecture_scout/tuning/train.jsonl")
-        valid_jsonl = Path("domains/code_architecture_scout/tuning/valid.jsonl")
 
         result = trainer.train(
             train_jsonl=train_jsonl,

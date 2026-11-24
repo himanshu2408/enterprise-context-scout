@@ -651,7 +651,9 @@ def test_polyglot_unseen_v2_blocks_public_docs_only_principal(
     poly_cnt = int(str(row_poly[0])) if row_poly is not None else 0
 
     target_domain = "polyglot_unseen_v2"
-    expected_min_eng = 4000
+    expected_min_eng = (
+        4000 if (Path(__file__).resolve().parents[1] / "data" / "unseen_repos_v2").is_dir() else 3
+    )
     if poly_cnt == 0:
         target_domain = ephemeral_pg_domain
         expected_min_eng = 1

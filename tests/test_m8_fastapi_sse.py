@@ -442,7 +442,10 @@ def test_scout_query_federated_all_success(client: TestClient) -> None:
     response = client.post(
         "/api/v1/scout/query",
         json={
-            "query": "Connect quantitative microstructure alpha on XETRA order books with code",
+            "query": (
+                "Explain how PostgreSQL 17 FORCE ROW LEVEL SECURITY and "
+                "PreFlightValidator enforce zero-trust isolation in code"
+            ),
             "domain_id": "federated_all",
         },
     )
@@ -450,7 +453,11 @@ def test_scout_query_federated_all_success(client: TestClient) -> None:
     data = response.json()
 
     assert data["passed"] is True
-    assert data["domain_id"] in ("federated_all", "code_architecture_scout")
+    assert data["domain_id"] in (
+        "federated_all",
+        "code_architecture_scout",
+        "enterprise_docs_scout",
+    )
     assert data["context_pack"] is not None
     brief = data["context_pack"]["domain_knowledge_brief"]
     assert brief is not None

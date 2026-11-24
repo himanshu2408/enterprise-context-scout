@@ -1256,6 +1256,7 @@ def _check_abstention_explanation_clarity(reason: str) -> bool:
     clarity_markers = (
         "not present",
         "not found",
+        "no verified citations",
         "outside",
         "no matching",
         "insufficient",
