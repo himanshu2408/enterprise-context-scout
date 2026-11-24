@@ -239,7 +239,7 @@ def _seed_federated_code_only_repo() -> tuple[InMemoryRLSRepository, DomainRegis
         admin,
         CodeFileRecord(
             file_id=file_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             repo_name="exec-core",
             file_path="src/exec/compute_slice.py",
             git_commit_sha="c" * 40,
@@ -255,7 +255,7 @@ def _seed_federated_code_only_repo() -> tuple[InMemoryRLSRepository, DomainRegis
         ASTSymbolRecord(
             symbol_id=uuid4(),
             file_id=file_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             qualified_name="compute_execution_slice",
             symbol_kind="function",
             start_line=1,
@@ -353,7 +353,7 @@ def test_format_doc_citation_label_idempotent_confluence_and_jira() -> None:
         RoleType.ENGINEER,
         RoleType.PRODUCT_MANAGER,
         RoleType.COMPLIANCE_OFFICER,
-        RoleType.QUANT_RESEARCHER,
+        RoleType.DOMAIN_RESEARCHER,
     ],
 )
 def test_all_roles_x_three_intents_no_role_bias_and_verified_packs(role: RoleType) -> None:
@@ -428,7 +428,7 @@ def test_federated_coordinator_pure_code_succeeds_when_quant_brief_is_none() -> 
         doc_chunks=[],
     )
     assert isinstance(result, ImplementationContextPack), result
-    assert result.quant_strategy_spec is None
+    assert result.domain_knowledge_brief is None
     assert len(result.code_slices) >= 1
     assert any(s.file_path == "src/exec/compute_slice.py" for s in result.code_slices)
 
@@ -444,7 +444,7 @@ def test_federated_coordinator_pure_doc_suppresses_code_slices() -> None:
         admin,
         DocChunkRecord(
             chunk_id=uuid4(),
-            domain_id="quant_research_scout",
+            domain_id="enterprise_docs_scout",
             doc_id="55100",
             doc_title="Execution Operations Runbook",
             source_uri="https://confluence.example.com/wiki/spaces/OPS/pages/55100",
@@ -779,7 +779,7 @@ def test_federated_coordinator_populates_code_vs_doc_conflicts() -> None:
         admin,
         CodeFileRecord(
             file_id=code_file_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             repo_name="exec-core",
             file_path="src/exec/batch_order.py",
             git_commit_sha="1" * 40,
@@ -795,7 +795,7 @@ def test_federated_coordinator_populates_code_vs_doc_conflicts() -> None:
         ASTSymbolRecord(
             symbol_id=uuid4(),
             file_id=code_file_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             qualified_name="submit_batch_order",
             symbol_kind="function",
             start_line=1,
@@ -808,7 +808,7 @@ def test_federated_coordinator_populates_code_vs_doc_conflicts() -> None:
     )
     doc_chunk = DocChunkRecord(
         chunk_id=uuid4(),
-        domain_id="quant_research_scout",
+        domain_id="enterprise_docs_scout",
         doc_id="confluence:8801",
         doc_title="Batch Execution Architecture Spec",
         source_uri="https://confluence.example.com/wiki/spaces/EXEC/pages/8801",

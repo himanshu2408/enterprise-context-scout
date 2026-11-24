@@ -12,6 +12,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 
+from context_scout import __version__
 from context_scout.agents.domain_registry import DomainRegistry
 from context_scout.api.dependencies import (
     get_domain_registry,
@@ -132,9 +133,20 @@ def probe_runtime_environment(
     for domain_id, manifest in manifests.items():
         adapter_info = adapter_status.get(domain_id, {})
         is_adapter_valid = (
-            bool(adapter_info.get("is_valid", False))
+            bool(adapter_info.get("is_valid", False)) if isinstance(adapter_info, dict) else False
+        )
+        adapter_present = (
+            bool(adapter_info.get("adapter_present", is_adapter_valid))
             if isinstance(adapter_info, dict)
             else False
+        )
+        adapter_state = (
+            str(
+                adapter_info.get("adapter_state")
+                or ("ready" if is_adapter_valid else "no_trained_adapter")
+            )
+            if isinstance(adapter_info, dict)
+            else "no_trained_adapter"
         )
         uses_lora = bool(manifest.lora_enabled and is_adapter_valid)
         runtime_models[domain_id] = {
@@ -144,9 +156,12 @@ def probe_runtime_environment(
             "lora_enabled": manifest.lora_enabled,
             "lora_adapter_id": manifest.lora_adapter_id if uses_lora else None,
             "adapter_valid": is_adapter_valid,
+            "adapter_state": adapter_state,
             "execution_mode": "qlora_adapter" if uses_lora else "base_gemma4",
         }
-        if manifest.lora_enabled and not is_adapter_valid:
+        # Serving on base open-weights when no adapter has been trained yet is healthy;
+        # only degrade when an existing adapter artifact on disk fails integrity checks.
+        if manifest.lora_enabled and adapter_present and not is_adapter_valid:
             overall_status = "degraded"
 
     return {
@@ -171,7 +186,9 @@ def get_health(
     probed = probe_runtime_environment(registry=registry, repo_root=repo_root, settings=settings)
 
     return HealthResponse(
+        version=__version__,
         status=probed["overall_status"],
+        overall_status=probed["overall_status"],
         database_connected=probed["database_connected"],
         database_status=probed["database_status"],
         registered_domains=probed["registered_domains"],

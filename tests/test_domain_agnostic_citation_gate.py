@@ -13,19 +13,25 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from examples.quant_dogfood.contracts import (
+    FrictionVerdict,
+    QuantStrategyBrief,
+)
+from examples.quant_dogfood.contracts import (
+    MarketRegime as QuantMarketRegime,
+)
+from examples.quant_dogfood.plugins.domains.finance import (
+    FinanceDomainPlugin,
+)
+
 from context_scout.agents.citation_gate import (
     CitationFailureCode,
     DocumentCitationGate,
 )
 from context_scout.ingestion.doc_parser import DocumentChunk
-from context_scout.plugins.domains.finance import (
-    FinanceDomainPlugin,
-)
 from context_scout.schemas.contracts import (
     DocCitationSpan,
-    FrictionVerdict,
-    MarketRegime,
-    QuantStrategyBrief,
+    DocumentScope,
 )
 
 
@@ -46,7 +52,7 @@ def _make_chunk(
         doc_id=doc_id,
         doc_title=title,
         source_uri=source_uri,
-        market_scope=MarketRegime.GLOBAL_MULTI,
+        market_scope=DocumentScope.GLOBAL_MULTI,
         section_heading=section,
         verbatim_content=content,
         formulas_latex=[],
@@ -332,7 +338,7 @@ def test_finance_plugin_composition_realistic() -> None:
     )
     brief = QuantStrategyBrief(
         strategy_name="NSE Delivery Momentum",
-        target_markets=[MarketRegime.INDIA_NSE_BSE],
+        target_markets=[QuantMarketRegime.INDIA_NSE_BSE],
         is_intraday_futures=False,
         mathematical_signal_latex="S_t = \\sum R_{t-k}",
         entry_exit_rules=["Rebalance monthly"],
@@ -372,7 +378,7 @@ def test_finance_plugin_unrealistic_friction_fails_while_citation_passes() -> No
     )
     brief = QuantStrategyBrief(
         strategy_name="NSE Sub-Floor Strategy",
-        target_markets=[MarketRegime.INDIA_NSE_BSE],
+        target_markets=[QuantMarketRegime.INDIA_NSE_BSE],
         is_intraday_futures=False,
         mathematical_signal_latex="S_t = 1.0",
         entry_exit_rules=["Rebalance monthly"],

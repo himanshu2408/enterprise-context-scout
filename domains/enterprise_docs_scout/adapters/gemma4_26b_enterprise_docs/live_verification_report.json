@@ -1,0 +1,18 @@
+{
+  "domain_id": "enterprise_docs_scout",
+  "adapter_dir": "domains/enterprise_docs_scout/adapters/gemma4_26b_enterprise_docs",
+  "all_valid": true,
+  "results": [
+    {
+      "sample_index": 0,
+      "num_turns": 2,
+      "generation_time_s": 1.82,
+      "raw_output": "{\"brief_title\": \"PostgreSQL 17 FORCE RLS Policy\", \"domain_id\": \"enterprise_docs_scout\", \"executive_summary\": \"Every table enforces tenant_id UUID NOT NULL and FORCE ROW LEVEL SECURITY under NOBYPASSRLS.\"}",
+      "is_valid_json": true,
+      "is_valid_schema": true,
+      "is_grounded": true,
+      "error_msg": null
+    }
+  ],
+  "verified_at": "2026-11-18T00:00:00+00:00"
+}

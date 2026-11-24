@@ -1,0 +1,286 @@
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "context-scout.fullname" . }}-default-deny
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "context-scout.fullname" . }}-api
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "context-scout.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: webui
+        - podSelector:
+            matchLabels:
+              {{- include "context-scout.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: worker
+        {{- if .Values.networkPolicy.ingressControllerNamespaceSelector }}
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressControllerNamespaceSelector | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ int .Values.api.port }}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "context-scout.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: vllm
+      ports:
+        - protocol: TCP
+          port: {{ int .Values.vllm.port }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "context-scout.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: zoekt
+      ports:
+        - protocol: TCP
+          port: {{ int .Values.zoekt.port }}
+    - to:
+        {{- range .Values.networkPolicy.postgresCidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 3307
+        - protocol: TCP
+          port: 6379
+    {{- if .Values.networkPolicy.allowDnsEgress }}
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+    {{- if .Values.networkPolicy.allowHttpsEgress }}
+    - ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "context-scout.fullname" . }}-worker
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "context-scout.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: vllm
+      ports:
+        - protocol: TCP
+          port: {{ int .Values.vllm.port }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "context-scout.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: zoekt
+      ports:
+        - protocol: TCP
+          port: {{ int .Values.zoekt.port }}
+    - to:
+        {{- range .Values.networkPolicy.postgresCidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 3307
+        - protocol: TCP
+          port: 6379
+    {{- if .Values.networkPolicy.allowDnsEgress }}
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+    {{- if .Values.networkPolicy.allowHttpsEgress }}
+    - ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "context-scout.fullname" . }}-webui
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webui
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: webui
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    {{- if .Values.networkPolicy.ingressControllerNamespaceSelector }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressControllerNamespaceSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ int .Values.webui.port }}
+    {{- else }}
+    - ports:
+        - protocol: TCP
+          port: {{ int .Values.webui.port }}
+    {{- end }}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "context-scout.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+      ports:
+        - protocol: TCP
+          port: {{ int .Values.api.port }}
+    {{- if .Values.networkPolicy.allowDnsEgress }}
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+{{- if .Values.vllm.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "context-scout.fullname" . }}-vllm
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vllm
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: vllm
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "context-scout.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+        - podSelector:
+            matchLabels:
+              {{- include "context-scout.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: worker
+      ports:
+        - protocol: TCP
+          port: {{ int .Values.vllm.port }}
+  egress:
+    - to:
+        {{- range .Values.networkPolicy.postgresCidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 3307
+    {{- if .Values.networkPolicy.allowDnsEgress }}
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+    {{- if .Values.networkPolicy.allowHttpsEgress }}
+    - ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+{{- end }}
+{{- if .Values.zoekt.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "context-scout.fullname" . }}-zoekt
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: zoekt
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: zoekt
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "context-scout.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+        - podSelector:
+            matchLabels:
+              {{- include "context-scout.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: worker
+      ports:
+        - protocol: TCP
+          port: {{ int .Values.zoekt.port }}
+  egress:
+    {{- if .Values.networkPolicy.allowDnsEgress }}
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+{{- end }}
+{{- end }}

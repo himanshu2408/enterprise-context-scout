@@ -22,7 +22,7 @@ describe("RoleSwitcher", () => {
       "Bearer Signed"
     );
     expect(screen.getByTestId("active-scopes-list")).toHaveTextContent(
-      "public_eng, public_quant"
+      "public_eng, public_docs"
     );
 
     rerender(
@@ -62,7 +62,7 @@ describe("RoleSwitcher", () => {
     });
   });
 
-  it("switches to quant_researcher and compliance_officer with expected RBAC default scopes", () => {
+  it("switches to domain_researcher and compliance_officer with expected RBAC default scopes", () => {
     const onChange = vi.fn();
     render(
       <RoleSwitcher
@@ -71,18 +71,18 @@ describe("RoleSwitcher", () => {
       />
     );
 
-    fireEvent.click(screen.getByTestId("role-btn-quant_researcher"));
+    fireEvent.click(screen.getByTestId("role-btn-domain_researcher"));
     expect(onChange).toHaveBeenLastCalledWith({
       ...TEST_ENGINEER_PRINCIPAL,
-      role: "quant_researcher",
-      allowed_scopes: ["public_quant"],
+      role: "domain_researcher",
+      allowed_scopes: ["public_docs"],
     });
 
     fireEvent.click(screen.getByTestId("role-btn-compliance_officer"));
     expect(onChange).toHaveBeenLastCalledWith({
       ...TEST_ENGINEER_PRINCIPAL,
       role: "compliance_officer",
-      allowed_scopes: ["public_eng", "public_quant"],
+      allowed_scopes: ["public_eng", "public_docs"],
     });
   });
 
@@ -98,13 +98,13 @@ describe("RoleSwitcher", () => {
     fireEvent.click(screen.getByTestId("scope-chip-public_eng"));
     expect(onChange).toHaveBeenLastCalledWith({
       ...TEST_ENGINEER_PRINCIPAL,
-      allowed_scopes: ["public_quant"],
+      allowed_scopes: ["public_docs"],
     });
 
-    fireEvent.click(screen.getByTestId("scope-chip-restricted_risk"));
+    fireEvent.click(screen.getByTestId("scope-chip-docs_restricted"));
     expect(onChange).toHaveBeenLastCalledWith({
       ...TEST_ENGINEER_PRINCIPAL,
-      allowed_scopes: ["public_eng", "public_quant", "restricted_risk"],
+      allowed_scopes: ["public_eng", "public_docs", "docs_restricted"],
     });
 
     fireEvent.click(screen.getByTestId("unscoped-probe-btn"));
@@ -126,13 +126,13 @@ describe("RoleSwitcher", () => {
       <RoleSwitcher
         principal={{
           ...TEST_ENGINEER_PRINCIPAL,
-          allowed_scopes: ["public_quant"],
+          allowed_scopes: ["public_docs"],
         }}
         onChangePrincipal={onChange}
       />
     );
 
-    fireEvent.click(screen.getByTestId("scope-chip-public_quant"));
+    fireEvent.click(screen.getByTestId("scope-chip-public_docs"));
     expect(onChange).toHaveBeenCalledWith({
       ...TEST_ENGINEER_PRINCIPAL,
       allowed_scopes: ["unscoped_probe"],

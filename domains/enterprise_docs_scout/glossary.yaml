@@ -1,0 +1,5 @@
+domain_id: enterprise_docs_scout
+terms:
+  ADR: Architecture Decision Record capturing context, decision, and consequences.
+  DomainKnowledgeBrief: Domain-agnostic structured synthesis contract for enterprise documents and specifications.
+  DocCitationSpan: Provenance-anchored citation span with chunk_id, doc_id, source_uri, section_heading, and verbatim_quote.

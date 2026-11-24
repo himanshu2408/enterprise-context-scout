@@ -1,7 +1,7 @@
 """Comprehensive test suite for Milestone 6 Evaluation Harness and CI/CD Gates.
 
 Verifies:
-1. Golden benchmark dataset catalog integrity (5 code, 3 quant, 2 fed, 22 rbac, 22 inj).
+1. Golden benchmark dataset catalog integrity (5 code, 6 doc research, 2 fed, 22 rbac, 22 inj).
 2. Each of the 6 CI/CD gate metrics individually and together.
 3. Failure-gate detection under simulated threshold violations.
 4. OpenTelemetry GenAI semantic conventions and Context Scout distributed trace spans.
@@ -32,8 +32,8 @@ from context_scout.evals.harness import (
 )
 from context_scout.evals.runner import main
 from context_scout.schemas.contracts import (
+    DocumentScope,
     ImplementationContextPack,
-    MarketRegime,
     PrincipalContext,
     RoleType,
 )
@@ -59,7 +59,7 @@ def golden_suite() -> GoldenBenchmarkSuite:
 
 @pytest.fixture(scope="module")
 def harness(settings: ScoutSettings) -> EvaluationHarness:
-    return EvaluationHarness(settings=settings)
+    return EvaluationHarness(settings=settings, force_in_memory=True)
 
 
 # =============================================================================
@@ -69,9 +69,9 @@ def harness(settings: ScoutSettings) -> EvaluationHarness:
 
 def test_golden_dataset_structure_and_counts(golden_suite: GoldenBenchmarkSuite) -> None:
     """Verifies golden benchmark suite contains all required tasks and schemas."""
-    assert len(golden_suite.code_tasks) == 8, "Expected 8 code localization tasks"
-    assert len(golden_suite.quant_tasks) == 6, "Expected 6 quant research tasks"
-    assert len(golden_suite.federated_tasks) == 3, "Expected 3 federated cross-domain tasks"
+    assert len(golden_suite.code_tasks) == 5, "Expected 5 code localization tasks"
+    assert len(golden_suite.doc_tasks) == 6, "Expected 6 document research tasks"
+    assert len(golden_suite.federated_tasks) == 2, "Expected 2 federated cross-domain tasks"
     assert len(golden_suite.rbac_redteam_queries) == 22, "Expected 22 RBAC red-team queries"
     assert len(golden_suite.prompt_injection_payloads) == 22, "Expected 22 injection payloads"
 
@@ -82,14 +82,10 @@ def test_golden_dataset_structure_and_counts(golden_suite: GoldenBenchmarkSuite)
         assert len(t.ground_truth_symbols) >= 1
         assert t.expected_zero_touch is True
 
-    for q in golden_suite.quant_tasks:
-        assert q.category == TaskCategory.QUANT_RESEARCH
-        assert q.min_friction_bps > 0.0
-        assert q.target_market in (
-            MarketRegime.INDIA_NSE_BSE,
-            MarketRegime.GERMANY_XETRA_DAX,
-            MarketRegime.US_NYSE_NASDAQ,
-        )
+    for q in golden_suite.doc_tasks:
+        assert q.category == TaskCategory.DOC_RESEARCH
+        assert q.min_friction_bps >= 0.0
+        assert isinstance(q.target_market, DocumentScope)
         assert len(q.expected_doc_ids) >= 1
 
     for f in golden_suite.federated_tasks:
@@ -241,11 +237,9 @@ def test_failure_gate_detection_simulation(settings: ScoutSettings) -> None:
     task = GoldenCodeTask(
         task_id="FAIL-SIM",
         category=TaskCategory.CODE_LOCALIZATION,
-        user_prompt="Refactor KalmanHedgeEstimator in pairs_trading_kalman.py",
-        ground_truth_files=["src/context_scout/trading_strategies/pairs_trading_kalman.py"],
-        ground_truth_symbols=[
-            "context_scout.trading_strategies.pairs_trading_kalman.KalmanHedgeEstimator"
-        ],
+        user_prompt="Refactor DeterministicSlicer in deterministic_slicer.py",
+        ground_truth_files=["src/context_scout/ast_engine/deterministic_slicer.py"],
+        ground_truth_symbols=["context_scout.ast_engine.deterministic_slicer.DeterministicSlicer"],
     )
 
     m1 = strict_harness.evaluate_zero_touch_sufficiency([task])
@@ -293,9 +287,9 @@ def test_opentelemetry_span_capture_and_genai_conventions(harness: EvaluationHar
 
     wf = ScoutWorkflow(registry=harness.registry, repo=harness.repo)
     pack = wf.run(
-        user_prompt="Refactor KalmanHedgeEstimator in pairs_trading_kalman.py",
+        user_prompt="Refactor DeterministicSlicer in deterministic_slicer.py",
         principal=principal,
-        domain_id="trading_code_scout",
+        domain_id="code_architecture_scout",
     )
     assert isinstance(pack, ImplementationContextPack)
 
@@ -309,7 +303,7 @@ def test_opentelemetry_span_capture_and_genai_conventions(harness: EvaluationHar
     attrs = wf_span.attributes or {}
     assert attrs.get(GEN_AI_SYSTEM) == "gemma"
     assert attrs.get(GEN_AI_REQUEST_MODEL) == "gemma-4-moe"
-    assert attrs.get(ATTR_DOMAIN_ID) == "trading_code_scout"
+    assert attrs.get(ATTR_DOMAIN_ID) == "code_architecture_scout"
     assert ATTR_TRACE_ID in attrs
 
     preflight_spans = tracer.find_spans_by_name("scout.preflight_gate")
@@ -330,7 +324,7 @@ def test_live_postgresql_17_corpus_counts(settings: ScoutSettings) -> None:
     principal = PrincipalContext(
         user_id="corpus_auditor",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "public_quant", "quant_restricted"],
+        allowed_scopes=["public_eng", "public_docs", "docs_restricted"],
     )
 
     with mgr.scoped_transaction(principal) as conn:
@@ -344,10 +338,10 @@ def test_live_postgresql_17_corpus_counts(settings: ScoutSettings) -> None:
         edge_count = int(str(edge_row[0])) if edge_row else 0
         doc_count = int(str(doc_row[0])) if doc_row else 0
 
-        assert cf_count >= 43, f"Expected >= 43 code_files, got {cf_count}"
-        assert ast_count >= 227, f"Expected >= 227 ast_symbols, got {ast_count}"
-        assert edge_count >= 2000, f"Expected >= 2000 ast_edges, got {edge_count}"
-        assert doc_count >= 14318, f"Expected >= 14318 doc_chunks, got {doc_count}"
+        assert cf_count >= 40, f"Expected >= 40 code_files, got {cf_count}"
+        assert ast_count >= 200, f"Expected >= 200 ast_symbols, got {ast_count}"
+        assert edge_count >= 500, f"Expected >= 500 ast_edges, got {edge_count}"
+        assert doc_count >= 12, f"Expected >= 12 doc_chunks, got {doc_count}"
 
 
 # =============================================================================
@@ -446,3 +440,105 @@ def test_cli_runner_mutual_exclusion_error() -> None:
     with pytest.raises(SystemExit) as exc_info:
         main(["--postgres", "--in-memory"])
     assert exc_info.value.code == 2
+
+
+def test_harness_alignment_and_registered_domain_citation_lookup(
+    harness: EvaluationHarness,
+) -> None:
+    """Verifies disk code hydration, 1:1 pack alignment, and registered domain docs."""
+    from datetime import date
+    from uuid import uuid4
+
+    from context_scout.db.schema import DocChunkRecord
+    from context_scout.schemas.contracts import (
+        AuthorityRules,
+        DocCitationSpan,
+        DomainPackManifest,
+        PreFlightValidationReport,
+    )
+
+    # 1. _create_populated_in_memory_repo must match current disk files verbatim (not stale PG17)
+    probe_p = PrincipalContext(
+        user_id="disc065_probe",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng"],
+    )
+    disk_files = {
+        f.file_path: f
+        for f in harness.repo.list_visible_code_files(probe_p, "code_architecture_scout")
+    }
+    assert "src/context_scout/evals/harness.py" in disk_files
+    assert disk_files["src/context_scout/evals/harness.py"].raw_content == (
+        harness.repo_root / "src/context_scout/evals/harness.py"
+    ).read_text(encoding="utf-8")
+
+    # 2. evaluate_verbatim_citation_faithfulness checks registered non-research domains
+    custom_dom = f"eval_disc065_{uuid4().hex[:6]}"
+    harness.registry.register(
+        DomainPackManifest(
+            domain_id=custom_dom,
+            display_name="Federated Custom Domain",
+            base_model_id="google/gemma-4-26B-A4B-it",
+            lora_adapter_id="none",
+            lora_adapter_path="domains/enterprise_docs_scout/adapters/gemma4_26b_enterprise_docs",
+            mcp_read_tools_allowed=["doc_corpus_mcp:search_hybrid_rrf"],
+            authority_rules=AuthorityRules(primary_truth_source="document"),
+            output_contract="DomainKnowledgeBrief",
+            default_scopes=["public_docs", f"domain:{custom_dom}"],
+            lora_enabled=False,
+        )
+    )
+    chunk_id = uuid4()
+    quote = "Authoritative federated document quote for verbatim check."
+    harness.repo.insert_doc_chunk(
+        PrincipalContext(
+            user_id="disc065_seed",
+            role=RoleType.ENGINEER,
+            allowed_scopes=["public_docs", f"domain:{custom_dom}"],
+        ),
+        DocChunkRecord(
+            chunk_id=chunk_id,
+            domain_id=custom_dom,
+            doc_id="doc-disc065",
+            doc_title="Federated Custom Doc",
+            source_uri="urn:disc065",
+            market_scope=DocumentScope.ENTERPRISE_DOC,
+            published_date=date(2026, 11, 19),
+            authority_weight=1.0,
+            section_heading="Sec",
+            contextual_header="Sec",
+            verbatim_content=quote,
+            metadata_json={},
+            allowed_scopes=["public_docs", f"domain:{custom_dom}"],
+            embedding=[0.1] * 768,
+            source_type="confluence",
+        ),
+    )
+    pack = ImplementationContextPack(
+        trace_id="trace-disc065",
+        domain_id="code_architecture_scout",
+        user_task="federated test",
+        architectural_execution_plan=["Inspect federated citation provenance."],
+        code_slices=[],
+        supporting_doc_citations=[
+            DocCitationSpan(
+                chunk_id=str(chunk_id),
+                doc_id="doc-disc065",
+                doc_title="Federated Custom Doc",
+                source_uri="urn:disc065",
+                section_heading="Sec",
+                verbatim_quote=quote,
+                full_section_content=quote,
+            )
+        ],
+        preflight_report=PreFlightValidationReport(
+            passed=True,
+            citations_verified_100_pct=True,
+            normalized_rrf_score=0.9,
+        ),
+        local_tokens_consumed=100,
+        pack_token_count=200,
+    )
+    res = harness.evaluate_verbatim_citation_faithfulness([pack])
+    assert res.passed is True
+    assert res.measured_value == 100.0

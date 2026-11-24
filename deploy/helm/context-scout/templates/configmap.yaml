@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "context-scout.fullname" . }}-config
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+data:
+  SCOUT_ENVIRONMENT: {{ .Values.global.environment | quote }}
+  SCOUT_ALLOW_EXTERNAL_CLOUD_EGRESS: {{ .Values.global.allowExternalCloudEgress | quote }}
+  SCOUT_DEFAULT_DOMAIN_ID: {{ .Values.config.defaultDomainId | quote }}
+  SCOUT_PRIMARY_MODEL_ID: {{ .Values.config.primaryModelId | quote }}
+  SCOUT_CONTEXTUALIZER_MODEL_ID: {{ .Values.config.contextualizerModelId | quote }}
+  SCOUT_EMBEDDING_MODEL_ID: {{ .Values.config.embeddingModelId | quote }}
+  SCOUT_RERANKER_MODEL_ID: {{ .Values.config.rerankerModelId | quote }}
+  SCOUT_SHIELD_MODEL_ID: {{ .Values.config.shieldModelId | quote }}
+  SCOUT_EMBEDDING_DIMENSIONS: {{ .Values.config.embeddingDimensions | quote }}
+  SCOUT_LOCAL_MAX_KV_TOKENS: {{ .Values.config.localMaxKvTokens | quote }}
+  SCOUT_LORA_SLOTS_CAPACITY: {{ .Values.config.loraSlotsCapacity | quote }}
+  SCOUT_REDIS_URL: {{ .Values.config.redisUrl | quote }}
+  SCOUT_ZOEKT_ENDPOINT_URL: {{ .Values.config.zoektEndpointUrl | quote }}
+  SCOUT_ZOEKT_PROTOCOL: {{ .Values.config.zoektProtocol | quote }}
+  SCOUT_LOCAL_MLX_ENDPOINT: {{ printf "http://%s-vllm:%d/v1" (include "context-scout.fullname" .) (int .Values.vllm.port) | quote }}
+  SCOUT_GCS_BUCKET: {{ .Values.config.gcsBucket | quote }}
+  SCOUT_GCS_PROJECT: {{ .Values.config.gcsProject | quote }}
+  SCOUT_S3_BUCKET: {{ .Values.config.s3Bucket | quote }}
+  SCOUT_S3_REGION: {{ .Values.config.s3Region | quote }}
+  SCOUT_S3_ENDPOINT_URL: {{ .Values.config.s3EndpointUrl | quote }}
+  SCOUT_S3_FORCE_PATH_STYLE: {{ .Values.config.s3ForcePathStyle | quote }}
+  SCOUT_GCP_PROJECT: {{ .Values.config.gcpProject | quote }}
+  SCOUT_GCP_LOCATION: {{ .Values.config.gcpLocation | quote }}
+  SCOUT_USE_VERTEX_AI: {{ .Values.config.useVertexAi | quote }}
+  SCOUT_IAP_ENABLED: {{ .Values.config.iapEnabled | quote }}
+  SCOUT_IAP_EXPECTED_AUDIENCE: {{ .Values.config.iapExpectedAudience | quote }}
+  SCOUT_CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
+  {{- range $k, $v := .Values.config.extraEnv }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}

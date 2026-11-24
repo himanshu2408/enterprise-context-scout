@@ -5,20 +5,13 @@
 
 export type RoleType =
   | "engineer"
-  | "quant_researcher"
+  | "domain_researcher"
   | "product_manager"
   | "compliance_officer";
 
 export type SourceFilterType = "all" | "code" | "wiki" | "jira";
 
 export type DomainModality = "code" | "document" | "issues";
-
-export type MarketRegime =
-  | "IN_NSE"
-  | "DE_XETRA"
-  | "US_EQUITY"
-  | "GLOBAL"
-  | "INTERNAL_ADR";
 
 export type ExecutionMode = "chat_qa" | "gemini_handoff";
 
@@ -28,11 +21,6 @@ export type ModificationIntent =
   | "direct_caller"
   | "test_fixture"
   | "reference_only";
-
-export type FrictionVerdict =
-  | "REALISTIC_FRICTION"
-  | "UNVERIFIED_FRICTION_WARNING"
-  | "FAILS_AFTER_COSTS";
 
 export type ConfidenceBand = "high" | "medium" | "low";
 
@@ -175,7 +163,9 @@ export interface AdapterVerificationStatus {
 }
 
 export interface HealthResponse {
+  version?: string;
   status: "healthy" | "degraded" | "unhealthy";
+  overall_status?: "healthy" | "degraded" | "unhealthy";
   database_connected: boolean;
   database_status: string;
   registered_domains: string[];
@@ -262,25 +252,6 @@ export interface DomainKnowledgeBrief {
     | string;
 }
 
-export interface QuantStrategyBrief {
-  strategy_name: string;
-  target_markets: MarketRegime[];
-  is_intraday_futures: boolean;
-  mathematical_signal_latex: string;
-  entry_exit_rules: string[];
-  sample_period_years: string;
-  reported_sharpe_ratio: number | null;
-  reported_max_drawdown_pct: number | null;
-  transaction_cost_bps_assumed: number | null;
-  friction_verdict: FrictionVerdict;
-  market_specific_caveats: string[];
-  known_failure_regimes: string[];
-  verified_citations: DocCitation[];
-  sufficiency_verdict?: SufficiencyVerdict;
-  missing_aspects?: string[];
-  synthesis_mode?: string;
-}
-
 export interface PreFlightValidationReport {
   passed: boolean;
   unresolved_symbols: string[];
@@ -300,7 +271,6 @@ export interface ContextPack {
   doc_vs_code_conflicts_detected: string[];
   code_slices: VerbatimCodeSlice[];
   supporting_doc_citations: DocCitation[];
-  quant_strategy_spec: QuantStrategyBrief | null;
   domain_knowledge_brief?: DomainKnowledgeBrief | null;
   preflight_report: PreFlightValidationReport;
   local_tokens_consumed: number;
@@ -311,6 +281,12 @@ export interface ContextPack {
   synthesis_mode?: string;
   stage_confidences?: StageConfidence[];
   stage_traces?: StageExecutionTrace[];
+  session_id?: string | null;
+  branch_id?: string | null;
+  commit_drift_warnings?: string[];
+  spec_drift_warnings?: string[];
+  side_effects?: SideEffectMatrixItem[];
+  architecture_mermaid?: string | null;
 }
 
 export interface InsufficientContextDiagnostic {
@@ -374,7 +350,6 @@ export interface SSEContextPackReadyData {
   event_type?: "context_pack_ready";
   status: "ready";
   pack: ContextPack | null;
-  quant_strategy_spec?: QuantStrategyBrief | null;
   token_savings: ScoutTokenSavingsBreakdown;
   stage_traces?: StageExecutionTrace[];
   timestamp: string;
@@ -417,7 +392,6 @@ export interface HandoffPreviewResponse {
 export interface HandoffApplyRequest {
   confirmation_token: string;
   confirmed: boolean;
-  custom_patch?: string;
 }
 
 export interface HandoffApplyResponse {
@@ -535,8 +509,9 @@ export interface ScoutQueryRequest {
   domain_id: string;
   query: string;
   trace_id?: string;
-  normalized_rrf_score?: number | null;
   max_bounce_backs?: number;
+  session_id?: string;
+  branch_id?: string;
 }
 
 export interface ScoutQueryResponse {
@@ -547,8 +522,78 @@ export interface ScoutQueryResponse {
   diagnostic: InsufficientContextDiagnostic | null;
   citations: DocCitation[];
   preflight_report: PreFlightValidationReport | null;
-  quant_strategy_spec: QuantStrategyBrief | null;
   token_savings: ScoutTokenSavingsBreakdown;
   trace_attributes: Record<string, unknown>;
   stage_traces?: StageExecutionTrace[];
+}
+
+
+export type HandoffExportFormat =
+  | "claude_xml"
+  | "cursor_antigravity_md"
+  | "gemini_json"
+  | "codex_patch"
+  | "local_llm_pack";
+
+export type SliceFeedbackStatus = "pinned" | "included" | "excluded";
+export type SliceFeedbackMap = Record<string, SliceFeedbackStatus>;
+
+export interface ScoutSessionSummary {
+  session_id: string;
+  title: string;
+  domain_id: string;
+  turn_count: number;
+  compacted_tokens: number;
+  updated_at: string;
+  has_commit_drift: boolean;
+  commit_drift_details?: string[];
+}
+
+export interface BranchOverlayOption {
+  branch_id: string;
+  label: string;
+  kind: "head" | "mr_overlay";
+  commit_sha: string;
+  mr_iid?: string | null;
+  overlay_files_count?: number;
+}
+
+export type SideEffectCategory =
+  | "DB_WRITE"
+  | "HTTP_EGRESS"
+  | "AUTH_GUARD"
+  | "QUEUE_PUBLISH"
+  | "ENV_CONTRACT";
+
+export interface SideEffectMatrixItem {
+  side_effect_id: string;
+  effect_type: SideEffectCategory;
+  qualified_symbol: string;
+  file_path: string;
+  line_range: string;
+  target_resource: string;
+  spec_status: "VERIFIED" | "SPEC_DRIFT_WARNING";
+  verification_note: string;
+}
+
+export interface AdminPurgeRequest {
+  domain_id: string;
+  repo_name?: string;
+  file_path?: string;
+  doc_id?: string;
+  include_derived_wiki?: boolean;
+}
+
+export interface AdminPurgeResponse {
+  domain_id: string;
+  tenant_id: string;
+  pg17_deleted: Record<string, number>;
+  zoekt_deleted: number;
+  object_store_deleted: string[];
+  permission_cache_invalidated: boolean;
+  residue_found: number;
+  elapsed_seconds: number;
+  sla_seconds: number;
+  sla_met: boolean;
+  warnings: string[];
 }

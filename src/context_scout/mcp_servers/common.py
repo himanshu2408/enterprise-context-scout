@@ -7,9 +7,18 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any, Final
 from uuid import UUID
+
+from fastapi import HTTPException
+from mcp.server.mcpserver import MCPServer
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.transport_security import TransportSecuritySettings
+from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSIONS
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from context_scout.config import ScoutSettings
 from context_scout.db.repositories import (
@@ -18,14 +27,26 @@ from context_scout.db.repositories import (
     ASTSymbolRecord,
     CodeFileRecord,
     DocChunkRecord,
+    JiraIssueRecord,
+    ScoutSessionRecord,
+    SideEffectRecord,
     _parse_market_scope,
 )
 from context_scout.db.session import RLSConnectionManager
-from context_scout.schemas.contracts import MarketRegime, PrincipalContext
+from context_scout.schemas.contracts import DocumentScope, PrincipalContext
+from context_scout.security.betrvg_privacy import pseudonymize_actor_if_enabled
 from context_scout.security.rbac import (
+    FORBIDDEN_TOOL_ARGUMENTS,
+    bind_session_principal,
     get_current_principal,
     scoped_db_session,
     validate_tool_call_arguments,
+)
+from context_scout.telemetry import (
+    ATTR_SCOUT_PRINCIPAL_ID,
+    ScoutTelemetryTracer,
+    extract_trace_context,
+    inject_trace_context,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +82,10 @@ def bound_payload_dict(
         "equations",
         "tables",
         "comparison",
+        "snapshots",
+        "deltas",
+        "files",
+        "branches",
     )
     for key in collection_keys:
         if key in data and isinstance(data[key], list) and len(data[key]) > max_items:
@@ -160,19 +185,27 @@ class PostgresScoutGraphAdapter:
         self.settings = settings or ScoutSettings()
 
     def list_visible_code_files(
-        self, principal: PrincipalContext, domain_id: str
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        *,
+        limit: int = 5_000,
+        include_raw_content: bool = True,
     ) -> list[CodeFileRecord]:
-        """Returns all code files visible to the principal under Forced RLS."""
+        """Returns visible code files for the principal under Forced RLS (bounded by limit)."""
+        safe_limit = max(1, min(limit, 5000))
+        content_col = "raw_content" if include_raw_content else "'' AS raw_content"
         with scoped_db_session(self.connection_manager, principal) as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT file_id, domain_id, repo_name, file_path, git_commit_sha,
-                       git_blob_sha, language, allowed_scopes, raw_content, line_count
+                       git_blob_sha, language, allowed_scopes, {content_col}, line_count
                 FROM code_files
                 WHERE domain_id = %s
-                ORDER BY file_path;
+                ORDER BY file_path
+                LIMIT %s;
                 """,
-                (domain_id,),
+                (domain_id, safe_limit),
             ).fetchall()
             results: list[CodeFileRecord] = []
             for r in rows:
@@ -192,6 +225,7 @@ class PostgresScoutGraphAdapter:
                         allowed_scopes=scopes_list,
                         raw_content=str(r[8]),
                         line_count=int(str(r[9])),
+                        tenant_id=principal.tenant_id,
                     )
                 )
             return results
@@ -474,7 +508,7 @@ class PostgresScoutGraphAdapter:
         self,
         principal: PrincipalContext,
         domain_id: str,
-        market_scope: MarketRegime | str | None = None,
+        market_scope: DocumentScope | str | None = None,
     ) -> list[DocChunkRecord]:
         """Returns visible document chunks under Forced RLS (bounded to 100 rows)."""
         with scoped_db_session(self.connection_manager, principal) as conn:
@@ -522,7 +556,7 @@ class PostgresScoutGraphAdapter:
         principal: PrincipalContext,
         domain_id: str,
         query_text: str,
-        market_scope: MarketRegime | str | None = None,
+        market_scope: DocumentScope | str | None = None,
         limit: int = 50,
     ) -> list[DocChunkRecord]:
         """Searches visible document chunks ranked by RRF, keyword, and market scope under RLS."""
@@ -755,14 +789,521 @@ class PostgresScoutGraphAdapter:
                 max_direct_callers=max_direct_callers,
             )
 
+    def list_visible_side_effects(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        *,
+        effect_category: str | None = None,
+        repo_name: str | None = None,
+        file_path: str | None = None,
+    ) -> list[SideEffectRecord]:
+        """Lists side effects visible to principal under Forced RLS."""
+        from context_scout.db.repositories import PostgresRLSRepository
+
+        repo = PostgresRLSRepository()
+        with scoped_db_session(self.connection_manager, principal) as conn:
+            return repo.list_visible_side_effects(
+                conn=conn,
+                domain_id=domain_id,
+                effect_category=effect_category,
+                repo_name=repo_name,
+                file_path=file_path,
+            )
+
+    def list_visible_jira_issues(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        *,
+        project_key: str | None = None,
+    ) -> list[JiraIssueRecord]:
+        """Lists Jira issues visible to principal under Forced RLS."""
+        from context_scout.db.repositories import PostgresRLSRepository
+
+        repo = PostgresRLSRepository()
+        with scoped_db_session(self.connection_manager, principal) as conn:
+            return repo.list_jira_issues(conn=conn, domain_id=domain_id, project_key=project_key)
+
+    def get_scout_session(
+        self,
+        principal: PrincipalContext,
+        session_id: str,
+    ) -> ScoutSessionRecord | None:
+        """Loads a multi-turn scout_sessions record for principal under Forced RLS."""
+        from context_scout.db.repositories import PostgresRLSRepository
+
+        repo = PostgresRLSRepository()
+        with scoped_db_session(self.connection_manager, principal) as conn:
+            return repo.get_scout_session(
+                conn=conn,
+                session_id=session_id,
+                principal_id=principal.user_id,
+            )
+
+    def upsert_scout_session(
+        self,
+        principal: PrincipalContext,
+        record: ScoutSessionRecord,
+    ) -> ScoutSessionRecord:
+        """Upserts a multi-turn scout_sessions record for principal under Forced RLS."""
+        from context_scout.db.repositories import PostgresRLSRepository
+
+        repo = PostgresRLSRepository()
+        with scoped_db_session(self.connection_manager, principal) as conn:
+            return repo.upsert_scout_session(conn=conn, record=record)
+
+
+MCP_PROTOCOL_VERSION_2026_07_28: Final[str] = "2026-07-28"
+SUPPORTED_MCP_PROTOCOL_VERSIONS: Final[tuple[str, ...]] = (
+    *MODERN_PROTOCOL_VERSIONS,
+    *reversed(HANDSHAKE_PROTOCOL_VERSIONS),
+)
+_CLOUD_TRACE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*([0-9a-fA-F]{32})/([0-9]+)(?:;o=([01]))?\s*$"
+)
+_DEFAULT_ALLOWED_MCP_HOSTS: Final[list[str]] = [
+    "127.0.0.1",
+    "127.0.0.1:*",
+    "localhost",
+    "localhost:*",
+    "[::1]",
+    "[::1]:*",
+    "testserver",
+    "testserver:*",
+]
+_DEFAULT_ALLOWED_MCP_ORIGINS: Final[list[str]] = [
+    "http://127.0.0.1",
+    "http://127.0.0.1:*",
+    "http://localhost",
+    "http://localhost:*",
+    "http://[::1]",
+    "http://[::1]:*",
+    "http://testserver",
+]
+
+
+def parse_cloud_trace_to_traceparent(cloud_trace: str | None) -> str | None:
+    """Converts GCP X-Cloud-Trace-Context (<trace_hex>/<span_dec>;o=<0|1>) to W3C traceparent."""
+    if not cloud_trace or not cloud_trace.strip():
+        return None
+    m = _CLOUD_TRACE_RE.match(cloud_trace)
+    if m is None:
+        return None
+    trace_hex = m.group(1).lower()
+    span_dec = int(m.group(2))
+    if span_dec <= 0 or trace_hex == "0" * 32:
+        return None
+    span_hex = f"{span_dec & 0xFFFFFFFFFFFFFFFF:016x}"
+    if span_hex == "0" * 16:
+        span_hex = "0000000000000001"
+    sampled = "01" if (m.group(3) in (None, "1")) else "00"
+    return f"00-{trace_hex}-{span_hex}-{sampled}"
+
+
+def resolve_traceparent_from_headers(
+    headers: Mapping[str, str],
+    body_payload: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Extracts W3C traceparent from HTTP headers, Cloud Trace header, or JSON-RPC _meta."""
+    for k, v in headers.items():
+        if k.lower() == "traceparent" and v.strip():
+            return v.strip()
+    for k, v in headers.items():
+        if k.lower() == "x-cloud-trace-context":
+            converted = parse_cloud_trace_to_traceparent(v)
+            if converted:
+                return converted
+    if isinstance(body_payload, Mapping):
+        params = body_payload.get("params")
+        if isinstance(params, Mapping):
+            meta = params.get("_meta")
+            if isinstance(meta, Mapping) and isinstance(meta.get("traceparent"), str):
+                tp = str(meta["traceparent"]).strip()
+                if tp:
+                    return tp
+    return None
+
+
+def build_mcp_well_known_metadata(
+    server: MCPServer,
+    *,
+    endpoint_path: str = "/mcp",
+    server_name: str | None = None,
+) -> dict[str, Any]:
+    """Builds SEP-2243 /.well-known/mcp discovery metadata for stateless MCP 2026-07-28."""
+    resolved_name = server_name or getattr(server, "name", None) or "enterprise-context-scout"
+    tools_desc: list[dict[str, Any]] = []
+    tool_mgr = getattr(server, "_tool_manager", None)
+    if tool_mgr is not None and hasattr(tool_mgr, "list_tools"):
+        for tool in tool_mgr.list_tools():
+            raw_props = (
+                dict(tool.parameters.get("properties", {}))
+                if isinstance(getattr(tool, "parameters", None), dict)
+                else {}
+            )
+            sanitized_props = {
+                k: v for k, v in raw_props.items() if k.lower() not in FORBIDDEN_TOOL_ARGUMENTS
+            }
+            tools_desc.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": sanitized_props,
+                    },
+                }
+            )
+    return {
+        "server": resolved_name,
+        "protocolVersion": MCP_PROTOCOL_VERSION_2026_07_28,
+        "supportedProtocolVersions": list(SUPPORTED_MCP_PROTOCOL_VERSIONS),
+        "transport": {
+            "type": "streamable-http",
+            "stateless": True,
+            "endpoint": endpoint_path,
+            "sep": "SEP-2575",
+        },
+        "discovery": {"sep": "SEP-2243"},
+        "capabilities": {
+            "tools": {"listChanged": False},
+            "tracing": {
+                "sep": "SEP-2663",
+                "w3cTraceContext": True,
+                "cloudTraceCompatible": True,
+            },
+        },
+        "authentication": {
+            "outOfBandOnly": True,
+            "schemes": ["CloudIAP", "OIDC_JWKS_Bearer", "HMAC_Bearer"],
+        },
+        "tools": tools_desc,
+    }
+
+
+_SINGLE_AUTH_HEADERS: Final[frozenset[str]] = frozenset(
+    {"authorization", "x-goog-iap-jwt-assertion"}
+)
+_SINGLE_CONTEXT_HEADERS: Final[frozenset[str]] = frozenset(
+    {
+        "x-principal-tenant-id",
+        "x-scout-tenant-id",
+        "x-principal-user-id",
+        "x-principal-role",
+        "x-principal-scopes",
+        "mcp-session-id",
+        "mcp-protocol-version",
+    }
+)
+
+
+def _rewrite_headers(
+    raw_headers: Sequence[tuple[bytes, bytes]],
+    updates: Mapping[str, str],
+) -> list[tuple[bytes, bytes]]:
+    lower_updates = {k.lower().encode("latin-1"): v.encode("latin-1") for k, v in updates.items()}
+    out: list[tuple[bytes, bytes]] = [
+        (k, v) for k, v in raw_headers if k.lower() not in lower_updates
+    ]
+    for k_bytes, v_bytes in lower_updates.items():
+        out.append((k_bytes, v_bytes))
+    return out
+
+
+class _StatelessMCPHTTPASGIApp:
+    """ASGI wrapper enforcing SEP-2575 stateless MCP 2026-07-28, SEP-2243, SEP-2663, and SEC-04."""
+
+    def __init__(
+        self,
+        server: MCPServer,
+        *,
+        streamable_http_path: str = "/mcp",
+        json_response: bool = True,
+        allowed_hosts: Sequence[str] | None = None,
+        allowed_origins: Sequence[str] | None = None,
+        require_auth: bool = True,
+    ) -> None:
+        self.server = server
+        self.streamable_http_path = streamable_http_path
+        self.json_response = json_response
+        self.require_auth = require_auth
+        self.security_settings = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=list(allowed_hosts)
+            if allowed_hosts is not None
+            else list(_DEFAULT_ALLOWED_MCP_HOSTS),
+            allowed_origins=list(allowed_origins)
+            if allowed_origins is not None
+            else list(_DEFAULT_ALLOWED_MCP_ORIGINS),
+        )
+        self.starlette_app = server.streamable_http_app(
+            streamable_http_path=streamable_http_path,
+            json_response=json_response,
+            stateless_http=True,
+            transport_security=self.security_settings,
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.starlette_app(scope, receive, send)
+            return
+
+        path = str(scope.get("path") or "").rstrip("/") or "/"
+        method = str(scope.get("method") or "GET").upper()
+
+        # SEP-2243 capability discovery
+        if method == "GET" and (
+            path in {"/.well-known/mcp", "/.well-known/mcp.json"}
+            or path.endswith("/.well-known/mcp")
+            or path.endswith("/.well-known/mcp.json")
+        ):
+            metadata = build_mcp_well_known_metadata(
+                self.server, endpoint_path=self.streamable_http_path
+            )
+            resp = JSONResponse(metadata, headers={"Cache-Control": "no-store"})
+            await resp(scope, receive, send)
+            return
+
+        raw_headers = list(scope.get("headers", ()))
+        folded_headers: dict[str, str] = {}
+        seen_keys: set[str] = set()
+        for raw_k, raw_v in raw_headers:
+            k_lower = raw_k.decode("latin-1").lower()
+            v_str = raw_v.decode("latin-1")
+            if k_lower in _SINGLE_AUTH_HEADERS and k_lower in seen_keys:
+                err_resp = JSONResponse(
+                    {"error": f"Duplicate authentication header '{k_lower}' is not permitted."},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+                await err_resp(scope, receive, send)
+                return
+            if k_lower in _SINGLE_CONTEXT_HEADERS and k_lower in seen_keys:
+                err_resp = JSONResponse(
+                    {"error": f"Duplicate header '{k_lower}' is not permitted."},
+                    status_code=400,
+                )
+                await err_resp(scope, receive, send)
+                return
+            seen_keys.add(k_lower)
+            folded_headers.setdefault(k_lower, v_str)
+
+        # SEP-2575 strict stateless check: prohibit sticky session state
+        if "mcp-session-id" in folded_headers:
+            err_resp = JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": -32600,
+                        "message": (
+                            "Stateless MCP 2026-07-28 (SEP-2575) prohibits sticky "
+                            "Mcp-Session-Id headers."
+                        ),
+                    },
+                },
+                status_code=400,
+            )
+            await err_resp(scope, receive, send)
+            return
+
+        # Out-of-band authentication (Cloud IAP / OIDC JWKS / HMAC Bearer)
+        principal: PrincipalContext | None = None
+        if self.require_auth:
+            from context_scout.api.dependencies import authenticate_headers
+
+            try:
+                principal = authenticate_headers(folded_headers)
+            except HTTPException as exc:
+                hdrs = {"WWW-Authenticate": "Bearer"} if exc.status_code == 401 else {}
+                err_resp = JSONResponse(
+                    {"error": str(exc.detail)},
+                    status_code=exc.status_code,
+                    headers=hdrs,
+                )
+                await err_resp(scope, receive, send)
+                return
+
+        if method == "GET":
+            err_resp = JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": -32600,
+                        "message": (
+                            "Method Not Allowed: Stateless MCP 2026-07-28 (SEP-2575) does not "
+                            "support standalone GET SSE streams; use POST."
+                        ),
+                    },
+                },
+                status_code=405,
+                headers={"Allow": "POST"},
+            )
+            await err_resp(scope, receive, send)
+            return
+
+        # Read HTTP body once for SEP-2663 _meta traceparent inspection & replay
+        body_chunks: list[bytes] = []
+        if method == "POST":
+            while True:
+                msg = await receive()
+                if msg["type"] != "http.request":
+                    break
+                body_chunks.append(msg.get("body", b""))
+                if not msg.get("more_body", False):
+                    break
+        body_bytes = b"".join(body_chunks)
+
+        decoded_body: dict[str, Any] | None = None
+        if body_bytes:
+            try:
+                parsed = json.loads(body_bytes.decode("utf-8"))
+                if isinstance(parsed, dict):
+                    decoded_body = parsed
+            except (UnicodeDecodeError, ValueError, RecursionError):
+                decoded_body = None
+
+        inbound_tp = resolve_traceparent_from_headers(folded_headers, decoded_body)
+        parent_ctx = extract_trace_context({"traceparent": inbound_tp}) if inbound_tp else None
+
+        rpc_method = str(decoded_body.get("method") or "") if isinstance(decoded_body, dict) else ""
+        rpc_params = decoded_body.get("params") if isinstance(decoded_body, dict) else None
+        tool_name = (
+            str(rpc_params.get("name") or "")
+            if isinstance(rpc_params, dict) and rpc_params.get("name")
+            else ""
+        )
+        req_proto = folded_headers.get("mcp-protocol-version") or (
+            str(rpc_params.get("_meta", {}).get("io.modelcontextprotocol/protocolVersion") or "")
+            if isinstance(rpc_params, dict) and isinstance(rpc_params.get("_meta"), dict)
+            else ""
+        )
+
+        tracer = ScoutTelemetryTracer.get_instance()
+        span_name = f"mcp.http.{rpc_method or method.lower()}"
+        with tracer.tracer.start_as_current_span(span_name, context=parent_ctx) as span:
+            span.set_attribute("mcp.stateless", True)
+            if rpc_method:
+                span.set_attribute("mcp.method.name", rpc_method)
+            if req_proto:
+                span.set_attribute("mcp.protocol.version", req_proto)
+            if tool_name:
+                span.set_attribute("gen_ai.tool.name", tool_name)
+            if principal is not None:
+                safe_pid = pseudonymize_actor_if_enabled(principal.user_id, principal.tenant_id)
+                span.set_attribute(ATTR_SCOUT_PRINCIPAL_ID, safe_pid)
+
+            carrier = inject_trace_context({})
+            active_tp = carrier.get("traceparent") or inbound_tp or ""
+
+            # Propagate traceparent into body params._meta for mcp.server._otel middleware
+            forwarded_body = body_bytes
+            if (
+                active_tp
+                and isinstance(decoded_body, dict)
+                and isinstance(decoded_body.get("params"), dict)
+                and isinstance(decoded_body["params"].get("_meta"), dict)
+                and not decoded_body["params"]["_meta"].get("traceparent")
+            ):
+                decoded_body["params"]["_meta"]["traceparent"] = active_tp
+                forwarded_body = json.dumps(decoded_body).encode("utf-8")
+
+            header_updates: dict[str, str] = {}
+            if active_tp:
+                header_updates["traceparent"] = active_tp
+            if forwarded_body is not body_bytes:
+                header_updates["content-length"] = str(len(forwarded_body))
+
+            modified_scope = dict(scope)
+            if header_updates:
+                modified_scope["headers"] = _rewrite_headers(raw_headers, header_updates)
+
+            body_sent = False
+
+            async def replay_receive() -> Message:
+                nonlocal body_sent
+                if not body_sent:
+                    body_sent = True
+                    return {"type": "http.request", "body": forwarded_body, "more_body": False}
+                return await receive()
+
+            active_receive = replay_receive if method == "POST" else receive
+
+            async def wrapped_send(message: Message) -> None:
+                if message["type"] == "http.response.start":
+                    resp_headers = list(message.get("headers", ()))
+                    extra: dict[str, str] = {}
+                    if active_tp:
+                        extra["traceparent"] = active_tp
+                    if req_proto == MCP_PROTOCOL_VERSION_2026_07_28:
+                        extra["mcp-protocol-version"] = MCP_PROTOCOL_VERSION_2026_07_28
+                    if extra:
+                        message = {
+                            **message,
+                            "headers": _rewrite_headers(resp_headers, extra),
+                        }
+                await send(message)
+
+            async def _dispatch() -> None:
+                session_mgr = getattr(self.server._lowlevel_server, "_session_manager", None)
+                if (
+                    session_mgr is not None
+                    and getattr(session_mgr, "_task_group", None) is not None
+                ):
+                    await self.starlette_app(modified_scope, active_receive, wrapped_send)
+                    return
+                # Stateless fallback when caller invokes ASGI without lifespan startup
+                per_req_mgr = StreamableHTTPSessionManager(
+                    app=self.server._lowlevel_server,
+                    json_response=self.json_response,
+                    stateless=True,
+                    security_settings=self.security_settings,
+                )
+                async with per_req_mgr.run():
+                    await per_req_mgr.handle_request(modified_scope, active_receive, wrapped_send)
+
+            if principal is not None:
+                with bind_session_principal(principal):
+                    await _dispatch()
+            else:
+                await _dispatch()
+
+
+def create_stateless_mcp_http_app(
+    server: MCPServer,
+    *,
+    streamable_http_path: str = "/mcp",
+    json_response: bool = True,
+    allowed_hosts: Sequence[str] | None = None,
+    allowed_origins: Sequence[str] | None = None,
+    require_auth: bool = True,
+) -> ASGIApp:
+    """Wraps an MCPServer in stateless Streamable HTTP 2026-07-28 ASGI transport."""
+    return _StatelessMCPHTTPASGIApp(
+        server,
+        streamable_http_path=streamable_http_path,
+        json_response=json_response,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+        require_auth=require_auth,
+    )
+
 
 __all__ = [
     "MAX_PAYLOAD_BYTES",
     "MAX_PAYLOAD_ITEMS",
+    "MCP_PROTOCOL_VERSION_2026_07_28",
+    "SUPPORTED_MCP_PROTOCOL_VERSIONS",
     "TRUNCATION_INDICATOR",
     "PostgresScoutGraphAdapter",
     "bound_payload_dict",
+    "build_mcp_well_known_metadata",
+    "create_stateless_mcp_http_app",
     "get_current_principal",
+    "parse_cloud_trace_to_traceparent",
+    "resolve_traceparent_from_headers",
     "scoped_db_session",
     "validate_tool_call_arguments",
 ]

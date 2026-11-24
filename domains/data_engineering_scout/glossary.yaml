@@ -1,0 +1,5 @@
+domain_id: data_engineering_scout
+terms:
+  ACID: Atomicity, Consistency, Isolation, Durability guarantees for transactional storage.
+  Lakehouse: Unified table format architecture (e.g., Apache Iceberg, Apache Paimon) supporting ACID snapshots over object storage.
+  Watermarking: Event-time progress threshold in streaming engines for bounding late-arriving data state.

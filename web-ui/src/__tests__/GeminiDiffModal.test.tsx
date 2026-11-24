@@ -7,6 +7,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearCachedAuthSession } from "../api/client";
+import { FrontierHandoffModal } from "../components/FrontierHandoffModal";
 import { GeminiDiffModal } from "../components/GeminiDiffModal";
 import {
   installMockApiFetch,
@@ -24,11 +25,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("GeminiDiffModal", () => {
+describe("FrontierHandoffModal (and GeminiDiffModal alias)", () => {
   it("does not render when isOpen is false", () => {
     const fetchMock = installMockApiFetch();
     render(
-      <GeminiDiffModal
+      <FrontierHandoffModal
         isOpen={false}
         onClose={vi.fn()}
         contextPack={TEST_CODE_PACK}
@@ -36,11 +37,11 @@ describe("GeminiDiffModal", () => {
       />
     );
 
-    expect(screen.queryByTestId("gemini-diff-modal")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("frontier-handoff-modal")).not.toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("loads live preview diff with TTL, requires human confirmation, and submits applyHandoff with custom patch", async () => {
+  it("loads live preview diff with TTL, requires human confirmation, and submits applyHandoff without custom_patch", async () => {
     const fetchMock = installMockApiFetch();
 
     render(
@@ -54,7 +55,7 @@ describe("GeminiDiffModal", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("unified-diff-view")).toHaveTextContent(
-        "if volatility <= 0:"
+        "if lines <= 0:"
       );
     });
 
@@ -62,21 +63,12 @@ describe("GeminiDiffModal", () => {
       "TTL 300s"
     );
     expect(screen.getByTestId("gemini-diff-modal")).toHaveTextContent(
-      "execution/optimizer.py"
+      "slicer/bounds.py"
     );
 
     // Apply button disabled until human confirmation checkbox checked
     const applyBtn = screen.getByTestId("approve-apply-btn");
     expect(applyBtn).toBeDisabled();
-
-    // Edit patch inline
-    fireEvent.click(screen.getByTestId("toggle-edit-patch-btn"));
-    fireEvent.change(screen.getByTestId("custom-patch-textarea"), {
-      target: {
-        value:
-          "--- a/execution/optimizer.py\n+++ b/execution/optimizer.py\n+# edited\n",
-      },
-    });
 
     fireEvent.click(screen.getByTestId("confirm-apply-checkbox"));
     expect(applyBtn).toBeEnabled();
@@ -102,14 +94,60 @@ describe("GeminiDiffModal", () => {
     };
     expect(sentBody.confirmation_token).toBe("confirm_tok_test_001");
     expect(sentBody.confirmed).toBe(true);
-    expect(sentBody.custom_patch).toContain("+# edited");
+    expect(sentBody.custom_patch).toBeUndefined();
+    expect("custom_patch" in sentBody).toBe(false);
+  });
+
+  it("supports all 5 export formats and slice Pin/Exclude feedback filtering", async () => {
+    installMockApiFetch();
+
+    render(
+      <FrontierHandoffModal
+        isOpen={true}
+        onClose={vi.fn()}
+        contextPack={TEST_CODE_PACK}
+        principal={TEST_ENGINEER_PRINCIPAL}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("unified-diff-view")).toBeInTheDocument();
+    });
+
+    const preview = screen.getByTestId("handoff-export-preview");
+    expect(preview).toHaveTextContent("<context_pack");
+
+    fireEvent.click(screen.getByTestId("handoff-format-cursor_antigravity_md"));
+    expect(preview).toHaveTextContent("@slicer/bounds.py:L14-L32");
+
+    fireEvent.click(screen.getByTestId("handoff-format-gemini_json"));
+    expect(preview).toHaveTextContent('"trace_id"');
+
+    fireEvent.click(screen.getByTestId("handoff-format-codex_patch"));
+    expect(preview).toHaveTextContent("# Codex Unified Bundle");
+
+    fireEvent.click(screen.getByTestId("handoff-format-local_llm_pack"));
+    expect(preview).toHaveTextContent("### Open-Weights Prompt Pack");
+
+    // Pin slice 0 and Exclude slice 1
+    fireEvent.click(screen.getByTestId("pin-slice-btn-0"));
+    fireEvent.click(screen.getByTestId("exclude-slice-btn-1"));
+
+    expect(screen.getByTestId("slice-feedback-summary")).toHaveTextContent(
+      "Pinned: 1"
+    );
+    expect(screen.getByTestId("slice-feedback-summary")).toHaveTextContent(
+      "Excluded: 1"
+    );
+    expect(preview).toHaveTextContent("slicer/bounds.py");
+    expect(preview).not.toHaveTextContent("slicer/budget.py");
   });
 
   it("resets confirmation checkbox and triggers fresh preview when switching target model", async () => {
     const fetchMock = installMockApiFetch();
 
     render(
-      <GeminiDiffModal
+      <FrontierHandoffModal
         isOpen={true}
         onClose={vi.fn()}
         contextPack={TEST_CODE_PACK}
@@ -147,7 +185,7 @@ describe("GeminiDiffModal", () => {
     installMockApiFetch({ previewStatus: 403 });
 
     render(
-      <GeminiDiffModal
+      <FrontierHandoffModal
         isOpen={true}
         onClose={vi.fn()}
         contextPack={TEST_CODE_PACK}
@@ -167,7 +205,7 @@ describe("GeminiDiffModal", () => {
     installMockApiFetch({ previewStatus: 500 });
 
     render(
-      <GeminiDiffModal
+      <FrontierHandoffModal
         isOpen={true}
         onClose={vi.fn()}
         contextPack={TEST_CODE_PACK}
@@ -187,7 +225,7 @@ describe("GeminiDiffModal", () => {
     installMockApiFetch({ applyStatus: 500 });
 
     render(
-      <GeminiDiffModal
+      <FrontierHandoffModal
         isOpen={true}
         onClose={vi.fn()}
         contextPack={TEST_CODE_PACK}
@@ -215,7 +253,7 @@ describe("GeminiDiffModal", () => {
     const onClose = vi.fn();
 
     render(
-      <GeminiDiffModal
+      <FrontierHandoffModal
         isOpen={true}
         onClose={onClose}
         contextPack={TEST_CODE_PACK}

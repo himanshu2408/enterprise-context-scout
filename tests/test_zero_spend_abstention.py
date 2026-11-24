@@ -564,7 +564,7 @@ def seed_synthetic_benchmark_repo(
             primary_truth_source, freshness_half_life_days, config_json
         )
         VALUES (%s, 'Synthetic Fixture Benchmark Domain', 'none', 'code', 30, '{}')
-        ON CONFLICT (domain_id) DO NOTHING;
+        ON CONFLICT (tenant_id, domain_id) DO NOTHING;
         """,
         (domain_id,),
     )
@@ -601,7 +601,7 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
     """Populates repository with synthetic multi-stack codebases and Atlassian fixtures."""
     domain_id = f"eval_synthetic_{uuid.uuid4().hex[:12]}"
     try:
-        base_manifest = domain_registry.get("trading_code_scout")
+        base_manifest = domain_registry.get("code_architecture_scout")
     except KeyError:
         base_manifest = next(iter(domain_registry._manifests.values()))
     synthetic_manifest = base_manifest.model_copy(
@@ -1090,7 +1090,7 @@ class TestStorageParityAndNeutralScopes:
                     primary_truth_source, freshness_half_life_days, config_json
                 )
                 VALUES (%s, 'Canary Verification Domain', 'none', 'code', 30, '{}')
-                ON CONFLICT (domain_id) DO NOTHING;
+                ON CONFLICT (tenant_id, domain_id) DO NOTHING;
                 """,
                 (canary_domain,),
             )

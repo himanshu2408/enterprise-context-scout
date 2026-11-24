@@ -1,0 +1,198 @@
+{{- if .Values.vllm.enabled }}
+{{- $isAmd := eq .Values.vllm.gpu.vendor "amd" }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "context-scout.fullname" . }}-vllm
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vllm
+spec:
+  serviceName: {{ include "context-scout.fullname" . }}-vllm
+  replicas: {{ .Values.vllm.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: vllm
+  template:
+    metadata:
+      labels:
+        {{- include "context-scout.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: vllm
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "context-scout.serviceAccountName" (list . "vllm") }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and .Values.vllm.gpu.nodeSelectorEnabled (not $isAmd) .Values.vllm.gpu.accelerator }}
+      nodeSelector:
+        cloud.google.com/gke-accelerator: {{ .Values.vllm.gpu.accelerator | quote }}
+      {{- end }}
+      {{- with .Values.vllm.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: vllm
+          {{- if $isAmd }}
+          image: {{ printf "%s:%s" .Values.vllm.amdImage.repository .Values.vllm.amdImage.tag | quote }}
+          {{- else }}
+          image: {{ printf "%s:%s" .Values.vllm.nvidiaImage.repository .Values.vllm.nvidiaImage.tag | quote }}
+          {{- end }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args:
+            - "--model"
+            - {{ .Values.vllm.modelId | quote }}
+            - "--port"
+            - {{ printf "%d" (int .Values.vllm.port) | quote }}
+            - "--enable-lora"
+            - "--max-lora-rank"
+            - {{ printf "%d" (int .Values.vllm.maxLoraRank) | quote }}
+            - "--max-loras"
+            - {{ printf "%d" (int .Values.vllm.maxLoras) | quote }}
+            - "--max-model-len"
+            - {{ printf "%d" (int .Values.vllm.maxModelLen) | quote }}
+            - "--guided-decoding-backend"
+            - "xgrammar"
+            - "--enable-prefix-caching"
+            - "--gpu-memory-utilization"
+            - {{ .Values.vllm.gpuMemoryUtilization | quote }}
+          ports:
+            - name: http
+              containerPort: {{ int .Values.vllm.port }}
+              protocol: TCP
+          env:
+            - name: TMPDIR
+              value: "/tmp"
+            - name: HOME
+              value: "/tmp"
+            - name: VLLM_ALLOW_RUNTIME_LORA_UPDATING
+              value: "True"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: HF_HUB_DISABLE_TELEMETRY
+              value: "1"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            requests:
+              cpu: {{ .Values.vllm.resources.requests.cpu }}
+              memory: {{ .Values.vllm.resources.requests.memory }}
+              {{- if $isAmd }}
+              amd.com/gpu: {{ int .Values.vllm.gpu.count }}
+              {{- else }}
+              nvidia.com/gpu: {{ int .Values.vllm.gpu.count }}
+              {{- end }}
+            limits:
+              cpu: {{ .Values.vllm.resources.limits.cpu }}
+              memory: {{ .Values.vllm.resources.limits.memory }}
+              {{- if $isAmd }}
+              amd.com/gpu: {{ int .Values.vllm.gpu.count }}
+              {{- else }}
+              nvidia.com/gpu: {{ int .Values.vllm.gpu.count }}
+              {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: adapters
+              mountPath: {{ .Values.vllm.adapterSyncSidecar.stagingDir | quote }}
+        {{- if .Values.vllm.adapterSyncSidecar.enabled }}
+        - name: adapter-sync-sidecar
+          image: {{ printf "%s:%s" .Values.vllm.adapterSyncSidecar.image.repository .Values.vllm.adapterSyncSidecar.image.tag | quote }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "context-scout.fullname" . }}-config
+          env:
+            - name: TMPDIR
+              value: "/tmp"
+            - name: HOME
+              value: "/tmp"
+            - name: SCOUT_DB_APP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | quote }}
+                  key: {{ .Values.secrets.dbAppUrlKey | quote }}
+            - name: SCOUT_VLLM_ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | quote }}
+                  key: {{ .Values.secrets.vllmAdminApiKeyKey | quote }}
+                  optional: true
+            - name: SCOUT_VLLM_ADMIN_ENDPOINT
+              value: {{ printf "http://127.0.0.1:%d" (int .Values.vllm.port) | quote }}
+            {{- if .Values.vllm.adapterSyncSidecar.baseModelRevisionSha256 }}
+            - name: SCOUT_BASE_MODEL_REVISION_SHA256
+              value: {{ .Values.vllm.adapterSyncSidecar.baseModelRevisionSha256 | quote }}
+            {{- end }}
+            - name: SCOUT_COSIGN_PUBLIC_KEYS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | quote }}
+                  key: {{ .Values.secrets.cosignPublicKeysJsonKey | quote }}
+                  optional: true
+            - name: SCOUT_COSIGN_PUBLIC_KEY_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | quote }}
+                  key: {{ .Values.secrets.cosignPublicKeyPemKey | quote }}
+                  optional: true
+            - name: SCOUT_COSIGN_CA_CERTS_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | quote }}
+                  key: {{ .Values.secrets.cosignCaCertsPemKey | quote }}
+                  optional: true
+            - name: SCOUT_ADAPTER_STAGING_DIR
+              value: {{ .Values.vllm.adapterSyncSidecar.stagingDir | quote }}
+            - name: SCOUT_OBJECT_STORE_SCHEME
+              value: {{ .Values.config.objectStoreScheme | quote }}
+            - name: SCOUT_LORA_MAX_RANK
+              value: {{ printf "%d" (int .Values.vllm.adapterSyncSidecar.maxLoraRank) | quote }}
+            - name: SCOUT_USE_RSLORA
+              value: {{ .Values.vllm.adapterSyncSidecar.useRslora | quote }}
+            - name: SCOUT_USE_DORA
+              value: {{ .Values.vllm.adapterSyncSidecar.useDora | quote }}
+            - name: SCOUT_ADAPTER_POLL_INTERVAL_SECONDS
+              value: {{ printf "%d" (int .Values.vllm.adapterSyncSidecar.pollIntervalSeconds) | quote }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.vllm.adapterSyncSidecar.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: adapters
+              mountPath: {{ .Values.vllm.adapterSyncSidecar.stagingDir | quote }}
+        {{- end }}
+        {{- if .Values.cloudSqlAuthProxy.enabled }}
+        {{- include "context-scout.cloudSqlAuthProxyContainer" . | nindent 8 }}
+        {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 512Mi
+        - name: adapters
+          emptyDir:
+            sizeLimit: 10Gi
+{{- end }}

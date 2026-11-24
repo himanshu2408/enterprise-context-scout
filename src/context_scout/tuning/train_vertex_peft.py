@@ -18,7 +18,7 @@ from typing import Any, Final
 
 from pydantic import BaseModel, Field
 
-from context_scout.config import ScoutSettings, validate_google_model_id
+from context_scout.config import ModelGovernancePolicy, ScoutSettings
 from context_scout.plugins.registry import PluginRegistry
 
 logger = logging.getLogger(__name__)
@@ -135,8 +135,10 @@ class VertexPEFTTrainer:
             domain_id=_resolve_default_domain_id(self.settings)
         )
 
-        # Enforce Google model whitelist
-        self.config.base_model_id = validate_google_model_id(self.config.base_model_id)
+        # Enforce ModelGovernancePolicy local/BYO model allowlist
+        self.config.base_model_id = ModelGovernancePolicy.default().validate_local_model_id(
+            self.config.base_model_id
+        )
 
     def generate_peft_lora_config(self) -> dict[str, Any]:
         """Constructs genuine Hugging Face PEFT LoraConfig JSON specification."""
@@ -258,9 +260,9 @@ class VertexPEFTTrainer:
                         "Router projections must be strictly frozen to prevent mode collapse."
                     )
 
-        # 3. Model prefix authorization
+        # 3. Model governance authorization
         try:
-            validate_google_model_id(self.config.base_model_id)
+            ModelGovernancePolicy.default().validate_local_model_id(self.config.base_model_id)
         except ValueError as exc:
             issues.append(f"Model ID authorization failure: {exc}")
 

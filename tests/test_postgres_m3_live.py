@@ -8,8 +8,8 @@ import pytest
 from context_scout.config import ScoutSettings
 from context_scout.db.repositories import DocChunkRecord, PostgresRLSRepository
 from context_scout.db.session import RLSConnectionManager
-from context_scout.ingestion.git_merkle_indexer import generate_deterministic_embedding
-from context_scout.schemas.contracts import MarketRegime, PrincipalContext, RoleType
+from context_scout.retrieval.embedder import get_embedding_provider
+from context_scout.schemas.contracts import DocumentScope, PrincipalContext, RoleType
 
 
 @pytest.fixture(scope="module")
@@ -25,14 +25,17 @@ def test_live_doc_chunks_forced_rls_isolation(
     mgr = RLSConnectionManager(settings.db_app_url)
     repo = PostgresRLSRepository()
 
-    # 1. Insert restricted doc chunk using quant_restricted principal inside isolated eval_ domain
+    # 1. Insert restricted doc chunk using docs_restricted principal inside isolated eval_ domain
     quant_principal = PrincipalContext(
         user_id="quant_trader_restricted",
-        role=RoleType.QUANT_RESEARCHER,
-        allowed_scopes=["quant_restricted"],
+        role=RoleType.DOMAIN_RESEARCHER,
+        allowed_scopes=["docs_restricted"],
     )
     chunk_id = uuid.uuid4()
-    dummy_emb = [0.0] * 768
+    dummy_emb = get_embedding_provider().embed_text(
+        "Confidential proprietary momentum formulation with STT delivery cost.",
+        is_query=False,
+    )
 
     restricted_record = DocChunkRecord(
         chunk_id=chunk_id,
@@ -40,14 +43,14 @@ def test_live_doc_chunks_forced_rls_isolation(
         doc_id="arxiv:2403.99999",
         doc_title="Proprietary Alpha Discovery in Indian Equities",
         source_uri="https://arxiv.org/abs/2403.99999",
-        market_scope=MarketRegime.INDIA_NSE_BSE,
+        market_scope=DocumentScope.REGIONAL_APAC,
         published_date=date(2024, 3, 15),
         authority_weight=1.5,
         section_heading="Confidential Alpha",
         contextual_header="[Context: arxiv:2403.99999 | Market: IN_NSE | Restricted]",
         verbatim_content="Confidential proprietary momentum formulation with STT delivery cost.",
         metadata_json={"confidential": True},
-        allowed_scopes=["quant_restricted"],
+        allowed_scopes=["docs_restricted"],
         embedding=dummy_emb,
     )
 
@@ -63,7 +66,7 @@ def test_live_doc_chunks_forced_rls_isolation(
     with mgr.scoped_transaction(public_principal, enable_hnsw_iterative_scan=False) as conn:
         visible_public = repo.list_visible_doc_chunks(conn, ephemeral_pg_domain)
         assert visible_public == [], (
-            "RLS Security Violation: Public principal saw quant_restricted doc chunk!"
+            "RLS Security Violation: Public principal saw docs_restricted doc chunk!"
         )
 
     # 3. Quant principal MUST see the row
@@ -83,22 +86,22 @@ def test_live_doc_chunks_3way_hybrid_rrf_query(
 
     principal = PrincipalContext(
         user_id="quant_trader_live",
-        role=RoleType.QUANT_RESEARCHER,
-        allowed_scopes=["public_quant"],
+        role=RoleType.DOMAIN_RESEARCHER,
+        allowed_scopes=["public_docs"],
     )
 
     chunk_id_nse = uuid.uuid4()
     chunk_id_xetra = uuid.uuid4()
     chunk_id_us = uuid.uuid4()
 
-    emb_nse = generate_deterministic_embedding(
-        "Securities Transaction Tax STT Nifty delivery Indian equities", 768
+    emb_nse = get_embedding_provider(dimensions=768).embed_text(
+        "Securities Transaction Tax STT Nifty delivery Indian equities", is_query=False
     )
-    emb_xetra = generate_deterministic_embedding(
-        "Deutsche Börse Xetra closing auction DAX liquidity tick size", 768
+    emb_xetra = get_embedding_provider(dimensions=768).embed_text(
+        "Deutsche Börse Xetra closing auction DAX liquidity tick size", is_query=False
     )
-    emb_us = generate_deterministic_embedding(
-        "NYSE NASDAQ Almgren-Chriss order flow imbalance US equities", 768
+    emb_us = get_embedding_provider(dimensions=768).embed_text(
+        "NYSE NASDAQ Almgren-Chriss order flow imbalance US equities", is_query=False
     )
 
     record_nse = DocChunkRecord(
@@ -107,7 +110,7 @@ def test_live_doc_chunks_3way_hybrid_rrf_query(
         doc_id="arxiv:2403.01182",
         doc_title="Momentum with Indian STT",
         source_uri="https://arxiv.org/abs/2403.01182",
-        market_scope=MarketRegime.INDIA_NSE_BSE,
+        market_scope=DocumentScope.REGIONAL_APAC,
         published_date=date(2024, 3, 15),
         authority_weight=1.5,
         section_heading="Empirical Results",
@@ -118,7 +121,7 @@ def test_live_doc_chunks_3way_hybrid_rrf_query(
             "Securities Transaction Tax (STT) requires 15 bps delivery friction on NSE."
         ),
         metadata_json={"sample_period": "2018-2023"},
-        allowed_scopes=["public_quant"],
+        allowed_scopes=["public_docs"],
         embedding=emb_nse,
     )
     record_xetra = DocChunkRecord(
@@ -127,7 +130,7 @@ def test_live_doc_chunks_3way_hybrid_rrf_query(
         doc_id="arxiv:2311.08941",
         doc_title="Xetra DAX Liquidity",
         source_uri="https://arxiv.org/abs/2311.08941",
-        market_scope=MarketRegime.GERMANY_XETRA_DAX,
+        market_scope=DocumentScope.REGIONAL_EU,
         published_date=date(2023, 11, 20),
         authority_weight=1.2,
         section_heading="Market Microstructure",
@@ -138,7 +141,7 @@ def test_live_doc_chunks_3way_hybrid_rrf_query(
             "Deutsche Börse Xetra closing auction dynamics under MiFID II tick sizes."
         ),
         metadata_json={"sample_period": "2019-2023"},
-        allowed_scopes=["public_quant"],
+        allowed_scopes=["public_docs"],
         embedding=emb_xetra,
     )
     record_us = DocChunkRecord(
@@ -147,7 +150,7 @@ def test_live_doc_chunks_3way_hybrid_rrf_query(
         doc_id="arxiv:2401.05432",
         doc_title="US Order Flow Imbalance",
         source_uri="https://arxiv.org/abs/2401.05432",
-        market_scope=MarketRegime.US_NYSE_NASDAQ,
+        market_scope=DocumentScope.REGIONAL_US,
         published_date=date(2024, 1, 10),
         authority_weight=1.0,
         section_heading="Order Flow Imbalance",
@@ -158,7 +161,7 @@ def test_live_doc_chunks_3way_hybrid_rrf_query(
             "Almgren-Chriss institutional order execution across NYSE and NASDAQ equities."
         ),
         metadata_json={"sample_period": "2020-2023"},
-        allowed_scopes=["public_quant"],
+        allowed_scopes=["public_docs"],
         embedding=emb_us,
     )
 
@@ -172,7 +175,7 @@ def test_live_doc_chunks_3way_hybrid_rrf_query(
             domain_id=ephemeral_pg_domain,
             query_text="Securities Transaction Tax STT delivery NSE",
             query_embedding=emb_nse,
-            market_scope=MarketRegime.INDIA_NSE_BSE,
+            market_scope=DocumentScope.REGIONAL_APAC,
             top_k=5,
         )
 

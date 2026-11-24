@@ -8,9 +8,13 @@ tool execution against 14,318 research chunks under Forced RLS.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
+from examples.quant_dogfood.contracts import FrictionVerdict
+from examples.quant_dogfood.mcp_servers.quant_corpus_mcp import create_quant_corpus_mcp_server
+from examples.quant_dogfood.mcp_servers.seed_code_corpus import seed_trading_codebase_and_issues
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult
 
@@ -22,10 +26,7 @@ from context_scout.mcp_servers.common import (
     TRUNCATION_INDICATOR,
     bound_payload_dict,
 )
-from context_scout.mcp_servers.quant_corpus_mcp import create_quant_corpus_mcp_server
-from context_scout.mcp_servers.seed_code_corpus import seed_trading_codebase_and_issues
 from context_scout.schemas.contracts import (
-    FrictionVerdict,
     PrincipalContext,
     RoleType,
 )
@@ -65,7 +66,7 @@ def eng_principal() -> PrincipalContext:
 def quant_principal() -> PrincipalContext:
     return PrincipalContext(
         user_id="test_m4_quant_lead",
-        role=RoleType.QUANT_RESEARCHER,
+        role=RoleType.DOMAIN_RESEARCHER,
         allowed_scopes=["public_quant"],
     )
 
@@ -179,7 +180,7 @@ def test_domain_authorization_gate_rejects_unallowed_tool(
     gate = DomainAuthorizationGate(DomainRegistry(ScoutSettings().domains_dir))
     with pytest.raises(DomainToolAccessDeniedError):
         gate.authorize_tool_call(
-            "trading_code_scout",
+            "code_architecture_scout",
             "quant_corpus_mcp:search_quant_papers_hybrid",
             eng_principal,
         )
@@ -222,10 +223,17 @@ def test_bound_payload_dict_byte_capping_and_truncation_notice() -> None:
 # =============================================================================
 
 
+def _create_quant_dogfood_code_server() -> Any:
+    return create_code_repo_mcp_server(
+        settings=ScoutSettings(domains_dir=Path("examples/quant_dogfood/domains")),
+        domain_id="trading_code_scout",
+    )
+
+
 @pytest.mark.asyncio
 async def test_live_search_code_trigram(eng_principal: PrincipalContext) -> None:
     """Tests search_code_trigram queries live code_files in PostgreSQL 17 under RLS."""
-    server = create_code_repo_mcp_server()
+    server = _create_quant_dogfood_code_server()
     with bind_session_principal(eng_principal):
         res = await server.call_tool(
             "search_code_trigram",
@@ -241,7 +249,7 @@ async def test_live_search_code_trigram(eng_principal: PrincipalContext) -> None
 @pytest.mark.asyncio
 async def test_live_lookup_ast_symbol(eng_principal: PrincipalContext) -> None:
     """Tests lookup_ast_symbol retrieves live symbol records from ast_symbols table."""
-    server = create_code_repo_mcp_server()
+    server = _create_quant_dogfood_code_server()
     with bind_session_principal(eng_principal):
         res = await server.call_tool(
             "lookup_ast_symbol",
@@ -260,7 +268,7 @@ async def test_live_lookup_ast_symbol(eng_principal: PrincipalContext) -> None:
 @pytest.mark.asyncio
 async def test_live_expand_ast_1hop_closure(eng_principal: PrincipalContext) -> None:
     """Tests expand_ast_1hop_closure bounded traversal under SEC-03 token budget."""
-    server = create_code_repo_mcp_server()
+    server = _create_quant_dogfood_code_server()
     with bind_session_principal(eng_principal):
         res = await server.call_tool(
             "expand_ast_1hop_closure",
@@ -277,13 +285,13 @@ async def test_live_slice_file_lines_valid_and_bounds_errors(
     eng_principal: PrincipalContext,
 ) -> None:
     """Tests slice_file_lines with 1-indexed bounds, SHA provenance, and off-by-one errors."""
-    server = create_code_repo_mcp_server()
+    server = _create_quant_dogfood_code_server()
     with bind_session_principal(eng_principal):
         # 1. Valid slice
         res = await server.call_tool(
             "slice_file_lines",
             {
-                "file_path": "src/context_scout/trading_strategies/volatility_garch.py",
+                "file_path": "examples/quant_dogfood/trading_strategies/volatility_garch.py",
                 "start_line": 1,
                 "end_line": 20,
             },
@@ -300,7 +308,7 @@ async def test_live_slice_file_lines_valid_and_bounds_errors(
             await server.call_tool(
                 "slice_file_lines",
                 {
-                    "file_path": "src/context_scout/trading_strategies/volatility_garch.py",
+                    "file_path": "examples/quant_dogfood/trading_strategies/volatility_garch.py",
                     "start_line": 0,
                     "end_line": 10,
                 },
@@ -313,7 +321,7 @@ async def test_live_slice_file_lines_valid_and_bounds_errors(
             await server.call_tool(
                 "slice_file_lines",
                 {
-                    "file_path": "src/context_scout/trading_strategies/volatility_garch.py",
+                    "file_path": "examples/quant_dogfood/trading_strategies/volatility_garch.py",
                     "start_line": 25,
                     "end_line": 10,
                 },
@@ -326,7 +334,7 @@ async def test_live_slice_file_lines_valid_and_bounds_errors(
             await server.call_tool(
                 "slice_file_lines",
                 {
-                    "file_path": "src/context_scout/trading_strategies/volatility_garch.py",
+                    "file_path": "examples/quant_dogfood/trading_strategies/volatility_garch.py",
                     "start_line": 1,
                     "end_line": 250,
                 },
@@ -338,7 +346,7 @@ async def test_live_slice_file_lines_valid_and_bounds_errors(
 @pytest.mark.asyncio
 async def test_live_search_github_issues(eng_principal: PrincipalContext) -> None:
     """Tests search_github_issues retrieves seeded issues from doc_chunks table."""
-    server = create_code_repo_mcp_server()
+    server = _create_quant_dogfood_code_server()
     with bind_session_principal(eng_principal):
         res = await server.call_tool(
             "search_github_issues",

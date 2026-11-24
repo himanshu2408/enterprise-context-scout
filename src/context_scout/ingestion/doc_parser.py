@@ -13,14 +13,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 import pypdf.errors
 from pypdf import PdfReader
 
 from context_scout.db.repositories import DocChunkRecord
-from context_scout.schemas.contracts import MarketRegime
+from context_scout.schemas.contracts import DEFAULT_TENANT_ID, DocumentScope
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +191,7 @@ class DocumentChunk:
     doc_id: str
     doc_title: str
     source_uri: str
-    market_scope: MarketRegime
+    market_scope: DocumentScope | str
     section_heading: str
     verbatim_content: str
     formulas_latex: list[str]
@@ -438,7 +438,7 @@ class LatexDocParser:
         doc_id: str,
         doc_title: str,
         source_uri: str,
-        market_scope: MarketRegime,
+        market_scope: DocumentScope | str,
         sections: list[ParsedSection],
         min_chunk_tokens: int = 400,
         max_chunk_tokens: int = 800,
@@ -522,7 +522,7 @@ class MarkdownTableChunker:
         doc_id: str,
         doc_title: str,
         source_uri: str,
-        market_scope: MarketRegime,
+        market_scope: DocumentScope | str,
         markdown_content: str,
         min_chunk_tokens: int = 400,
         max_chunk_tokens: int = 800,
@@ -671,19 +671,29 @@ class MarkdownTableChunker:
 PDF_SECTION_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^(?:(?:[0-9]+\.?\s+)?(Abstract|Introduction|Related Work|Literature Review|"
     r"Data and Methodology|Methodology|Model Specification|Empirical Results|"
-    r"Market Microstructure|Trading Strategy|Friction and Transaction Costs|"
+    r"Architecture Overview|System Design|Security Considerations|Operational Runbook|"
     r"Performance Evaluation|Discussion|Conclusion|References))\b",
     re.IGNORECASE | re.MULTILINE,
 )
 
 
 class PdfDocParser:
-    """Extracts structured sections and chunks from raw PDF bytes."""
+    """Extracts structured sections and chunks from raw PDF bytes (Docling SPI + pypdf)."""
+
+    def __init__(self, doc_extractor: Any | None = None) -> None:
+        self._doc_extractor = doc_extractor
 
     def extract_text(self, pdf_bytes: bytes) -> str:
-        """Extracts plain text across all pages in the PDF, validating %PDF- magic bytes."""
+        """Extracts structured Markdown/text across all pages in the PDF."""
         if not pdf_bytes or len(pdf_bytes) < 32 or not pdf_bytes.startswith(PDF_MAGIC_BYTES):
             return ""
+        if self._doc_extractor is not None:
+            try:
+                extracted = self._doc_extractor.extract(pdf_bytes, filename="document.pdf")
+                if extracted.markdown_text.strip():
+                    return str(extracted.markdown_text).replace("\x00", "").strip()
+            except Exception as exc:
+                logger.debug("DocExtractorSPI failed on PDF bytes, falling back to pypdf: %s", exc)
         try:
             reader = PdfReader(io.BytesIO(pdf_bytes))
             pages_text: list[str] = []
@@ -761,7 +771,7 @@ class PdfDocParser:
         doc_id: str,
         doc_title: str,
         source_uri: str,
-        market_scope: MarketRegime,
+        market_scope: DocumentScope | str,
         pdf_bytes: bytes,
         min_chunk_tokens: int = 400,
         max_chunk_tokens: int = 800,
@@ -792,7 +802,7 @@ class PdfDocParser:
         doc_id: str,
         doc_title: str,
         source_uri: str,
-        market_scope: MarketRegime,
+        market_scope: DocumentScope | str,
         pdf_bytes: bytes,
         min_chars: int = MIN_PDF_CHAR_COUNT,
         min_chunks: int = MIN_PDF_CHUNK_COUNT,
@@ -977,6 +987,12 @@ def extract_sgml_docbook_text(raw_text: str) -> str:
         flags=re.DOTALL | re.IGNORECASE,
     )
     text = re.sub(
+        r"<glossentry\b[^>]*>\s*<glossterm\b[^>]*>(.*?)</glossterm>",
+        _replace_heading(3),
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    text = re.sub(
         r"<title\b[^>]*>(.*?)</title>",
         _replace_heading(3),
         text,
@@ -1134,6 +1150,7 @@ def chunk_custom_domain_document(
     blob_sha: str,
     min_chunk_tokens: int = 400,
     max_chunk_tokens: int = 800,
+    tenant_id: UUID = DEFAULT_TENANT_ID,
 ) -> list[DocumentChunk]:
     """Splits any supported custom knowledge document into bounded 400-800 token DocumentChunks."""
     suffix = file_path.suffix.lower()
@@ -1144,15 +1161,48 @@ def chunk_custom_domain_document(
     chunks: list[DocumentChunk] = []
 
     if suffix == ".pdf" and raw_bytes.startswith(PDF_MAGIC_BYTES):
-        chunks = PdfDocParser().chunk_pdf(
-            doc_id=doc_id,
-            doc_title=doc_title,
-            source_uri=source_uri,
-            market_scope=MarketRegime.GLOBAL_MULTI,
-            pdf_bytes=raw_bytes,
-            min_chunk_tokens=min_chunk_tokens,
-            max_chunk_tokens=max_chunk_tokens,
+        from context_scout.ingestion.docling_extractor import get_doc_extractor
+
+        extracted_pdf = get_doc_extractor().extract(raw_bytes, filename=file_path.name)
+        if extracted_pdf.tables_markdown and extracted_pdf.markdown_text.strip():
+            chunks = MarkdownTableChunker().parse_and_chunk(
+                doc_id=doc_id,
+                doc_title=doc_title,
+                source_uri=source_uri,
+                market_scope=DocumentScope.GLOBAL_MULTI,
+                markdown_content=extracted_pdf.markdown_text,
+                min_chunk_tokens=min_chunk_tokens,
+                max_chunk_tokens=max_chunk_tokens,
+            )
+        if not chunks:
+            chunks = PdfDocParser().chunk_pdf(
+                doc_id=doc_id,
+                doc_title=doc_title,
+                source_uri=source_uri,
+                market_scope=DocumentScope.GLOBAL_MULTI,
+                pdf_bytes=raw_bytes,
+                min_chunk_tokens=min_chunk_tokens,
+                max_chunk_tokens=max_chunk_tokens,
+            )
+    elif suffix in (".docx", ".pptx", ".html", ".htm"):
+        from context_scout.ingestion.docling_extractor import get_doc_extractor
+
+        extracted_doc = get_doc_extractor().extract(
+            raw_bytes if raw_bytes else text.encode("utf-8", errors="replace"),
+            filename=file_path.name,
         )
+        md_doc = extracted_doc.markdown_text.strip()
+        if md_doc:
+            doc_title, default_heading = _infer_title_and_heading(md_doc, file_path)
+            chunks = MarkdownTableChunker().parse_and_chunk(
+                doc_id=doc_id,
+                doc_title=doc_title,
+                source_uri=source_uri,
+                market_scope=DocumentScope.GLOBAL_MULTI,
+                markdown_content=md_doc,
+                min_chunk_tokens=min_chunk_tokens,
+                max_chunk_tokens=max_chunk_tokens,
+            )
     elif suffix == ".tex":
         latex_parser = LatexDocParser()
         sections = latex_parser.parse_latex(text)
@@ -1160,7 +1210,7 @@ def chunk_custom_domain_document(
             doc_id=doc_id,
             doc_title=doc_title,
             source_uri=source_uri,
-            market_scope=MarketRegime.GLOBAL_MULTI,
+            market_scope=DocumentScope.GLOBAL_MULTI,
             sections=sections,
             min_chunk_tokens=min_chunk_tokens,
             max_chunk_tokens=max_chunk_tokens,
@@ -1181,7 +1231,7 @@ def chunk_custom_domain_document(
             doc_id=doc_id,
             doc_title=doc_title,
             source_uri=source_uri,
-            market_scope=MarketRegime.GLOBAL_MULTI,
+            market_scope=DocumentScope.GLOBAL_MULTI,
             markdown_content=md_text,
             min_chunk_tokens=min_chunk_tokens,
             max_chunk_tokens=max_chunk_tokens,
@@ -1197,7 +1247,7 @@ def chunk_custom_domain_document(
                     doc_id=doc_id,
                     doc_title=f"{file_path.name} ({rel_path})",
                     source_uri=source_uri,
-                    market_scope=MarketRegime.GLOBAL_MULTI,
+                    market_scope=DocumentScope.GLOBAL_MULTI,
                     section_heading=f"Reference Pattern ({lang})",
                     verbatim_content=wrapped,
                     formulas_latex=[],
@@ -1232,7 +1282,7 @@ def chunk_custom_domain_document(
                         doc_id=doc_id,
                         doc_title=f"{file_path.name} ({rel_path})",
                         source_uri=source_uri,
-                        market_scope=MarketRegime.GLOBAL_MULTI,
+                        market_scope=DocumentScope.GLOBAL_MULTI,
                         section_heading=f"Reference Pattern ({lang}) #{part_idx}",
                         verbatim_content=part_md,
                         formulas_latex=[],
@@ -1251,7 +1301,7 @@ def chunk_custom_domain_document(
                 doc_id=doc_id,
                 doc_title=doc_title,
                 source_uri=source_uri,
-                market_scope=MarketRegime.GLOBAL_MULTI,
+                market_scope=DocumentScope.GLOBAL_MULTI,
                 sections=[
                     ParsedSection(
                         heading=default_heading,
@@ -1265,9 +1315,10 @@ def chunk_custom_domain_document(
 
     extra_meta = _infer_corpus_metadata(rel_path)
     total_chunks = len(chunks)
+    ns_domain = domain_id if tenant_id == DEFAULT_TENANT_ID else f"{tenant_id}:{domain_id}"
     finalized: list[DocumentChunk] = []
     for idx, ch in enumerate(chunks):
-        det_uuid = uuid5(NAMESPACE_DNS, f"{domain_id}:doc:{rel_path}:{idx}")
+        det_uuid = uuid5(NAMESPACE_DNS, f"{ns_domain}:doc:{rel_path}:{idx}")
         heading = (
             ch.section_heading
             if ch.section_heading and ch.section_heading != "Main"

@@ -11,11 +11,12 @@ from context_scout.api.dependencies import (
     DEFAULT_ROLE_SCOPES,
     create_signed_principal_token,
     get_principal_context,
-    is_production_environment,
+    is_development_environment,
     verify_signed_principal_token,
 )
 from context_scout.api.schemas import AuthSessionRequest, AuthSessionResponse
 from context_scout.schemas.contracts import PrincipalContext
+from context_scout.security.audit_chain import get_audit_chain_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Auth"])
@@ -25,13 +26,28 @@ SESSION_TTL_SECONDS = 3600
 
 @router.post("/auth/session", response_model=AuthSessionResponse)
 def create_auth_session(request: AuthSessionRequest) -> AuthSessionResponse:
-    """Mints an HMAC-SHA256 signed Bearer token for non-production local evaluation."""
-    if is_production_environment():
+    """Mints an HMAC-SHA256 signed Bearer token strictly in development mode."""
+    if not is_development_environment():
+        safe_actor = request.user_id.replace("\x00", "").strip()[:128] or "anonymous"
+        try:
+            get_audit_chain_service().record_event(
+                tenant_id=request.tenant_id,
+                event_type="auth.session.mint",
+                severity="WARNING",
+                actor_id=safe_actor,
+                actor_role=request.role.value,
+                resource_uri="/api/v1/auth/session",
+                outcome="deny",
+                payload={"reason": "blocked_outside_development"},
+            )
+        except Exception as exc:
+            logger.warning("Failed recording denied auth.session.mint audit event: %s", exc)
         raise HTTPException(
             status_code=403,
             detail=(
-                "Interactive persona token minting is disabled in production environments; "
-                "supply an external IdP signed Bearer token (SEC-04)."
+                "Interactive persona token minting is restricted to development environments and "
+                "disabled in production; supply an external Cloud IAP or OIDC Bearer token "
+                "(SEC-04)."
             ),
         )
 
@@ -65,6 +81,7 @@ def create_auth_session(request: AuthSessionRequest) -> AuthSessionResponse:
             allowed_scopes=scopes,
             ttl_seconds=SESSION_TTL_SECONDS,
             max_session_paid_tokens=request.max_session_paid_tokens,
+            tenant_id=request.tenant_id,
         )
         principal = verify_signed_principal_token(token)
     except HTTPException:
@@ -75,6 +92,15 @@ def create_auth_session(request: AuthSessionRequest) -> AuthSessionResponse:
             status_code=500,
             detail=f"Failed to mint signed principal token: {exc}",
         ) from exc
+
+    get_audit_chain_service().record_event(
+        principal=principal,
+        event_type="auth.session.mint",
+        severity="INFO",
+        resource_uri="/api/v1/auth/session",
+        outcome="allow",
+        payload={"scopes_count": len(principal.allowed_scopes)},
+    )
 
     return AuthSessionResponse(
         access_token=token,

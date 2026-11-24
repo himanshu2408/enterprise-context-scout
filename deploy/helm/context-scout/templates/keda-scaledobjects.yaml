@@ -1,0 +1,71 @@
+{{- if .Values.keda.enabled }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "context-scout.fullname" . }}-worker
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    kind: Deployment
+    name: {{ include "context-scout.fullname" . }}-worker
+  pollingInterval: {{ int .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ int .Values.keda.cooldownPeriod }}
+  minReplicaCount: {{ int .Values.keda.worker.minReplicas }}
+  maxReplicaCount: {{ int .Values.keda.worker.maxReplicas }}
+  triggers:
+    - type: redis
+      metadata:
+        address: {{ .Values.keda.worker.redisAddress | quote }}
+        listName: {{ .Values.keda.worker.redisListName | quote }}
+        listLength: {{ .Values.keda.worker.listLength | quote }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "context-scout.fullname" . }}-api
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  scaleTargetRef:
+    kind: Deployment
+    name: {{ include "context-scout.fullname" . }}-api
+  pollingInterval: {{ int .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ int .Values.keda.cooldownPeriod }}
+  minReplicaCount: {{ int .Values.keda.api.minReplicas }}
+  maxReplicaCount: {{ int .Values.keda.api.maxReplicas }}
+  triggers:
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: {{ printf "%d" (int .Values.keda.api.cpuUtilization) | quote }}
+{{- if and .Values.vllm.enabled .Values.keda.vllm.enabled }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "context-scout.fullname" . }}-vllm
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vllm
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: {{ include "context-scout.fullname" . }}-vllm
+  pollingInterval: {{ int .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ int .Values.keda.cooldownPeriod }}
+  minReplicaCount: {{ int .Values.keda.vllm.minReplicas }}
+  maxReplicaCount: {{ int .Values.keda.vllm.maxReplicas }}
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: {{ .Values.keda.vllm.prometheusServerAddress | quote }}
+        metricName: {{ .Values.keda.vllm.metricName | quote }}
+        query: {{ printf "sum(%s{app_kubernetes_io_instance=%q})" .Values.keda.vllm.metricName .Release.Name | quote }}
+        threshold: {{ .Values.keda.vllm.threshold | quote }}
+{{- end }}
+{{- end }}

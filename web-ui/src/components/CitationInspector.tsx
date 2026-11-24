@@ -18,7 +18,6 @@ import {
   DocCitation,
   InsufficientContextDiagnostic,
   ModificationIntent,
-  QuantStrategyBrief,
   QueryFacetCoverage,
   RoleType,
   ScoutTokenSavingsBreakdown,
@@ -28,7 +27,6 @@ import {
 
 export interface CitationInspectorProps {
   contextPack: ContextPack | null;
-  quantSpec: QuantStrategyBrief | null;
   tokenSavings: ScoutTokenSavingsBreakdown | null;
   principalRole: RoleType;
   sourceFilter?: SourceFilterType;
@@ -38,7 +36,7 @@ export interface CitationInspectorProps {
 
 type InspectorTab =
   | "code-slices"
-  | "quant"
+  | "documents"
   | "preflight-report"
   | "telemetry-roi";
 
@@ -164,7 +162,6 @@ function renderHighlightedSection(
 
 export const CitationInspector: React.FC<CitationInspectorProps> = ({
   contextPack,
-  quantSpec,
   tokenSavings,
   principalRole,
   sourceFilter = "all",
@@ -195,7 +192,6 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
     const sources = [
       ...contextPack.supporting_doc_citations,
       ...(contextPack.domain_knowledge_brief?.verified_citations ?? []),
-      ...(quantSpec?.verified_citations ?? []),
     ];
     for (const cite of sources) {
       if (!seen.has(cite.chunk_id)) {
@@ -204,7 +200,7 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
       }
     }
     return combined;
-  }, [contextPack, quantSpec]);
+  }, [contextPack]);
 
   const filteredSlices = useMemo(() => {
     if (!contextPack) return [];
@@ -250,15 +246,15 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
     if (
       activeTab === "code-slices" &&
       filteredSlices.length === 0 &&
-      (quantSpec !== null ||
+      (contextPack.domain_knowledge_brief !== null ||
         filteredCitations.length > 0 ||
         sourceFilter === "wiki" ||
         sourceFilter === "jira")
     ) {
-      return "quant";
+      return "documents";
     }
     if (
-      activeTab === "quant" &&
+      activeTab === "documents" &&
       sourceFilter === "code" &&
       filteredCitations.length === 0 &&
       filteredSlices.length > 0
@@ -271,7 +267,6 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
     contextPack,
     filteredSlices.length,
     filteredCitations.length,
-    quantSpec,
     sourceFilter,
   ]);
 
@@ -289,7 +284,7 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
   };
 
   const handleJumpToCitation = (chunkId: string): void => {
-    setActiveTab("quant");
+    setActiveTab("documents");
     setHighlightedChunkId(chunkId);
     setHighlightedSliceIdx(null);
     setExpandedSections((prev) => ({ ...prev, [chunkId]: true }));
@@ -426,16 +421,13 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
   }
 
   const brief = contextPack.domain_knowledge_brief ?? null;
-  const resolvedQuant = quantSpec ?? contextPack.quant_strategy_spec ?? null;
   const conflicts = contextPack.doc_vs_code_conflicts_detected;
   const staleCitations = filteredCitations.filter(
     (cite) => cite.is_stale === true || Boolean(cite.stale_reason)
   );
   const canOpenPatchModal =
     principalRole === "engineer" && contextPack.code_slices.length > 0;
-  const citationsTabLabel = resolvedQuant
-    ? `Strategy & Sections (${filteredCitations.length})`
-    : `Document Sections (${filteredCitations.length})`;
+  const citationsTabLabel = `Document Sections (${filteredCitations.length})`;
 
   const queryFacets: QueryFacetCoverage[] =
     contextPack.query_facets ?? brief?.query_facets ?? [];
@@ -444,11 +436,9 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
       ...(contextPack.missing_or_unverified_aspects ?? []),
       ...(brief?.missing_or_unverified_aspects ?? []),
       ...(brief?.missing_aspects ?? []),
-      ...(resolvedQuant?.missing_aspects ?? []),
     ])
   );
-  const sufficiencyVerdict =
-    brief?.sufficiency_verdict ?? resolvedQuant?.sufficiency_verdict;
+  const sufficiencyVerdict = brief?.sufficiency_verdict;
   const groundedFacetCount = queryFacets.filter(
     (f) => f.status === "grounded"
   ).length;
@@ -465,9 +455,7 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
   );
 
   const answerHeadline =
-    brief?.brief_title ??
-    resolvedQuant?.strategy_name ??
-    "Grounded Engineering & Knowledge Answer";
+    brief?.brief_title ?? "Grounded Engineering & Knowledge Answer";
 
   const directSummary =
     brief?.executive_summary ??
@@ -633,6 +621,44 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
           <h2 className="hero-title">{answerHeadline}</h2>
           <p className="hero-summary">{directSummary}</p>
 
+          {contextPack.commit_drift_warnings &&
+            contextPack.commit_drift_warnings.length > 0 && (
+              <div
+                className="drift-callout drift-callout-commit"
+                role="alert"
+                data-testid="inspector-commit-drift-callout"
+              >
+                <AlertTriangle size={15} aria-hidden="true" />
+                <div>
+                  <strong>Commit Drift Warning:</strong>
+                  <ul className="drift-callout-list">
+                    {contextPack.commit_drift_warnings.map((warn, i) => (
+                      <li key={`${i}-${warn.slice(0, 20)}`}>{warn}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            )}
+
+          {contextPack.spec_drift_warnings &&
+            contextPack.spec_drift_warnings.length > 0 && (
+              <div
+                className="drift-callout drift-callout-spec"
+                role="alert"
+                data-testid="inspector-spec-drift-callout"
+              >
+                <AlertTriangle size={15} aria-hidden="true" />
+                <div>
+                  <strong>Spec Drift Warning:</strong>
+                  <ul className="drift-callout-list">
+                    {contextPack.spec_drift_warnings.map((warn, i) => (
+                      <li key={`${i}-${warn.slice(0, 20)}`}>{warn}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            )}
+
           {Boolean(brief?.formal_expression_or_rule) && (
             <div className="formal-rule-box">
               <span className="formal-label">Formal Rule / Expression</span>
@@ -726,7 +752,7 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
                 onClick={onOpenDiffModal}
                 data-testid="open-diff-modal-btn"
               >
-                <GitBranch size={15} /> Review &amp; Apply Patch in Sandbox
+                <GitBranch size={15} /> Frontier Handoff &amp; Export Pack
               </button>
             ) : (
               <div
@@ -764,12 +790,12 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
           <button
             type="button"
             role="tab"
-            aria-selected={effectiveTab === "quant"}
+            aria-selected={effectiveTab === "documents"}
             className={`tab-btn ${
-              effectiveTab === "quant" ? "tab-btn-active" : ""
+              effectiveTab === "documents" ? "tab-btn-active" : ""
             }`}
-            onClick={() => setActiveTab("quant")}
-            data-testid="tab-quant-strategy"
+            onClick={() => setActiveTab("documents")}
+            data-testid="tab-document-sections"
           >
             <BookOpen size={14} /> {citationsTabLabel}
           </button>
@@ -905,79 +931,99 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
             </div>
           )}
 
-          {effectiveTab === "quant" && (
-            <div className="evidence-list" data-testid="quant-strategy-view">
-              {resolvedQuant && (
+          {effectiveTab === "documents" && (
+            <div className="evidence-list" data-testid="document-sections-view">
+              {brief && (
                 <div
-                  className="quant-spec-block"
-                  data-testid="quant-executive-answer"
+                  className="domain-brief-block"
+                  data-testid="domain-knowledge-brief-panel"
                 >
                   <div className="evidence-item-head">
                     <div>
                       <strong className="symbol-title">
-                        {resolvedQuant.strategy_name}
+                        {brief.brief_title}
                       </strong>
-                      <div
-                        className="markets-list"
-                        data-testid="market-regimes-list"
-                      >
-                        Target Markets: {resolvedQuant.target_markets.join(", ")}
-                        {" | "}Sample: {resolvedQuant.sample_period_years}
+                      <div className="markets-list">
+                        Domain: <code>{brief.domain_id}</code>
                       </div>
                     </div>
-                    <span
-                      className={`status-tag ${
-                        resolvedQuant.friction_verdict === "REALISTIC_FRICTION"
-                          ? "status-tag-ok"
-                          : "status-tag-warn"
-                      }`}
-                      data-testid="friction-verdict-badge"
-                    >
-                      {resolvedQuant.friction_verdict}
-                    </span>
+                    {brief.sufficiency_verdict && (
+                      <span
+                        className={`status-tag ${
+                          brief.sufficiency_verdict === "sufficient"
+                            ? "status-tag-ok"
+                            : "status-tag-warn"
+                        }`}
+                        data-testid="brief-sufficiency-badge"
+                      >
+                        {brief.sufficiency_verdict}
+                      </span>
+                    )}
                   </div>
 
-                  {resolvedQuant.mathematical_signal_latex && (
+                  {brief.executive_summary && (
+                    <p className="domain-brief-summary">
+                      {brief.executive_summary}
+                    </p>
+                  )}
+
+                  {brief.formal_expression_or_rule && (
                     <div
                       className="math-signal-box"
-                      data-testid="latex-mathematical-signal"
+                      data-testid="formal-expression-box"
                     >
-                      <code>{resolvedQuant.mathematical_signal_latex}</code>
+                      <code>{brief.formal_expression_or_rule}</code>
                     </div>
                   )}
 
-                  <div className="quant-stats-strip tabular-num">
-                    <span>
-                      Sharpe:{" "}
-                      <strong>
-                        {resolvedQuant.reported_sharpe_ratio ?? "N/A"}
-                      </strong>
-                    </span>
-                    <span>
-                      Max Drawdown:{" "}
-                      <strong>
-                        {resolvedQuant.reported_max_drawdown_pct !== null
-                          ? `${resolvedQuant.reported_max_drawdown_pct}%`
-                          : "N/A"}
-                      </strong>
-                    </span>
-                    <span>
-                      Assumed Friction:{" "}
-                      <strong>
-                        {resolvedQuant.transaction_cost_bps_assumed !== null
-                          ? `${resolvedQuant.transaction_cost_bps_assumed} bps`
-                          : "N/A"}
-                      </strong>
-                    </span>
-                  </div>
+                  {Object.keys(brief.structured_metadata ?? {}).length > 0 && (
+                    <div
+                      className="domain-metadata-strip tabular-num"
+                      data-testid="domain-structured-metadata"
+                    >
+                      {Object.entries(brief.structured_metadata).map(
+                        ([key, val]) => (
+                          <span key={key}>
+                            {key}: <strong>{String(val)}</strong>
+                          </span>
+                        )
+                      )}
+                    </div>
+                  )}
 
-                  {resolvedQuant.entry_exit_rules.length > 0 && (
-                    <div className="quant-rules-block">
-                      <h5>Entry / Exit Rules</h5>
-                      <ul data-testid="entry-exit-rules-list">
-                        {resolvedQuant.entry_exit_rules.map((rule, rIdx) => (
+                  {brief.core_findings_and_rules.length > 0 && (
+                    <div className="domain-rules-block">
+                      <h5>Core Findings &amp; Rules</h5>
+                      <ul data-testid="core-findings-list">
+                        {brief.core_findings_and_rules.map((rule, rIdx) => (
                           <li key={rIdx}>{rule}</li>
                         ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {brief.domain_constraints_and_caveats.length > 0 && (
+                    <div className="domain-rules-block">
+                      <h5>Domain Constraints &amp; Caveats</h5>
+                      <ul data-testid="domain-constraints-list">
+                        {brief.domain_constraints_and_caveats.map(
+                          (caveat, cIdx) => (
+                            <li key={cIdx}>{caveat}</li>
+                          )
+                        )}
+                      </ul>
+                    </div>
+                  )}
+
+                  {brief.known_risks_and_failure_modes.length > 0 && (
+                    <div className="domain-rules-block">
+                      <h5>Known Risks &amp; Failure Modes</h5>
+                      <ul data-testid="known-risks-list">
+                        {brief.known_risks_and_failure_modes.map(
+                          (risk, kIdx) => (
+                            <li key={kIdx}>{risk}</li>
+                          )
+                        )}
                       </ul>
                     </div>
                   )}

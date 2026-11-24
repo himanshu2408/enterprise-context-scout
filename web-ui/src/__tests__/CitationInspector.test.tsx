@@ -4,8 +4,8 @@ import { CitationInspector } from "../components/CitationInspector";
 import {
   TEST_CODE_PACK,
   TEST_DIAGNOSTIC,
+  TEST_DOCS_PACK,
   TEST_JIRA_CITATION,
-  TEST_QUANT_PACK,
   TEST_STALE_DOC_CITATION,
   TEST_TOKEN_SAVINGS,
 } from "./fixtures";
@@ -19,7 +19,6 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     const { rerender } = render(
       <CitationInspector
         contextPack={null}
-        quantSpec={null}
         tokenSavings={null}
         principalRole="engineer"
         onOpenDiffModal={vi.fn()}
@@ -33,7 +32,6 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     rerender(
       <CitationInspector
         contextPack={null}
-        quantSpec={null}
         tokenSavings={null}
         principalRole="engineer"
         onOpenDiffModal={vi.fn()}
@@ -51,7 +49,6 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     render(
       <CitationInspector
         contextPack={TEST_CODE_PACK}
-        quantSpec={null}
         tokenSavings={TEST_TOKEN_SAVINGS}
         principalRole="engineer"
         onOpenDiffModal={onOpenModal}
@@ -60,10 +57,10 @@ describe("CitationInspector (Answer-First Workspace)", () => {
 
     const hero = screen.getByTestId("answer-first-hero");
     expect(hero).toHaveTextContent(
-      "Almgren-Chriss Optimal Execution Schedule & Risk Bounds"
+      "Deterministic Slicer & Token Budget Bounds"
     );
     expect(hero).toHaveTextContent(
-      "AlmgrenChrissExecutionOptimizer splits parent orders"
+      "DeterministicSlicer computes AST-aligned slice bounds"
     );
     expect(screen.getByTestId("preflight-passed-badge")).toHaveTextContent(
       "100% Grounded & Verified"
@@ -71,18 +68,18 @@ describe("CitationInspector (Answer-First Workspace)", () => {
 
     // Inline code citation chip matches [repo@sha:file:Lstart-Lend]
     expect(screen.getByTestId("inline-cite-code-0")).toHaveTextContent(
-      "[quant-exec-core@abc1234:execution/optimizer.py:L14-L32]"
+      "[context-core@abc1234:slicer/bounds.py:L14-L32]"
     );
     expect(
-      screen.getByTestId("inline-cite-doc-chunk_hawkes_01")
+      screen.getByTestId("inline-cite-doc-chunk_rls_01")
     ).toHaveTextContent(
-      "[1] The role of volume in order book dynamics: a multivariate Hawkes process analysis: 3.2 Excitation Kernel Stability"
+      "[1] PostgreSQL 17 Forced Row-Level Security and Connection Pool Isolation: 3.2 Transaction-Scoped GUC Binding"
     );
 
     // Click inline doc citation chip -> switches to Document Sections tab and highlights card
-    fireEvent.click(screen.getByTestId("inline-cite-doc-chunk_hawkes_01"));
-    expect(screen.getByTestId("quant-strategy-view")).toBeInTheDocument();
-    expect(screen.getByTestId("citation-card-chunk_hawkes_01")).toHaveClass(
+    fireEvent.click(screen.getByTestId("inline-cite-doc-chunk_rls_01"));
+    expect(screen.getByTestId("document-sections-view")).toBeInTheDocument();
+    expect(screen.getByTestId("citation-card-chunk_rls_01")).toHaveClass(
       "evidence-item-highlighted"
     );
 
@@ -99,14 +96,13 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     expect(onOpenModal).toHaveBeenCalledTimes(1);
   });
 
-  it("renders prominent doc_vs_code_conflicts_detected banner, Quant brief, and hides patch CTA for non-engineers", () => {
+  it("renders prominent doc_vs_code_conflicts_detected banner, DomainKnowledgeBrief, and hides patch CTA for non-engineers", () => {
     render(
       <CitationInspector
         contextPack={{
-          ...TEST_QUANT_PACK,
+          ...TEST_DOCS_PACK,
           code_slices: TEST_CODE_PACK.code_slices,
         }}
-        quantSpec={TEST_QUANT_PACK.quant_strategy_spec}
         tokenSavings={TEST_TOKEN_SAVINGS}
         principalRole="product_manager"
         onOpenDiffModal={vi.fn()}
@@ -114,26 +110,26 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     );
 
     expect(screen.getByTestId("conflicts-banner")).toHaveTextContent(
-      "Code uses static 2-bps impact"
+      "Legacy script bypasses RLS"
     );
     expect(screen.queryByTestId("open-diff-modal-btn")).not.toBeInTheDocument();
     expect(screen.getByTestId("handoff-readonly-notice")).toHaveTextContent(
       "Read-Only Role (product_manager)"
     );
 
-    fireEvent.click(screen.getByTestId("tab-quant-strategy"));
-    expect(screen.getByTestId("quant-executive-answer")).toBeInTheDocument();
-    expect(screen.getByTestId("entry-exit-rules-list")).toHaveTextContent(
-      "2.5x baseline"
+    fireEvent.click(screen.getByTestId("tab-document-sections"));
+    expect(screen.getByTestId("domain-knowledge-brief-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("core-findings-list")).toHaveTextContent(
+      "db_admin_url"
     );
-    expect(screen.getByTestId("latex-mathematical-signal")).toHaveTextContent(
-      "\\lambda_t"
+    expect(screen.getByTestId("formal-expression-box")).toHaveTextContent(
+      "current_setting('app.tenant_id'"
     );
-    expect(screen.getByTestId("friction-verdict-badge")).toHaveTextContent(
-      "UNVERIFIED_FRICTION_WARNING"
+    expect(screen.getByTestId("brief-sufficiency-badge")).toHaveTextContent(
+      "sufficient"
     );
-    expect(screen.getByTestId("market-regimes-list")).toHaveTextContent(
-      "DE_XETRA, US_EQUITY"
+    expect(screen.getByTestId("domain-structured-metadata")).toHaveTextContent(
+      "17.11"
     );
   });
 
@@ -147,7 +143,6 @@ describe("CitationInspector (Answer-First Workspace)", () => {
             TEST_STALE_DOC_CITATION,
           ],
         }}
-        quantSpec={null}
         tokenSavings={TEST_TOKEN_SAVINGS}
         principalRole="engineer"
         onOpenDiffModal={vi.fn()}
@@ -161,7 +156,7 @@ describe("CitationInspector (Answer-First Workspace)", () => {
       "Superseded by automated pg_pool failover ADR-2026-11."
     );
 
-    fireEvent.click(screen.getByTestId("tab-quant-strategy"));
+    fireEvent.click(screen.getByTestId("tab-document-sections"));
     const staleCard = screen.getByTestId(
       `citation-card-${TEST_STALE_DOC_CITATION.chunk_id}`
     );
@@ -171,11 +166,10 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     );
   });
 
-  it("auto-switches to Quant Strategy view when code_slices is empty and QuantStrategyBrief is present", () => {
+  it("auto-switches to Document Sections view when code_slices is empty and DomainKnowledgeBrief is present", () => {
     const { rerender } = render(
       <CitationInspector
         contextPack={TEST_CODE_PACK}
-        quantSpec={null}
         tokenSavings={TEST_TOKEN_SAVINGS}
         principalRole="engineer"
         onOpenDiffModal={vi.fn()}
@@ -185,28 +179,26 @@ describe("CitationInspector (Answer-First Workspace)", () => {
 
     rerender(
       <CitationInspector
-        contextPack={TEST_QUANT_PACK}
-        quantSpec={TEST_QUANT_PACK.quant_strategy_spec}
+        contextPack={TEST_DOCS_PACK}
         tokenSavings={TEST_TOKEN_SAVINGS}
-        principalRole="quant_researcher"
+        principalRole="domain_researcher"
         onOpenDiffModal={vi.fn()}
       />
     );
 
-    expect(screen.getByTestId("quant-strategy-view")).toBeInTheDocument();
-    expect(screen.getByTestId("quant-executive-answer")).toHaveTextContent(
-      "Multivariate Hawkes Order-Book Imbalance"
+    expect(screen.getByTestId("document-sections-view")).toBeInTheDocument();
+    expect(screen.getByTestId("domain-knowledge-brief-panel")).toHaveTextContent(
+      "PostgreSQL 17 FORCE RLS & Tenant Isolation"
     );
   });
 
-  it("renders domain-neutral Citations & Docs labeling without fake quant metrics when quantSpec is null", () => {
+  it("renders domain-neutral Document Sections labeling and formal rule for DomainKnowledgeBrief", () => {
     render(
       <CitationInspector
         contextPack={{
           ...TEST_CODE_PACK,
           domain_id: "crispr_biology_scout",
           code_slices: [],
-          quant_strategy_spec: null,
           domain_knowledge_brief: {
             brief_title: "CRISPR-Cas9 Guide RNA Specificity",
             domain_id: "crispr_biology_scout",
@@ -226,14 +218,13 @@ describe("CitationInspector (Answer-First Workspace)", () => {
             verified_citations: TEST_CODE_PACK.supporting_doc_citations,
           },
         }}
-        quantSpec={null}
         tokenSavings={TEST_TOKEN_SAVINGS}
         principalRole="engineer"
         onOpenDiffModal={vi.fn()}
       />
     );
 
-    expect(screen.getByTestId("tab-quant-strategy")).toHaveTextContent(
+    expect(screen.getByTestId("tab-document-sections")).toHaveTextContent(
       "Document Sections (1)"
     );
     expect(screen.getByTestId("answer-first-hero")).toHaveTextContent(
@@ -242,12 +233,6 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     expect(screen.getByTestId("answer-first-hero")).toHaveTextContent(
       "Constraints & Known Risks"
     );
-    expect(
-      screen.queryByTestId("quant-executive-answer")
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId("friction-verdict-badge")
-    ).not.toBeInTheDocument();
     // Engineer still sees read-only notice when code_slices is empty
     expect(screen.getByTestId("handoff-readonly-notice")).toHaveTextContent(
       "No mutable code slices in this pack"
@@ -266,7 +251,6 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     const { rerender } = render(
       <CitationInspector
         contextPack={packWithMixedCitations}
-        quantSpec={null}
         tokenSavings={TEST_TOKEN_SAVINGS}
         principalRole="engineer"
         sourceFilter="jira"
@@ -276,7 +260,7 @@ describe("CitationInspector (Answer-First Workspace)", () => {
 
     expect(screen.queryByTestId("inline-cite-code-0")).not.toBeInTheDocument();
     expect(
-      screen.queryByTestId("inline-cite-doc-chunk_hawkes_01")
+      screen.queryByTestId("inline-cite-doc-chunk_rls_01")
     ).not.toBeInTheDocument();
     expect(
       screen.getByTestId("inline-cite-doc-chunk_jira_eng412")
@@ -288,7 +272,6 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     rerender(
       <CitationInspector
         contextPack={packWithMixedCitations}
-        quantSpec={null}
         tokenSavings={TEST_TOKEN_SAVINGS}
         principalRole="engineer"
         sourceFilter="code"
@@ -306,7 +289,6 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     render(
       <CitationInspector
         contextPack={TEST_CODE_PACK}
-        quantSpec={null}
         tokenSavings={TEST_TOKEN_SAVINGS}
         principalRole="engineer"
         onOpenDiffModal={vi.fn()}
@@ -365,7 +347,6 @@ describe("CitationInspector (Answer-First Workspace)", () => {
           ],
           completeness_ratio: 0.67,
         }}
-        quantSpec={null}
         tokenSavings={TEST_TOKEN_SAVINGS}
         principalRole="engineer"
         onOpenDiffModal={vi.fn()}
@@ -398,8 +379,8 @@ describe("CitationInspector (Answer-First Workspace)", () => {
         },
         {
           ...TEST_CODE_PACK.code_slices[0],
-          file_path: "tests/test_optimizer.py",
-          qualified_symbol: "test_almgren_chriss_slippage",
+          file_path: "tests/test_slicer.py",
+          qualified_symbol: "test_compute_slice_bounds",
           modification_intent: "test_fixture" as const,
           auto_expanded_by_ast: true,
         },
@@ -418,7 +399,6 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     render(
       <CitationInspector
         contextPack={richPack}
-        quantSpec={null}
         tokenSavings={TEST_TOKEN_SAVINGS}
         principalRole="engineer"
         onOpenDiffModal={vi.fn()}
@@ -439,10 +419,10 @@ describe("CitationInspector (Answer-First Workspace)", () => {
     );
 
     // Switch to Document Sections tab and expand full section context
-    fireEvent.click(screen.getByTestId("tab-quant-strategy"));
-    fireEvent.click(screen.getByTestId("full-section-toggle-chunk_hawkes_01"));
+    fireEvent.click(screen.getByTestId("tab-document-sections"));
+    fireEvent.click(screen.getByTestId("full-section-toggle-chunk_rls_01"));
     const fullSection = screen.getByTestId(
-      "full-section-content-chunk_hawkes_01"
+      "full-section-content-chunk_rls_01"
     );
     expect(fullSection).toHaveTextContent("Section intro paragraph.");
     expect(fullSection).toHaveTextContent(

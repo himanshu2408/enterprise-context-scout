@@ -1,0 +1,31 @@
+domain_id: "enterprise_docs_scout"
+display_name: "Enterprise Docs, ADRs & Knowledge Scout"
+base_model_id: "google/gemma-4-26B-A4B-it"
+contextualizer_model_id: "google/gemma-4-E4B-it"
+lora_adapter_id: "gemma4_26b_enterprise_docs"
+lora_adapter_path: "domains/enterprise_docs_scout/adapters/gemma4_26b_enterprise_docs"
+embedding_model_id: "google/embeddinggemma-2"
+embedding_dimensions: 768
+mcp_read_tools_allowed:
+  - "doc_corpus_mcp:search_hybrid_rrf"
+  - "doc_corpus_mcp:verify_citation_quote"
+  - "doc_corpus_mcp:get_document_section"
+authority_rules:
+  primary_truth_source: "document"
+  require_out_of_sample_check: false
+  require_transaction_cost_check: false
+  freshness_half_life_days: 730
+output_contract: "DomainKnowledgeBrief"
+description: "Enterprise architecture decision records, Confluence specifications, Jira design tickets, runbooks, and compliance policies."
+modalities:
+  - "document"
+lora_enabled: false
+default_scopes:
+  - "public"
+  - "public_docs"
+  - "corpus:enterprise_docs"
+  - "domain:enterprise_docs_scout"
+sample_queries:
+  - "What are the tenant isolation and FORCE RLS requirements for PostgreSQL 17?"
+  - "How does the zero-spend abstention policy prevent paid frontier token waste?"
+  - "What provenance fields are required on Confluence and Jira DocCitationSpan entries?"

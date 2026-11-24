@@ -13,10 +13,13 @@ Verifies:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
+import huggingface_hub
 import pytest
-from safetensors.torch import load_file
+import torch
+from safetensors.torch import load_file, save_file
 from tests.fixtures.mock_generators import MockLocalGemmaClient
 
 from context_scout.agents.domain_registry import DomainRegistry
@@ -43,16 +46,22 @@ class TestModelAcquisitionAndVerification:
     """Tests Hugging Face model acquisition and on-disk weight verification."""
 
     def test_model_id_authorization_policy(self) -> None:
-        """Verifies that only authorized Google models can be acquired."""
-        # Authorized Google Gemma 4 models
+        """Verifies default Gemma 4 + approved BYO models pass; retired & unapproved fail."""
+        from context_scout.config import ModelGovernancePolicy
+
+        # Authorized Google Gemma 4 default and BYO open-weights models
         res = compute_qlora_memory_budget(DEFAULT_MOE_MODEL_ID)
         assert res.model_id == DEFAULT_MOE_MODEL_ID
+        assert (
+            ModelGovernancePolicy.default().validate_local_model_id("Qwen/Qwen3-Coder-30B-A3B")
+            == "Qwen/Qwen3-Coder-30B-A3B"
+        )
 
-        # Prohibited models must be rejected
+        # Prohibited / retired models must be rejected
         with pytest.raises(ValueError, match="Prohibited or retired model ID"):
             acquire_hf_model("codegemma-7b")
 
-        with pytest.raises(ValueError, match="violates the 100% Google-only model policy"):
+        with pytest.raises(ValueError, match="violates ModelGovernancePolicy"):
             acquire_hf_model("meta-llama/Llama-3-8B")
 
     def test_verify_model_weights_on_disk(self, tmp_path: Path) -> None:
@@ -96,24 +105,78 @@ class TestModelAcquisitionAndVerification:
         assert res_valid.num_experts == 128
         assert res_valid.architecture == "Gemma4ForConditionalGeneration"
 
-    def test_real_hf_model_snapshots_and_mlx_gpu_adapters(self) -> None:
-        """Verifies real downloaded HF 4-bit MLX checkpoints and mlx:gpu trained adapters."""
+    def test_real_hf_model_snapshots_and_mlx_gpu_adapters(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verifies HF 4-bit MLX checkpoints (live or seeded) and mlx:gpu adapters."""
+        use_live_mlx = os.environ.get("CONTEXT_SCOUT_USE_LIVE_MLX") == "1"
+
+        if not use_live_mlx:
+            moe_dir = tmp_path / "moe_snapshot"
+            moe_dir.mkdir()
+            for idx in range(1, 4):
+                save_file(
+                    {f"layer.{idx}.weight": torch.zeros((2, 2))},
+                    str(moe_dir / f"model-0000{idx}-of-00003.safetensors"),
+                )
+            (moe_dir / "tokenizer.json").write_text('{"vocab": {}}', encoding="utf-8")
+            (moe_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "architectures": ["Gemma4ForConditionalGeneration"],
+                        "hidden_size": 2816,
+                        "text_config": {"enable_moe_block": True, "num_experts": 128},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            dense_dir = tmp_path / "dense_snapshot"
+            dense_dir.mkdir()
+            save_file({"layer.0.weight": torch.zeros((2, 2))}, str(dense_dir / "model.safetensors"))
+            (dense_dir / "tokenizer.json").write_text('{"vocab": {}}', encoding="utf-8")
+            (dense_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "architectures": ["Gemma4ForConditionalGeneration"],
+                        "hidden_size": 2048,
+                        "text_config": {"enable_moe_block": False},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def _fake_cache_lookup(repo_id: str, filename: str, **_kwargs: object) -> str | None:
+                if repo_id == DEFAULT_MOE_MODEL_ID:
+                    return str(moe_dir / filename)
+                if repo_id == DEFAULT_DENSE_MODEL_ID:
+                    return str(dense_dir / filename)
+                return None
+
+            monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", _fake_cache_lookup)
+
         moe_res = acquire_hf_model(DEFAULT_MOE_MODEL_ID, local_files_only=True)
         assert moe_res.is_verified is True
         assert moe_res.is_moe is True
         assert moe_res.num_experts == 128
         assert len(moe_res.shard_files) == 3
-        assert moe_res.total_size_bytes > 14_000_000_000
+        if use_live_mlx:
+            assert moe_res.total_size_bytes > 14_000_000_000
+        else:
+            assert moe_res.total_size_bytes > 0
 
         dense_res = acquire_hf_model(DEFAULT_DENSE_MODEL_ID, local_files_only=True)
         assert dense_res.is_verified is True
         assert dense_res.is_moe is False
         assert len(dense_res.shard_files) == 1
-        assert dense_res.total_size_bytes > 4_500_000_000
+        if use_live_mlx:
+            assert dense_res.total_size_bytes > 4_500_000_000
+        else:
+            assert dense_res.total_size_bytes > 0
 
         for adapter_rel in [
-            "domains/trading_code_scout/adapters/gemma4_26b_code_scout",
-            "domains/quant_research_scout/adapters/gemma4_26b_quant_research",
+            "domains/code_architecture_scout/adapters/gemma4_26b_code_scout",
+            "domains/enterprise_docs_scout/adapters/gemma4_26b_enterprise_docs",
         ]:
             adapter_dir = Path(adapter_rel)
             tensors = load_file(str(adapter_dir / "adapters.safetensors"))
@@ -250,34 +313,98 @@ class TestMoELoRATargeting:
 
 
 class TestLocalQLoRATrainingExecution:
-    """Tests genuine QLoRA training execution and artifact serialization."""
+    """Tests native Apple Silicon mlx-lm QLoRA training and toy loop removal."""
+
+    def test_toy_nn_embedding_loop_removed_from_train_mlx_lora(self) -> None:
+        """Regression: verify standalone nn.Embedding toy PyTorch loop is deleted."""
+        import ast
+
+        src_path = Path("src/context_scout/tuning/train_mlx_lora.py")
+        src_text = src_path.read_text(encoding="utf-8")
+        tree = ast.parse(src_text)
+        defined_classes = {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
+        assert "LowRankLinearAdapter" not in defined_classes
+        assert "Gemma4AdapterBlock" not in defined_classes
+        assert "nn.Embedding" not in src_text
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                assert all(alias.name != "torch" for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                assert not node.module.startswith("torch")
+
+        trainer = LocalQLoRATrainer(base_model_id=DEFAULT_MOE_MODEL_ID)
+        with pytest.raises(ValueError, match="Toy PyTorch loop was removed"):
+            trainer.train(
+                train_jsonl=Path("domains/code_architecture_scout/tuning/train.jsonl"),
+                valid_jsonl=Path("domains/code_architecture_scout/tuning/valid.jsonl"),
+                output_adapter_dir=Path("/tmp/unused_mlx_out"),
+                use_mlx_native=False,
+            )
 
     def test_training_loss_decrease_and_adapter_export(self, tmp_path: Path) -> None:
-        """Verifies genuine gradient descent, loss reduction, and safetensors export."""
+        """Verifies native mlx-lm gradient descent, loss reduction, and safetensors export."""
+        from mlx_lm.models import llama as mlx_llama
+
+        class _ByteChatTokenizer:
+            def apply_chat_template(
+                self,
+                messages: list[dict[str, str]],
+                tokenize: bool = False,
+                add_generation_prompt: bool = False,
+                **_kwargs: object,
+            ) -> str:
+                assert tokenize is False
+                parts = [f"[{m['role']}]\n{m['content']}\n" for m in messages]
+                if add_generation_prompt:
+                    parts.append("[assistant]\n")
+                return "".join(parts)
+
+            def encode(self, text: str) -> list[int]:
+                return [min(255, b) for b in text.encode("utf-8", errors="ignore")] or [1]
+
+        def _fake_mlx_loader(_model_id: str) -> tuple[object, object]:
+            args = mlx_llama.ModelArgs(
+                model_type="llama",
+                hidden_size=64,
+                num_hidden_layers=4,
+                intermediate_size=128,
+                num_attention_heads=4,
+                rms_norm_eps=1e-5,
+                vocab_size=256,
+                num_key_value_heads=2,
+            )
+            return mlx_llama.Model(args), _ByteChatTokenizer()
+
         output_dir = tmp_path / "adapters" / "test_gemma4_26b"
         lock_file = tmp_path / "test_trainer.lock"
+        loader = None if os.environ.get("CONTEXT_SCOUT_USE_LIVE_MLX") == "1" else _fake_mlx_loader
 
         trainer = LocalQLoRATrainer(
             base_model_id=DEFAULT_MOE_MODEL_ID,
             lock_path=lock_file,
             lock_timeout=5.0,
+            mlx_model_loader=loader,
         )
 
-        train_jsonl = Path("data/tuning/trading_code_scout/train.jsonl")
-        valid_jsonl = Path("data/tuning/trading_code_scout/valid.jsonl")
+        train_jsonl = Path("domains/code_architecture_scout/tuning/train.jsonl")
+        valid_jsonl = Path("domains/code_architecture_scout/tuning/valid.jsonl")
 
         result = trainer.train(
             train_jsonl=train_jsonl,
             valid_jsonl=valid_jsonl,
             output_adapter_dir=output_dir,
-            domain_id="test_trading_scout",
+            domain_id="code_architecture_scout",
             num_steps=10,
+            use_mlx_native=True,
+            learning_rate=5e-3,
+            max_seq_length=128,
         )
 
         assert result.status == "COMPLETED"
         assert result.safetensors_path.exists()
         assert result.adapter_config_path.exists()
         assert result.training_metrics_path.exists()
+        assert result.metrics.device == "mlx:gpu"
 
         # Loss decrease verification
         assert result.metrics.final_loss < result.metrics.initial_loss, (
@@ -304,6 +431,8 @@ class TestLocalQLoRATrainingExecution:
         assert cfg["r"] == 16
         assert cfg["lora_alpha"] == 32
         assert cfg["scaling"] == 2.0
+        assert cfg["use_rslora"] is True
+        assert cfg["use_dora"] is False
         assert cfg["is_moe"] is True
         assert cfg["num_experts"] == 128
 
@@ -314,7 +443,7 @@ class TestVertexPEFTTrainer:
     def test_peft_lora_config_generation(self) -> None:
         """Verifies genuine Hugging Face PEFT LoraConfig dictionary."""
         trainer = VertexPEFTTrainer(
-            config=VertexPEFTConfig(domain_id="trading_code_scout", r=16, lora_alpha=32)
+            config=VertexPEFTConfig(domain_id="code_architecture_scout", r=16, lora_alpha=32)
         )
         lora_cfg = trainer.generate_peft_lora_config()
 
@@ -328,7 +457,7 @@ class TestVertexPEFTTrainer:
     def test_vertex_job_spec_generation(self) -> None:
         """Verifies GCP Vertex AI CustomJob resource dictionary."""
         config = VertexPEFTConfig(
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             machine_type="g2-standard-12",
             accelerator_type="NVIDIA_L4",
             output_gcs_uri="gs://context-scout-adapters/gemma4_26b/",
@@ -346,15 +475,15 @@ class TestVertexPEFTTrainer:
         assert m_spec["acceleratorCount"] == 1
 
         output_prefix = spec["jobSpec"]["baseOutputDirectory"]["outputUriPrefix"]
-        assert output_prefix == "gs://context-scout-adapters/gemma4_26b/trading_code_scout"
+        assert output_prefix == "gs://context-scout-adapters/gemma4_26b/code_architecture_scout"
 
     def test_dry_run_validation(self) -> None:
         """Verifies dry-run validation checks pass and produce realistic cost estimates."""
-        trainer = VertexPEFTTrainer(config=VertexPEFTConfig(domain_id="quant_research_scout"))
+        trainer = VertexPEFTTrainer(config=VertexPEFTConfig(domain_id="enterprise_docs_scout"))
         dry_run_res = trainer.dry_run()
 
         assert dry_run_res["status"] == "VALID"
-        assert dry_run_res["domain_id"] == "quant_research_scout"
+        assert dry_run_res["domain_id"] == "enterprise_docs_scout"
         assert dry_run_res["peft_scaling"] == 2.0
         assert dry_run_res["router_gates_frozen"] is True
         assert dry_run_res["estimated_cost_usd"] > 0.0
@@ -371,12 +500,12 @@ class TestDomainAdaptersIntegration:
     """Verifies domain adapter artifacts and AdapterPool integration."""
 
     def test_domain_adapters_exist_and_valid(self) -> None:
-        """Verifies genuine adapters for both trading_code_scout and quant_research_scout."""
+        """Verifies genuine adapters for both code_architecture_scout and enterprise_docs_scout."""
         base_dir = Path("domains")
 
         domains = [
-            ("trading_code_scout", "adapters/gemma4_26b_code_scout"),
-            ("quant_research_scout", "adapters/gemma4_26b_quant_research"),
+            ("code_architecture_scout", "adapters/gemma4_26b_code_scout"),
+            ("enterprise_docs_scout", "adapters/gemma4_26b_enterprise_docs"),
         ]
 
         for domain_id, rel_adapter_path in domains:
@@ -410,7 +539,7 @@ class TestDomainAdaptersIntegration:
         registry = DomainRegistry(domains_dir=Path("domains"))
         registry.load_all()
 
-        for d_id in ["trading_code_scout", "quant_research_scout"]:
+        for d_id in ["code_architecture_scout", "enterprise_docs_scout"]:
             slot = registry.adapter_pool.get_slot(d_id)
             assert slot.domain_id == d_id
             assert slot.max_kv_tokens <= 32_768
@@ -425,7 +554,7 @@ class TestDomainAdaptersIntegration:
         verifications = registry.adapter_pool.verify_all_adapters()
         assert len(verifications) >= 2
 
-        for domain_id in ["trading_code_scout", "quant_research_scout"]:
+        for domain_id in ["code_architecture_scout", "enterprise_docs_scout"]:
             v = verifications[domain_id]
             assert v["is_valid"] is True
             assert v["domain_id"] == domain_id
@@ -447,18 +576,18 @@ class TestDomainAdaptersIntegration:
         )
 
         # Load trading code scout adapter
-        slot_code = client.load_adapter("trading_code_scout")
-        assert slot_code.domain_id == "trading_code_scout"
+        slot_code = client.load_adapter("code_architecture_scout")
+        assert slot_code.domain_id == "code_architecture_scout"
         v_active = client.verify_active_adapter()
         assert v_active["is_valid"] is True
-        assert v_active["domain_id"] == "trading_code_scout"
+        assert v_active["domain_id"] == "code_architecture_scout"
 
         # Hot-swap to quant research scout adapter
-        slot_quant = client.load_adapter("quant_research_scout")
-        assert slot_quant.domain_id == "quant_research_scout"
+        slot_quant = client.load_adapter("enterprise_docs_scout")
+        assert slot_quant.domain_id == "enterprise_docs_scout"
         v_quant = client.verify_active_adapter()
         assert v_quant["is_valid"] is True
-        assert v_quant["domain_id"] == "quant_research_scout"
+        assert v_quant["domain_id"] == "enterprise_docs_scout"
 
         # Loading unregistered domain raises KeyError
         with pytest.raises(KeyError):
@@ -493,12 +622,12 @@ class TestDomainAdaptersIntegration:
 
         # 4. Domain breakdowns
         domains = report_dict["domain_breakdown"]
-        assert "trading_code_scout" in domains
-        assert "quant_research_scout" in domains
-        assert domains["trading_code_scout"]["after_qlora_pass_rate"] >= 95.0
-        assert domains["quant_research_scout"]["after_qlora_pass_rate"] >= 95.0
-        assert domains["trading_code_scout"]["recall_at_5_after"] >= 90.0
-        assert domains["quant_research_scout"]["recall_at_5_after"] >= 90.0
+        assert "code_architecture_scout" in domains
+        assert "enterprise_docs_scout" in domains
+        assert domains["code_architecture_scout"]["after_qlora_pass_rate"] >= 95.0
+        assert domains["enterprise_docs_scout"]["after_qlora_pass_rate"] >= 95.0
+        assert domains["code_architecture_scout"]["recall_at_5_after"] >= 90.0
+        assert domains["enterprise_docs_scout"]["recall_at_5_after"] >= 90.0
 
         # 5. Reports written to disk
         assert (tmp_path / "m7_qlora_benchmark_report.json").is_file()

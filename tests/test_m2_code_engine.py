@@ -184,7 +184,7 @@ def test_git_merkle_indexer_diffing_and_unchanged_cache_hit(
 ) -> None:
     repo_dir = Path.cwd()
     repo = InMemoryRLSRepository()
-    domain_id = "trading_code_scout"
+    domain_id = "code_architecture_scout"
     repo_name = "enterprise-context-scout"
 
     # Run 1: Initial cold index
@@ -226,7 +226,7 @@ def test_git_merkle_indexer_two_pass_edge_resolution(
 ) -> None:
     repo_dir = Path.cwd()
     repo = InMemoryRLSRepository()
-    domain_id = "trading_code_scout"
+    domain_id = "code_architecture_scout"
     repo_name = "enterprise-context-scout"
 
     indexer.sync_in_memory(
@@ -244,7 +244,16 @@ def test_git_merkle_indexer_two_pass_edge_resolution(
     resolved_edges = [e for e in visible_edges if e.target_symbol_id is not None]
     assert len(resolved_edges) >= 10
     assert {e.edge_kind for e in resolved_edges}.issubset(
-        {"CALLS", "IMPORTS", "USES_TYPE", "INHERITS", "TESTED_BY"}
+        {
+            "CALLS",
+            "IMPORTS",
+            "USES_TYPE",
+            "INHERITS",
+            "TESTED_BY",
+            "PROVISIONED_BY",
+            "BINDS_SERVICE_ACCOUNT",
+            "ACCESSES_SECRET",
+        }
     )
     for edge in resolved_edges:
         assert edge.target_symbol_id is not None
@@ -269,3 +278,119 @@ def test_git_merkle_tree_diffing_partitions(indexer: GitMerkleIndexer) -> None:
     assert new == {"file_a.py"}
     assert modified == {"file_c.py"}
     assert deleted == {"file_d.py"}
+
+
+def test_ast_extractor_python_ts_syntax_error_abstains_and_yaml_flags_fallback(
+    extractor: ASTExtractor,
+) -> None:
+    """Python/TS/TSX abstain on syntax errors; regex branches flag fallback."""
+    bad_py = "def valid_before():\n    return 1\n\ndef broken(((:\n    pass\n"
+    py_syms, py_edges = extractor.parse_source(bad_py, "python", "broken.py")
+    assert (py_syms, py_edges) == ([], [])
+    assert extractor.last_parse_diagnostics is not None
+    assert extractor.last_parse_diagnostics.has_parse_error is True
+    assert extractor.last_parse_diagnostics.abstained is True
+
+    bad_ts = "export function validBefore(): number { return 1; }\nfunction broken(((: {\n"
+    ts_syms, ts_edges = extractor.parse_source(bad_ts, "typescript", "broken.ts")
+    assert (ts_syms, ts_edges) == ([], [])
+    assert extractor.last_parse_diagnostics is not None
+    assert extractor.last_parse_diagnostics.has_parse_error is True
+    assert extractor.last_parse_diagnostics.abstained is True
+
+    bad_tsx = "export const Card = () => <div>ok</div>;\nconst Broken = (((( => <div;\n"
+    tsx_syms, tsx_edges = extractor.parse_source(bad_tsx, "tsx", "broken.tsx")
+    assert (tsx_syms, tsx_edges) == ([], [])
+    assert extractor.last_parse_diagnostics is not None
+    assert extractor.last_parse_diagnostics.has_parse_error is True
+    assert extractor.last_parse_diagnostics.abstained is True
+
+    yaml_syms, _yaml_edges = extractor.parse_source(
+        "build:\n  stage: test\n  script:\n    - pytest\n",
+        "yaml",
+        ".gitlab-ci.yml",
+    )
+    assert len(yaml_syms) >= 1
+    assert extractor.last_parse_diagnostics is not None
+    assert extractor.last_parse_diagnostics.low_confidence_fallback is True
+    assert extractor.last_parse_diagnostics.abstained is False
+
+
+def test_diff_commit_blobs_use_cache_false_spawns_subprocess_every_call(
+    monkeypatch: pytest.MonkeyPatch,
+    indexer: GitMerkleIndexer,
+) -> None:
+    """Verifies use_cache=False bypasses _DIFF_TREE_CACHE and spawns git diff-tree each call."""
+    import subprocess
+    from typing import Any
+
+    import context_scout.ingestion.git_merkle_indexer as gmi
+
+    repo_dir = Path.cwd()
+    head_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo_dir, text=True
+    ).strip()
+    parent_proc = subprocess.run(
+        ["git", "rev-parse", "HEAD~1"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    parent_sha = (
+        parent_proc.stdout.strip()
+        if parent_proc.returncode == 0
+        else GitMerkleIndexer.EMPTY_TREE_SHA
+    )
+
+    real_run = subprocess.run
+    diff_tree_calls = 0
+
+    def _counting_run(cmd: list[str], *args: Any, **kwargs: Any) -> Any:
+        nonlocal diff_tree_calls
+        if isinstance(cmd, list) and "diff-tree" in cmd:
+            diff_tree_calls += 1
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _counting_run)
+    gmi._DIFF_TREE_CACHE.clear()
+
+    # 1. Uncached calls always execute git diff-tree and do not populate _DIFF_TREE_CACHE.
+    d1 = indexer.diff_commit_blobs(repo_dir, parent_sha, head_sha, use_cache=False)
+    d2 = indexer.diff_commit_blobs(repo_dir, parent_sha, head_sha, use_cache=False)
+    assert d1 == d2
+    assert diff_tree_calls == 2
+    assert len(gmi._DIFF_TREE_CACHE) == 0
+
+    # 2. Cached calls execute git diff-tree once and serve repeat immutable SHA diffs from cache.
+    d3 = indexer.diff_commit_blobs(repo_dir, parent_sha, head_sha, use_cache=True)
+    d4 = indexer.diff_commit_blobs(repo_dir, parent_sha, head_sha, use_cache=True)
+    assert d3 == d4 == d1
+    assert diff_tree_calls == 3
+    assert len(gmi._DIFF_TREE_CACHE) == 1
+
+
+def test_merkle_indexer_bounded_lru_caches_evict_oldest_entries() -> None:
+    """Verifies all module-level Merkle caches are bounded OrderedDict LRUs."""
+    from collections import OrderedDict
+
+    import context_scout.ingestion.git_merkle_indexer as gmi
+
+    assert isinstance(gmi._COMMIT_TREE_CACHE, OrderedDict)
+    assert isinstance(gmi._WT_BLOB_CACHE, OrderedDict)
+    assert isinstance(gmi._DIFF_TREE_CACHE, OrderedDict)
+    assert isinstance(gmi._SYMBOL_EMBEDDING_CACHE, OrderedDict)
+    assert gmi._COMMIT_TREE_CACHE_MAX_ENTRIES > 0
+    assert gmi._WT_BLOB_CACHE_MAX_ENTRIES > 0
+    assert gmi._DIFF_TREE_CACHE_MAX_ENTRIES > 0
+    assert gmi._SYMBOL_EMBEDDING_CACHE_MAX_ENTRIES > 0
+
+    lru: OrderedDict[str, int] = OrderedDict()
+    gmi._lru_set(lru, "k1", 1, max_entries=2)
+    gmi._lru_set(lru, "k2", 2, max_entries=2)
+    # Access k1 so k2 becomes least-recently-used
+    assert gmi._lru_get(lru, "k1") == 1
+    gmi._lru_set(lru, "k3", 3, max_entries=2)
+    assert list(lru.keys()) == ["k1", "k3"]
+    assert gmi._lru_get(lru, "k2") is None
+    assert gmi._lru_get(lru, "k3") == 3

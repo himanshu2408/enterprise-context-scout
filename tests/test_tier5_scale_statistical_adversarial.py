@@ -10,6 +10,7 @@ Adversarial stress-testing suite covering:
 from __future__ import annotations
 
 import concurrent.futures
+import gc
 import math
 import subprocess
 import time
@@ -434,7 +435,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                         primary_truth_source, freshness_half_life_days, config_json
                     )
                     VALUES (%s, %s, 'none', 'code', 30, '{}')
-                    ON CONFLICT (domain_id) DO NOTHING;
+                    ON CONFLICT (tenant_id, domain_id) DO NOTHING;
                     """,
                     (d, f"Adversarial Domain {d}"),
                 )
@@ -637,7 +638,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                         primary_truth_source, freshness_half_life_days, config_json
                     )
                     VALUES (%s, 'Canary Domain', 'none', 'code', 30, '{}')
-                    ON CONFLICT (domain_id) DO NOTHING;
+                    ON CONFLICT (tenant_id, domain_id) DO NOTHING;
                     """,
                     (canary_domain,),
                 )
@@ -666,7 +667,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                         primary_truth_source, freshness_half_life_days, config_json
                     )
                     VALUES (%s, 'Session Domain', 'none', 'code', 30, '{}')
-                    ON CONFLICT (domain_id) DO NOTHING;
+                    ON CONFLICT (tenant_id, domain_id) DO NOTHING;
                     """,
                     (session_domain,),
                 )
@@ -741,7 +742,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                         primary_truth_source, freshness_half_life_days, config_json
                     )
                     VALUES (%s, %s, 'none', 'code', 30, '{}')
-                    ON CONFLICT (domain_id) DO NOTHING;
+                    ON CONFLICT (tenant_id, domain_id) DO NOTHING;
                     """,
                     (d, f"Adversarial CTE Domain {d}"),
                 )
@@ -893,7 +894,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                         primary_truth_source, freshness_half_life_days, config_json
                     )
                     VALUES (%s, %s, 'none', 'code', 30, '{}')
-                    ON CONFLICT (domain_id) DO NOTHING;
+                    ON CONFLICT (tenant_id, domain_id) DO NOTHING;
                     """,
                     (d, f"RW Domain {d}"),
                 )
@@ -980,7 +981,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                         primary_truth_source, freshness_half_life_days, config_json
                     )
                     VALUES (%s, 'Canary Mutation Domain', 'none', 'code', 30, '{}')
-                    ON CONFLICT (domain_id) DO NOTHING;
+                    ON CONFLICT (tenant_id, domain_id) DO NOTHING;
                     """,
                     (canary_domain,),
                 )
@@ -1009,7 +1010,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                         primary_truth_source, freshness_half_life_days, config_json
                     )
                     VALUES (%s, 'Session Mutation Domain', 'none', 'code', 30, '{}')
-                    ON CONFLICT (domain_id) DO NOTHING;
+                    ON CONFLICT (tenant_id, domain_id) DO NOTHING;
                     """,
                     (session_domain,),
                 )
@@ -1201,10 +1202,11 @@ class TestScaleLadderRoutingAndMerkleDiffingLatency:
         )
         parent_sha = res_parent.stdout.strip() if res_parent.returncode == 0 else ""
 
+        gc.collect()
         latencies_ms: list[float] = []
         for _ in range(50):
             t0 = time.perf_counter()
-            diff = indexer.diff_commit_blobs(repo_root, parent_sha, head_sha)
+            diff = indexer.diff_commit_blobs(repo_root, parent_sha, head_sha, use_cache=False)
             duration_ms = (time.perf_counter() - t0) * 1000.0
             latencies_ms.append(duration_ms)
             assert isinstance(diff, MerkleBlobDiff)
@@ -1402,10 +1404,11 @@ class TestScaleLadderRoutingAndMerkleDiffingLatency:
         )
         parent_sha = res_parent.stdout.strip() if res_parent.returncode == 0 else ""
 
+        gc.collect()
         latencies_ms: list[float] = []
         for _ in range(100):
             t0 = time.perf_counter()
-            diff = indexer.diff_commit_blobs(repo_root, parent_sha, head_sha)
+            diff = indexer.diff_commit_blobs(repo_root, parent_sha, head_sha, use_cache=False)
             duration_ms = (time.perf_counter() - t0) * 1000.0
             latencies_ms.append(duration_ms)
             assert isinstance(diff, MerkleBlobDiff)

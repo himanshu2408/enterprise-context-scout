@@ -46,9 +46,16 @@ FORBIDDEN_TOOL_ARGUMENTS: Final[frozenset[str]] = frozenset(
         "allowed_scopes",
         "user_id",
         "role",
+        "roles",
         "scopes",
         "principal_scopes",
         "app.principal_scopes",
+        "tenant_id",
+        "app.tenant_id",
+        "app.current_tenant_id",
+        "team_id",
+        "max_session_paid_tokens",
+        "session_budget_tokens",
     }
 )
 
@@ -97,20 +104,51 @@ def scoped_db_session(
         yield conn
 
 
+_MAX_TOOL_ARG_DEPTH: Final[int] = 16
+
+
+def _scan_tool_value_for_injection(
+    value: object,
+    *,
+    depth: int,
+    forbidden_detected: list[str],
+) -> None:
+    if depth > _MAX_TOOL_ARG_DEPTH:
+        raise ValueError(
+            f"Tool arguments exceed maximum allowed nesting depth ({_MAX_TOOL_ARG_DEPTH})."
+        )
+    if isinstance(value, str):
+        if "\x00" in value:
+            raise ValueError("NUL byte detected in nested tool argument")
+        return
+    if isinstance(value, Mapping):
+        for k, v in value.items():
+            key_str = str(k)
+            if "\x00" in key_str:
+                raise ValueError(f"NUL byte detected in argument key '{key_str}'")
+            if key_str.lower() in FORBIDDEN_TOOL_ARGUMENTS:
+                forbidden_detected.append(key_str)
+            _scan_tool_value_for_injection(
+                v, depth=depth + 1, forbidden_detected=forbidden_detected
+            )
+        return
+    if isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            _scan_tool_value_for_injection(
+                item, depth=depth + 1, forbidden_detected=forbidden_detected
+            )
+
+
 def validate_tool_call_arguments(arguments: Mapping[str, object]) -> None:
-    """Ensures PrincipalContext and scopes are not passed as LLM tool arguments (SEC-04)."""
-    forbidden_detected = [k for k in arguments if k.lower() in FORBIDDEN_TOOL_ARGUMENTS]
+    """Ensures PrincipalContext, tenant/role keys, and NUL bytes are absent in tool arguments."""
+    forbidden_detected: list[str] = []
+    _scan_tool_value_for_injection(arguments, depth=0, forbidden_detected=forbidden_detected)
     if forbidden_detected:
         raise SecurityError(
-            f"Security parameter injection detected: {sorted(forbidden_detected)}. "
+            f"Security parameter injection detected: {sorted(set(forbidden_detected))}. "
             "PrincipalContext and authorization scopes cannot be supplied via tool parameters "
             "(SEC-04)."
         )
-    for k, v in arguments.items():
-        if "\x00" in k:
-            raise ValueError(f"NUL byte detected in argument key '{k}'")
-        if isinstance(v, str) and "\x00" in v:
-            raise ValueError(f"NUL byte detected in argument '{k}'")
 
 
 def require_scope(required_scope: str, principal: PrincipalContext | None = None) -> None:
@@ -182,8 +220,11 @@ class DomainAuthorizationGate:
         if tool_name in manifest.mcp_read_tools_allowed:
             return True
 
-        bare = tool_name.split(":")[-1]
-        return any(declared.split(":")[-1] == bare for declared in manifest.mcp_read_tools_allowed)
+        if ":" not in tool_name:
+            return any(
+                declared.split(":")[-1] == tool_name for declared in manifest.mcp_read_tools_allowed
+            )
+        return False
 
     def authorize_tool_call(
         self,

@@ -1,4 +1,4 @@
-.PHONY: install lint format-check typecheck test-fast test-full test-ui ci
+.PHONY: install lint format-check typecheck test-fast test-full test-ui demo-seed verify-backend ci
 
 PY_DIRS := src tests
 PER_FILE_TIMEOUT_S := 120
@@ -85,5 +85,11 @@ test-full:
 
 test-ui:
 	cd web-ui && npm run test && npm run build
+
+demo-seed:
+	SCOUT_EMBEDDING_DEVICE=auto uv run context-scout seed-demo
+
+verify-backend:
+	uv run context-scout verify-backend --postgres --fail-under-threshold
 
 ci: lint format-check typecheck test-fast test-ui

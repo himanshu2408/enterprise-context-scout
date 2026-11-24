@@ -40,10 +40,9 @@ from context_scout.db.repositories import (
     InMemoryRLSRepository,
 )
 from context_scout.schemas.contracts import (
-    FrictionVerdict,
+    DocumentScope,
     ImplementationContextPack,
     InsufficientContextDiagnostic,
-    MarketRegime,
     ModificationIntent,
     PrincipalContext,
     RoleType,
@@ -59,10 +58,10 @@ def principal() -> PrincipalContext:
         role=RoleType.ENGINEER,
         allowed_scopes=[
             "public_eng",
-            "repo:trading_strategies",
+            "repo:code_architecture_scout",
             "corpus:quant_papers",
-            "domain:quant_research_scout",
-            "domain:trading_code_scout",
+            "domain:enterprise_docs_scout",
+            "domain:code_architecture_scout",
         ],
     )
 
@@ -104,9 +103,9 @@ def test_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
         principal,
         CodeFileRecord(
             file_id=file1_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             repo_name="trading-execution",
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             git_commit_sha="commit_ofi_123",
             git_blob_sha="blob_ofi_456",
             language="python",
@@ -122,8 +121,8 @@ def test_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
         ASTSymbolRecord(
             symbol_id=sym1_id,
             file_id=file1_id,
-            domain_id="trading_code_scout",
-            qualified_name="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            domain_id="code_architecture_scout",
+            qualified_name="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
             symbol_kind="class",
             start_line=3,
             end_line=8,
@@ -146,9 +145,9 @@ def test_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
         principal,
         CodeFileRecord(
             file_id=file2_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             repo_name="trading-execution",
-            file_path="src/trading_strategies/models.py",
+            file_path="src/service_core/models.py",
             git_commit_sha="commit_models_123",
             git_blob_sha="blob_models_456",
             language="python",
@@ -164,8 +163,8 @@ def test_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
         ASTSymbolRecord(
             symbol_id=sym2_id,
             file_id=file2_id,
-            domain_id="trading_code_scout",
-            qualified_name="trading_strategies.models.OrderBookSnapshot",
+            domain_id="code_architecture_scout",
+            qualified_name="service_core.models.OrderBookSnapshot",
             symbol_kind="class",
             start_line=1,
             end_line=4,
@@ -182,10 +181,10 @@ def test_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
         principal,
         ASTEdgeRecord(
             edge_id=edge1_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             source_symbol_id=sym1_id,
             target_symbol_id=sym2_id,
-            target_qualified_name="trading_strategies.models.OrderBookSnapshot",
+            target_qualified_name="service_core.models.OrderBookSnapshot",
             edge_kind="USES_TYPE",
             allowed_scopes=["public_eng"],
         ),
@@ -201,11 +200,11 @@ def test_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
         principal,
         DocChunkRecord(
             chunk_id=chunk_id,
-            domain_id="quant_research_scout",
+            domain_id="enterprise_docs_scout",
             doc_id="doc_quant_ofi_01",
             doc_title="High-Frequency Order Flow Dynamics",
             source_uri="urn:quant:papers:ofi_dynamics.pdf",
-            market_scope=MarketRegime.GERMANY_XETRA_DAX,
+            market_scope=DocumentScope.REGIONAL_EU,
             published_date=None,
             authority_weight=1.0,
             section_heading="Section 3: Mean Reversion Dynamics",
@@ -242,15 +241,15 @@ def test_local_gemma_client_adapter_hot_swapping(domain_registry: DomainRegistry
     pool = domain_registry.adapter_pool
     client = LocalGemmaClient(adapter_pool=pool, offline_mode=True)
 
-    slot_code = client.set_active_domain("trading_code_scout")
+    slot_code = client.set_active_domain("code_architecture_scout")
     assert slot_code is not None
-    assert slot_code.domain_id == "trading_code_scout"
+    assert slot_code.domain_id == "code_architecture_scout"
     assert "gemma4_26b_code_scout" in slot_code.adapter_id
 
-    slot_quant = client.set_active_domain("quant_research_scout")
+    slot_quant = client.set_active_domain("enterprise_docs_scout")
     assert slot_quant is not None
-    assert slot_quant.domain_id == "quant_research_scout"
-    assert "gemma4_26b_quant_research" in slot_quant.adapter_id
+    assert slot_quant.domain_id == "enterprise_docs_scout"
+    assert "gemma4_26b_enterprise_docs" in slot_quant.adapter_id
 
 
 def test_local_gemma_client_deterministic_fallback(
@@ -260,7 +259,7 @@ def test_local_gemma_client_deterministic_fallback(
     # 1. Complete fails closed with ModelUnavailableError when offline/unreachable
     client = LocalGemmaClient(offline_mode=True)
     with pytest.raises(ModelUnavailableError) as exc_info:
-        client.complete("Refactor OrderFlowImbalanceAnalyzer", domain_id="trading_code_scout")
+        client.complete("Refactor OrderFlowImbalanceAnalyzer", domain_id="code_architecture_scout")
     assert exc_info.value.is_abstention is True
     assert exc_info.value.paid_tokens_spent == 0
     assert "model unavailable" in str(exc_info.value).lower()
@@ -268,13 +267,13 @@ def test_local_gemma_client_deterministic_fallback(
     # 2. AST-based code pointer generation functions with in-memory repository
     pointers = client.generate_code_pointers(
         user_prompt="Refactor OrderFlowImbalanceAnalyzer in order_flow_imbalance.py",
-        domain_id="trading_code_scout",
+        domain_id="code_architecture_scout",
         repo=test_repo,
         principal=principal,
     )
     assert [p.qualified_symbol for p in pointers] == [
-        "trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
-        "trading_strategies.models.OrderBookSnapshot",
+        "service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+        "service_core.models.OrderBookSnapshot",
     ]
     target = pointers[0]
     assert "OrderFlowImbalanceAnalyzer" in target.qualified_symbol
@@ -296,7 +295,7 @@ def test_local_gemma_client_bounce_back_remediation(
 
     remediated = client.generate_code_pointers(
         user_prompt="Refactor OrderFlowImbalanceAnalyzer",
-        domain_id="trading_code_scout",
+        domain_id="code_architecture_scout",
         repo=test_repo,
         principal=principal,
         bounce_back_feedback=feedback,
@@ -315,9 +314,9 @@ def test_local_gemma_client_quant_brief_generation(
 ) -> None:
     """Verifies LocalGemmaClient(offline_mode=True) fails closed (returns None)."""
     client = LocalGemmaClient(offline_mode=True)
-    brief = client.generate_quant_brief(
+    brief = client.generate_research_brief(
         user_prompt="Extract OFI strategy on German Xetra DAX",
-        domain_id="quant_research_scout",
+        domain_id="enterprise_docs_scout",
         repo=test_repo,
         principal=principal,
     )
@@ -371,12 +370,16 @@ def test_scout_workflow_full_4stage_pass(
     result = workflow.run(
         user_prompt="Refactor OrderFlowImbalanceAnalyzer in order_flow_imbalance.py",
         principal=principal,
-        domain_id="trading_code_scout",
+        domain_id="code_architecture_scout",
         normalized_rrf_score=0.92,
     )
 
     assert isinstance(result, ImplementationContextPack)
-    assert result.domain_id in ("trading_code_scout", "quant_research_scout")
+    assert result.domain_id in (
+        "federated_all",
+        "code_architecture_scout",
+        "enterprise_docs_scout",
+    )
     assert result.preflight_report.passed is True
     # Verify 1-hop AST expansion attached OrderBookSnapshot automatically
     assert len(result.code_slices) >= 2
@@ -399,7 +402,7 @@ def test_scout_workflow_stage3_local_bounce_back_remediation(
     result = workflow.run(
         user_prompt="Refactor OrderFlowImbalanceAnalyzer and verify against models.py",
         principal=principal,
-        domain_id="trading_code_scout",
+        domain_id="code_architecture_scout",
         normalized_rrf_score=0.90,
         max_bounce_backs=1,
     )
@@ -419,8 +422,8 @@ def test_scout_workflow_stage3_terminal_exit_on_low_rrf(
     result = workflow.run(
         user_prompt="Refactor OrderFlowImbalanceAnalyzer",
         principal=principal,
-        domain_id="trading_code_scout",
-        normalized_rrf_score=0.40,  # Below 0.55 threshold (BLK-01)
+        domain_id="code_architecture_scout",
+        normalized_rrf_score=0.40,  # Below 0.55 Normalized RRF floor
         max_bounce_backs=0,
     )
 
@@ -459,12 +462,14 @@ def test_federated_scout_coordinator_2stage_dag(
     )
 
     assert isinstance(result, ImplementationContextPack)
-    assert result.domain_id in ("trading_code_scout", "quant_research_scout")
-    assert result.quant_strategy_spec is not None
-    assert result.quant_strategy_spec.friction_verdict in (
-        FrictionVerdict.REALISTIC_FRICTION,
-        FrictionVerdict.UNVERIFIED_FRICTION_WARNING,
+    assert result.domain_id in (
+        "federated_all",
+        "code_architecture_scout",
+        "enterprise_docs_scout",
     )
+    assert result.domain_knowledge_brief is not None
+    assert result.domain_knowledge_brief.domain_id == "enterprise_docs_scout"
+    assert len(result.domain_knowledge_brief.verified_citations) >= 1
     assert any(
         "order flow" in c.verbatim_quote.lower() or "xetra" in c.verbatim_quote.lower()
         for c in result.supporting_doc_citations

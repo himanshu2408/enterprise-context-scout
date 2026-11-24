@@ -1,0 +1,22 @@
+{{- if .Values.vllm.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "context-scout.fullname" . }}-vllm
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vllm
+spec:
+  type: {{ .Values.vllm.service.type }}
+  {{- if .Values.vllm.service.headless }}
+  clusterIP: None
+  {{- end }}
+  ports:
+    - name: http
+      port: {{ int .Values.vllm.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "context-scout.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: vllm
+{{- end }}

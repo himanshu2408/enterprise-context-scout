@@ -57,10 +57,10 @@ describe("ScoutConsole", () => {
 
     // Dynamic sample pills interleaved from TEST_DOMAINS
     expect(
-      screen.getByTestId("quick-pick-trading_code_scout-0")
+      screen.getByTestId("quick-pick-code_architecture_scout-0")
     ).toBeInTheDocument();
     expect(
-      screen.getByTestId("quick-pick-quant_research_scout-0")
+      screen.getByTestId("quick-pick-enterprise_docs_scout-0")
     ).toBeInTheDocument();
   });
 
@@ -83,11 +83,11 @@ describe("ScoutConsole", () => {
     expect(restBtn).toHaveClass("mode-btn-active");
     expect(streamBtn).not.toHaveClass("mode-btn-active");
 
-    fireEvent.click(screen.getByTestId("quick-pick-quant_research_scout-0"));
+    fireEvent.click(screen.getByTestId("quick-pick-enterprise_docs_scout-0"));
     const textarea = screen.getByTestId(
       "scout-query-input"
     ) as HTMLTextAreaElement;
-    expect(textarea.value).toContain("Hawkes process");
+    expect(textarea.value).toContain("RLS policy ADR");
   });
 
   it("streams live SSE stages [1..4] with signed Bearer token, never sends normalized_rrf_score=0.85, and propagates stage_traces", async () => {
@@ -132,7 +132,7 @@ describe("ScoutConsole", () => {
             stage: 4,
             status: "retrying",
             bounce_count: 1,
-            feedback: "Missing 1-hop callee VolatilityForecastResult.",
+            feedback: "Missing 1-hop callee ConnectionPoolConfig.",
             remediation_action: "expand_ast_1hop",
             details: "Expanding AST slice locally.",
             paid_tokens_spent: 0,
@@ -169,7 +169,7 @@ describe("ScoutConsole", () => {
 
     render(
       <ScoutConsole
-        selectedDomain="trading_code_scout"
+        selectedDomain="code_architecture_scout"
         principal={TEST_ENGINEER_PRINCIPAL}
         domains={TEST_DOMAINS}
         pipelineStages={TEST_PIPELINE_STAGES}
@@ -185,13 +185,12 @@ describe("ScoutConsole", () => {
         TEST_CODE_PACK,
         TEST_TOKEN_SAVINGS,
         null,
-        null,
         TEST_STAGE_TRACES
       );
     });
 
     expect(screen.getByTestId("bounce-back-badge")).toHaveTextContent(
-      "Missing 1-hop callee VolatilityForecastResult."
+      "Missing 1-hop callee ConnectionPoolConfig."
     );
     expect(screen.getByTestId("check-stage-1")).toBeInTheDocument();
     expect(screen.getByTestId("check-stage-2")).toBeInTheDocument();
@@ -216,15 +215,15 @@ describe("ScoutConsole", () => {
     // Expand Stage 1..4 X-Ray accordions and verify rich telemetry
     fireEvent.click(screen.getByTestId("stage-toggle-1"));
     expect(screen.getByTestId("stage-xray-trace-1")).toHaveTextContent(
-      "AlmgrenChrissExecutionOptimizer"
+      "DeterministicSlicer"
     );
     fireEvent.click(screen.getByTestId("stage-toggle-2"));
     expect(
-      screen.getByTestId("domain-probe-trading_code_scout")
+      screen.getByTestId("domain-probe-code_architecture_scout")
     ).toHaveTextContent("cal=0.91");
     fireEvent.click(screen.getByTestId("stage-toggle-3"));
     expect(screen.getByTestId("stage-xray-trace-3")).toHaveTextContent(
-      "QLoRA (trading_code_scout_v1)"
+      "QLoRA (code_architecture_scout_v1)"
     );
     fireEvent.click(screen.getByTestId("stage-toggle-4"));
     expect(screen.getByTestId("stage4-final-decision")).toHaveTextContent(
@@ -245,7 +244,7 @@ describe("ScoutConsole", () => {
     const onClearPack = vi.fn();
     render(
       <ScoutConsole
-        selectedDomain="trading_code_scout"
+        selectedDomain="code_architecture_scout"
         principal={TEST_ENGINEER_PRINCIPAL}
         domains={TEST_DOMAINS}
         pipelineStages={TEST_PIPELINE_STAGES}
@@ -266,20 +265,19 @@ describe("ScoutConsole", () => {
     });
     expect(screen.getByTestId("fail-stage-1")).toBeInTheDocument();
     expect(onClearPack).toHaveBeenCalledTimes(1);
-    expect(onPackReady).toHaveBeenCalledWith(null, null, null, null);
+    expect(onPackReady).toHaveBeenCalledWith(null, null, null);
   });
 
   it("executes synchronous REST mode and displays $0 abstention diagnostic when insufficient", async () => {
     installMockApiFetch({
       queryResponse: {
         trace_id: TEST_DIAGNOSTIC.trace_id,
-        domain_id: "trading_code_scout",
+        domain_id: "code_architecture_scout",
         passed: false,
         context_pack: null,
         diagnostic: TEST_DIAGNOSTIC,
         citations: [],
         preflight_report: null,
-        quant_strategy_spec: null,
         token_savings: {
           local_tokens_explored: 5000,
           pack_tokens_sent: 0,
@@ -296,7 +294,7 @@ describe("ScoutConsole", () => {
     const onClearPack = vi.fn();
     render(
       <ScoutConsole
-        selectedDomain="trading_code_scout"
+        selectedDomain="code_architecture_scout"
         principal={TEST_ENGINEER_PRINCIPAL}
         domains={TEST_DOMAINS}
         pipelineStages={TEST_PIPELINE_STAGES}
@@ -324,7 +322,6 @@ describe("ScoutConsole", () => {
     expect(onPackReady).toHaveBeenCalledWith(
       null,
       expect.objectContaining({ pack_tokens_sent: 0 }),
-      null,
       TEST_DIAGNOSTIC,
       []
     );
@@ -360,7 +357,7 @@ describe("ScoutConsole", () => {
     const onPackReady = vi.fn();
     render(
       <ScoutConsole
-        selectedDomain="trading_code_scout"
+        selectedDomain="code_architecture_scout"
         principal={TEST_ENGINEER_PRINCIPAL}
         domains={TEST_DOMAINS}
         pipelineStages={TEST_PIPELINE_STAGES}
@@ -379,7 +376,6 @@ describe("ScoutConsole", () => {
     expect(onPackReady).toHaveBeenCalledWith(
       null,
       null,
-      null,
       TEST_DIAGNOSTIC,
       undefined
     );
@@ -394,7 +390,7 @@ describe("ScoutConsole", () => {
     const onPackReady = vi.fn();
     render(
       <ScoutConsole
-        selectedDomain="trading_code_scout"
+        selectedDomain="code_architecture_scout"
         principal={TEST_ENGINEER_PRINCIPAL}
         domains={TEST_DOMAINS}
         pipelineStages={TEST_PIPELINE_STAGES}
@@ -418,7 +414,7 @@ describe("ScoutConsole", () => {
 
     const { rerender } = render(
       <ScoutConsole
-        selectedDomain="trading_code_scout"
+        selectedDomain="code_architecture_scout"
         principal={TEST_ENGINEER_PRINCIPAL}
         domains={TEST_DOMAINS}
         pipelineStages={TEST_PIPELINE_STAGES}
@@ -434,7 +430,7 @@ describe("ScoutConsole", () => {
 
     rerender(
       <ScoutConsole
-        selectedDomain="quant_research_scout"
+        selectedDomain="enterprise_docs_scout"
         principal={TEST_ENGINEER_PRINCIPAL}
         domains={TEST_DOMAINS}
         pipelineStages={TEST_PIPELINE_STAGES}
@@ -604,7 +600,7 @@ describe("ScoutConsole", () => {
 
     render(
       <ScoutConsole
-        selectedDomain="trading_code_scout"
+        selectedDomain="code_architecture_scout"
         principal={TEST_ENGINEER_PRINCIPAL}
         domains={TEST_DOMAINS}
         pipelineStages={TEST_PIPELINE_STAGES}

@@ -1,0 +1,73 @@
+# Enterprise Context Scout — Model Pricing Table (USD per 1M tokens)
+# Local & self-hosted open-weights models are $0.00 API cost.
+
+schema_version: "1.0"
+currency: "USD"
+unit: "per_1m_tokens"
+
+models:
+  # Default local Gemma 4 stack ($0 API cost)
+  "google/gemma-4-26B-A4B-it":
+    input: 0.0
+    output: 0.0
+    self_hosted: true
+  "mlx-community/gemma-4-26b-a4b-it-4bit":
+    input: 0.0
+    output: 0.0
+    self_hosted: true
+  "google/gemma-4-E4B-it":
+    input: 0.0
+    output: 0.0
+    self_hosted: true
+  "mlx-community/gemma-4-e4b-it-4bit":
+    input: 0.0
+    output: 0.0
+    self_hosted: true
+  "google/gemma-4-12B-it":
+    input: 0.0
+    output: 0.0
+    self_hosted: true
+  "google/gemma-4-31B-it":
+    input: 0.0
+    output: 0.0
+    self_hosted: true
+  "google/embeddinggemma-2":
+    input: 0.0
+    output: 0.0
+    self_hosted: true
+  "google/shieldgemma-2-2b-it":
+    input: 0.0
+    output: 0.0
+    self_hosted: true
+
+  # BYO self-hosted open-weights families ($0 API cost)
+  "byo_open_weights_default":
+    input: 0.0
+    output: 0.0
+    self_hosted: true
+
+  # Optional cloud handoff models (requires allow_external_cloud_egress: true)
+  "gemini-3.8-flash":
+    input: 0.15
+    output: 0.60
+    self_hosted: false
+  "gemini-4-argon":
+    input: 1.25
+    output: 5.00
+    self_hosted: false
+  "claude-sonnet-5.5":
+    input: 3.00
+    output: 15.00
+    self_hosted: false
+  "claude-opus-5.5":
+    input: 15.00
+    output: 75.00
+    self_hosted: false
+  "gpt-5.6-sol":
+    input: 2.50
+    output: 10.00
+    self_hosted: false
+  "gpt-6-astra":
+    input: 10.00
+    output: 30.00
+    self_hosted: false

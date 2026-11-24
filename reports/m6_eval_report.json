@@ -1,83 +1,121 @@
 {
-  "timestamp": "2026-11-16T08:47:24.479968+00:00",
+  "timestamp": "2026-11-23T00:33:08.035914+00:00",
   "all_passed": true,
   "metrics": {
     "zero_touch_sufficiency_rate": {
       "metric_id": "zero_touch_sufficiency_rate",
       "display_name": "Zero-Touch Sufficiency Rate",
-      "measured_value": 100.0,
+      "measured_value": 85.71,
       "target_threshold": 85.0,
       "comparator": ">=",
       "passed": true,
       "details": {
-        "total_tasks": 11,
-        "successful_tasks": 11,
+        "total_tasks": 7,
+        "successful_tasks": 6,
         "task_results": [
           {
             "task_id": "CODE-01",
             "success": true,
             "missing_requests": 0,
-            "patch_applied": true
+            "patch_applied": true,
+            "target_files": [
+              "src/context_scout/agents/citation_gate.py",
+              "src/context_scout/agents/preflight_gate.py",
+              "src/context_scout/ast_engine/extractor.py",
+              "src/context_scout/config.py",
+              "src/context_scout/db/schema.py",
+              "src/context_scout/schemas/contracts.py"
+            ]
           },
           {
             "task_id": "CODE-02",
             "success": true,
             "missing_requests": 0,
-            "patch_applied": true
+            "patch_applied": true,
+            "target_files": [
+              "src/context_scout/ast_engine/dependency_expander.py",
+              "src/context_scout/ast_engine/deterministic_slicer.py",
+              "src/context_scout/cli.py",
+              "src/context_scout/schemas/contracts.py"
+            ]
           },
           {
             "task_id": "CODE-03",
             "success": true,
             "missing_requests": 0,
-            "patch_applied": true
+            "patch_applied": true,
+            "target_files": [
+              "src/context_scout/api/dependencies.py",
+              "src/context_scout/api/routes/health.py",
+              "src/context_scout/cli.py",
+              "src/context_scout/db/session.py",
+              "src/context_scout/mcp_servers/doc_corpus_mcp.py",
+              "src/context_scout/schemas/contracts.py",
+              "src/context_scout/security/rbac.py"
+            ]
           },
           {
             "task_id": "CODE-04",
             "success": true,
             "missing_requests": 0,
-            "patch_applied": true
+            "patch_applied": true,
+            "target_files": [
+              "src/context_scout/evals/harness.py",
+              "src/context_scout/security/guardrails.py",
+              "src/context_scout/security/mutation_gate.py",
+              "src/context_scout/security/pre_index_scrubber.py",
+              "tests/test_adversarial_security.py",
+              "tests/test_m4_security.py"
+            ]
           },
           {
             "task_id": "CODE-05",
             "success": true,
             "missing_requests": 0,
-            "patch_applied": true
-          },
-          {
-            "task_id": "CODE-06",
-            "success": true,
-            "missing_requests": 0,
-            "patch_applied": true
-          },
-          {
-            "task_id": "CODE-07",
-            "success": true,
-            "missing_requests": 0,
-            "patch_applied": true
-          },
-          {
-            "task_id": "CODE-08",
-            "success": true,
-            "missing_requests": 0,
-            "patch_applied": true
+            "patch_applied": true,
+            "target_files": [
+              "src/context_scout/agents/llm_backend.py",
+              "src/context_scout/api/dependencies.py",
+              "src/context_scout/api/routes/scout.py",
+              "src/context_scout/plugins/base.py",
+              "src/context_scout/schemas/contracts.py",
+              "src/context_scout/telemetry/otel.py",
+              "tests/test_gemini_executor.py"
+            ]
           },
           {
             "task_id": "FED-01",
-            "success": true,
+            "success": false,
             "missing_requests": 0,
-            "patch_applied": true
+            "patch_applied": false,
+            "target_files": [
+              "src/context_scout/agents/domain_registry.py",
+              "src/context_scout/api/routes/health.py",
+              "src/context_scout/cli.py",
+              "src/context_scout/db/session.py",
+              "src/context_scout/mcp_servers/doc_corpus_mcp.py",
+              "src/context_scout/queue/task_queue.py",
+              "src/context_scout/schemas/contracts.py",
+              "src/context_scout/serving/adapter_sync_sidecar.py",
+              "tests/fixtures/mock_generators.py",
+              "tests/test_l9_mixed_tenant_50_sse_mcp_concurrency.py",
+              "tests/test_m2_01_zoekt_overlays_ownership.py",
+              "tests/test_m2_03_side_effects_contracts_wiki.py"
+            ]
           },
           {
             "task_id": "FED-02",
             "success": true,
             "missing_requests": 0,
-            "patch_applied": true
-          },
-          {
-            "task_id": "FED-03",
-            "success": true,
-            "missing_requests": 0,
-            "patch_applied": true
+            "patch_applied": true,
+            "target_files": [
+              "src/context_scout/agents/citation_gate.py",
+              "src/context_scout/agents/claim_verifier.py",
+              "src/context_scout/agents/open_weights_vllm_executor.py",
+              "src/context_scout/agents/preflight_gate.py",
+              "src/context_scout/api/routes/scout.py",
+              "src/context_scout/schemas/contracts.py"
+            ]
           }
         ]
       }
@@ -120,27 +158,9 @@
             "file_recall": 100.0,
             "symbol_recall": 100.0,
             "combined_task_recall": 100.0
-          },
-          {
-            "task_id": "CODE-06",
-            "file_recall": 100.0,
-            "symbol_recall": 100.0,
-            "combined_task_recall": 100.0
-          },
-          {
-            "task_id": "CODE-07",
-            "file_recall": 100.0,
-            "symbol_recall": 100.0,
-            "combined_task_recall": 100.0
-          },
-          {
-            "task_id": "CODE-08",
-            "file_recall": 100.0,
-            "symbol_recall": 100.0,
-            "combined_task_recall": 100.0
           }
         ],
-        "tasks_count": 8
+        "tasks_count": 5
       }
     },
     "verbatim_citation_faithfulness": {
@@ -151,24 +171,24 @@
       "comparator": "==",
       "passed": true,
       "details": {
-        "total_code_slices": 75,
-        "valid_code_slices": 75,
-        "total_doc_citations": 144,
-        "valid_doc_citations": 144,
+        "total_code_slices": 96,
+        "valid_code_slices": 96,
+        "total_doc_citations": 64,
+        "valid_doc_citations": 64,
         "failures": []
       }
     },
     "frontier_token_savings_ratio": {
       "metric_id": "frontier_token_savings_ratio",
       "display_name": "Frontier Token Savings Ratio",
-      "measured_value": 87.37,
+      "measured_value": 92.24,
       "target_threshold": 80.0,
       "comparator": ">=",
       "passed": true,
       "details": {
-        "total_context_pack_tokens_sent": 67871,
-        "total_local_tokens_explored": 537543,
-        "tokens_saved": 469672
+        "total_context_pack_tokens_sent": 77365,
+        "total_local_tokens_explored": 996609,
+        "tokens_saved": 919244
       }
     },
     "rbac_zero_leakage_rate": {
@@ -185,35 +205,35 @@
           {
             "query_id": "RBAC-01",
             "target_table": "doc_chunks",
-            "target_scope": "quant_restricted",
+            "target_scope": "docs_restricted",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
             "query_id": "RBAC-02",
-            "target_table": "code_files",
-            "target_scope": "quant_restricted",
+            "target_table": "doc_chunks",
+            "target_scope": "docs_restricted",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
             "query_id": "RBAC-03",
-            "target_table": "ast_symbols",
-            "target_scope": "quant_restricted",
+            "target_table": "code_files",
+            "target_scope": "exec_restricted",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
             "query_id": "RBAC-04",
-            "target_table": "ast_edges",
-            "target_scope": "quant_restricted",
+            "target_table": "ast_symbols",
+            "target_scope": "docs_restricted",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
             "query_id": "RBAC-05",
-            "target_table": "doc_chunks",
-            "target_scope": "quant_restricted",
+            "target_table": "ast_edges",
+            "target_scope": "exec_restricted",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
@@ -233,57 +253,57 @@
           },
           {
             "query_id": "RBAC-08",
-            "target_table": "code_files",
-            "target_scope": "public_eng",
+            "target_table": "doc_chunks",
+            "target_scope": "docs_restricted",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
             "query_id": "RBAC-09",
             "target_table": "doc_chunks",
-            "target_scope": "public_quant",
+            "target_scope": "audit:compliance",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
             "query_id": "RBAC-10",
-            "target_table": "doc_chunks",
-            "target_scope": "public_quant",
+            "target_table": "ast_edges",
+            "target_scope": "public_eng",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
             "query_id": "RBAC-11",
-            "target_table": "doc_chunks",
-            "target_scope": "quant_restricted",
+            "target_table": "code_files",
+            "target_scope": "public_eng",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
             "query_id": "RBAC-12",
-            "target_table": "code_files",
-            "target_scope": "quant_restricted",
+            "target_table": "ast_symbols",
+            "target_scope": "public_eng",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
             "query_id": "RBAC-13",
-            "target_table": "ast_symbols",
-            "target_scope": "quant_restricted",
+            "target_table": "doc_chunks",
+            "target_scope": "docs_restricted",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
             "query_id": "RBAC-14",
-            "target_table": "ast_edges",
-            "target_scope": "quant_restricted",
+            "target_table": "doc_chunks",
+            "target_scope": "audit:compliance",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
             "query_id": "RBAC-15",
-            "target_table": "code_files",
-            "target_scope": "quant_restricted",
+            "target_table": "ast_edges",
+            "target_scope": "public_eng",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
@@ -296,43 +316,43 @@
           },
           {
             "query_id": "RBAC-17",
+            "target_table": "doc_chunks",
+            "target_scope": "docs_restricted",
+            "records_returned": 0,
+            "zero_leak_maintained": true
+          },
+          {
+            "query_id": "RBAC-18",
             "target_table": "ast_symbols",
             "target_scope": "public_eng",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
-            "query_id": "RBAC-18",
-            "target_table": "doc_chunks",
-            "target_scope": "quant_restricted",
-            "records_returned": 0,
-            "zero_leak_maintained": true
-          },
-          {
             "query_id": "RBAC-19",
-            "target_table": "doc_chunks",
-            "target_scope": "quant_restricted",
-            "records_returned": 0,
-            "zero_leak_maintained": true
-          },
-          {
-            "query_id": "RBAC-20",
             "target_table": "ast_edges",
             "target_scope": "public_eng",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
+            "query_id": "RBAC-20",
+            "target_table": "doc_chunks",
+            "target_scope": "docs_restricted",
+            "records_returned": 0,
+            "zero_leak_maintained": true
+          },
+          {
             "query_id": "RBAC-21",
-            "target_table": "code_files",
-            "target_scope": "quant_restricted",
+            "target_table": "doc_chunks",
+            "target_scope": "exec_restricted",
             "records_returned": 0,
             "zero_leak_maintained": true
           },
           {
             "query_id": "RBAC-22",
-            "target_table": "doc_chunks",
-            "target_scope": "quant_restricted",
+            "target_table": "code_files",
+            "target_scope": "exec_restricted",
             "records_returned": 0,
             "zero_leak_maintained": true
           }
@@ -489,7 +509,8 @@
             "guardrail_passed": false,
             "injection_signatures": [
               "reveal_system_prompt",
-              "tag_instruction_injection"
+              "tag_instruction_injection",
+              "xml_boundary_breakout"
             ],
             "redacted_tokens": [],
             "sanitized_differs": false,
@@ -533,7 +554,7 @@
           {
             "payload_id": "INJ-16",
             "category": "indirect_github_issue",
-            "guardrail_passed": true,
+            "guardrail_passed": false,
             "injection_signatures": [],
             "redacted_tokens": [],
             "sanitized_differs": true,
@@ -612,7 +633,7 @@
       }
     }
   },
-  "summary": "Milestone 6 Evaluation Pipeline: ALL GATES PASSED\nZero-Touch Sufficiency Rate: 100.0% (Target: 85.0%) -> PASS\nFile & Symbol Recall@5: 100.0% (Target: 90.0%) -> PASS\nVerbatim Citation Faithfulness: 100.0% (Target: 100.0%) -> PASS\nFrontier Token Savings Ratio: 87.37% (Target: 80.0%) -> PASS\nRBAC Zero-Leakage Rate: 100.0% (Target: 100.0%) -> PASS\nPrompt-Injection Block Rate: 100.0% (Target: 95.0%) -> PASS\nTotal duration: 17181ms, OpenTelemetry spans captured: 45",
-  "total_duration_ms": 17181,
-  "telemetry_spans_count": 45
+  "summary": "Milestone 6 Evaluation Pipeline: ALL GATES PASSED\nZero-Touch Sufficiency Rate: 85.71% (Target: 85.0%) -> PASS\nFile & Symbol Recall@5: 100.0% (Target: 90.0%) -> PASS\nVerbatim Citation Faithfulness: 100.0% (Target: 100.0%) -> PASS\nFrontier Token Savings Ratio: 92.24% (Target: 80.0%) -> PASS\nRBAC Zero-Leakage Rate: 100.0% (Target: 100.0%) -> PASS\nPrompt-Injection Block Rate: 100.0% (Target: 95.0%) -> PASS\nTotal duration: 27615ms, OpenTelemetry spans captured: 33",
+  "total_duration_ms": 27615,
+  "telemetry_spans_count": 33
 }

@@ -1,0 +1,346 @@
+name: enterprise-context-scout
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-context_scout}
+    volumes:
+      - scout_pgdata:/var/lib/postgresql/data
+      - ./sql/001_init_schema.sql:/docker-entrypoint-initdb.d/001_init_schema.sql:ro
+      - ./sql/002_production_enterprise_schema.sql:/docker-entrypoint-initdb.d/002_production_enterprise_schema.sql:ro
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=512MB"
+      - "-c"
+      - "work_mem=32MB"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-context_scout}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - scout_data_plane
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    command:
+      - "redis-server"
+      - "--save"
+      - ""
+      - "--appendonly"
+      - "no"
+      - "--requirepass"
+      - "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"${REDIS_PASSWORD}\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - scout_data_plane
+
+  zoekt:
+    image: sourcegraph/zoekt-webserver:latest
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    volumes:
+      - scout_zoekt_index:/data/index:ro
+    command:
+      - "-index"
+      - "/data/index"
+      - "-listen"
+      - ":6070"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:6070/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - scout_data_plane
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-18T16-25-55Z
+    profiles:
+      - minio
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
+    volumes:
+      - scout_minio_data:/data
+    command:
+      - "server"
+      - "/data"
+      - "--address"
+      - ":9000"
+      - "--console-address"
+      - ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - scout_data_plane
+
+  vllm:
+    image: vllm/vllm-openai:v0.8.5
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    environment:
+      HF_HOME: /tmp/hf_cache
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      VLLM_ALLOW_RUNTIME_LORA_UPDATING: "True"
+    volumes:
+      - scout_hf_models:/root/.cache/huggingface:ro
+      - scout_adapters:/var/run/scout/adapters:ro
+    command:
+      - "--model"
+      - "${SCOUT_PRIMARY_MODEL_ID:-google/gemma-4-26B-A4B-it}"
+      - "--port"
+      - "8000"
+      - "--enable-lora"
+      - "--max-lora-rank"
+      - "32"
+      - "--guided-decoding-backend"
+      - "xgrammar"
+      - "--enable-prefix-caching"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - scout_data_plane
+
+  db-migrate:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.worker
+    restart: "no"
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_ADMIN_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-context_scout}
+      SCOUT_DB_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD must be set}
+    command: ["db", "upgrade", "--from-postgres-env"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - scout_data_plane
+
+  adapter-sync-sidecar:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.adapter-sidecar
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    environment:
+      SCOUT_ENV: production
+      SCOUT_ENVIRONMENT: production
+      SCOUT_DB_APP_URL: ${SCOUT_DB_APP_URL:?SCOUT_DB_APP_URL must be set}
+      SCOUT_ALLOW_EXTERNAL_CLOUD_EGRESS: "false"
+      SCOUT_PRIMARY_MODEL_ID: ${SCOUT_PRIMARY_MODEL_ID:-google/gemma-4-26B-A4B-it}
+      SCOUT_BASE_MODEL_REVISION_SHA256: ${SCOUT_BASE_MODEL_REVISION_SHA256:-}
+      SCOUT_COSIGN_PUBLIC_KEYS_JSON: ${SCOUT_COSIGN_PUBLIC_KEYS_JSON:-}
+      SCOUT_COSIGN_PUBLIC_KEY_PEM: ${SCOUT_COSIGN_PUBLIC_KEY_PEM:-}
+      SCOUT_COSIGN_CA_CERTS_PEM: ${SCOUT_COSIGN_CA_CERTS_PEM:-}
+      SCOUT_ADAPTER_STAGING_DIR: /var/run/scout/adapters
+      SCOUT_VLLM_ENDPOINTS: http://vllm:8000
+      SCOUT_S3_ENDPOINT_URL: ${SCOUT_S3_ENDPOINT_URL:-}
+      SCOUT_S3_BUCKET: ${SCOUT_S3_BUCKET:-}
+      SCOUT_S3_ACCESS_KEY_ID: ${SCOUT_S3_ACCESS_KEY_ID:-}
+      SCOUT_S3_SECRET_ACCESS_KEY: ${SCOUT_S3_SECRET_ACCESS_KEY:-}
+      SCOUT_GCS_BUCKET: ${SCOUT_GCS_BUCKET:-}
+    volumes:
+      - scout_adapters:/var/run/scout/adapters:rw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+      vllm:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/bin/python3", "-c", "import context_scout.serving.adapter_sync_sidecar"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - scout_data_plane
+
+  context-scout-api:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.api
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    environment:
+      SCOUT_ENV: production
+      SCOUT_ENVIRONMENT: production
+      SCOUT_DB_APP_URL: ${SCOUT_DB_APP_URL:?SCOUT_DB_APP_URL must be set}
+      SCOUT_AUTH_HMAC_SECRET: ${SCOUT_AUTH_HMAC_SECRET:?SCOUT_AUTH_HMAC_SECRET must be set}
+      SCOUT_ALLOW_EXTERNAL_CLOUD_EGRESS: "false"
+      SCOUT_REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0
+      SCOUT_ZOEKT_ENDPOINT_URL: http://zoekt:6070
+      SCOUT_LOCAL_MLX_ENDPOINT: http://vllm:8000/v1
+      SCOUT_CORS_ORIGINS: ${SCOUT_CORS_ORIGINS:-http://localhost:8080}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v1/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - scout_data_plane
+      - scout_edge
+
+  context-scout-worker:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.worker
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    environment:
+      SCOUT_ENV: production
+      SCOUT_ENVIRONMENT: production
+      SCOUT_DB_APP_URL: ${SCOUT_DB_APP_URL:?SCOUT_DB_APP_URL must be set}
+      SCOUT_ALLOW_EXTERNAL_CLOUD_EGRESS: "false"
+      SCOUT_REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0
+      SCOUT_ZOEKT_ENDPOINT_URL: http://zoekt:6070
+      HF_HOME: /tmp/hf_cache
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    command: ["worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/bin/python3", "-c", "import context_scout.cli"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - scout_data_plane
+
+  context-scout-webui:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.webui
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    ports:
+      - "8080:8080"
+    depends_on:
+      context-scout-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - scout_edge
+
+volumes:
+  scout_pgdata:
+  scout_zoekt_index:
+  scout_minio_data:
+  scout_hf_models:
+  scout_adapters:
+
+networks:
+  scout_data_plane:
+    driver: bridge
+    internal: true
+  scout_edge:
+    driver: bridge

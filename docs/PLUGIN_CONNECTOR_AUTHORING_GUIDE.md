@@ -66,7 +66,7 @@ connector = PluginRegistry.get_connector(my_connector.source_id)
 For production connectors:
 
 - Accept an optional `client: httpx.Client | None = None` in `__init__` so tests can inject `httpx.MockTransport` without monkeypatching sockets.
-- Emit `DocChunkRecord` records with deterministic embeddings (`generate_deterministic_embedding`) and 50-token contextual headers so verbatim citation verification (`PreFlightValidator.check_citations`) stays lossless.
+- Emit `DocChunkRecord` records with real provider embeddings (via `EmbeddingProviderSPI`, e.g., `google/embeddinggemma-2`, `Qwen3-Embedding`, or `BAAI/bge-m3`) and 50-token contextual headers so verbatim citation verification (`PreFlightValidator.check_citations`) stays lossless. Never emit PRNG or `[0.0]*D` placeholder vectors.
 
 ---
 
@@ -75,11 +75,11 @@ For production connectors:
 Each domain lives under `<domains_dir>/<domain_id>/domain.yaml` and validates against `context_scout.schemas.contracts.DomainPackManifest`:
 
 - **`domain_id`**, **`display_name`**
-- **`base_model_id`**, **`contextualizer_model_id`**, **`embedding_model_id`** (validated by `validate_google_model_id` to enforce Google Gemma / EmbeddingGemma models)
+- **`base_model_id`**, **`contextualizer_model_id`**, **`embedding_model_id`** (validated by `ModelGovernancePolicy` against `config/model_registry.yaml` for `$0` Gemma 4 defaults and governed BYO open-weights models)
 - **`lora_adapter_id`**, **`lora_adapter_path`**
 - **`mcp_read_tools_allowed`**: Explicit read-only MCP tool allow-list enforced by `DomainRegistry.is_mcp_tool_allowed(domain_id, tool_name)`
-- **`authority_rules`**: `AuthorityRules(primary_truth_source="code" | "document", require_out_of_sample_check=..., require_transaction_cost_check=..., freshness_half_life_days=...)`
-- **`output_contract`**: `"ImplementationContextPack"`, `"QuantStrategyBrief"`, or `"DomainKnowledgeBrief"`
+- **`authority_rules`**: `AuthorityRules(primary_truth_source="code" | "document", freshness_half_life_days=...)`
+- **`output_contract`**: `"ImplementationContextPack"`, `"DomainKnowledgeBrief"`, or a `specialization.yaml` `custom_json_contract` schema
 
 Load directories with `DomainRegistry(domains_dir=path)` (`context_scout.agents.domain_registry.DomainRegistry`).
 

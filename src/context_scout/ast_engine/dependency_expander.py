@@ -258,6 +258,8 @@ class ASTDependencyExpander:
             "DISPATCHES",
             "SELECTS",
             "DOCUMENTS_COMPONENT",
+            "OWNED_BY_TEAM",
+            "PART_OF_SYSTEM",
         )
         for edge in visible_edges:
             if edge.source_symbol_id in family_ids and (

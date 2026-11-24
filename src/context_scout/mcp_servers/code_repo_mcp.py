@@ -6,11 +6,16 @@ ASTDependencyExpander, and DeterministicSlicer under out-of-band context (SEC-04
 
 from __future__ import annotations
 
+import difflib
 import logging
+from collections.abc import Sequence
+from pathlib import PurePosixPath
 from typing import Any, Final
 from uuid import UUID
 
+from mcp.server._otel import OpenTelemetryMiddleware
 from mcp.server.mcpserver import Context, MCPServer
+from starlette.types import ASGIApp
 
 from context_scout.agents.domain_registry import DomainRegistry
 from context_scout.ast_engine.dependency_expander import ASTDependencyExpander
@@ -20,12 +25,13 @@ from context_scout.ast_engine.deterministic_slicer import (
     OffByOneBoundsError,
 )
 from context_scout.config import ScoutSettings
-from context_scout.db.repositories import ASTSymbolRecord
+from context_scout.db.repositories import ASTSymbolRecord, PostgresRLSRepository
 from context_scout.db.session import RLSConnectionManager
 from context_scout.mcp_servers.common import (
     MAX_PAYLOAD_ITEMS,
     PostgresScoutGraphAdapter,
     bound_payload_dict,
+    create_stateless_mcp_http_app,
 )
 from context_scout.plugins.registry import PluginRegistry
 from context_scout.security.rbac import (
@@ -38,6 +44,24 @@ from context_scout.security.rbac import (
 logger = logging.getLogger(__name__)
 
 MAX_SLICE_LINES: Final[int] = 200
+
+
+def _validate_clean_file_path(raw_path: str) -> str:
+    """Validates and normalizes repository relative paths, blocking traversal and NUL bytes."""
+    if "\x00" in raw_path or "\\" in raw_path:
+        raise ValueError(f"Unsafe file_path rejected (ASI02): {raw_path!r}")
+    stripped = raw_path.strip().lstrip("/")
+    if not stripped:
+        raise ValueError("file_path must not be empty.")
+    parts = PurePosixPath(stripped).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"Path traversal segment rejected in file_path (ASI02): {raw_path!r}")
+    return "/".join(parts)
+
+
+def _escape_sql_like(value: str) -> str:
+    """Escapes SQL LIKE/ILIKE wildcards (\\, %, _) for ESCAPE '\\' queries."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _resolve_default_code_domain_id(
@@ -74,7 +98,7 @@ def create_code_repo_mcp_server(
         max_expansion_token_budget=1500,
     )
 
-    server = MCPServer("code_repo_mcp")
+    server = MCPServer("code_repo_mcp", middleware=[OpenTelemetryMiddleware()])
 
     # -------------------------------------------------------------------------
     # Canonical Tool 1: search_code_trigram
@@ -97,20 +121,24 @@ def create_code_repo_mcp_server(
         )
 
         clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
-        clean_pattern = f"%{file_pattern.strip()}%" if file_pattern else None
+        clean_pattern = (
+            f"%{_escape_sql_like(file_pattern.strip())}%"
+            if file_pattern and file_pattern.strip()
+            else None
+        )
 
         with scoped_db_session(conn_mgr, principal) as conn:
             sql = """
                 SELECT file_path, repo_name, raw_content,
-                       similarity(raw_content, %s) AS sim
+                       (similarity(raw_content, %s) * COALESCE(ranking_weight, 1.0)) AS sim
                 FROM code_files
                 WHERE domain_id = %s
-                  AND (%s::text IS NULL OR file_path ILIKE %s)
-                  AND (raw_content %% %s OR raw_content ILIKE %s)
+                  AND (%s::text IS NULL OR file_path ILIKE %s ESCAPE '\\')
+                  AND (raw_content %% %s OR raw_content ILIKE %s ESCAPE '\\')
                 ORDER BY sim DESC, file_path ASC
                 LIMIT %s;
             """
-            search_str = f"%{query}%"
+            search_str = f"%{_escape_sql_like(query)}%"
             rows = conn.execute(
                 sql,
                 (
@@ -183,7 +211,7 @@ def create_code_repo_mcp_server(
 
         clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
         clean_name = symbol_name.strip()
-        wildcard_name = f"%{clean_name}%"
+        wildcard_name = f"%{_escape_sql_like(clean_name)}%"
 
         with scoped_db_session(conn_mgr, principal) as conn:
             sql = """
@@ -195,7 +223,7 @@ def create_code_repo_mcp_server(
                 WHERE s.domain_id = %s
                   AND (
                       s.qualified_name = %s
-                      OR s.qualified_name ILIKE %s
+                      OR s.qualified_name ILIKE %s ESCAPE '\\'
                       OR s.qualified_name %% %s
                       OR s.fts_doc @@ plainto_tsquery('english', %s)
                   )
@@ -258,6 +286,7 @@ def create_code_repo_mcp_server(
         )
 
         clean_name = symbol_name.strip()
+        wildcard_name = f"%{_escape_sql_like(clean_name)}%"
 
         with scoped_db_session(conn_mgr, principal) as conn:
             row = conn.execute(
@@ -267,11 +296,11 @@ def create_code_repo_mcp_server(
                        allowed_scopes, embedding
                 FROM ast_symbols
                 WHERE domain_id = %s
-                  AND (qualified_name = %s OR qualified_name ILIKE %s)
+                  AND (qualified_name = %s OR qualified_name ILIKE %s ESCAPE '\\')
                 ORDER BY (qualified_name = %s) DESC
                 LIMIT 1;
                 """,
-                (default_domain_id, clean_name, f"%{clean_name}%", clean_name),
+                (default_domain_id, clean_name, wildcard_name, clean_name),
             ).fetchone()
 
             if not row:
@@ -397,7 +426,8 @@ def create_code_repo_mcp_server(
             default_domain_id, "code_repo_mcp:slice_file_lines", principal
         )
 
-        clean_path = file_path.strip().lstrip("/")
+        clean_path = _validate_clean_file_path(file_path)
+        like_pattern = f"%{_escape_sql_like(clean_path)}"
         requested_count = end_line - start_line + 1
         if requested_count > MAX_SLICE_LINES:
             raise ValueError(
@@ -412,10 +442,10 @@ def create_code_repo_mcp_server(
                 FROM code_files
                 WHERE domain_id = %s
                   AND repo_name = %s
-                  AND (file_path = %s OR file_path ILIKE %s)
+                  AND (file_path = %s OR file_path ILIKE %s ESCAPE '\\')
                 LIMIT 1;
                 """,
-                (default_domain_id, repo_name, clean_path, f"%{clean_path}"),
+                (default_domain_id, repo_name, clean_path, like_pattern),
             ).fetchone()
 
             if not row:
@@ -491,13 +521,13 @@ def create_code_repo_mcp_server(
                       OR to_tsvector('english', doc_title || ' ' || verbatim_content)
                          @@ plainto_tsquery('english', %s)
                       OR verbatim_content %% %s
-                      OR doc_title ILIKE %s
-                      OR verbatim_content ILIKE %s
+                      OR doc_title ILIKE %s ESCAPE '\\'
+                      OR verbatim_content ILIKE %s ESCAPE '\\'
                   )
-                ORDER BY (doc_title ILIKE %s) DESC, fts_score DESC, trgm_score DESC
+                ORDER BY (doc_title ILIKE %s ESCAPE '\\') DESC, fts_score DESC, trgm_score DESC
                 LIMIT %s;
             """
-            wildcard = f"%{query}%"
+            wildcard = f"%{_escape_sql_like(query)}%"
             rows = conn.execute(
                 sql,
                 (
@@ -598,6 +628,284 @@ def create_code_repo_mcp_server(
         return dumped
 
     # -------------------------------------------------------------------------
+    # Canonical Tool 7: list_repo_branches_and_mrs (M5-02 IDE Branch/MR Tools)
+    # -------------------------------------------------------------------------
+    @server.tool(
+        name="list_repo_branches_and_mrs",
+        description="List indexed repository branch and Merge/Pull Request snapshots under RLS.",
+    )
+    async def list_repo_branches_and_mrs(
+        repo_name: str | None = None,
+        state: str | None = None,
+        limit: int = 20,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Lists Copy-on-Write ref_snapshots visible to principal under Forced RLS."""
+        validate_tool_call_arguments({"repo_name": repo_name, "state": state, "limit": limit})
+        principal = get_current_principal()
+        auth_gate.authorize_tool_call(
+            default_domain_id, "code_repo_mcp:list_repo_branches_and_mrs", principal
+        )
+        clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
+        clean_repo = repo_name.strip() if repo_name and repo_name.strip() else None
+        clean_state = state.strip().lower() if state and state.strip() else None
+
+        pg_repo = PostgresRLSRepository()
+        with scoped_db_session(conn_mgr, principal) as conn:
+            snaps = pg_repo.list_ref_snapshots(
+                conn,
+                default_domain_id,
+                repo_name=clean_repo,
+                state=clean_state,
+            )
+
+        snapshots_out = [
+            {
+                "snapshot_id": str(s.snapshot_id),
+                "repo_name": s.repo_name,
+                "ref_name": s.ref_name,
+                "ref_kind": s.ref_kind,
+                "mr_iid": s.mr_iid,
+                "base_commit_sha": s.base_commit_sha,
+                "head_commit_sha": s.head_commit_sha,
+                "state": s.state,
+                "updated_at": s.updated_at.isoformat() if s.updated_at else "",
+            }
+            for s in snaps[:clamped_limit]
+        ]
+        return bound_payload_dict(
+            {
+                "domain_id": default_domain_id,
+                "repo_name": clean_repo,
+                "state": clean_state,
+                "count": len(snapshots_out),
+                "snapshots": snapshots_out,
+            }
+        )
+
+    # -------------------------------------------------------------------------
+    # Canonical Tool 8: inspect_mr_overlay_diff (M5-02 CoW MR Diff Tool)
+    # -------------------------------------------------------------------------
+    @server.tool(
+        name="inspect_mr_overlay_diff",
+        description="Inspect Copy-on-Write branch/MR overlay unified diffs & changed symbols.",
+    )
+    async def inspect_mr_overlay_diff(
+        repo_name: str,
+        mr_iid: int | None = None,
+        ref_name: str | None = None,
+        file_path: str | None = None,
+        context_lines: int = 3,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Computes bounded unified diffs across CoW overlay_file_deltas under Forced RLS."""
+        validate_tool_call_arguments(
+            {
+                "repo_name": repo_name,
+                "mr_iid": mr_iid,
+                "ref_name": ref_name,
+                "file_path": file_path,
+                "context_lines": context_lines,
+            }
+        )
+        principal = get_current_principal()
+        auth_gate.authorize_tool_call(
+            default_domain_id, "code_repo_mcp:inspect_mr_overlay_diff", principal
+        )
+        clean_repo = repo_name.strip()
+        clean_ref = ref_name.strip() if ref_name and ref_name.strip() else None
+        clean_fp = (
+            _validate_clean_file_path(file_path)
+            if file_path is not None and file_path.strip()
+            else None
+        )
+        if mr_iid is None and clean_ref is None:
+            raise ValueError("Specify either mr_iid or ref_name to inspect MR/branch overlay diff.")
+
+        ctx_n = max(0, min(int(context_lines), 10))
+        pg_repo = PostgresRLSRepository()
+        with scoped_db_session(conn_mgr, principal) as conn:
+            snap = pg_repo.get_ref_snapshot(
+                conn,
+                default_domain_id,
+                repo_name=clean_repo,
+                ref_name=clean_ref,
+                mr_iid=str(mr_iid) if mr_iid is not None else None,
+            )
+            if snap is None:
+                return bound_payload_dict(
+                    {
+                        "domain_id": default_domain_id,
+                        "repo_name": clean_repo,
+                        "mr_iid": mr_iid,
+                        "ref_name": clean_ref,
+                        "found": False,
+                        "count": 0,
+                        "deltas": [],
+                    }
+                )
+            raw_deltas = pg_repo.list_overlay_file_deltas(conn, default_domain_id, snap.snapshot_id)
+            if clean_fp is not None:
+                raw_deltas = [
+                    d
+                    for d in raw_deltas
+                    if d.file_path == clean_fp or d.previous_file_path == clean_fp
+                ]
+
+            deltas_out: list[dict[str, Any]] = []
+            for d in raw_deltas[:MAX_PAYLOAD_ITEMS]:
+                old_path = d.previous_file_path or d.file_path
+                base_text = ""
+                if d.change_type != "added":
+                    base_row = conn.execute(
+                        """
+                        SELECT raw_content
+                        FROM code_files
+                        WHERE domain_id = %s AND repo_name = %s AND file_path = %s
+                        LIMIT 1;
+                        """,
+                        (default_domain_id, clean_repo, old_path),
+                    ).fetchone()
+                    if base_row is not None:
+                        base_text = str(base_row[0] or "")
+                new_text = "" if d.change_type == "deleted" else (d.raw_content or "")
+                diff_text = "".join(
+                    difflib.unified_diff(
+                        base_text.splitlines(keepends=True),
+                        new_text.splitlines(keepends=True),
+                        fromfile=f"a/{old_path}",
+                        tofile=f"b/{d.file_path}",
+                        n=ctx_n,
+                    )
+                )
+                changed_symbols = [
+                    str(s.get("qualified_name"))
+                    for s in d.symbols_json
+                    if isinstance(s, dict) and s.get("qualified_name")
+                ]
+                deltas_out.append(
+                    {
+                        "delta_id": str(d.delta_id),
+                        "file_path": d.file_path,
+                        "previous_file_path": d.previous_file_path,
+                        "change_type": d.change_type,
+                        "language": d.language,
+                        "base_blob_sha": d.base_blob_sha,
+                        "overlay_blob_sha": d.overlay_blob_sha,
+                        "line_count": d.line_count,
+                        "changed_symbols": changed_symbols,
+                        "unified_diff": diff_text,
+                    }
+                )
+
+        return bound_payload_dict(
+            {
+                "found": True,
+                "domain_id": default_domain_id,
+                "snapshot_id": str(snap.snapshot_id),
+                "repo_name": snap.repo_name,
+                "ref_name": snap.ref_name,
+                "ref_kind": snap.ref_kind,
+                "mr_iid": snap.mr_iid,
+                "base_commit_sha": snap.base_commit_sha,
+                "head_commit_sha": snap.head_commit_sha,
+                "count": len(deltas_out),
+                "deltas": deltas_out,
+            }
+        )
+
+    # -------------------------------------------------------------------------
+    # Canonical Tool 9: slice_branch_or_mr_file (M5-02 CoW Overlay File Slicer)
+    # -------------------------------------------------------------------------
+    @server.tool(
+        name="slice_branch_or_mr_file",
+        description="Slice verbatim lines from a branch or MR CoW overlay snapshot under RLS.",
+    )
+    async def slice_branch_or_mr_file(
+        repo_name: str,
+        file_path: str,
+        start_line: int,
+        end_line: int,
+        mr_iid: int | None = None,
+        ref_name: str | None = None,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Resolves effective CoW overlay file and slices exact line range."""
+        validate_tool_call_arguments(
+            {
+                "repo_name": repo_name,
+                "file_path": file_path,
+                "start_line": start_line,
+                "end_line": end_line,
+                "mr_iid": mr_iid,
+                "ref_name": ref_name,
+            }
+        )
+        principal = get_current_principal()
+        auth_gate.authorize_tool_call(
+            default_domain_id, "code_repo_mcp:slice_branch_or_mr_file", principal
+        )
+        clean_repo = repo_name.strip()
+        clean_fp = _validate_clean_file_path(file_path)
+        clean_ref = ref_name.strip() if ref_name and ref_name.strip() else None
+        if mr_iid is None and clean_ref is None:
+            raise ValueError("Specify either mr_iid or ref_name to slice branch/MR file.")
+        requested_count = end_line - start_line + 1
+        if requested_count > MAX_SLICE_LINES:
+            raise ValueError(
+                f"Requested slice of {requested_count} lines exceeds "
+                f"maximum allowed {MAX_SLICE_LINES} lines"
+            )
+
+        pg_repo = PostgresRLSRepository()
+        with scoped_db_session(conn_mgr, principal) as conn:
+            snap = pg_repo.get_ref_snapshot(
+                conn,
+                default_domain_id,
+                repo_name=clean_repo,
+                ref_name=clean_ref,
+                mr_iid=str(mr_iid) if mr_iid is not None else None,
+            )
+            if snap is None:
+                raise FileNotFoundError(
+                    f"Branch/MR snapshot not found in repo '{clean_repo}' under active RLS scopes."
+                )
+            resolved = pg_repo.get_overlay_file(conn, default_domain_id, snap.snapshot_id, clean_fp)
+            if resolved is None:
+                raise FileNotFoundError(
+                    f"File '{clean_fp}' not found on snapshot '{snap.ref_name}' under RLS."
+                )
+
+        try:
+            slicer.validate_bounds(start_line, end_line, resolved.line_count)
+        except (InvalidLineBoundsError, OffByOneBoundsError) as err:
+            raise ValueError(f"Invalid line bounds [{start_line}, {end_line}]: {err}") from err
+
+        sliced_content = slicer.slice_lines(resolved.raw_content, start_line, end_line)
+        lines_data: list[dict[str, Any]] = [
+            {"line_number": ln, "content": txt}
+            for ln, txt in zip(
+                range(start_line, end_line + 1), sliced_content.splitlines(), strict=False
+            )
+        ]
+        return bound_payload_dict(
+            {
+                "file_path": resolved.file_path,
+                "repo_name": resolved.repo_name,
+                "ref_name": snap.ref_name,
+                "mr_iid": snap.mr_iid,
+                "source_layer": resolved.source_layer,
+                "git_commit_sha": resolved.git_commit_sha,
+                "git_blob_sha": resolved.git_blob_sha,
+                "start_line": start_line,
+                "end_line": end_line,
+                "total_file_lines": resolved.line_count,
+                "slice_line_count": len(lines_data),
+                "lines": lines_data,
+            }
+        )
+
+    # -------------------------------------------------------------------------
     # Legacy Tool Aliases (for backward compatibility)
     # -------------------------------------------------------------------------
     @server.tool(name="search_ast_symbols", description="Legacy alias for lookup_ast_symbol.")
@@ -661,4 +969,28 @@ def create_code_repo_mcp_server(
     return server
 
 
-__all__ = ["create_code_repo_mcp_server"]
+def create_code_repo_mcp_http_app(
+    settings: ScoutSettings | None = None,
+    connection_manager: RLSConnectionManager | None = None,
+    domain_id: str | None = None,
+    *,
+    streamable_http_path: str = "/mcp",
+    allowed_hosts: Sequence[str] | None = None,
+    require_auth: bool = True,
+) -> ASGIApp:
+    """Builds a stateless MCP 2026-07-28 Streamable HTTP ASGI app for code_repo_mcp."""
+    server = create_code_repo_mcp_server(
+        settings=settings,
+        connection_manager=connection_manager,
+        domain_id=domain_id,
+    )
+    return create_stateless_mcp_http_app(
+        server,
+        streamable_http_path=streamable_http_path,
+        json_response=True,
+        allowed_hosts=allowed_hosts,
+        require_auth=require_auth,
+    )
+
+
+__all__ = ["create_code_repo_mcp_http_app", "create_code_repo_mcp_server"]

@@ -190,6 +190,43 @@ _NON_DOMAIN_ACRONYMS: frozenset[str] = frozenset(
         "AT",
         "BY",
         "AS",
+        # SQL DDL/DML and standard protocol keywords are never domain acronyms to define.
+        "CREATE",
+        "INDEX",
+        "CONCURRENTLY",
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "ALTER",
+        "DROP",
+        "TABLE",
+        "FORCE",
+        "ENABLE",
+        "ROW",
+        "LEVEL",
+        "SECURITY",
+        "SET",
+        "LOCAL",
+        "WHERE",
+        "FROM",
+        "JOIN",
+        "MERGE",
+        "VACUUM",
+        "RETAIN",
+        "HOURS",
+        "BEGIN",
+        "COMMIT",
+        "ROLLBACK",
+        "SKIP",
+        "LOCKED",
+        "NULL",
+        "CHECK",
+        "VALID",
+        "KEY",
+        "PRIMARY",
+        "FOREIGN",
+        "UNIQUE",
     }
 )
 _DEFINITIONAL_LEAD_RE = re.compile(
@@ -220,6 +257,7 @@ def _strip_definitional_tail(text: str) -> str:
             if head:
                 return head
     return trimmed
+
 
 _FACET_STOPWORDS: frozenset[str] = frozenset(
     {
@@ -257,6 +295,19 @@ _FACET_STOPWORDS: frozenset[str] = frozenset(
         "during",
         "using",
         "running",
+        "without",
+        "taking",
+        "long",
+        "short",
+        "enforce",
+        "enforces",
+        "configure",
+        "configures",
+        "handle",
+        "handles",
+        "handling",
+        "make",
+        "makes",
         "compare",
         "contrast",
         "versus",
@@ -882,9 +933,7 @@ def anchor_llm_query_plan(
         for idx, f in enumerate(anchored_facets, start=1)
     ]
 
-    all_expansions = list(
-        dict.fromkeys([*merged_expansions, *demoted_expansions])
-    )[:5]
+    all_expansions = list(dict.fromkeys([*merged_expansions, *demoted_expansions]))[:5]
     safe_subject = (
         base_plan.core_subject
         if (
@@ -1028,13 +1077,14 @@ def evaluate_facet_grounding(
         """Verify multi-term concepts co-occur within a tight 16-word window or title/heading."""
         if len(active_terms) <= 1:
             return True
-        words = re.findall(r"[A-Za-z0-9]+", raw_text.lower())
+        words = re.findall(r"[A-Za-z0-9_]+", raw_text.lower())
         if not words:
             return False
         positions: dict[str, list[int]] = {t: [] for t in active_terms}
         for idx, w in enumerate(words):
+            w_norm = w.replace("_", " ")
             for t in active_terms:
-                if w == t or (len(t) >= 5 and t in w):
+                if w == t or (len(t) >= 5 and (t in w or t in w_norm)):
                     positions[t].append(idx)
         present = [t for t in active_terms if positions[t]]
         if len(present) < min(2, len(active_terms)):
@@ -1058,7 +1108,9 @@ def evaluate_facet_grounding(
         hits_here = {
             t
             for t in terms
-            if re.search(rf"\b{re.escape(t)}\b", low_norm) or (len(t) >= 5 and t in low_norm)
+            if re.search(rf"\b{re.escape(t)}\b", low_norm)
+            or re.search(rf"\b{re.escape(t)}\b", low)
+            or (len(t) >= 5 and (t in low_norm or t in low))
         }
         if not hits_here:
             return
@@ -1077,9 +1129,14 @@ def evaluate_facet_grounding(
         if len(hits_here) > best_hits:
             best_hits = len(hits_here)
 
-        is_cohesive = len(hits_here) == 1 or (
-            header_text and sum(1 for t in hits_here if t in header_low) >= min(2, len(hits_here))
-        ) or _has_proximity_cohesion(text, list(hits_here))
+        is_cohesive = (
+            len(hits_here) == 1
+            or (
+                header_text
+                and sum(1 for t in hits_here if t in header_low) >= min(2, len(hits_here))
+            )
+            or _has_proximity_cohesion(text, list(hits_here))
+        )
         if is_cohesive and len(hits_here) > best_cohesive_hits:
             best_cohesive_hits = len(hits_here)
 
@@ -1116,11 +1173,7 @@ def evaluate_facet_grounding(
             qsym = str(getattr(slc, "qualified_symbol", "") or "")
             fpath = str(getattr(slc, "file_path", "") or "")
             label = str(fpath or qsym)
-            txt = (
-                f"{fpath}\n"
-                f"{qsym}\n"
-                f"{getattr(slc, 'verbatim_code_with_lines', '')}"
-            )
+            txt = f"{fpath}\n{qsym}\n{getattr(slc, 'verbatim_code_with_lines', '')}"
             _scan_text(txt, label, header_text=f"{fpath} {qsym}")
 
     total_terms = len(terms)
@@ -1178,17 +1231,11 @@ def evaluate_facet_grounding(
         acr.lower()
         for acr in uppercase_acronyms
         if acr.lower() not in matched_acronyms_strict
-        and (
-            acr.lower() in matched_terms_overall
-            or total_terms <= 3
-            or coverage_ratio < 0.75
-        )
+        and (acr.lower() in matched_terms_overall or total_terms <= 3 or coverage_ratio < 0.75)
     ]
 
     missing_identifiers = [
-        ident
-        for ident in explicit_identifiers
-        if ident not in matched_terms_overall
+        ident for ident in explicit_identifiers if ident not in matched_terms_overall
     ]
 
     if missing_acronyms or missing_identifiers:

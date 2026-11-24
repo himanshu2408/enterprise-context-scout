@@ -1,0 +1,51 @@
+# Git & VCS
+.git
+.gitignore
+.gitattributes
+
+# Python caches & virtual environments
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+*.egg-info
+dist
+build
+
+# Node & frontend build artifacts
+node_modules
+web-ui/node_modules
+web-ui/dist
+
+# Secrets, certificates, and local environment files
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+
+# Data, reports, and domain-specific examples
+reports
+.postgres_data
+examples/quant_dogfood
+domains/*/adapters
+domains/*/tuning
+
+# Tests, docs, and agent metadata (keep README.md for hatchling build)
+tests
+docs
+*.md
+!README.md
+.agents
+.github
+**/.DS_Store
+*.log
+tmp

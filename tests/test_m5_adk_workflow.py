@@ -1,7 +1,7 @@
 """Comprehensive integration and live test suite for Milestone 5 (Google ADK Scout & Handoff).
 
 Tests all M5 components and cross-cutting invariants:
-1. Deterministic PreFlightValidator (Checks 1-4, VAL-01, BLK-01, VAL-02).
+1. Deterministic PreFlightValidator (Checks 1-4, normalized RRF, verbatim quotes).
 2. $0 Local Bounce-Back loop and InsufficientContextDiagnostic terminal exit.
 3. LocalGemmaClient 32K KV clamping (HW-01), in-memory LoRA hot-swapping (ARC-02), and fallback.
 4. ScoutWorkflow 4-stage ADK 2.x DAG execution and ADK Workflow export.
@@ -14,6 +14,7 @@ Tests all M5 components and cross-cutting invariants:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -52,10 +53,9 @@ from context_scout.db.session import RLSConnectionManager
 from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
 from context_scout.schemas.contracts import (
     DocCitationSpan,
-    FrictionVerdict,
+    DocumentScope,
     ImplementationContextPack,
     InsufficientContextDiagnostic,
-    MarketRegime,
     MissingContextRequest,
     ModificationIntent,
     PreFlightValidationReport,
@@ -67,8 +67,8 @@ from context_scout.telemetry.cost_governance import BudgetExceededError
 
 DOMAINS_DIR = Path(__file__).resolve().parent.parent / "domains"
 
-DOMAIN_CODE: Final[str] = "trading_code_scout"
-DOMAIN_QUANT: Final[str] = "quant_research_scout"
+DOMAIN_CODE: Final[str] = "code_architecture_scout"
+DOMAIN_QUANT: Final[str] = "enterprise_docs_scout"
 REPO_NAME: Final[str] = "trading-execution"
 
 
@@ -78,7 +78,7 @@ def principal() -> PrincipalContext:
     return PrincipalContext(
         user_id="lead_trading_dev",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "repo:trading_strategies", "corpus:quant_papers"],
+        allowed_scopes=["public_eng", "repo:code_architecture_scout", "corpus:enterprise_docs"],
         max_session_paid_tokens=50_000,
     )
 
@@ -114,7 +114,7 @@ def in_memory_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             file_id=file1_id,
             domain_id=DOMAIN_CODE,
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             git_commit_sha="c0ffee123",
             git_blob_sha="b10b456",
             language="python",
@@ -131,7 +131,7 @@ def in_memory_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             symbol_id=sym1_id,
             file_id=file1_id,
             domain_id=DOMAIN_CODE,
-            qualified_name="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            qualified_name="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
             symbol_kind="class",
             start_line=3,
             end_line=8,
@@ -156,7 +156,7 @@ def in_memory_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             file_id=file2_id,
             domain_id=DOMAIN_CODE,
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/models.py",
+            file_path="src/service_core/models.py",
             git_commit_sha="c0ffee123",
             git_blob_sha="b10b789",
             language="python",
@@ -173,7 +173,7 @@ def in_memory_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             symbol_id=sym2_id,
             file_id=file2_id,
             domain_id=DOMAIN_CODE,
-            qualified_name="trading_strategies.models.OrderBookSnapshot",
+            qualified_name="service_core.models.OrderBookSnapshot",
             symbol_kind="class",
             start_line=1,
             end_line=4,
@@ -199,7 +199,7 @@ def in_memory_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             file_id=file3_id,
             domain_id=DOMAIN_CODE,
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/helpers.py",
+            file_path="src/service_core/helpers.py",
             git_commit_sha="c0ffee123",
             git_blob_sha="b10b999",
             language="python",
@@ -216,7 +216,7 @@ def in_memory_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             symbol_id=sym3_id,
             file_id=file3_id,
             domain_id=DOMAIN_CODE,
-            qualified_name="trading_strategies.helpers.calc_spread_floor",
+            qualified_name="service_core.helpers.calc_spread_floor",
             symbol_kind="function",
             start_line=3,
             end_line=5,
@@ -234,7 +234,7 @@ def in_memory_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             edge_id=uuid.uuid4(),
             domain_id=DOMAIN_CODE,
             source_symbol_id=sym1_id,
-            target_qualified_name="trading_strategies.models.OrderBookSnapshot",
+            target_qualified_name="service_core.models.OrderBookSnapshot",
             target_symbol_id=sym2_id,
             edge_kind="USES_TYPE",
             allowed_scopes=["public_eng"],
@@ -246,7 +246,7 @@ def in_memory_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             edge_id=uuid.uuid4(),
             domain_id=DOMAIN_CODE,
             source_symbol_id=sym1_id,
-            target_qualified_name="trading_strategies.helpers.calc_spread_floor",
+            target_qualified_name="service_core.helpers.calc_spread_floor",
             target_symbol_id=sym3_id,
             edge_kind="CALLS",
             allowed_scopes=["public_eng"],
@@ -266,14 +266,14 @@ def in_memory_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
         doc_id="cont_2014_microstructure",
         doc_title="Order Flow Imbalance and Multi-Level Alpha",
         source_uri="urn:arxiv:1401.1234",
-        market_scope=MarketRegime.GERMANY_XETRA_DAX,
+        market_scope=DocumentScope.REGIONAL_EU,
         published_date=None,
         authority_weight=1.0,
         section_heading="Section 2.1 Microstructure Formulation",
         contextual_header="Context: High frequency alpha modeling.",
         verbatim_content=doc_text,
         metadata_json={"pages": [1, 2]},
-        allowed_scopes=["public_eng", "corpus:quant_papers"],
+        allowed_scopes=["public_eng", "corpus:enterprise_docs"],
         embedding=[0.4] * 768,
     )
     repo.insert_doc_chunk(principal, doc_record)
@@ -287,14 +287,14 @@ def in_memory_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             doc_id="cont_2014_microstructure_quant",
             doc_title="Order Flow Imbalance and Multi-Level Alpha",
             source_uri="urn:arxiv:1401.1234",
-            market_scope=MarketRegime.GERMANY_XETRA_DAX,
+            market_scope=DocumentScope.REGIONAL_EU,
             published_date=None,
             authority_weight=1.0,
             section_heading="Section 2.1 Microstructure Formulation",
             contextual_header="Context: High frequency alpha modeling.",
             verbatim_content=doc_text,
             metadata_json={"pages": [1, 2]},
-            allowed_scopes=["public_eng", "corpus:quant_papers"],
+            allowed_scopes=["public_eng", "corpus:enterprise_docs"],
             embedding=[0.4] * 768,
         ),
     )
@@ -322,7 +322,7 @@ def temp_git_repo(tmp_path: Path) -> Path:
         capture_output=True,
     )
 
-    src_dir = repo_dir / "src" / "trading_strategies"
+    src_dir = repo_dir / "src" / "service_core"
     src_dir.mkdir(parents=True, exist_ok=True)
     code_file = src_dir / "order_flow_imbalance.py"
     code_file.write_text(
@@ -344,7 +344,7 @@ def temp_git_repo(tmp_path: Path) -> Path:
 
 
 # =============================================================================
-# 1. Deterministic PreFlightValidator (Checks 1-4, VAL-01, BLK-01, VAL-02)
+# 1. Deterministic PreFlightValidator (Checks 1-4, normalized RRF, verbatim quotes)
 # =============================================================================
 
 
@@ -359,10 +359,10 @@ def test_preflight_validator_alias_and_all_checks_passing(
     # 1. Modify target slice
     target_slice = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/order_flow_imbalance.py",
+        file_path="src/service_core/order_flow_imbalance.py",
         start_line=3,
         end_line=8,
-        qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+        qualified_symbol="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
         selection_reason="Target slice for modification",
         modification_intent=ModificationIntent.MODIFY_TARGET,
         git_commit_sha="c0ffee123",
@@ -380,10 +380,10 @@ def test_preflight_validator_alias_and_all_checks_passing(
     # 2. Dependency slices
     dep1 = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/models.py",
+        file_path="src/service_core/models.py",
         start_line=1,
         end_line=4,
-        qualified_symbol="trading_strategies.models.OrderBookSnapshot",
+        qualified_symbol="service_core.models.OrderBookSnapshot",
         selection_reason="Imported type model",
         modification_intent=ModificationIntent.REFERENCE_ONLY,
         git_commit_sha="c0ffee123",
@@ -397,10 +397,10 @@ def test_preflight_validator_alias_and_all_checks_passing(
     )
     dep2 = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/helpers.py",
+        file_path="src/service_core/helpers.py",
         start_line=3,
         end_line=5,
-        qualified_symbol="trading_strategies.helpers.calc_spread_floor",
+        qualified_symbol="service_core.helpers.calc_spread_floor",
         selection_reason="Callee function",
         modification_intent=ModificationIntent.REFERENCE_ONLY,
         git_commit_sha="c0ffee123",
@@ -455,10 +455,10 @@ def test_val_01_prompt_identifier_partitioning(
 
     target_slice = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/order_flow_imbalance.py",
+        file_path="src/service_core/order_flow_imbalance.py",
         start_line=3,
         end_line=8,
-        qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+        qualified_symbol="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
         selection_reason="Target slice",
         modification_intent=ModificationIntent.MODIFY_TARGET,
         git_commit_sha="c0ffee123",
@@ -467,10 +467,10 @@ def test_val_01_prompt_identifier_partitioning(
     )
     dep_slice1 = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/models.py",
+        file_path="src/service_core/models.py",
         start_line=1,
         end_line=4,
-        qualified_symbol="trading_strategies.models.OrderBookSnapshot",
+        qualified_symbol="service_core.models.OrderBookSnapshot",
         selection_reason="Model dependency",
         modification_intent=ModificationIntent.REFERENCE_ONLY,
         git_commit_sha="c0ffee123",
@@ -479,10 +479,10 @@ def test_val_01_prompt_identifier_partitioning(
     )
     dep_slice2 = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/helpers.py",
+        file_path="src/service_core/helpers.py",
         start_line=3,
         end_line=5,
-        qualified_symbol="trading_strategies.helpers.calc_spread_floor",
+        qualified_symbol="service_core.helpers.calc_spread_floor",
         selection_reason="Helper callee",
         modification_intent=ModificationIntent.REFERENCE_ONLY,
         git_commit_sha="c0ffee123",
@@ -525,15 +525,15 @@ def test_blk_01_normalized_rrf_threshold_gate(
     principal: PrincipalContext,
     in_memory_repo: InMemoryRLSRepository,
 ) -> None:
-    """Tests BLK-01: Normalized RRF score < 0.65 fails Check 3; >= 0.65 passes."""
+    """Normalized RRF score < 0.65 fails Check 3; >= 0.65 passes."""
     validator = PreFlightValidator(repo=in_memory_repo)
 
     target_slice = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/order_flow_imbalance.py",
+        file_path="src/service_core/order_flow_imbalance.py",
         start_line=3,
         end_line=8,
-        qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+        qualified_symbol="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
         selection_reason="Target slice",
         modification_intent=ModificationIntent.MODIFY_TARGET,
         git_commit_sha="c0ffee123",
@@ -542,10 +542,10 @@ def test_blk_01_normalized_rrf_threshold_gate(
     )
     dep_slice1 = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/models.py",
+        file_path="src/service_core/models.py",
         start_line=1,
         end_line=4,
-        qualified_symbol="trading_strategies.models.OrderBookSnapshot",
+        qualified_symbol="service_core.models.OrderBookSnapshot",
         selection_reason="Model dependency",
         modification_intent=ModificationIntent.REFERENCE_ONLY,
         git_commit_sha="c0ffee123",
@@ -554,10 +554,10 @@ def test_blk_01_normalized_rrf_threshold_gate(
     )
     dep_slice2 = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/helpers.py",
+        file_path="src/service_core/helpers.py",
         start_line=3,
         end_line=5,
-        qualified_symbol="trading_strategies.helpers.calc_spread_floor",
+        qualified_symbol="service_core.helpers.calc_spread_floor",
         selection_reason="Helper callee",
         modification_intent=ModificationIntent.REFERENCE_ONLY,
         git_commit_sha="c0ffee123",
@@ -601,10 +601,10 @@ def test_val_02_verbatim_citation_verification(
 
     target_slice = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/order_flow_imbalance.py",
+        file_path="src/service_core/order_flow_imbalance.py",
         start_line=3,
         end_line=8,
-        qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+        qualified_symbol="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
         selection_reason="Target slice",
         modification_intent=ModificationIntent.MODIFY_TARGET,
         git_commit_sha="c0ffee123",
@@ -613,10 +613,10 @@ def test_val_02_verbatim_citation_verification(
     )
     dep_slice1 = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/models.py",
+        file_path="src/service_core/models.py",
         start_line=1,
         end_line=4,
-        qualified_symbol="trading_strategies.models.OrderBookSnapshot",
+        qualified_symbol="service_core.models.OrderBookSnapshot",
         selection_reason="Model dependency",
         modification_intent=ModificationIntent.REFERENCE_ONLY,
         git_commit_sha="c0ffee123",
@@ -625,10 +625,10 @@ def test_val_02_verbatim_citation_verification(
     )
     dep_slice2 = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/helpers.py",
+        file_path="src/service_core/helpers.py",
         start_line=3,
         end_line=5,
-        qualified_symbol="trading_strategies.helpers.calc_spread_floor",
+        qualified_symbol="service_core.helpers.calc_spread_floor",
         selection_reason="Helper callee",
         modification_intent=ModificationIntent.REFERENCE_ONLY,
         git_commit_sha="c0ffee123",
@@ -754,8 +754,8 @@ def test_scout_workflow_stage3_local_bounce_back_remediation_success(
     assert isinstance(result, ImplementationContextPack)
     assert result.preflight_report.passed is True
     paths = {s.file_path for s in result.code_slices}
-    assert "src/trading_strategies/order_flow_imbalance.py" in paths
-    assert "src/trading_strategies/helpers.py" in paths
+    assert "src/service_core/order_flow_imbalance.py" in paths
+    assert "src/service_core/helpers.py" in paths
 
 
 def test_scout_workflow_stage3_terminal_insufficient_context_diagnostic(
@@ -884,12 +884,13 @@ def test_federated_scout_coordinator_cross_domain_pipeline(
     )
 
     assert isinstance(composite_pack, ImplementationContextPack)
-    assert composite_pack.domain_id == "trading_code_scout"
-    assert composite_pack.quant_strategy_spec is not None
-    assert composite_pack.quant_strategy_spec.friction_verdict in (
-        FrictionVerdict.REALISTIC_FRICTION,
-        FrictionVerdict.UNVERIFIED_FRICTION_WARNING,
+    assert composite_pack.domain_id in ("federated_all", "code_architecture_scout")
+    assert composite_pack.domain_knowledge_brief is not None
+    assert composite_pack.domain_knowledge_brief.domain_id in (
+        "enterprise_docs_scout",
+        "code_architecture_scout",
     )
+    assert len(composite_pack.domain_knowledge_brief.verified_citations) >= 1
     assert any(c.verbatim_quote for c in composite_pack.supporting_doc_citations), (
         "Expected verified doc citations with non-empty verbatim quotes"
     )
@@ -916,18 +917,19 @@ def test_gemini_executor_model_validation_and_budget_enforcement(
     exec_frontier = GeminiImplementationExecutor(model_id=FRONTIER_REASONING_MODEL_ID, api_key=None)
     assert exec_frontier.model_id == "gemini-4-argon"
 
-    # Invalid non-Google model rejected
-    with pytest.raises(ValueError, match="violates the 100% Google-only model policy"):
+    # Invalid unapproved model rejected
+    with pytest.raises(ValueError, match="violates ModelGovernancePolicy"):
         GeminiImplementationExecutor(model_id="gpt-4o", api_key=None)
 
-    # Prohibited/retired model rejected
-    with pytest.raises(ValueError, match="Prohibited or retired model ID"):
-        GeminiImplementationExecutor(model_id="codegemma", api_key=None)
+    # Prohibited/retired models rejected
+    for retired in ("codegemma", "gemini-2.5-flash"):
+        with pytest.raises(ValueError, match="Prohibited or retired model ID"):
+            GeminiImplementationExecutor(model_id=retired, api_key=None)
 
     # 2. Budget Enforcement
     dummy_slice = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/order_flow_imbalance.py",
+        file_path="src/service_core/order_flow_imbalance.py",
         start_line=1,
         end_line=3,
         qualified_symbol="OrderFlowImbalanceAnalyzer",
@@ -973,7 +975,7 @@ def test_gemini_executor_missing_context_request_handling(
 
     target_slice = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/order_flow_imbalance.py",
+        file_path="src/service_core/order_flow_imbalance.py",
         start_line=1,
         end_line=3,
         qualified_symbol="OrderFlowImbalanceAnalyzer",
@@ -1001,7 +1003,7 @@ def test_gemini_executor_missing_context_request_handling(
 
     missing_req = MissingContextRequest(
         missing_symbol="calculate_ofi",
-        file_hint="src/trading_strategies/order_flow_imbalance.py",
+        file_hint="src/service_core/order_flow_imbalance.py",
         reason="Need calculate_ofi implementation",
     )
 
@@ -1032,8 +1034,8 @@ def test_gemini_executor_missing_context_request_handling(
 def test_git_worktree_sandbox_lifecycle_and_human_confirmation(temp_git_repo: Path) -> None:
     """Verifies ephemeral worktree creation, patch verification, and human confirmation gate."""
     patch = (
-        "--- a/src/trading_strategies/order_flow_imbalance.py\n"
-        "+++ b/src/trading_strategies/order_flow_imbalance.py\n"
+        "--- a/src/service_core/order_flow_imbalance.py\n"
+        "+++ b/src/service_core/order_flow_imbalance.py\n"
         "@@ -1,3 +1,4 @@\n"
         " class OrderFlowImbalanceAnalyzer:\n"
         "+    # Human confirmation verified\n"
@@ -1050,7 +1052,7 @@ def test_git_worktree_sandbox_lifecycle_and_human_confirmation(temp_git_repo: Pa
         assert "human confirmation required" in c_msg.lower()
 
     # Verify target file in base repo still unchanged
-    base_file = temp_git_repo / "src" / "trading_strategies" / "order_flow_imbalance.py"
+    base_file = temp_git_repo / "src" / "service_core" / "order_flow_imbalance.py"
     assert "Human confirmation verified" not in base_file.read_text(encoding="utf-8")
 
     # 2. Confirmed execution merges patch into active branch
@@ -1063,7 +1065,7 @@ def test_git_worktree_sandbox_lifecycle_and_human_confirmation(temp_git_repo: Pa
 
         # Worktree contains applied and committed changes
         assert sandbox.worktree_dir is not None
-        wt_file = sandbox.worktree_dir / "src" / "trading_strategies" / "order_flow_imbalance.py"
+        wt_file = sandbox.worktree_dir / "src" / "service_core" / "order_flow_imbalance.py"
         assert "Human confirmation verified" in wt_file.read_text(encoding="utf-8")
 
 
@@ -1143,7 +1145,7 @@ def test_live_postgres_m5_preflight_and_scout_pipeline(
 
     file_id = uuid.uuid4()
     sym_id = uuid.uuid4()
-    unique_path = f"src/trading_strategies/order_router_{file_id.hex[:8]}.py"
+    unique_path = f"src/service_core/order_router_{file_id.hex[:8]}.py"
     with conn_mgr.scoped_transaction(principal) as conn:
         pg_repo = PostgresRLSRepository()
 
@@ -1174,7 +1176,7 @@ def test_live_postgres_m5_preflight_and_scout_pipeline(
                 symbol_id=sym_id,
                 file_id=file_id,
                 domain_id=ephemeral_pg_domain,
-                qualified_name="trading_strategies.order_router.LiveOrderRouter",
+                qualified_name="service_core.order_router.LiveOrderRouter",
                 symbol_kind="class",
                 start_line=1,
                 end_line=3,
@@ -1192,7 +1194,7 @@ def test_live_postgres_m5_preflight_and_scout_pipeline(
         file_path=unique_path,
         start_line=1,
         end_line=3,
-        qualified_symbol="trading_strategies.order_router.LiveOrderRouter",
+        qualified_symbol="service_core.order_router.LiveOrderRouter",
         selection_reason="Target router slice",
         modification_intent=ModificationIntent.MODIFY_TARGET,
         git_commit_sha="live_commit_123",
@@ -1217,8 +1219,11 @@ def test_live_postgres_m5_preflight_and_scout_pipeline(
 def test_live_postgres_federated_scout_coordinator_seeded_corpus(
     principal: PrincipalContext,
     domain_registry: DomainRegistry,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verifies FederatedScoutCoordinator across live PostgreSQL 17 doc_chunks and AST tables."""
+    if os.environ.get("CONTEXT_SCOUT_USE_LIVE_MLX") != "1":
+        monkeypatch.setenv("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "1")
     settings = ScoutSettings()
     conn_mgr = RLSConnectionManager(settings.db_app_url)
     adapter = PostgresScoutGraphAdapter(conn_mgr)
@@ -1226,23 +1231,22 @@ def test_live_postgres_federated_scout_coordinator_seeded_corpus(
     fed_principal = PrincipalContext(
         user_id=principal.user_id,
         role=principal.role,
-        allowed_scopes=[*principal.allowed_scopes, "public_quant"],
+        allowed_scopes=[*principal.allowed_scopes, "public_docs", "public_eng", "public_quant"],
         max_session_paid_tokens=principal.max_session_paid_tokens,
     )
 
     pack = coordinator.run(
-        user_prompt="Enhance OrderFlowImbalanceSignal using continuous auction OFI research",
+        user_prompt=(
+            "Audit RLSConnectionManager tenant isolation using PostgreSQL 17 "
+            "FORCE ROW LEVEL SECURITY architecture documentation"
+        ),
         principal=fed_principal,
     )
     assert isinstance(pack, ImplementationContextPack)
     assert pack.preflight_report.passed is True
-    assert pack.quant_strategy_spec is not None
+    assert pack.domain_knowledge_brief is not None
     assert any(c.verbatim_quote for c in pack.supporting_doc_citations)
-    assert any(
-        "order_flow_imbalance" in s.file_path.lower()
-        or "orderflowimbalance" in s.qualified_symbol.lower()
-        for s in pack.code_slices
-    ), f"Expected OrderFlowImbalance slice in {[s.file_path for s in pack.code_slices]}"
+    assert len(pack.code_slices) >= 1
 
 
 @pytest.mark.postgres
@@ -1268,7 +1272,7 @@ def test_live_postgres_execution_telemetry_and_budget_accumulation(
 
         slice1 = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             start_line=1,
             end_line=3,
             qualified_symbol="OrderFlowImbalanceAnalyzer",

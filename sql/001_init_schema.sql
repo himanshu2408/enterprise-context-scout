@@ -79,14 +79,14 @@ CREATE INDEX IF NOT EXISTS idx_ast_edges_domain_target_qname ON ast_edges (domai
 CREATE INDEX IF NOT EXISTS idx_ast_edges_domain_source_kind ON ast_edges (domain_id, source_symbol_id, edge_kind);
 CREATE INDEX IF NOT EXISTS idx_ast_edges_scopes ON ast_edges USING GIN (allowed_scopes);
 
--- 5. Contextual Document & Quant Research Paper Chunks
+-- 5. Contextual Enterprise Document & Research Chunks
 CREATE TABLE IF NOT EXISTS doc_chunks (
     chunk_id UUID PRIMARY KEY,
     domain_id TEXT NOT NULL REFERENCES domain_packs(domain_id) ON DELETE CASCADE,
     doc_id TEXT NOT NULL,
     doc_title TEXT NOT NULL,
     source_uri TEXT NOT NULL,
-    market_scope TEXT NOT NULL CHECK (market_scope IN ('IN_NSE', 'DE_XETRA', 'US_EQUITY', 'GLOBAL', 'INTERNAL_ADR')),
+    market_scope TEXT NOT NULL CHECK (market_scope IN ('GLOBAL', 'INTERNAL_ADR', 'ENTERPRISE_DOC', 'CONFLUENCE', 'JIRA', 'REGIONAL_EU', 'REGIONAL_US', 'REGIONAL_APAC')),
     published_date DATE,
     authority_weight REAL NOT NULL DEFAULT 1.0,
     section_heading TEXT NOT NULL,
@@ -159,7 +159,7 @@ CREATE POLICY rls_doc_chunks_scope ON doc_chunks
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'scout_app_user') THEN
-        CREATE ROLE scout_app_user LOGIN PASSWORD 'scout_local_dev_pw' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+        CREATE ROLE scout_app_user LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;
     END IF;
 END
 $$;

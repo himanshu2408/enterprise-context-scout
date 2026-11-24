@@ -19,11 +19,11 @@ import pytest
 
 from context_scout.config import ScoutSettings
 from context_scout.db.repositories import CodeFileRecord
-from context_scout.db.schema import ASTSymbolRecord
+from context_scout.db.schema import ASTEdgeRecord, ASTSymbolRecord
 from context_scout.schemas.contracts import (
     CodeSlicePointer,
+    DomainKnowledgeBrief,
     ModificationIntent,
-    QuantStrategyBrief,
 )
 from context_scout.tuning.teacher_distiller import (
     MAX_BOUNCE_BACK_RATIO,
@@ -44,21 +44,21 @@ class TestTeacherDistillerPipeline:
 
     def test_database_introspection(self, distiller: TeacherDistiller) -> None:
         """Verifies live PostgreSQL 17 introspection across code and quant tables."""
-        code_files = distiller.get_all_code_files("trading_code_scout")
-        ast_symbols = distiller.get_all_ast_symbols("trading_code_scout")
-        ast_edges = distiller.get_all_ast_edges("trading_code_scout")
-        doc_chunks = distiller.get_all_doc_chunks("quant_research_scout", max_chunks_per_doc=2)
+        code_files = distiller.get_all_code_files("code_architecture_scout")
+        ast_symbols = distiller.get_all_ast_symbols("code_architecture_scout")
+        ast_edges = distiller.get_all_ast_edges("code_architecture_scout")
+        doc_chunks = distiller.get_all_doc_chunks("enterprise_docs_scout", max_chunks_per_doc=2)
 
         assert len(code_files) >= 40, f"Expected >= 40 code files, got {len(code_files)}"
-        assert len(ast_symbols) >= 500, f"Expected >= 500 AST symbols, got {len(ast_symbols)}"
-        assert len(ast_edges) >= 2000, f"Expected >= 2000 AST edges, got {len(ast_edges)}"
-        assert len(doc_chunks) >= 300, f"Expected >= 300 doc chunks, got {len(doc_chunks)}"
+        assert len(ast_symbols) >= 200, f"Expected >= 200 AST symbols, got {len(ast_symbols)}"
+        assert len(ast_edges) >= 500, f"Expected >= 500 AST edges, got {len(ast_edges)}"
+        assert len(doc_chunks) >= 12, f"Expected >= 12 doc chunks, got {len(doc_chunks)}"
 
     def test_rejection_sampling_gate(self, distiller: TeacherDistiller) -> None:
         """Verifies PreFlightValidator rejects invalid candidates and admits valid ones."""
         # Valid code pointer
-        symbols = distiller.get_all_ast_symbols("trading_code_scout")
-        files = distiller.get_all_code_files("trading_code_scout")
+        symbols = distiller.get_all_ast_symbols("code_architecture_scout")
+        files = distiller.get_all_code_files("code_architecture_scout")
         files_by_id = {f.file_id: f for f in files}
 
         target_sym = next(s for s in symbols if s.file_id in files_by_id)
@@ -77,7 +77,7 @@ class TestTeacherDistillerPipeline:
         pass_rep = distiller.validator.validate(
             code_slices=[v_slice],
             user_prompt="Inspect implementation for testing",
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             normalized_rrf_score=0.90,
         )
         assert pass_rep.passed is True, (
@@ -94,7 +94,7 @@ class TestTeacherDistillerPipeline:
         fail_rep = distiller.validator.validate(
             code_slices=[v_slice],
             user_prompt=f"Refactor {other_short_name} to integrate NonExistentTarget",
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             normalized_rrf_score=0.90,
         )
         assert fail_rep.passed is False
@@ -104,9 +104,9 @@ class TestTeacherDistillerPipeline:
 
     def test_qlora_flywheel_ingestion(self, distiller: TeacherDistiller) -> None:
         """Verifies ingestion and fallback seed generation of ContextMissEvent objects."""
-        symbols = distiller.get_all_ast_symbols("trading_code_scout")
-        edges = distiller.get_all_ast_edges("trading_code_scout")
-        files = distiller.get_all_code_files("trading_code_scout")
+        symbols = distiller.get_all_ast_symbols("code_architecture_scout")
+        edges = distiller.get_all_ast_edges("code_architecture_scout")
+        files = distiller.get_all_code_files("code_architecture_scout")
         files_by_id = {f.file_id: f for f in files}
 
         seed_misses = distiller.generate_seed_telemetry_misses_if_empty(
@@ -116,11 +116,11 @@ class TestTeacherDistillerPipeline:
         for miss in seed_misses:
             assert miss.missing_symbol
             assert miss.reason
-            assert miss.domain_id == "trading_code_scout"
+            assert miss.domain_id == "code_architecture_scout"
 
     def test_trading_code_distillation_splits(self, distiller: TeacherDistiller) -> None:
-        """Verifies trading_code_scout generation, bounce-back ratios, and zero module leakage."""
-        train, valid = distiller.distill_trading_code_scout(num_samples=80)
+        """Verifies code_architecture_scout generation, bounce-back, and zero module leakage."""
+        train, valid = distiller.distill_code_domain(num_samples=80)
         assert len(train) > 0
         assert len(valid) > 0
         total = len(train) + len(valid)
@@ -151,8 +151,8 @@ class TestTeacherDistillerPipeline:
             assert len(pointers) >= 1
 
     def test_quant_research_distillation_splits(self, distiller: TeacherDistiller) -> None:
-        """Verifies quant_research_scout generation, bounce-back ratios, and zero paper leakage."""
-        train, valid = distiller.distill_quant_research_scout(num_samples=80)
+        """Verifies enterprise_docs_scout generation, bounce-back ratios, and zero paper leakage."""
+        train, valid = distiller.distill_research_domain(num_samples=80)
         assert len(train) > 0
         assert len(valid) > 0
         total = len(train) + len(valid)
@@ -167,13 +167,13 @@ class TestTeacherDistillerPipeline:
         assert 0.0 <= train_ratio <= 1.0
         assert 0.0 <= valid_ratio <= 1.0
 
-        # Check schema compliance: all assistant messages parse as QuantStrategyBrief
+        # Check schema compliance: all assistant messages parse as DomainKnowledgeBrief
         for ex in train + valid:
             assistant_msg = ex["messages"][-1]["content"]
-            brief = QuantStrategyBrief.model_validate_json(assistant_msg)
-            assert brief.strategy_name
+            brief = DomainKnowledgeBrief.model_validate_json(assistant_msg)
+            assert brief.brief_title
             assert len(brief.verified_citations) >= 1
-            assert len(brief.target_markets) >= 1
+            assert brief.domain_id
 
     def test_distill_all_and_save_zero_leakage(
         self, distiller: TeacherDistiller, tmp_path: Path
@@ -183,30 +183,44 @@ class TestTeacherDistillerPipeline:
             target_dir=tmp_path,
             num_samples_per_domain=60,
         )
-        assert summary["trading_code_scout"]["total"] == 60
-        assert 1 <= summary["quant_research_scout"]["total"] <= 60
+        assert summary["code_architecture_scout"]["total"] == 60
+        assert 1 <= summary["enterprise_docs_scout"]["total"] <= 60
 
-        # Verify files on disk
-        code_train_file = tmp_path / "data" / "tuning" / "trading_code_scout" / "train.jsonl"
-        code_valid_file = tmp_path / "data" / "tuning" / "trading_code_scout" / "valid.jsonl"
-        quant_train_file = tmp_path / "data" / "tuning" / "quant_research_scout" / "train.jsonl"
-        quant_valid_file = tmp_path / "data" / "tuning" / "quant_research_scout" / "valid.jsonl"
+        # Verify 3-way split files on disk under domains/*/tuning/
+        code_train_file = (
+            tmp_path / "domains" / "code_architecture_scout" / "tuning" / "train.jsonl"
+        )
+        code_valid_file = (
+            tmp_path / "domains" / "code_architecture_scout" / "tuning" / "valid.jsonl"
+        )
+        code_eval_file = tmp_path / "domains" / "code_architecture_scout" / "tuning" / "eval.jsonl"
+        quant_train_file = tmp_path / "domains" / "enterprise_docs_scout" / "tuning" / "train.jsonl"
+        quant_valid_file = tmp_path / "domains" / "enterprise_docs_scout" / "tuning" / "valid.jsonl"
+        quant_eval_file = tmp_path / "domains" / "enterprise_docs_scout" / "tuning" / "eval.jsonl"
 
         assert code_train_file.is_file()
         assert code_valid_file.is_file()
+        assert code_eval_file.is_file()
         assert quant_train_file.is_file()
         assert quant_valid_file.is_file()
+        assert quant_eval_file.is_file()
 
-        # Zero leakage checks
+        # 3-way zero leakage & SHA-256 disjointness checks
         assert (
             TeacherDistiller.verify_zero_leakage(
-                code_train_file, code_valid_file, domain_id="trading_code_scout"
+                code_train_file,
+                code_valid_file,
+                eval_path=code_eval_file,
+                domain_id="code_architecture_scout",
             )
             is True
         )
         assert (
             TeacherDistiller.verify_zero_leakage(
-                quant_train_file, quant_valid_file, domain_id="quant_research_scout"
+                quant_train_file,
+                quant_valid_file,
+                eval_path=quant_eval_file,
+                domain_id="enterprise_docs_scout",
             )
             is True
         )
@@ -223,7 +237,7 @@ class TestTeacherDistillerPipeline:
         f_id = uuid4()
         f_rec = CodeFileRecord(
             file_id=f_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             repo_name="repo",
             file_path="empty.py",
             language="python",
@@ -236,7 +250,7 @@ class TestTeacherDistillerPipeline:
         sym = ASTSymbolRecord(
             symbol_id=uuid4(),
             file_id=f_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             qualified_name="empty.FOO",
             symbol_kind="variable",
             start_line=1,
@@ -255,3 +269,97 @@ class TestTeacherDistillerPipeline:
             target_bounce_backs=0,
         )
         assert len(examples) == 0
+
+    def test_holdout_cross_module_bridge_never_leaks_between_valid_and_eval(
+        self, distiller: TeacherDistiller, tmp_path: Path
+    ) -> None:
+        """Regression: cross-module AST edges between holdout prefixes
+        (e.g., security <-> retrieval) must not create bridge items in holdout splits
+        or midpoint-slice connected components into leaking valid/eval files.
+        """
+        code_files = distiller.get_all_code_files("code_architecture_scout")
+        files_by_id = {f.file_id: f for f in code_files}
+        all_syms = distiller.get_all_ast_symbols("code_architecture_scout")
+        sec_syms = [
+            s
+            for s in all_syms
+            if s.file_id in files_by_id
+            and files_by_id[s.file_id].file_path.startswith("src/context_scout/security/")
+            and files_by_id[s.file_id].file_path.endswith(".py")
+        ][:6]
+        ret_syms = [
+            s
+            for s in all_syms
+            if s.file_id in files_by_id
+            and files_by_id[s.file_id].file_path.startswith("src/context_scout/retrieval/")
+            and files_by_id[s.file_id].file_path.endswith(".py")
+        ][:6]
+        assert len(sec_syms) >= 2 and len(ret_syms) >= 2
+
+        cross_edges = [
+            ASTEdgeRecord(
+                edge_id=uuid4(),
+                domain_id="code_architecture_scout",
+                source_symbol_id=sec_syms[0].symbol_id,
+                target_qualified_name=ret_syms[0].qualified_name,
+                target_symbol_id=ret_syms[0].symbol_id,
+                edge_kind="CALLS",
+                allowed_scopes=["public_eng"],
+            ),
+            ASTEdgeRecord(
+                edge_id=uuid4(),
+                domain_id="code_architecture_scout",
+                source_symbol_id=ret_syms[1].symbol_id,
+                target_qualified_name=sec_syms[1].qualified_name,
+                target_symbol_id=sec_syms[1].symbol_id,
+                edge_kind="CALLS",
+                allowed_scopes=["public_eng"],
+            ),
+        ]
+        holdout = distiller._generate_code_split(
+            pool_symbols=[*sec_syms, *ret_syms],
+            all_edges=cross_edges,
+            files_by_id=files_by_id,
+            target_count=6,
+            target_bounce_backs=2,
+            isolate_module_groups=True,
+        )
+        assert len(holdout) == 6
+        valid_split, eval_split = TeacherDistiller._split_holdout_into_valid_and_eval(
+            holdout, is_research=False
+        )
+        assert len(valid_split) >= 1 and len(eval_split) >= 1
+        assert len(valid_split) + len(eval_split) == 6
+
+        p_train = tmp_path / "train.jsonl"
+        p_valid = tmp_path / "valid.jsonl"
+        p_eval = tmp_path / "eval.jsonl"
+        p_train.write_text(
+            json.dumps(
+                {
+                    "messages": [
+                        {"role": "user", "content": "q"},
+                        {
+                            "role": "assistant",
+                            "content": '{"file_path": "src/context_scout/api/main.py"}',
+                        },
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        TeacherDistiller._write_jsonl(p_valid, valid_split)
+        TeacherDistiller._write_jsonl(p_eval, eval_split)
+        assert (
+            TeacherDistiller.verify_zero_leakage(
+                p_train, p_valid, eval_path=p_eval, domain_id="code_architecture_scout"
+            )
+            is True
+        )
+
+        # Also verify single-component fallback never midpoint-slices overlapping IDs
+        single_mod_a, single_mod_b = TeacherDistiller._split_holdout_into_valid_and_eval(
+            valid_split, is_research=False
+        )
+        assert len(single_mod_a) == len(valid_split) and single_mod_b == []

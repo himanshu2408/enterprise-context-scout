@@ -1,15 +1,15 @@
 {
   "suite": "Suite 3.1: 10,000-Page Enterprise Wiki Scale & Lifecycle Qualification",
-  "generated_at_utc": "2026-11-14T14:12:59.738476+00:00",
-  "head_commit": "56c9d5e",
+  "generated_at_utc": "2026-11-19T22:40:11.589867+00:00",
+  "head_commit": "d07b073",
   "baseline_commit": "5d85e3e",
   "embedding_model": "google/embeddinggemma-2",
-  "embedding_elapsed_seconds": 105.76,
+  "embedding_elapsed_seconds": 108.1,
   "provenance": {
     "total_pages_constructed": 10000,
     "unique_source_files_used": 463,
     "total_real_tables_harvested": 76,
-    "total_real_sections_harvested": 67097,
+    "total_real_sections_harvested": 67270,
     "collections_breakdown": {
       "data/unseen_repos_v2": 10073
     },
@@ -123,8 +123,8 @@
     "space_counts": {
       "ENG_RUNBOOKS": 1295,
       "SRE_INCIDENTS": 1276,
-      "ARCH_ADR": 1296,
-      "PRODUCT_SPECS": 1296,
+      "ARCH_ADR": 1295,
+      "PRODUCT_SPECS": 1297,
       "COMPLIANCE_POLICY": 2145,
       "~personal_notes": 1415,
       "EXEC_RESTRICTED": 1277
@@ -155,31 +155,31 @@
     {
       "checkpoint_pages": 1000,
       "total_queries": 71,
-      "latency_p50_ms": 106.76,
-      "latency_p95_ms": 121.41,
+      "latency_p50_ms": 128.61,
+      "latency_p95_ms": 168.63,
       "noise_rejection_clean": 12,
       "noise_rejection_total": 12,
       "noise_rejection_ci95": [
         0.7575,
         1.0
       ],
-      "freshness_v3_passed": 26,
+      "freshness_v3_passed": 27,
       "freshness_v3_total": 27,
       "freshness_v3_ci95": [
-        0.8172,
-        0.9934
+        0.8754,
+        1.0
       ],
-      "conflict_disambig_passed": 3,
+      "conflict_disambig_passed": 10,
       "conflict_disambig_total": 10,
       "conflict_disambig_ci95": [
-        0.1078,
-        0.6032
+        0.7225,
+        1.0
       ],
-      "table_lookup_passed": 5,
+      "table_lookup_passed": 10,
       "table_lookup_total": 10,
       "table_lookup_ci95": [
-        0.2366,
-        0.7634
+        0.7225,
+        1.0
       ],
       "rbac_zero_leak_passed": 12,
       "rbac_total": 12,
@@ -200,8 +200,8 @@
     {
       "checkpoint_pages": 5000,
       "total_queries": 71,
-      "latency_p50_ms": 258.95,
-      "latency_p95_ms": 364.78,
+      "latency_p50_ms": 301.06,
+      "latency_p95_ms": 453.72,
       "noise_rejection_clean": 12,
       "noise_rejection_total": 12,
       "noise_rejection_ci95": [
@@ -214,17 +214,17 @@
         0.8754,
         1.0
       ],
-      "conflict_disambig_passed": 3,
+      "conflict_disambig_passed": 10,
       "conflict_disambig_total": 10,
       "conflict_disambig_ci95": [
-        0.1078,
-        0.6032
+        0.7225,
+        1.0
       ],
-      "table_lookup_passed": 7,
+      "table_lookup_passed": 10,
       "table_lookup_total": 10,
       "table_lookup_ci95": [
-        0.3968,
-        0.8922
+        0.7225,
+        1.0
       ],
       "rbac_zero_leak_passed": 12,
       "rbac_total": 12,
@@ -245,31 +245,31 @@
     {
       "checkpoint_pages": 10000,
       "total_queries": 71,
-      "latency_p50_ms": 418.99,
-      "latency_p95_ms": 533.2,
+      "latency_p50_ms": 541.16,
+      "latency_p95_ms": 764.14,
       "noise_rejection_clean": 12,
       "noise_rejection_total": 12,
       "noise_rejection_ci95": [
         0.7575,
         1.0
       ],
-      "freshness_v3_passed": 25,
+      "freshness_v3_passed": 27,
       "freshness_v3_total": 27,
       "freshness_v3_ci95": [
-        0.7663,
-        0.9794
+        0.8754,
+        1.0
       ],
-      "conflict_disambig_passed": 2,
+      "conflict_disambig_passed": 10,
       "conflict_disambig_total": 10,
       "conflict_disambig_ci95": [
-        0.0567,
-        0.5098
+        0.7225,
+        1.0
       ],
-      "table_lookup_passed": 7,
+      "table_lookup_passed": 10,
       "table_lookup_total": 10,
       "table_lookup_ci95": [
-        0.3968,
-        0.8922
+        0.7225,
+        1.0
       ],
       "rbac_zero_leak_passed": 12,
       "rbac_total": 12,
@@ -292,12 +292,12 @@
     "baseline_commit": "5d85e3e",
     "confluence_market_scope_error": "ValueError: 'CONFLUENCE' is not a valid MarketRegime",
     "federated_custom_domain_abstained": false,
-    "federated_custom_domain_reason": "",
+    "federated_custom_domain_reason": "Pre-Flight Gate Validation FAILED ($0 Local Bounce-Back Required):\n- Check 4 (Verbatim Citation Verification, VAL-02): Citations failed verbatim verification: Chunk ID 'chk_quant_default' for quote 'Order flow imbalance exhibits mean rever...' not found in corpus. Ensure quotes match source documents verbatim with >=0.98 token overlap.",
     "checkpoints": [
       {
         "checkpoint_pages": 1000,
-        "latency_p50_ms": 46.7,
-        "latency_p95_ms": 49.28,
+        "latency_p50_ms": 46.5,
+        "latency_p95_ms": 49.59,
         "noise_rejection_clean": 1,
         "noise_rejection_total": 12,
         "conflict_disambig_passed": 0,
@@ -307,9 +307,9 @@
       },
       {
         "checkpoint_pages": 5000,
-        "latency_p50_ms": 182.47,
-        "latency_p95_ms": 203.45,
-        "noise_rejection_clean": 5,
+        "latency_p50_ms": 176.53,
+        "latency_p95_ms": 189.41,
+        "noise_rejection_clean": 1,
         "noise_rejection_total": 12,
         "conflict_disambig_passed": 0,
         "conflict_disambig_total": 10,
@@ -318,8 +318,8 @@
       },
       {
         "checkpoint_pages": 10000,
-        "latency_p50_ms": 322.28,
-        "latency_p95_ms": 355.36,
+        "latency_p50_ms": 315.96,
+        "latency_p95_ms": 342.28,
         "noise_rejection_clean": 0,
         "noise_rejection_total": 12,
         "conflict_disambig_passed": 0,

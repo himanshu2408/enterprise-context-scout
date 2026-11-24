@@ -19,10 +19,11 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from context_scout.schemas.contracts import PrincipalContext
+from context_scout.schemas.contracts import DEFAULT_TENANT_ID, PrincipalContext
 
 logger = logging.getLogger(__name__)
 
@@ -373,8 +374,8 @@ class SessionBudgetTracker:
     def __init__(self, spend_ceiling_usd: float = DEFAULT_SESSION_SPEND_CEILING_USD) -> None:
         self._lock = threading.Lock()
         self.spend_ceiling_usd = spend_ceiling_usd
-        # user_id -> dict of metrics
-        self._principal_consumption: dict[str, dict[str, Any]] = {}
+        # (tenant_id, user_id) -> dict of metrics
+        self._principal_consumption: dict[tuple[str, str], dict[str, Any]] = {}
         # session_id -> cumulative exploration tokens
         self._exploration_tokens: dict[str, int] = {}
 
@@ -387,16 +388,19 @@ class SessionBudgetTracker:
                     cls._instance = cls()
         return cls._instance
 
-    def _get_or_create_record(self, user_id: str) -> dict[str, Any]:
-        if user_id not in self._principal_consumption:
-            self._principal_consumption[user_id] = {
+    def _get_or_create_record(
+        self, user_id: str, tenant_id: UUID | str = DEFAULT_TENANT_ID
+    ) -> dict[str, Any]:
+        key = (str(tenant_id), user_id)
+        if key not in self._principal_consumption:
+            self._principal_consumption[key] = {
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "total_tokens": 0,
                 "cost_usd": 0.0,
                 "paid_calls_count": 0,
             }
-        return self._principal_consumption[user_id]
+        return self._principal_consumption[key]
 
     def check_and_reserve(
         self,
@@ -415,7 +419,7 @@ class SessionBudgetTracker:
         )
 
         with self._lock:
-            rec = self._get_or_create_record(principal.user_id)
+            rec = self._get_or_create_record(principal.user_id, principal.tenant_id)
             projected_total = rec["total_tokens"] + projected_tokens
             if projected_total > budget_cap:
                 raise BudgetExceededException(
@@ -440,12 +444,21 @@ class SessionBudgetTracker:
     ) -> None:
         """Records finalized token consumption and dollar spend."""
         with self._lock:
-            rec = self._get_or_create_record(principal.user_id)
+            rec = self._get_or_create_record(principal.user_id, principal.tenant_id)
             rec["input_tokens"] += input_tokens
             rec["output_tokens"] += output_tokens
             rec["total_tokens"] += input_tokens + output_tokens
             rec["cost_usd"] += cost_usd
             rec["paid_calls_count"] += 1
+
+    def reset_principal(
+        self,
+        user_id: str,
+        tenant_id: UUID | str = DEFAULT_TENANT_ID,
+    ) -> None:
+        """Resets in-memory session consumption counters for a single principal."""
+        with self._lock:
+            self._principal_consumption.pop((str(tenant_id), user_id), None)
 
     def record_exploration_tokens(
         self,
@@ -468,10 +481,12 @@ class SessionBudgetTracker:
                     f"({new_total:,}) exceeded safety exploration ceiling ({max_cap:,})"
                 )
 
-    def get_consumption(self, user_id: str) -> dict[str, Any]:
+    def get_consumption(
+        self, user_id: str, tenant_id: UUID | str = DEFAULT_TENANT_ID
+    ) -> dict[str, Any]:
         """Returns snapshot of consumption metrics for a given principal."""
         with self._lock:
-            rec = self._principal_consumption.get(user_id)
+            rec = self._principal_consumption.get((str(tenant_id), user_id))
             if rec is None:
                 return {
                     "input_tokens": 0,
@@ -482,11 +497,18 @@ class SessionBudgetTracker:
                 }
             return dict(rec)
 
-    def reset_session(self, user_id: str | None = None) -> None:
+    def reset_session(
+        self,
+        user_id: str | None = None,
+        tenant_id: UUID | str | None = None,
+    ) -> None:
         """Resets consumption counters for testing or session rollover."""
         with self._lock:
-            if user_id is not None:
-                self._principal_consumption.pop(user_id, None)
+            if user_id is not None and tenant_id is not None:
+                self._principal_consumption.pop((str(tenant_id), user_id), None)
+            elif user_id is not None:
+                for key in [k for k in self._principal_consumption if k[1] == user_id]:
+                    self._principal_consumption.pop(key, None)
             else:
                 self._principal_consumption.clear()
                 self._exploration_tokens.clear()

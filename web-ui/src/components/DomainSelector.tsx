@@ -51,7 +51,7 @@ export function matchesDomainSourceFilter(
   if (sourceFilter === "wiki") {
     return (
       domain.primary_truth_source === "document" ||
-      /wiki|confluence|doc|quant|research|handbook|runbook/.test(descriptor)
+      /wiki|confluence|doc|research|handbook|runbook/.test(descriptor)
     );
   }
   if (sourceFilter === "jira") {
@@ -196,8 +196,6 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
               key={domain.domain_id}
               className={`domain-row ${active ? "domain-row-active" : ""}`}
               data-testid={`domain-card-${domain.domain_id}`}
-              role="button"
-              tabIndex={0}
               onClick={() => onSelectDomain(domain.domain_id)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
@@ -206,24 +204,34 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
                 }
               }}
             >
-              <div className="domain-row-main">
-                <div className="domain-name-row">
-                  {isDoc ? (
-                    <BookOpen size={14} className="icon-emerald" />
-                  ) : (
-                    <Code size={14} className="icon-accent" />
-                  )}
-                  <span className="domain-title">{domain.display_name}</span>
+              <button
+                type="button"
+                className="domain-select-btn"
+                aria-pressed={active}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSelectDomain(domain.domain_id);
+                }}
+              >
+                <div className="domain-row-main">
+                  <div className="domain-name-row">
+                    {isDoc ? (
+                      <BookOpen size={14} className="icon-emerald" />
+                    ) : (
+                      <Code size={14} className="icon-accent" />
+                    )}
+                    <span className="domain-title">{domain.display_name}</span>
+                  </div>
+                  <span
+                    className={`status-tag ${
+                      domain.verified ? "status-tag-ok" : "status-tag-warn"
+                    }`}
+                  >
+                    <CheckCircle2 size={11} />
+                    {domain.verified ? "Verified" : "Base"}
+                  </span>
                 </div>
-                <span
-                  className={`status-tag ${
-                    domain.verified ? "status-tag-ok" : "status-tag-warn"
-                  }`}
-                >
-                  <CheckCircle2 size={11} />
-                  {domain.verified ? "Verified" : "Base"}
-                </span>
-              </div>
+              </button>
 
               <p className="domain-desc">{describeDomain(domain)}</p>
 
@@ -284,7 +292,7 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
                 >
                   <div className="metric-kv">
                     <span>Cartridge</span>
-                    <code>{cartridgeLabel}</code>
+                    <code title={cartridgeLabel}>{cartridgeLabel}</code>
                   </div>
                   <div className="metric-kv">
                     <span>Rank / Alpha</span>

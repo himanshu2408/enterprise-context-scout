@@ -133,7 +133,7 @@ CREATE INDEX IF NOT EXISTS idx_ast_edges_domain_target_qname ON ast_edges (domai
 CREATE INDEX IF NOT EXISTS idx_ast_edges_domain_source_kind ON ast_edges (domain_id, source_symbol_id, edge_kind);
 
 -- D. doc_chunks: add enterprise metadata columns & relax market_scope constraint
-ALTER TABLE doc_chunks ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'quant_paper';
+ALTER TABLE doc_chunks ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'enterprise_doc';
 ALTER TABLE doc_chunks ADD COLUMN IF NOT EXISTS version_str TEXT NOT NULL DEFAULT '1';
 ALTER TABLE doc_chunks ADD COLUMN IF NOT EXISTS is_stale BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE doc_chunks ADD COLUMN IF NOT EXISTS stale_reason TEXT;
@@ -146,8 +146,9 @@ ALTER TABLE doc_chunks ALTER COLUMN market_scope DROP NOT NULL;
 ALTER TABLE doc_chunks DROP CONSTRAINT IF EXISTS doc_chunks_market_scope_check;
 ALTER TABLE doc_chunks ADD CONSTRAINT doc_chunks_market_scope_check CHECK (
     market_scope IS NULL OR market_scope IN (
-        'IN_NSE', 'DE_XETRA', 'US_EQUITY', 'GLOBAL', 'INTERNAL_ADR',
-        'ENTERPRISE_DOC', 'CONFLUENCE', 'JIRA'
+        'GLOBAL', 'INTERNAL_ADR',
+        'ENTERPRISE_DOC', 'CONFLUENCE', 'JIRA',
+        'REGIONAL_EU', 'REGIONAL_US', 'REGIONAL_APAC'
     )
 );
 

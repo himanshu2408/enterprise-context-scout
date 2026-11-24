@@ -739,3 +739,60 @@ class CSharpPlugin:
 
         walk(tree.root_node)
         return symbols, edges
+
+    def to_scip_symbol(
+        self,
+        symbol: ParsedSymbol,
+        package_name: str = "",
+        package_version: str = "1.0.0",
+    ) -> str:
+        """Format a ParsedSymbol as a SCIP scip-dotnet symbol string."""
+        pkg = (package_name or symbol.repo_name or ".").strip()
+        ver = (package_version or ".").strip()
+        parts = [p for p in symbol.qualified_name.split(".") if p]
+        if not parts:
+            return f"scip-dotnet nuget {pkg} {ver} {symbol.name}#"
+
+        if symbol.symbol_kind in {"class", "interface"}:
+            ns = "/".join(parts[:-1])
+            desc = f"{ns}/{parts[-1]}#" if ns else f"{parts[-1]}#"
+        elif symbol.bare_name and "." in symbol.bare_name and len(parts) >= 2:
+            ns = "/".join(parts[:-2])
+            type_desc = f"{parts[-2]}#"
+            method_desc = f"{parts[-1]}()."
+            desc = f"{ns}/{type_desc}{method_desc}" if ns else f"{type_desc}{method_desc}"
+        else:
+            ns = "/".join(parts[:-1])
+            desc = f"{ns}/{parts[-1]}()." if ns else f"{parts[-1]}()."
+        return f"scip-dotnet nuget {pkg} {ver} {desc}"
+
+    def extract_scip_occurrences(
+        self,
+        code: str,
+        file_path: str = "",
+        repo_name: str = "",
+        module_prefix: str = "",
+        package_name: str = "",
+        package_version: str = "1.0.0",
+    ) -> list[dict[str, object]]:
+        """Extract SCIP-compatible definition occurrences aligned with Tree-sitter symbols."""
+        symbols, _ = self.extract_ast(
+            code,
+            file_path=file_path,
+            repo_name=repo_name,
+            module_prefix=module_prefix,
+        )
+        return [
+            {
+                "symbol": self.to_scip_symbol(
+                    sym,
+                    package_name=package_name,
+                    package_version=package_version,
+                ),
+                "range": [max(0, sym.start_line - 1), 0, max(0, sym.end_line - 1), 0],
+                "symbol_roles": 1,
+                "kind": sym.symbol_kind,
+                "qualified_name": sym.qualified_name,
+            }
+            for sym in symbols
+        ]

@@ -17,15 +17,15 @@ export interface RoleSwitcherProps {
 }
 
 export const ROLE_DEFAULT_SCOPES: Record<RoleType, string[]> = {
-  engineer: ["public_eng", "public_quant"],
-  quant_researcher: ["public_quant"],
-  product_manager: ["public_eng", "public_quant"],
-  compliance_officer: ["public_eng", "public_quant"],
+  engineer: ["public_eng", "public_docs"],
+  domain_researcher: ["public_docs"],
+  product_manager: ["public_eng", "public_docs"],
+  compliance_officer: ["public_eng", "public_docs"],
 };
 
 const ROLE_SUBTITLES: Record<RoleType, string> = {
   engineer: "Code, AST & Sandbox Patch",
-  quant_researcher: "Papers, Formulas & Specs",
+  domain_researcher: "Architecture Docs, ADRs & Specs",
   product_manager: "Read-Only Architecture",
   compliance_officer: "Audit & Grounding Checks",
 };
@@ -37,9 +37,9 @@ const FALLBACK_ROLE_PRESETS: WorkspaceRolePreset[] = [
     default_scopes: ROLE_DEFAULT_SCOPES.engineer,
   },
   {
-    role: "quant_researcher",
-    label: "Quant Researcher",
-    default_scopes: ROLE_DEFAULT_SCOPES.quant_researcher,
+    role: "domain_researcher",
+    label: "Domain Researcher",
+    default_scopes: ROLE_DEFAULT_SCOPES.domain_researcher,
   },
   {
     role: "product_manager",
@@ -71,7 +71,7 @@ export const RoleSwitcher: React.FC<RoleSwitcherProps> = ({
   );
 
   const resolvedScopes = useMemo(() => {
-    const set = new Set<string>(["public_eng", "public_quant", "restricted_risk"]);
+    const set = new Set<string>(["public_eng", "public_docs", "docs_restricted"]);
     for (const preset of presets) {
       for (const sc of preset.default_scopes) {
         if (sc) set.add(sc);

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import sys
 import time
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -50,9 +51,11 @@ from context_scout.evals.golden_dataset import (
 )
 from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
 from context_scout.plugins.registry import PluginRegistry
+from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import (
+    DocumentScope,
     ImplementationContextPack,
-    MarketRegime,
+    MissingContextRequest,
     PrincipalContext,
     RoleType,
 )
@@ -176,18 +179,18 @@ class EvaluationHarness:
             test_principal = PrincipalContext(
                 user_id="harness_probe",
                 role=RoleType.ENGINEER,
-                allowed_scopes=["public_eng", "public_quant"],
+                allowed_scopes=["public", "public_eng", "public_docs"],
             )
             with mgr.scoped_transaction(test_principal) as conn:
                 row = conn.execute(
                     "SELECT COUNT(*) FROM doc_chunks WHERE domain_id = %s;",
                     (self.research_domain_id,),
                 ).fetchone()
-                quant_count = int(str(row[0])) if row else 0
-            if quant_count < 100 and not require_postgres:
+                doc_count = int(str(row[0])) if row else 0
+            if doc_count < 100 and not require_postgres:
                 logger.info(
                     "PostgreSQL has %d research chunks (<100); using InMemoryRLSRepository.",
-                    quant_count,
+                    doc_count,
                 )
                 return self._create_populated_in_memory_repo()
             self._connection_manager = mgr
@@ -209,10 +212,11 @@ class EvaluationHarness:
         admin_principal = PrincipalContext(
             user_id="harness_seeder",
             role=RoleType.ENGINEER,
-            allowed_scopes=["public_eng", "public_quant", "quant_restricted"],
+            allowed_scopes=["public", "public_eng", "public_docs", "docs_restricted"],
         )
 
-        # Hydrate from live PostgreSQL 17 if connection is accessible
+        # Hydrate doc_chunks from live PostgreSQL 17 if accessible; code_files are
+        # always indexed from disk (self.repo_root) so verbatim slices match HEAD.
         seen_file_paths: set[str] = set()
         seen_chunk_ids: set[UUID] = set()
         seen_doc_ids: set[str] = set()
@@ -224,21 +228,14 @@ class EvaluationHarness:
                 conn.cursor() as cur,
             ):
                 cur.execute(
-                    "SELECT COUNT(*) FROM code_files WHERE domain_id = %s;",
-                    (self.code_domain_id,),
+                    "SELECT COUNT(*) FROM doc_chunks WHERE domain_id = %s;",
+                    (self.research_domain_id,),
                 )
                 row = cur.fetchone()
                 if row and int(str(row[0])) > 0:
                     mgr = RLSConnectionManager(self.settings.db_app_url)
                     adapter = PostgresScoutGraphAdapter(mgr, self.settings)
-                    for f in adapter.list_visible_code_files(admin_principal, self.code_domain_id):
-                        repo.insert_code_file(admin_principal, f)
-                        seen_file_paths.add(f.file_path)
-                    for s in adapter.list_visible_ast_symbols(admin_principal, self.code_domain_id):
-                        repo.insert_ast_symbol(admin_principal, s)
-                    for e in adapter.list_visible_ast_edges(admin_principal, self.code_domain_id):
-                        repo.insert_ast_edge(admin_principal, e)
-                    for mr in (None, *list(MarketRegime)):
+                    for mr in (None, *list(DocumentScope)):
                         for c in adapter.list_visible_doc_chunks(
                             admin_principal, self.research_domain_id, market_scope=mr
                         ):
@@ -246,8 +243,6 @@ class EvaluationHarness:
                                 seen_chunk_ids.add(c.chunk_id)
                                 seen_doc_ids.add(c.doc_id)
                                 repo.insert_doc_chunk(admin_principal, c)
-                    if len(seen_file_paths) >= 150 and len(seen_chunk_ids) >= 6:
-                        return repo
         except Exception as exc:
             logger.debug(
                 "PostgreSQL hydration skipped for EvaluationHarness in-memory repo (%s): %s",
@@ -260,6 +255,7 @@ class EvaluationHarness:
         import uuid
 
         scan_roots = [self.repo_root / "src" / "context_scout", self.repo_root / "tests"]
+        pending_syms: list[tuple[UUID, str, str, int, int, str, str, str]] = []
         for scan_dir in scan_roots:
             if not scan_dir.exists():
                 continue
@@ -309,21 +305,17 @@ class EvaluationHarness:
                             kind = "class" if is_cls else "function"
                             prefix = "class" if is_cls else "def"
                             doc = ast.get_docstring(node) or f"{kind.title()} {sym_name}"
-                            repo.insert_ast_symbol(
-                                admin_principal,
-                                ASTSymbolRecord(
-                                    symbol_id=uuid.uuid4(),
-                                    file_id=f_id,
-                                    domain_id=self.code_domain_id,
-                                    qualified_name=q_name,
-                                    symbol_kind=kind,
-                                    start_line=node.lineno,
-                                    end_line=node.end_lineno or min(node.lineno + 50, len(lines)),
-                                    signature_skeleton=f"{prefix} {sym_name}:",
-                                    contextual_summary=doc[:400],
-                                    allowed_scopes=["public_eng"],
-                                    embedding=[0.05] * 768,
-                                ),
+                            pending_syms.append(
+                                (
+                                    f_id,
+                                    q_name,
+                                    kind,
+                                    node.lineno,
+                                    node.end_lineno or min(node.lineno + 50, len(lines)),
+                                    f"{prefix} {sym_name}:",
+                                    doc[:400],
+                                    f"{q_name} {prefix} {sym_name}: {doc[:200]}",
+                                )
                             )
                 except Exception as exc:
                     logger.debug(
@@ -332,6 +324,39 @@ class EvaluationHarness:
                         type(exc).__name__,
                         exc,
                     )
+
+        if pending_syms:
+            sym_vecs = get_embedding_provider().embed_batch(
+                [item[7] for item in pending_syms],
+                is_query=False,
+                batch_size=64,
+            )
+            for (
+                f_id,
+                q_name,
+                kind,
+                s_line,
+                e_line,
+                sig_skel,
+                ctx_sum,
+                _emb_txt,
+            ), emb_vec in zip(pending_syms, sym_vecs, strict=True):
+                repo.insert_ast_symbol(
+                    admin_principal,
+                    ASTSymbolRecord(
+                        symbol_id=uuid.uuid4(),
+                        file_id=f_id,
+                        domain_id=self.code_domain_id,
+                        qualified_name=q_name,
+                        symbol_kind=kind,
+                        start_line=s_line,
+                        end_line=e_line,
+                        signature_skeleton=sig_skel,
+                        contextual_summary=ctx_sum,
+                        allowed_scopes=["public_eng"],
+                        embedding=emb_vec,
+                    ),
+                )
 
         # Seed sample doc chunks from registered domain plugins
         for domain_plugin in PluginRegistry.list_domain_plugins():
@@ -343,9 +368,9 @@ class EvaluationHarness:
                 if doc_rec.doc_id not in seen_doc_ids:
                     seen_doc_ids.add(doc_rec.doc_id)
                     sanitized_scopes = (
-                        ["public_quant"]
+                        ["public_docs"]
                         if doc_rec.domain_id == self.research_domain_id
-                        else [s for s in doc_rec.allowed_scopes if s != "quant_restricted"]
+                        else [s for s in doc_rec.allowed_scopes if s != "docs_restricted"]
                     )
                     repo.insert_doc_chunk(
                         admin_principal,
@@ -374,9 +399,9 @@ class EvaluationHarness:
                 details={"error": "Empty tasks suite"},
             )
 
-        evaluated_packs: list[ImplementationContextPack] = []
+        evaluated_packs: list[ImplementationContextPack | None] = []
         if packs is not None and len(packs) == len(tasks):
-            evaluated_packs = packs
+            evaluated_packs = list(packs)
         else:
             workflow = ScoutWorkflow(registry=self.registry, repo=self.repo)
             federated = FederatedScoutCoordinator(registry=self.registry, repo=self.repo)
@@ -385,8 +410,9 @@ class EvaluationHarness:
                     user_id=f"zero_touch_{t.task_id}",
                     role=RoleType.ENGINEER,
                     allowed_scopes=[
+                        "public",
                         "public_eng",
-                        "public_quant",
+                        "public_docs",
                         f"domain:{self.research_domain_id}",
                     ],
                     session_budget_tokens=200_000,
@@ -400,50 +426,126 @@ class EvaluationHarness:
                         principal=t_p,
                         domain_id=t.domain_id,
                     )
-                if isinstance(p, ImplementationContextPack):
-                    evaluated_packs.append(p)
+                evaluated_packs.append(p if isinstance(p, ImplementationContextPack) else None)
 
         success_count = 0
         task_details: list[dict[str, Any]] = []
 
-        # Fast and reliable verification commands for sandbox testing
-        lint_cmd = ["ruff", "check", "src/context_scout/schemas"]
-        test_cmd = [
-            "pytest",
-            "-q",
-            "tests/test_deterministic_slicer.py",
-            "-k",
-            "test_slicer_verbatim_lines",
-        ]
-
         for idx, task in enumerate(tasks):
             t_id = task.task_id
-            if idx >= len(evaluated_packs):
+            pack = evaluated_packs[idx] if idx < len(evaluated_packs) else None
+            if pack is None:
                 task_details.append(
                     {"task_id": t_id, "success": False, "reason": "ContextPack assembly failed"}
                 )
                 continue
-
-            pack = evaluated_packs[idx]
             task_principal = PrincipalContext(
                 user_id=f"zero_touch_evaluator_{t_id}",
                 role=RoleType.ENGINEER,
-                allowed_scopes=["public_eng", "public_quant", f"domain:{self.research_domain_id}"],
+                allowed_scopes=[
+                    "public",
+                    "public_eng",
+                    "public_docs",
+                    f"domain:{self.research_domain_id}",
+                ],
                 session_budget_tokens=200_000,
                 max_session_paid_tokens=200_000,
             )
+
+            if isinstance(task, GoldenFederatedTask):
+                req_files = list(task.ground_truth_code_files)
+                req_symbols = list(task.ground_truth_code_symbols)
+                req_1hop: list[str] = []
+            else:
+                req_files = list(task.ground_truth_files)
+                req_symbols = list(task.ground_truth_symbols)
+                req_1hop = list(task.ast_1hop_reference_symbols)
+
+            covered_files = {s.file_path for s in pack.code_slices}
+            covered_symbols = {s.qualified_symbol for s in pack.code_slices}
+            covered_short_symbols = {s.qualified_symbol.split(".")[-1] for s in pack.code_slices}
+            covered_code_blob = "\n".join(s.verbatim_code_with_lines for s in pack.code_slices)
+
+            missing_reqs: list[MissingContextRequest] = []
+            seen_missing: set[str] = set()
+            for req_sym in req_symbols:
+                short_sym = req_sym.split(".")[-1]
+                if (
+                    req_sym not in covered_symbols
+                    and short_sym not in covered_short_symbols
+                    and req_sym not in seen_missing
+                ):
+                    seen_missing.add(req_sym)
+                    missing_reqs.append(
+                        MissingContextRequest(
+                            missing_symbol=req_sym,
+                            file_hint=req_files[0] if req_files else None,
+                            reason=(f"Required ground-truth symbol '{req_sym}' missing from pack"),
+                        )
+                    )
+            for ref_sym in req_1hop:
+                short_ref = ref_sym.split(".")[-1]
+                if (
+                    ref_sym not in covered_symbols
+                    and short_ref not in covered_short_symbols
+                    and short_ref not in covered_code_blob
+                    and ref_sym not in seen_missing
+                ):
+                    seen_missing.add(ref_sym)
+                    missing_reqs.append(
+                        MissingContextRequest(
+                            missing_symbol=ref_sym,
+                            file_hint=req_files[0] if req_files else None,
+                            reason=(
+                                f"Required 1-hop reference symbol '{ref_sym}' missing from pack"
+                            ),
+                        )
+                    )
+            for req_file in req_files:
+                if req_file not in covered_files:
+                    file_key = f"file:{req_file}"
+                    if file_key not in seen_missing:
+                        seen_missing.add(file_key)
+                        missing_reqs.append(
+                            MissingContextRequest(
+                                missing_symbol=Path(req_file).stem,
+                                file_hint=req_file,
+                                reason=f"Required ground-truth file '{req_file}' missing from pack",
+                            )
+                        )
+
+            target_py_files = sorted(
+                {
+                    s.file_path
+                    for s in pack.code_slices
+                    if s.file_path.endswith(".py") and (self.repo_root / s.file_path).is_file()
+                }
+            )
+            if not target_py_files:
+                target_py_files = sorted(
+                    {f for f in req_files if f.endswith(".py") and (self.repo_root / f).is_file()}
+                )
+            if target_py_files:
+                lint_cmd = ["ruff", "check", *target_py_files]
+                test_cmd = [sys.executable, "-m", "py_compile", *target_py_files]
+            else:
+                lint_cmd = ["ruff", "check", "src/context_scout"]
+                test_cmd = [sys.executable, "--version"]
+
             # Execute patch via GeminiImplementationExecutor in isolated worktree sandbox
             try:
                 res, tele = self.executor.execute_implementation(
                     pack=pack,
                     principal=task_principal,
                     repo_root=self.repo_root,
+                    missing_context_requests=missing_reqs or None,
                     auto_confirm=True,
                     lint_cmd=lint_cmd,
                     test_cmd=test_cmd,
                 )
                 zero_touch_ok = (
                     len(tele.missing_context_requests) == 0
+                    and len(missing_reqs) == 0
                     and res.success
                     and bool(tele.zero_touch_sufficient)
                 )
@@ -455,6 +557,7 @@ class EvaluationHarness:
                         "success": zero_touch_ok,
                         "missing_requests": len(tele.missing_context_requests),
                         "patch_applied": res.success,
+                        "target_files": target_py_files,
                     }
                 )
             except Exception as exc:
@@ -599,6 +702,7 @@ class EvaluationHarness:
         total_citations = 0
         valid_citations = 0
         failures: list[dict[str, Any]] = []
+        visible_chunks_by_domain: dict[str, dict[str, Any]] = {}
 
         for pack in packs:
             # 1. Verify code slices
@@ -683,50 +787,92 @@ class EvaluationHarness:
                         }
                     )
 
-            # 2. Verify document citations
+            # 2. Verify document citations (fail closed if chunk_id missing or repo cannot verify)
             citations_to_check = list(pack.supporting_doc_citations)
-            if pack.quant_strategy_spec:
-                citations_to_check.extend(pack.quant_strategy_spec.verified_citations)
+            if pack.domain_knowledge_brief:
+                citations_to_check.extend(pack.domain_knowledge_brief.verified_citations)
 
+            deduped_citations: list[Any] = []
+            seen_cit_keys: set[tuple[str, str]] = set()
             for cit in citations_to_check:
+                cit_key = (str(cit.chunk_id), str(cit.verbatim_quote))
+                if cit_key not in seen_cit_keys:
+                    seen_cit_keys.add(cit_key)
+                    deduped_citations.append(cit)
+
+            registered_domains = (
+                list(self.registry.load_all().keys()) if hasattr(self.registry, "load_all") else []
+            )
+            domains_to_check = list(
+                dict.fromkeys([pack.domain_id, self.research_domain_id, *registered_domains])
+            )
+            dummy_p = PrincipalContext(
+                user_id="doc_verifier",
+                role=RoleType.DOMAIN_RESEARCHER,
+                allowed_scopes=[
+                    "public",
+                    "public_eng",
+                    "public_docs",
+                    *[f"domain:{d}" for d in domains_to_check],
+                ],
+            )
+
+            for cit in deduped_citations:
                 total_citations += 1
-                # If chunk is accessible in doc chunks
-                if hasattr(self.repo, "list_visible_doc_chunks"):
-                    dummy_p = PrincipalContext(
-                        user_id="doc_verifier",
-                        role=RoleType.QUANT_RESEARCHER,
-                        allowed_scopes=["public_quant"],
+                if not (
+                    hasattr(self.repo, "list_visible_doc_chunks")
+                    or hasattr(self.repo, "get_doc_chunks_by_ids")
+                ):
+                    failures.append(
+                        {
+                            "type": "doc_citation",
+                            "chunk_id": cit.chunk_id,
+                            "reason": (
+                                "Repository does not support doc chunk lookup (fail-closed)."
+                            ),
+                        }
                     )
-                    chunks = self.repo.list_visible_doc_chunks(dummy_p, self.research_domain_id)
-                    matching_chk = next(
-                        (c for c in chunks if str(c.chunk_id) == cit.chunk_id),
-                        None,
-                    )
-                    if matching_chk is None and hasattr(self.repo, "get_doc_chunks_by_ids"):
+                    continue
+
+                matching_chk = None
+                for dom_id in domains_to_check:
+                    if hasattr(self.repo, "get_doc_chunks_by_ids"):
                         fetched_chks = self.repo.get_doc_chunks_by_ids(
-                            dummy_p, self.research_domain_id, [str(cit.chunk_id)]
+                            dummy_p, dom_id, [str(cit.chunk_id)]
                         )
                         if fetched_chks:
                             matching_chk = fetched_chks[0]
-                    if matching_chk:
-                        res = self.slicer.verify_doc_citation(cit, matching_chk.verbatim_content)
-                        if res.is_valid:
-                            valid_citations += 1
-                        else:
-                            failures.append(
-                                {
-                                    "type": "doc_citation",
-                                    "chunk_id": cit.chunk_id,
-                                    "reason": res.error_reason,
-                                }
-                            )
+                    if matching_chk is None and hasattr(self.repo, "list_visible_doc_chunks"):
+                        if dom_id not in visible_chunks_by_domain:
+                            chunks = self.repo.list_visible_doc_chunks(dummy_p, dom_id)
+                            visible_chunks_by_domain[dom_id] = {str(c.chunk_id): c for c in chunks}
+                        matching_chk = visible_chunks_by_domain[dom_id].get(str(cit.chunk_id))
+                    if matching_chk is not None:
+                        break
+
+                if matching_chk is not None:
+                    res = self.slicer.verify_doc_citation(cit, matching_chk.verbatim_content)
+                    if res.is_valid:
+                        valid_citations += 1
                     else:
-                        # Direct verbatim verification on self
-                        res = self.slicer.verify_quote(cit.verbatim_quote, cit.verbatim_quote)
-                        if res.is_valid:
-                            valid_citations += 1
+                        failures.append(
+                            {
+                                "type": "doc_citation",
+                                "chunk_id": cit.chunk_id,
+                                "reason": res.error_reason,
+                            }
+                        )
                 else:
-                    valid_citations += 1
+                    failures.append(
+                        {
+                            "type": "doc_citation",
+                            "chunk_id": cit.chunk_id,
+                            "reason": (
+                                f"Cited chunk_id '{cit.chunk_id}' not found in repository "
+                                "(fail-closed)."
+                            ),
+                        }
+                    )
 
         total_items = total_slices + total_citations
         valid_items = valid_slices + valid_citations
@@ -1007,7 +1153,7 @@ class EvaluationHarness:
         principal = PrincipalContext(
             user_id="harness_orchestrator",
             role=RoleType.ENGINEER,
-            allowed_scopes=["public_eng", "public_quant"],
+            allowed_scopes=["public", "public_eng", "public_docs"],
         )
 
         workflow = ScoutWorkflow(registry=self.registry, repo=self.repo)
@@ -1026,18 +1172,18 @@ class EvaluationHarness:
             if isinstance(p, ImplementationContextPack):
                 generated_packs.append(p)
 
-        quant_packs: list[ImplementationContextPack] = []
-        for qt in active_suite.quant_tasks:
-            qp = workflow.run(
-                user_prompt=qt.user_prompt,
+        doc_packs: list[ImplementationContextPack] = []
+        for dt in active_suite.doc_tasks:
+            dp = workflow.run(
+                user_prompt=dt.user_prompt,
                 principal=principal,
-                domain_id=qt.domain_id,
+                domain_id=dt.domain_id,
             )
-            if isinstance(qp, ImplementationContextPack):
-                quant_packs.append(qp)
+            if isinstance(dp, ImplementationContextPack):
+                doc_packs.append(dp)
 
         code_packs = generated_packs[: len(active_suite.code_tasks)]
-        all_packs_with_quant = [*generated_packs, *quant_packs]
+        all_packs_with_docs = [*generated_packs, *doc_packs]
 
         # 1. Zero-Touch Sufficiency Rate
         m1 = self.evaluate_zero_touch_sufficiency(all_eval_tasks, packs=generated_packs)
@@ -1045,11 +1191,11 @@ class EvaluationHarness:
         # 2. File & Symbol Recall@5
         m2 = self.evaluate_file_and_symbol_recall(active_suite.code_tasks, packs=code_packs)
 
-        # 3. Verbatim Citation Faithfulness (including Quant Research tasks)
-        m3 = self.evaluate_verbatim_citation_faithfulness(all_packs_with_quant)
+        # 3. Verbatim Citation Faithfulness (including Doc Research tasks)
+        m3 = self.evaluate_verbatim_citation_faithfulness(all_packs_with_docs)
 
-        # 4. Frontier Token Savings Ratio (including Quant Research tasks)
-        m4 = self.evaluate_frontier_token_savings(all_packs_with_quant)
+        # 4. Frontier Token Savings Ratio (including Doc Research tasks)
+        m4 = self.evaluate_frontier_token_savings(all_packs_with_docs)
 
         # 5. RBAC Zero-Leakage Rate
         m5 = self.evaluate_rbac_zero_leakage(active_suite.rbac_redteam_queries)

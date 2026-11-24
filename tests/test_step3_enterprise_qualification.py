@@ -48,12 +48,12 @@ from context_scout.db.schema import (
     DocChunkRecord,
 )
 from context_scout.db.session import RLSConnectionManager
-from context_scout.ingestion.git_merkle_indexer import generate_deterministic_embedding
 from context_scout.plugins.connectors.confluence import (
     ConfluenceConnectorPlugin,
     ConfluenceNoisePolicy,
     ConfluencePageDTO,
 )
+from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import (
     AuthorityRules,
     DomainPackManifest,
@@ -68,6 +68,14 @@ from context_scout.schemas.contracts import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _HMAC_SECRET = "scout-step3-pytest-hmac-secret-32-chars-minimum-ok!!"
 _FK_DELETE_ORDER: tuple[str, ...] = (
+    "audit_events",
+    "scim_groups",
+    "scim_users",
+    "model_artifacts",
+    "scout_sessions",
+    "overlay_file_deltas",
+    "ref_snapshots",
+    "side_effects",
     "ast_edges",
     "ast_symbols",
     "code_files",
@@ -78,8 +86,15 @@ _FK_DELETE_ORDER: tuple[str, ...] = (
     "indexing_queue",
     "indexing_dead_letter",
     "execution_telemetry",
+    "connector_sync_watermarks",
+    "embedding_spaces",
+    "domain_sync_manifests",
     "domain_packs",
 )
+
+
+def _embed_test_text(text: str) -> list[float]:
+    return get_embedding_provider().embed_text(text, is_query=False)
 
 
 def _snapshot_non_eval_counts(db_admin_url: str) -> dict[str, dict[str, int]]:
@@ -527,7 +542,7 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
                     signature_skeleton=ps.signature_skeleton,
                     contextual_summary=summary,
                     allowed_scopes=["public_eng", f"domain:{domain_id}", f"repo:{repo_name}"],
-                    embedding=generate_deterministic_embedding(ps.qualified_name),
+                    embedding=_embed_test_text(ps.qualified_name),
                     repo_qualified_id=ps.qualified_name
                     if "::" in ps.qualified_name
                     else f"{repo_name}::{ps.qualified_name}",
@@ -547,7 +562,7 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
         signature_skeleton="class SharedConfig:",
         contextual_summary="API SharedConfig",
         allowed_scopes=["public_eng", f"domain:{domain_id}", "repo:scout-api"],
-        embedding=generate_deterministic_embedding("API SharedConfig"),
+        embedding=_embed_test_text("API SharedConfig"),
         repo_qualified_id="scout-api::config::SharedConfig",
         bare_name="SharedConfig",
     )
@@ -562,7 +577,7 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
         signature_skeleton="interface SharedConfig {}",
         contextual_summary="UI SharedConfig",
         allowed_scopes=["public_eng", f"domain:{domain_id}", "repo:scout-ui"],
-        embedding=generate_deterministic_embedding("UI SharedConfig"),
+        embedding=_embed_test_text("UI SharedConfig"),
         repo_qualified_id="scout-ui::types::SharedConfig",
         bare_name="SharedConfig",
     )
@@ -577,7 +592,7 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
         signature_skeleton="def load_shared_config() -> SharedConfig:",
         contextual_summary="Calls intra-repo SharedConfig",
         allowed_scopes=["public_eng", f"domain:{domain_id}", "repo:scout-api"],
-        embedding=generate_deterministic_embedding("load_shared_config"),
+        embedding=_embed_test_text("load_shared_config"),
         repo_qualified_id="scout-api::routes::load_shared_config",
         bare_name="load_shared_config",
     )
@@ -615,7 +630,7 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
             verbatim_content="Legacy ADR specifies SESSION_TTL_SECONDS = 7200 and ttl = 7200s.",
             metadata_json={},
             allowed_scopes=["public_eng"],
-            embedding=generate_deterministic_embedding("SESSION_TTL_SECONDS 7200"),
+            embedding=_embed_test_text("SESSION_TTL_SECONDS 7200"),
             source_type="internal_adr",
             version_str="1",
             is_stale=False,
@@ -634,7 +649,7 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
             verbatim_content="S3_CANARY_COMPLIANCE_ONLY: immutable audit trace requirement.",
             metadata_json={},
             allowed_scopes=["audit:compliance"],
-            embedding=generate_deterministic_embedding("Compliance Audit Policy"),
+            embedding=_embed_test_text("Compliance Audit Policy"),
             source_type="internal_adr",
             version_str="2",
             is_stale=False,
@@ -653,7 +668,7 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
             verbatim_content="S3_CANARY_PM_ONLY: milestone ROI dashboard spec.",
             metadata_json={},
             allowed_scopes=["public_pm"],
-            embedding=generate_deterministic_embedding("PM Telemetry Spec"),
+            embedding=_embed_test_text("PM Telemetry Spec"),
             source_type="internal_adr",
             version_str="2",
             is_stale=False,
@@ -767,7 +782,7 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
                     "Compliance Audit Policy",
                 ),
                 (RoleType.PRODUCT_MANAGER, ["public_pm"], "wiki", "PM Telemetry Spec"),
-                (RoleType.QUANT_RESEARCHER, ["public_quant"], "wiki", "Compliance Audit Policy"),
+                (RoleType.DOMAIN_RESEARCHER, ["public_docs"], "wiki", "Compliance Audit Policy"),
             ]
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(

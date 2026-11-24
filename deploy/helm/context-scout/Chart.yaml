@@ -1,0 +1,15 @@
+apiVersion: v2
+name: context-scout
+description: Enterprise Context Scout — self-hosted, cloud- and model-agnostic Enterprise Context Control Plane
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - enterprise-context
+  - rag
+  - vllm
+  - lora
+  - zoekt
+  - gke
+maintainers:
+  - name: Enterprise Context Scout Maintainers

@@ -13,10 +13,10 @@ import { ScoutConsole } from "../components/ScoutConsole";
 import {
   installMockApiFetch,
   TEST_CODE_PACK,
+  TEST_DOCS_PACK,
   TEST_DOMAINS,
   TEST_ENGINEER_PRINCIPAL,
   TEST_PIPELINE_STAGES,
-  TEST_QUANT_PACK,
   TEST_TOKEN_SAVINGS,
 } from "./fixtures";
 
@@ -54,7 +54,6 @@ describe("Adversarial & Regression Security Tests", () => {
               },
             ],
           }}
-          quantSpec={null}
           tokenSavings={TEST_TOKEN_SAVINGS}
           principalRole="engineer"
           onOpenDiffModal={vi.fn()}
@@ -76,8 +75,8 @@ describe("Adversarial & Regression Security Tests", () => {
     expect(staleBanner.querySelector("script")).toBeNull();
     expect(staleBanner.querySelector("img")).toBeNull();
 
-    fireEvent.click(screen.getByTestId("tab-quant-strategy"));
-    const citeCard = screen.getByTestId("citation-card-chunk_hawkes_01");
+    fireEvent.click(screen.getByTestId("tab-document-sections"));
+    const citeCard = screen.getByTestId("citation-card-chunk_rls_01");
     expect(citeCard.textContent).toContain("<script>alert(1)</script>");
     expect(citeCard.querySelector("script")).toBeNull();
     expect(citeCard.querySelector("img")).toBeNull();
@@ -91,7 +90,7 @@ describe("Adversarial & Regression Security Tests", () => {
 
     render(
       <ScoutConsole
-        selectedDomain="trading_code_scout"
+        selectedDomain="code_architecture_scout"
         principal={TEST_ENGINEER_PRINCIPAL}
         domains={TEST_DOMAINS}
         pipelineStages={TEST_PIPELINE_STAGES}
@@ -124,7 +123,7 @@ describe("Adversarial & Regression Security Tests", () => {
 
     render(
       <ScoutConsole
-        selectedDomain="trading_code_scout"
+        selectedDomain="code_architecture_scout"
         principal={TEST_ENGINEER_PRINCIPAL}
         domains={TEST_DOMAINS}
         pipelineStages={TEST_PIPELINE_STAGES}
@@ -158,6 +157,10 @@ describe("Adversarial & Regression Security Tests", () => {
       expect(screen.getByTestId("header-auth-badge")).toHaveTextContent(
         "Bearer: engineer"
       );
+      expect(
+        screen.getByTestId("domain-card-code_architecture_scout")
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("run-scout-btn")).toBeEnabled();
     });
 
     fireEvent.click(screen.getByTestId("run-scout-btn"));
@@ -216,11 +219,11 @@ describe("Adversarial & Regression Security Tests", () => {
     expect(screen.queryByTestId("answer-first-hero")).not.toBeInTheDocument();
   });
 
-  it("handles CitationInspector resilience with empty code_slices, null quant metrics, and missing optional fields", () => {
+  it("handles CitationInspector resilience with empty code_slices, null brief, and missing optional fields", () => {
     render(
       <CitationInspector
         contextPack={{
-          ...TEST_QUANT_PACK,
+          ...TEST_DOCS_PACK,
           code_slices: [],
           supporting_doc_citations: [
             {
@@ -234,23 +237,13 @@ describe("Adversarial & Regression Security Tests", () => {
           ],
           domain_knowledge_brief: null,
         }}
-        quantSpec={{
-          ...TEST_QUANT_PACK.quant_strategy_spec!,
-          reported_sharpe_ratio: null,
-          reported_max_drawdown_pct: null,
-          transaction_cost_bps_assumed: null,
-          verified_citations: [],
-        }}
         tokenSavings={null}
         principalRole="compliance_officer"
         onOpenDiffModal={vi.fn()}
       />
     );
 
-    expect(screen.getByTestId("quant-strategy-view")).toBeInTheDocument();
-    expect(screen.getByTestId("quant-executive-answer")).toHaveTextContent(
-      "N/A"
-    );
+    expect(screen.getByTestId("document-sections-view")).toBeInTheDocument();
     expect(
       screen.getByTestId("inline-cite-doc-minimal_cite")
     ).toHaveTextContent("[1] Minimal Citation: Summary (v1.0)");

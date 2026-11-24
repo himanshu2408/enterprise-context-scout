@@ -42,7 +42,7 @@ def test_adversarial_ast_10_callers_across_5_files_bounded_and_diverse() -> None
     """
     expander = ASTDependencyExpander(max_direct_callers=3, max_expansion_token_budget=1500)
     repo = InMemoryRLSRepository()
-    domain_id = "trading_code_scout"
+    domain_id = "code_architecture_scout"
     repo_name = "adversarial-graph"
 
     principal = PrincipalContext(
@@ -225,7 +225,7 @@ def test_adversarial_ast_expansion_token_budget_never_exceeds_1500() -> None:
     """
     expander = ASTDependencyExpander(max_direct_callers=3, max_expansion_token_budget=1500)
     repo = InMemoryRLSRepository()
-    domain_id = "trading_code_scout"
+    domain_id = "code_architecture_scout"
     repo_name = "budget-stress-repo"
 
     principal = PrincipalContext(
@@ -405,7 +405,7 @@ def test_adversarial_live_postgres_rls_isolation(
     """Live PostgreSQL 17 test on port 5432:
 
     Verifies that an engineer principal (allowed_scopes=['public_eng']) cannot query
-    code_files, ast_symbols, or ast_edges tagged with 'quant_restricted'.
+    code_files, ast_symbols, or ast_edges tagged with 'docs_restricted'.
     """
     mgr = RLSConnectionManager(settings.db_app_url)
     repo = PostgresRLSRepository()
@@ -414,8 +414,8 @@ def test_adversarial_live_postgres_rls_isolation(
 
     quant_principal = PrincipalContext(
         user_id="adversarial_quant_user",
-        role=RoleType.QUANT_RESEARCHER,
-        allowed_scopes=["quant_restricted"],
+        role=RoleType.DOMAIN_RESEARCHER,
+        allowed_scopes=["docs_restricted"],
     )
     eng_principal = PrincipalContext(
         user_id="adversarial_eng_user",
@@ -444,7 +444,7 @@ def test_adversarial_live_postgres_rls_isolation(
                 git_commit_sha="commit_res",
                 git_blob_sha="blob_res",
                 language="python",
-                allowed_scopes=["quant_restricted"],
+                allowed_scopes=["docs_restricted"],
                 raw_content="def secret_alpha(): pass\n",
                 line_count=1,
             ),
@@ -461,7 +461,7 @@ def test_adversarial_live_postgres_rls_isolation(
                 end_line=1,
                 signature_skeleton="def secret_alpha() -> None:",
                 contextual_summary="Restricted alpha function",
-                allowed_scopes=["quant_restricted"],
+                allowed_scopes=["docs_restricted"],
                 embedding=[0.5] * 768,
             ),
         )
@@ -474,7 +474,7 @@ def test_adversarial_live_postgres_rls_isolation(
                 target_qualified_name="alpha.models.SecretWeights",
                 target_symbol_id=None,
                 edge_kind="USES_TYPE",
-                allowed_scopes=["quant_restricted"],
+                allowed_scopes=["docs_restricted"],
             ),
         )
 
@@ -531,7 +531,7 @@ def test_adversarial_live_postgres_rls_isolation(
             "SELECT file_id, file_path FROM code_files WHERE file_id = %s;",
             (restricted_file_id,),
         ).fetchall()
-        assert len(res_cf) == 0, "RLS BREACH: public_eng queried quant_restricted code_file!"
+        assert len(res_cf) == 0, "RLS BREACH: public_eng queried docs_restricted code_file!"
 
         pub_cf = conn.execute(
             "SELECT file_id, file_path FROM code_files WHERE file_id = %s;",
@@ -548,7 +548,7 @@ def test_adversarial_live_postgres_rls_isolation(
             "SELECT symbol_id, qualified_name FROM ast_symbols WHERE symbol_id = %s;",
             (restricted_sym_id,),
         ).fetchall()
-        assert len(res_sym) == 0, "RLS BREACH: public_eng queried quant_restricted ast_symbol!"
+        assert len(res_sym) == 0, "RLS BREACH: public_eng queried docs_restricted ast_symbol!"
 
         pub_sym = conn.execute(
             "SELECT symbol_id, qualified_name FROM ast_symbols WHERE symbol_id = %s;",
@@ -565,7 +565,7 @@ def test_adversarial_live_postgres_rls_isolation(
             "SELECT edge_id, target_qualified_name FROM ast_edges WHERE edge_id = %s;",
             (restricted_edge_id,),
         ).fetchall()
-        assert len(res_edge) == 0, "RLS BREACH: public_eng queried quant_restricted ast_edge!"
+        assert len(res_edge) == 0, "RLS BREACH: public_eng queried docs_restricted ast_edge!"
 
         pub_edge = conn.execute(
             "SELECT edge_id, target_qualified_name FROM ast_edges WHERE edge_id = %s;",
@@ -602,7 +602,7 @@ def test_adversarial_live_pgvector_cosine_with_relaxed_order(
 
     Verifies that pgvector cosine similarity search (<=>) executes with
     'relaxed_order' without RLS bypass.
-    Even when the query vector exactly matches a quant_restricted symbol,
+    Even when the query vector exactly matches a docs_restricted symbol,
     public_eng cannot see the row.
     """
     mgr = RLSConnectionManager(settings.db_app_url)
@@ -611,8 +611,8 @@ def test_adversarial_live_pgvector_cosine_with_relaxed_order(
 
     quant_principal = PrincipalContext(
         user_id="adversarial_quant_user",
-        role=RoleType.QUANT_RESEARCHER,
-        allowed_scopes=["quant_restricted"],
+        role=RoleType.DOMAIN_RESEARCHER,
+        allowed_scopes=["docs_restricted"],
     )
     eng_principal = PrincipalContext(
         user_id="adversarial_eng_user",
@@ -646,7 +646,7 @@ def test_adversarial_live_pgvector_cosine_with_relaxed_order(
                 %s, %s, %s, 'src/alpha/vec_target.py', 'c1', 'b1', 'python', %s, 'pass\n', 1
             );
             """,
-            (restricted_fid, domain_id, repo_name, ["quant_restricted"]),
+            (restricted_fid, domain_id, repo_name, ["docs_restricted"]),
         )
         conn.execute(
             """
@@ -662,7 +662,7 @@ def test_adversarial_live_pgvector_cosine_with_relaxed_order(
                 'Restricted target', %s, %s::vector
             );
             """,
-            (restricted_sid, restricted_fid, domain_id, ["quant_restricted"], target_vec_lit),
+            (restricted_sid, restricted_fid, domain_id, ["docs_restricted"], target_vec_lit),
         )
 
     # Insert public symbol with ortho_vec
@@ -723,7 +723,7 @@ def test_adversarial_live_pgvector_cosine_with_relaxed_order(
         # 3. Assert RLS prevents the restricted target symbol from leaking
         assert restricted_sid not in result_sids, (
             "CRITICAL SECURITY VULNERABILITY: pgvector <=> search bypassed RLS! "
-            "public_eng retrieved quant_restricted symbol!"
+            "public_eng retrieved docs_restricted symbol!"
         )
 
         # 4. Check explicit pair isolation under vector distance ordering
@@ -770,7 +770,7 @@ def test_adversarial_ast_boundary_clamping_at_edges() -> None:
     """
     expander = ASTDependencyExpander(max_direct_callers=3, max_expansion_token_budget=1500)
     repo = InMemoryRLSRepository()
-    domain_id = "trading_code_scout"
+    domain_id = "code_architecture_scout"
     repo_name = "clamping-repo"
 
     principal = PrincipalContext(
@@ -888,15 +888,15 @@ def test_adversarial_postgres_rls_tamper_and_delete_resistance(
     settings: ScoutSettings,
     ephemeral_pg_domain: str,
 ) -> None:
-    """Verifies that an engineer principal cannot DELETE or UPDATE quant_restricted rows."""
+    """Verifies that an engineer principal cannot DELETE or UPDATE docs_restricted rows."""
     mgr = RLSConnectionManager(settings.db_app_url)
     domain_id = ephemeral_pg_domain
     repo_name = "tamper-defense-test"
 
     quant_principal = PrincipalContext(
         user_id="adversarial_quant_user",
-        role=RoleType.QUANT_RESEARCHER,
-        allowed_scopes=["quant_restricted"],
+        role=RoleType.DOMAIN_RESEARCHER,
+        allowed_scopes=["docs_restricted"],
     )
     eng_principal = PrincipalContext(
         user_id="adversarial_eng_user",
@@ -920,7 +920,7 @@ def test_adversarial_postgres_rls_tamper_and_delete_resistance(
                 %s, 'secret_content = 42\n', 1
             );
             """,
-            (restricted_fid, domain_id, repo_name, ["quant_restricted"]),
+            (restricted_fid, domain_id, repo_name, ["docs_restricted"]),
         )
 
     # Attempt DELETE as eng_principal
@@ -943,7 +943,7 @@ def test_adversarial_postgres_rls_tamper_and_delete_resistance(
             (restricted_fid,),
         ).fetchone()
         assert row is not None, "Restricted file was improperly deleted"
-        assert row[1] == ["quant_restricted"], f"Scope was altered: {row[1]}"
+        assert row[1] == ["docs_restricted"], f"Scope was altered: {row[1]}"
 
 
 def test_adversarial_postgres_empty_and_injected_scopes(settings: ScoutSettings) -> None:
@@ -963,7 +963,7 @@ def test_adversarial_postgres_empty_and_injected_scopes(settings: ScoutSettings)
 
     with pytest.raises(ValidationError):
         PrincipalContext(
-            user_id="u", role=RoleType.ENGINEER, allowed_scopes=["public_eng,quant_restricted"]
+            user_id="u", role=RoleType.ENGINEER, allowed_scopes=["public_eng,docs_restricted"]
         )
 
     # 2. Database gate: unauthorized/unmatched scope sees 0 rows

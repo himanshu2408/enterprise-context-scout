@@ -19,11 +19,14 @@ import re
 from pathlib import Path
 from typing import Final
 
+import pytest
+
 from context_scout.agents.preflight_gate import (
     TYPESCRIPT_KEYWORDS,
     PreFlightValidator,
 )
 from context_scout.config import DomainConfig, ScoutSettings
+from context_scout.schemas.contracts import RoleType
 
 PROHIBITED_FINANCE_LITERALS: Final[frozenset[str]] = frozenset(
     {
@@ -41,33 +44,50 @@ PROHIBITED_FINANCE_LITERALS: Final[frozenset[str]] = frozenset(
         "germany_xetra",
         "us_nyse",
         "auto_quant",
+        "quant_researcher",
+        "quant_research",
+        "quant_paper",
+        "quantstrategybrief",
+        "goldenquanttask",
+        "quant_tasks",
+        "canary_quant_only",
+        "quant_corpus_mcp",
+        "quant_adapter",
+        "market microstructure",
+        "trading strategy",
+        "friction and transaction costs",
+        "momentum & microstructure",
+        "quantitative research context",
+        "hawkes",
+        "orderbook",
+        "volatilityforecastresult",
+        "marketregime",
+        "corp-finance-vault",
+        "public_quant",
     }
 )
 
 PROHIBITED_WORD_REGEX: Final[re.Pattern[str]] = re.compile(
-    r"\b(nse|kelly|sharpe)\b",
+    r"\b(nse|kelly|sharpe|quant)\b",
     re.IGNORECASE,
 )
 
-# Strictly bounded allowlist of finance-plugin and finance-corpus/schema modules.
-# Core modules (agents/*, api/*, ast_engine/*, cli.py, config.py, db/*,
-# mcp_servers/{common,code_repo_mcp,doc_corpus_mcp}.py, queue/*, retrieval/*,
-# security/*, telemetry/*, tuning/*, evals/{harness,unseen_ab_benchmark,unseen_repo_dataset}.py)
-# MUST NEVER appear on this allowlist.
-FINANCE_PLUGIN_ALLOWLIST: Final[frozenset[str]] = frozenset(
-    {
-        "plugins/domains/finance.py",
-        "mcp_servers/quant_corpus_mcp.py",
-        "mcp_servers/seed_code_corpus.py",
-        "ingestion/paper_harvester.py",
-        "ingestion/harvest_pipeline.py",
-        "ingestion/scepticism_gate.py",
-        "evals/golden_dataset.py",
-        "schemas/contracts.py",
-        "schemas/__init__.py",
-    }
-)
-FINANCE_PLUGIN_PREFIXES: Final[tuple[str, ...]] = ("trading_strategies/",)
+# Strictly empty allowlist: all finance-domain dogfooding is evicted to examples/quant_dogfood/.
+FINANCE_PLUGIN_ALLOWLIST: Final[frozenset[str]] = frozenset()
+FINANCE_PLUGIN_PREFIXES: Final[tuple[str, ...]] = ()
+
+
+def _get_repo_root() -> Path:
+    cand1 = Path(__file__).resolve().parents[1]
+    if (cand1 / "src" / "context_scout").exists():
+        return cand1
+    cand2 = Path.cwd()
+    if (cand2 / "src" / "context_scout").exists():
+        return cand2
+    cand3 = Path(__file__).resolve().parents[2] / "enterprise-context-scout"
+    if (cand3 / "src" / "context_scout").exists():
+        return cand3
+    raise FileNotFoundError("Could not locate repository root")
 
 
 def _get_src_root() -> Path:
@@ -330,12 +350,57 @@ def find_silent_broad_except_handlers(src_root: Path) -> dict[str, list[tuple[in
     return violations
 
 
+NEUTRAL_SCAN_TREES: Final[tuple[str, ...]] = ("src", "sql", "evals", "web-ui/src")
+NEUTRAL_SCAN_SUFFIXES: Final[frozenset[str]] = frozenset(
+    {".py", ".sql", ".ts", ".tsx", ".yaml", ".yml", ".json"}
+)
+
+
+def scan_neutral_trees_for_finance_tokens(
+    repo_root: Path,
+) -> dict[str, list[tuple[int, str, str]]]:
+    """Scans src/, sql/, evals/, and web-ui/src/ for prohibited finance literals and symbols."""
+    violations: dict[str, list[tuple[int, str, str]]] = {}
+    for tree_rel in NEUTRAL_SCAN_TREES:
+        tree_root = repo_root / tree_rel
+        if not tree_root.exists():
+            continue
+        for file_path in sorted(tree_root.rglob("*")):
+            if not file_path.is_file() or file_path.suffix not in NEUTRAL_SCAN_SUFFIXES:
+                continue
+            if any(
+                part in {"__pycache__", "node_modules", ".venv", "dist"} for part in file_path.parts
+            ):
+                continue
+            rel_posix = file_path.relative_to(repo_root).as_posix()
+            file_hits: list[tuple[int, str, str]] = []
+            for lineno, line in enumerate(
+                file_path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                matched = _match_prohibited_finance_token(line)
+                if matched:
+                    file_hits.append((lineno, matched, line.strip()[:80]))
+            if file_hits:
+                violations[rel_posix] = file_hits
+    return violations
+
+
 def test_core_modules_finance_literals_isolation_guard() -> None:
     """Dynamically scans ALL src/context_scout/**/*.py files for finance coupling."""
     src_root = _get_src_root()
     violations = scan_directory_for_finance_coupling(src_root)
     assert not violations, (
         f"Finance domain literals or symbols leaked outside FINANCE_PLUGIN_ALLOWLIST: {violations}."
+    )
+
+
+def test_all_core_trees_contain_no_finance_tokens() -> None:
+    """Scans ALL src/, sql/, evals/, and web-ui/src/ files for prohibited finance tokens."""
+    repo_root = _get_repo_root()
+    violations = scan_neutral_trees_for_finance_tokens(repo_root)
+    assert not violations, (
+        "Prohibited finance literals or symbols found in neutral core trees "
+        f"(src/, sql/, evals/, web-ui/src/): {violations}"
     )
 
 
@@ -395,3 +460,62 @@ def test_silent_broad_except_guard_mutation_proof(tmp_path: Path) -> None:
 
     violations = find_silent_broad_except_handlers(fake_src)
     assert violations == {"silent_sample.py": [(5, "Pass"), (9, "Continue")]}
+
+
+def test_finance_plugin_allowlist_is_empty() -> None:
+    """R2: Guarantees FINANCE_PLUGIN_ALLOWLIST and FINANCE_PLUGIN_PREFIXES remain empty."""
+    assert isinstance(FINANCE_PLUGIN_ALLOWLIST, frozenset)
+    assert len(FINANCE_PLUGIN_ALLOWLIST) == 0
+    assert len(FINANCE_PLUGIN_PREFIXES) == 0
+
+
+def test_domains_manifests_and_tuning_contain_no_finance_tokens() -> None:
+    """Scans shipped domains/ manifests, prompts, and tuning JSONL for quant tokens."""
+    repo_root = _get_repo_root()
+    domains_dir = repo_root / "domains"
+    assert domains_dir.is_dir()
+
+    violations: dict[str, list[tuple[int, str, str]]] = {}
+    for domain_dir in sorted(p for p in domains_dir.iterdir() if p.is_dir()):
+        candidate_files: list[Path] = []
+        for fixed_name in ("domain.yaml", "specialization.yaml", "glossary.yaml", "schema.json"):
+            fp = domain_dir / fixed_name
+            if fp.is_file():
+                candidate_files.append(fp)
+        for sub_name in ("prompts", "tuning"):
+            sub_dir = domain_dir / sub_name
+            if sub_dir.is_dir():
+                allowed_exts = {".yaml", ".yml", ".json", ".jsonl", ".md", ".txt"}
+                for p in sorted(sub_dir.rglob("*")):
+                    if p.is_file() and p.suffix in allowed_exts:
+                        candidate_files.append(p)
+        for file_path in candidate_files:
+            rel_posix = file_path.relative_to(repo_root).as_posix()
+            hits: list[tuple[int, str, str]] = []
+            for lineno, line in enumerate(
+                file_path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                matched = _match_prohibited_finance_token(line)
+                if matched:
+                    hits.append((lineno, matched, line.strip()[:80]))
+                if "examples/quant_dogfood" in line:
+                    hits.append((lineno, "examples/quant_dogfood", line.strip()[:80]))
+            if hits:
+                violations[rel_posix] = hits
+
+    assert not violations, (
+        f"Quant/finance or dogfood tokens leaked into shipped domains/: {violations}"
+    )
+
+
+def test_roletype_rejects_removed_quant_researcher_alias() -> None:
+    """Verifies RoleType no longer exposes or aliases quant_researcher."""
+    assert {r.value for r in RoleType} == {
+        "engineer",
+        "domain_researcher",
+        "product_manager",
+        "compliance_officer",
+    }
+    assert not hasattr(RoleType, "QUANT_RESEARCHER")
+    with pytest.raises(ValueError):
+        RoleType("quant_researcher")

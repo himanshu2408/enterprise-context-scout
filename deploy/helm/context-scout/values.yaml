@@ -1,0 +1,317 @@
+# Default portable values for Enterprise Context Scout.
+# For GCP GKE production deployments, layer `-f values-gcp-gke.yaml`.
+
+nameOverride: ""
+fullnameOverride: ""
+
+global:
+  environment: production
+  allowExternalCloudEgress: false
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets: []
+
+# Pod & Container Security Context (Kubernetes Restricted Pod Security Standard)
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+# Workload Identity ServiceAccounts (zero static keys)
+serviceAccount:
+  create: true
+  automountServiceAccountToken: false
+  annotations: {}
+  workloadIdentity:
+    provider: none # none | gcp | aws | azure
+    gcp:
+      api: ""
+      worker: ""
+      vllm: ""
+    aws:
+      apiRoleArn: ""
+      workerRoleArn: ""
+      vllmRoleArn: ""
+    azure:
+      apiClientId: ""
+      workerClientId: ""
+      vllmClientId: ""
+
+# Secret references (runtime containers ONLY receive SCOUT_DB_APP_URL, NEVER SCOUT_DB_ADMIN_URL)
+secrets:
+  existingSecret: "context-scout-secrets"
+  dbAppUrlKey: "SCOUT_DB_APP_URL"
+  authHmacSecretKey: "SCOUT_AUTH_HMAC_SECRET"
+  vllmAdminApiKeyKey: "SCOUT_VLLM_ADMIN_API_KEY"
+  metricsBearerTokenKey: "SCOUT_METRICS_BEARER_TOKEN"
+  scimBearerTokenKey: "SCOUT_SCIM_BEARER_TOKEN"
+  cosignPublicKeysJsonKey: "SCOUT_COSIGN_PUBLIC_KEYS_JSON"
+  cosignPublicKeyPemKey: "SCOUT_COSIGN_PUBLIC_KEY_PEM"
+  cosignCaCertsPemKey: "SCOUT_COSIGN_CA_CERTS_PEM"
+
+# Non-secret SCOUT_* configuration rendered into ConfigMap
+config:
+  defaultDomainId: "default"
+  primaryModelId: "google/gemma-4-26B-A4B-it"
+  contextualizerModelId: "google/gemma-4-E4B-it"
+  embeddingModelId: "google/embeddinggemma-2"
+  rerankerModelId: "BAAI/bge-reranker-v2-m3"
+  shieldModelId: "google/shieldgemma-2-2b-it"
+  embeddingDimensions: "768"
+  localMaxKvTokens: "32768"
+  loraSlotsCapacity: "4"
+  redisUrl: "redis://context-scout-redis:6379/0"
+  zoektEndpointUrl: "http://context-scout-zoekt:6070"
+  zoektProtocol: "grpc_json"
+  objectStoreScheme: "s3" # gs | s3
+  gcsBucket: ""
+  gcsProject: ""
+  s3Bucket: "context-scout-artifacts"
+  s3Region: "eu-central-1"
+  s3EndpointUrl: ""
+  s3ForcePathStyle: "true"
+  gcpProject: ""
+  gcpLocation: "europe-west3"
+  useVertexAi: "false"
+  iapEnabled: "false"
+  iapExpectedAudience: ""
+  corsOrigins: "https://context-scout.internal"
+  extraEnv: {}
+
+# Cloud SQL Auth Proxy Sidecar (default false in portable values; true in values-gcp-gke.yaml)
+cloudSqlAuthProxy:
+  enabled: false
+  image: "gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.2"
+  instanceConnectionName: ""
+  port: 5432
+  httpPort: 9801
+  autoIamAuthn: true
+  privateIp: true
+  psc: false
+  structuredLogs: true
+  healthCheck: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+api:
+  replicaCount: 2
+  image:
+    repository: ghcr.io/enterprise-context-scout/api
+    tag: "1.0.0"
+  port: 8080
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations: {}
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+worker:
+  replicaCount: 2
+  image:
+    repository: ghcr.io/enterprise-context-scout/worker
+    tag: "1.0.0"
+  command: ["/usr/bin/python3", "-m", "context_scout.cli"]
+  args: ["worker"]
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+webui:
+  replicaCount: 2
+  image:
+    repository: ghcr.io/enterprise-context-scout/webui
+    tag: "1.0.0"
+  port: 8080
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations: {}
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+vllm:
+  enabled: true
+  replicaCount: 1
+  port: 8001
+  modelId: "google/gemma-4-26B-A4B-it"
+  maxLoraRank: 32
+  maxLoras: 4
+  maxModelLen: 32768
+  gpuMemoryUtilization: "0.90"
+  gpu:
+    vendor: nvidia # nvidia | amd
+    count: 1
+    accelerator: "nvidia-l4" # nvidia-l4 | nvidia-tesla-a100 | nvidia-h100-80gb | ""
+    nodeSelectorEnabled: false
+  nvidiaImage:
+    repository: vllm/vllm-openai
+    tag: "v0.8.5"
+  amdImage:
+    repository: rocm/vllm
+    tag: "latest"
+  service:
+    type: ClusterIP
+    port: 8001
+    headless: true
+  resources:
+    requests:
+      cpu: 2000m
+      memory: 16Gi
+    limits:
+      cpu: 8000m
+      memory: 32Gi
+  tolerations: []
+  adapterSyncSidecar:
+    enabled: true
+    image:
+      repository: ghcr.io/enterprise-context-scout/adapter-sidecar
+      tag: "1.0.0"
+    stagingDir: "/var/run/scout/adapters"
+    baseModelRevisionSha256: ""
+    maxLoraRank: 32
+    useRslora: true
+    useDora: false
+    pollIntervalSeconds: 15
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+zoekt:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: sourcegraph/zoekt-webserver
+    tag: "latest"
+  port: 6070
+  service:
+    type: ClusterIP
+    port: 6070
+  storage:
+    storageClassName: "standard-rwo" # e.g. gp3 on AWS EKS, standard-rwo / premium-rwo on GKE
+    size: 50Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+# Portable Kubernetes Ingress (disabled when using GKE Gateway + IAP)
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: context-scout.local
+      apiPaths:
+        - /api
+        - /mcp
+        - /.well-known/mcp
+      webuiPaths:
+        - /
+  tls: []
+
+# GKE Gateway API + Cloud IAP + Cloud Armor
+gateway:
+  enabled: false
+  createGateway: false
+  gatewayClassName: "gke-l7-global-external-managed"
+  gatewayName: "context-scout-gateway"
+  gatewayNamespace: ""
+  hostnames:
+    - "context-scout.example.com"
+  iap:
+    enabled: true
+    oauth2ClientSecretName: "context-scout-iap-oauth"
+  cloudArmor:
+    enabled: true
+    securityPolicyName: "context-scout-cloud-armor"
+
+# KEDA Autoscaling
+keda:
+  enabled: true
+  pollingInterval: 15
+  cooldownPeriod: 120
+  worker:
+    minReplicas: 1
+    maxReplicas: 10
+    redisAddress: "context-scout-redis:6379"
+    redisListName: "scout:ingestion:queue"
+    listLength: "5"
+  api:
+    minReplicas: 2
+    maxReplicas: 10
+    cpuUtilization: 70
+  vllm:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 4
+    prometheusServerAddress: "http://prometheus-operated.monitoring.svc:9090"
+    metricName: "vllm:num_requests_waiting"
+    threshold: "4"
+
+# Default-Deny NetworkPolicy + Least-Privilege Internal Rules
+networkPolicy:
+  enabled: true
+  allowDnsEgress: true
+  allowHttpsEgress: true
+  postgresCidrs:
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+  ingressControllerNamespaceSelector:
+    kubernetes.io/metadata.name: ingress-nginx

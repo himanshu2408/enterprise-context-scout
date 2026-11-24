@@ -203,14 +203,6 @@ class PluginRegistry:
     def _load_builtin_plugins(cls) -> None:
         """Initializes and registers core language and connector plugins."""
         try:
-            from context_scout.plugins.languages.csharp import CSharpPlugin
-
-            if "csharp" not in cls._unregistered_languages:
-                cls.register_language(CSharpPlugin(), priority=50)
-        except ImportError as err:
-            logger.debug("CSharpPlugin not loaded: %s", err)
-
-        try:
             from context_scout.plugins.languages.storybook import StorybookPlugin
 
             if "storybook" not in cls._unregistered_languages:
@@ -227,12 +219,92 @@ class PluginRegistry:
             logger.debug("ReactReduxPlugin not loaded: %s", err)
 
         try:
+            from context_scout.plugins.languages.templates_i18n import TemplatesI18nPlugin
+
+            if "templates_i18n" not in cls._unregistered_languages:
+                cls.register_language(TemplatesI18nPlugin(), priority=25)
+        except ImportError as err:
+            logger.debug("TemplatesI18nPlugin not loaded: %s", err)
+
+        try:
+            from context_scout.plugins.languages.api_specs import ApiSpecsPlugin
+
+            if "api_specs" not in cls._unregistered_languages:
+                cls.register_language(ApiSpecsPlugin(), priority=28)
+        except ImportError as err:
+            logger.debug("ApiSpecsPlugin not loaded: %s", err)
+
+        try:
             from context_scout.plugins.languages.terraform import TerraformPlugin
 
             if "terraform" not in cls._unregistered_languages:
                 cls.register_language(TerraformPlugin(), priority=30)
         except ImportError as err:
             logger.debug("TerraformPlugin not loaded: %s", err)
+
+        try:
+            from context_scout.plugins.languages.csharp import CSharpPlugin
+
+            if "csharp" not in cls._unregistered_languages:
+                cls.register_language(CSharpPlugin(), priority=50)
+        except ImportError as err:
+            logger.debug("CSharpPlugin not loaded: %s", err)
+
+        try:
+            from context_scout.plugins.languages.java_spring import JavaSpringPlugin
+
+            if "java" not in cls._unregistered_languages:
+                cls.register_language(JavaSpringPlugin(), priority=50)
+        except ImportError as err:
+            logger.debug("JavaSpringPlugin not loaded: %s", err)
+
+        try:
+            from context_scout.plugins.languages.kotlin import KotlinPlugin
+
+            if "kotlin" not in cls._unregistered_languages:
+                cls.register_language(KotlinPlugin(), priority=50)
+        except ImportError as err:
+            logger.debug("KotlinPlugin not loaded: %s", err)
+
+        try:
+            from context_scout.plugins.languages.go import GoPlugin
+
+            if "go" not in cls._unregistered_languages:
+                cls.register_language(GoPlugin(), priority=50)
+        except ImportError as err:
+            logger.debug("GoPlugin not loaded: %s", err)
+
+        try:
+            from context_scout.plugins.languages.rust import RustPlugin
+
+            if "rust" not in cls._unregistered_languages:
+                cls.register_language(RustPlugin(), priority=50)
+        except ImportError as err:
+            logger.debug("RustPlugin not loaded: %s", err)
+
+        try:
+            from context_scout.plugins.languages.sql_dbt import SqlDbtPlugin
+
+            if "sql" not in cls._unregistered_languages:
+                cls.register_language(SqlDbtPlugin(), priority=50)
+        except ImportError as err:
+            logger.debug("SqlDbtPlugin not loaded: %s", err)
+
+        try:
+            from context_scout.plugins.languages.protobuf_grpc import ProtobufGrpcPlugin
+
+            if "protobuf" not in cls._unregistered_languages:
+                cls.register_language(ProtobufGrpcPlugin(), priority=50)
+        except ImportError as err:
+            logger.debug("ProtobufGrpcPlugin not loaded: %s", err)
+
+        try:
+            from context_scout.plugins.languages.scip_ingestor import SCIPIndexPlugin
+
+            if "scip" not in cls._unregistered_languages:
+                cls.register_language(SCIPIndexPlugin(), priority=60)
+        except ImportError as err:
+            logger.debug("SCIPIndexPlugin not loaded: %s", err)
 
         try:
             from context_scout.plugins.connectors.confluence import ConfluenceConnectorPlugin
@@ -258,11 +330,20 @@ class PluginRegistry:
             logger.debug("GitLabConnectorPlugin not loaded: %s", err)
 
         try:
-            from context_scout.plugins.domains.finance import FinanceDomainPlugin
+            from context_scout.plugins.connectors.github import GitHubEnterpriseConnectorPlugin
 
-            cls.register_domain(FinanceDomainPlugin())
+            cls.register_connector(
+                GitHubEnterpriseConnectorPlugin(base_url="https://api.github.com")
+            )
         except ImportError as err:
-            logger.debug("FinanceDomainPlugin not loaded: %s", err)
+            logger.debug("GitHubEnterpriseConnectorPlugin not loaded: %s", err)
+
+        try:
+            from context_scout.plugins.domains.enterprise_core import EnterpriseCoreDomainPlugin
+
+            cls.register_domain(EnterpriseCoreDomainPlugin())
+        except ImportError as err:
+            logger.debug("EnterpriseCoreDomainPlugin not loaded: %s", err)
 
         try:
             from context_scout.plugins.domains.data_engineering import DataEngineeringDomainPlugin

@@ -27,7 +27,7 @@ from context_scout.db.repositories import (
     DocChunkRecord,
 )
 from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
-from context_scout.schemas.contracts import MarketRegime, PrincipalContext, RoleType
+from context_scout.schemas.contracts import DocumentScope, PrincipalContext, RoleType
 
 _ACID_QUOTE = (
     "ACID stands for Atomicity, Consistency, Isolation, and Durability, "
@@ -95,7 +95,7 @@ class _FakeEnterpriseDocRepo:
         self,
         principal: PrincipalContext,
         domain_id: str,
-        market_scope: MarketRegime | str | None = None,
+        market_scope: DocumentScope | str | None = None,
     ) -> list[DocChunkRecord]:
         _ = (principal, market_scope)
         return [c for c in self._chunks if c.domain_id == domain_id]
@@ -105,7 +105,7 @@ class _FakeEnterpriseDocRepo:
         principal: PrincipalContext,
         domain_id: str,
         query_text: str,
-        market_scope: MarketRegime | str | None = None,
+        market_scope: DocumentScope | str | None = None,
         limit: int = 50,
     ) -> list[DocChunkRecord]:
         _ = (principal, query_text, market_scope)
@@ -155,9 +155,8 @@ class _FakeConnectionManager:
 
 
 def test_row_to_doc_chunk_parses_enterprise_doc_and_negative_control() -> None:
-    """Proves MarketRegime rejects ENTERPRISE_DOC while _row_to_doc_chunk preserves it."""
-    with pytest.raises(ValueError):
-        MarketRegime("ENTERPRISE_DOC")
+    """Proves DocumentScope parses ENTERPRISE_DOC and REGIONAL_US while preserving None."""
+    assert DocumentScope("ENTERPRISE_DOC") == DocumentScope.ENTERPRISE_DOC
 
     enterprise_chunk = PostgresScoutGraphAdapter._row_to_doc_chunk(
         _make_doc_row(
@@ -169,14 +168,14 @@ def test_row_to_doc_chunk_parses_enterprise_doc_and_negative_control() -> None:
             raw_market_scope="ENTERPRISE_DOC",
         )
     )
-    equity_chunk = PostgresScoutGraphAdapter._row_to_doc_chunk(
+    regional_chunk = PostgresScoutGraphAdapter._row_to_doc_chunk(
         _make_doc_row(
             chunk_id=uuid.uuid4(),
-            doc_id="eq_doc",
-            doc_title="US Equity Execution",
+            doc_id="reg_doc",
+            doc_title="US Regional Compliance",
             section_heading="Overview",
-            verbatim_content="US equity execution semantics.",
-            raw_market_scope="US_EQUITY",
+            verbatim_content="US regional compliance semantics.",
+            raw_market_scope="REGIONAL_US",
         )
     )
     none_chunk = PostgresScoutGraphAdapter._row_to_doc_chunk(
@@ -190,8 +189,8 @@ def test_row_to_doc_chunk_parses_enterprise_doc_and_negative_control() -> None:
         )
     )
 
-    assert enterprise_chunk.market_scope == "ENTERPRISE_DOC"
-    assert equity_chunk.market_scope == MarketRegime.US_NYSE_NASDAQ
+    assert enterprise_chunk.market_scope == DocumentScope.ENTERPRISE_DOC
+    assert regional_chunk.market_scope == DocumentScope.REGIONAL_US
     assert none_chunk.market_scope is None
 
 

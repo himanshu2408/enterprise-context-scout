@@ -1,0 +1,19 @@
+{{- if .Values.zoekt.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "context-scout.fullname" . }}-zoekt
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: zoekt
+spec:
+  type: {{ .Values.zoekt.service.type }}
+  ports:
+    - name: http
+      port: {{ int .Values.zoekt.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "context-scout.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: zoekt
+{{- end }}

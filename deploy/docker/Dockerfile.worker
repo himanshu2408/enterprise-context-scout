@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1.7
+
+FROM python:3.12-slim-bookworm AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=0 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir "uv>=0.13.4,<0.14.0"
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+
+RUN uv sync --frozen --no-dev --extra worker --no-editable \
+    && pip uninstall -y uv \
+    && find /app /usr/local/lib/python3.12 -type d -name '__pycache__' -exec rm -rf {} +
+
+
+FROM gcr.io/distroless/python3-debian12:nonroot AS runtime
+
+WORKDIR /app
+
+COPY --from=builder /usr/local/bin/python3.12 /usr/bin/python3
+COPY --from=builder /usr/local/bin/python3.12 /usr/local/bin/python3.12
+COPY --from=builder /usr/local/lib/libpython3.12* /usr/local/lib/
+COPY --from=builder /usr/local/lib/python3.12 /usr/local/lib/python3.12
+COPY --from=builder --chown=65532:65532 /app/.venv /app/.venv
+COPY --from=builder --chown=65532:65532 /app/src /app/src
+COPY --chown=65532:65532 alembic.ini /app/alembic.ini
+COPY --chown=65532:65532 config /app/config
+COPY --chown=65532:65532 domains /app/domains
+COPY --chown=65532:65532 sql /app/sql
+
+USER 65532:65532
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TMPDIR=/tmp \
+    HOME=/tmp \
+    HF_HOME=/tmp/hf_cache \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    LD_LIBRARY_PATH=/usr/local/lib \
+    PYTHONPATH=/app/src:/app/.venv/lib/python3.12/site-packages \
+    PATH=/app/.venv/bin:/usr/bin:/bin
+
+ENTRYPOINT ["/usr/bin/python3", "-m", "context_scout.cli"]

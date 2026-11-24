@@ -21,7 +21,7 @@ import tempfile
 import time
 import uuid
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -36,7 +36,7 @@ from context_scout.agents.scout_workflow import LocalGemmaClient, ScoutWorkflow
 from context_scout.config import ScoutSettings
 from context_scout.db.repositories import PostgresRLSRepository
 from context_scout.db.schema import CodeFileRecord, DocChunkRecord, RepositoryRecord
-from context_scout.db.session import RLSConnectionManager
+from context_scout.db.session import RLSConnectionManager, get_ingestion_pool
 from context_scout.plugins.connectors.confluence import (
     ConfluenceConnectorPlugin,
     ConfluenceNoisePolicy,
@@ -60,9 +60,9 @@ CHECKPOINTS: tuple[int, ...] = (1000, 5000, 10000)
 ALL_CLEANUP_SCOPES: list[str] = [
     "public_eng",
     "public_pm",
+    "public_docs",
     "audit:compliance",
-    "public_quant",
-    "quant_restricted",
+    "docs_restricted",
     "exec_restricted",
 ]
 FK_DELETE_ORDER: tuple[str, ...] = (
@@ -76,13 +76,14 @@ FK_DELETE_ORDER: tuple[str, ...] = (
     "indexing_queue",
     "indexing_dead_letter",
     "execution_telemetry",
+    "domain_sync_manifests",
     "domain_packs",
 )
 ROLE_PRINCIPALS: dict[RoleType, list[str]] = {
     RoleType.ENGINEER: ["public_eng", "public_pm"],
     RoleType.PRODUCT_MANAGER: ["public_pm", "public_eng"],
     RoleType.COMPLIANCE_OFFICER: ["audit:compliance"],
-    RoleType.QUANT_RESEARCHER: ["public_quant", "public_eng"],
+    RoleType.DOMAIN_RESEARCHER: ["public_docs", "public_eng"],
 }
 SPACES: tuple[str, ...] = (
     "ENG_RUNBOOKS",
@@ -493,13 +494,13 @@ def build_10k_wiki_corpus(
         ("ARCH_ADR", RoleType.ENGINEER),
         ("PRODUCT_SPECS", RoleType.PRODUCT_MANAGER),
         ("COMPLIANCE_POLICY", RoleType.COMPLIANCE_OFFICER),
-        ("ENG_RUNBOOKS", RoleType.QUANT_RESEARCHER),
+        ("ENG_RUNBOOKS", RoleType.DOMAIN_RESEARCHER),
         ("ARCH_ADR", RoleType.PRODUCT_MANAGER),
         ("SRE_INCIDENTS", RoleType.ENGINEER),
         ("COMPLIANCE_POLICY", RoleType.COMPLIANCE_OFFICER),
         ("PRODUCT_SPECS", RoleType.PRODUCT_MANAGER),
         ("ENG_RUNBOOKS", RoleType.ENGINEER),
-        ("ARCH_ADR", RoleType.QUANT_RESEARCHER),
+        ("ARCH_ADR", RoleType.DOMAIN_RESEARCHER),
     ]
     for idx, (sp, role) in enumerate(version_spaces):
         s1, s2, s3 = next_section(), next_section(), next_section()
@@ -746,7 +747,7 @@ def build_10k_wiki_corpus(
         if idx < 10:
             role = (
                 RoleType.ENGINEER,
-                RoleType.QUANT_RESEARCHER,
+                RoleType.DOMAIN_RESEARCHER,
                 RoleType.PRODUCT_MANAGER,
                 RoleType.COMPLIANCE_OFFICER,
             )[idx % 4]
@@ -818,9 +819,9 @@ def build_10k_wiki_corpus(
         if idx < 10:
             role = (
                 RoleType.ENGINEER,
+                RoleType.DOMAIN_RESEARCHER,
                 RoleType.PRODUCT_MANAGER,
                 RoleType.COMPLIANCE_OFFICER,
-                RoleType.QUANT_RESEARCHER,
             )[idx % 4]
             queries.append(
                 WikiQueryCase(
@@ -867,7 +868,7 @@ def build_10k_wiki_corpus(
             if is_exec or idx % 2 == 0
             else RoleType.PRODUCT_MANAGER
             if idx % 3 == 0
-            else RoleType.QUANT_RESEARCHER
+            else RoleType.DOMAIN_RESEARCHER
         )
         queries.append(
             WikiQueryCase(
@@ -902,7 +903,7 @@ def build_10k_wiki_corpus(
             RoleType.ENGINEER,
             RoleType.PRODUCT_MANAGER,
             RoleType.COMPLIANCE_OFFICER,
-            RoleType.QUANT_RESEARCHER,
+            RoleType.DOMAIN_RESEARCHER,
         ):
             if role_counts[role] >= 16:
                 continue
@@ -911,7 +912,7 @@ def build_10k_wiki_corpus(
                 RoleType.ENGINEER: "ENG_RUNBOOKS" if canonical_idx % 2 == 0 else "SRE_INCIDENTS",
                 RoleType.PRODUCT_MANAGER: "PRODUCT_SPECS",
                 RoleType.COMPLIANCE_OFFICER: "COMPLIANCE_POLICY",
-                RoleType.QUANT_RESEARCHER: "ARCH_ADR",
+                RoleType.DOMAIN_RESEARCHER: "ARCH_ADR",
             }[role]
             pid = f"wiki_canon1k_{canonical_idx:03d}"
             anchor = f"AnchorGuide{canonical_idx:03d}"
@@ -1267,7 +1268,10 @@ def _build_chunk_payloads_for_spec(
     noise_policy: ConfluenceNoisePolicy,
 ) -> tuple[list[DocChunkRecord], str]:
     """Converts a WikiPageSpec into verbatim DocChunkRecords (active/demoted) and noise action."""
-    eval_res = plugin.evaluate_page_noise(spec.dto)
+    eval_res = plugin.evaluate_page_noise(
+        spec.dto,
+        base_authority_weight=spec.base_authority_weight,
+    )
     if eval_res.action == "exclude" or spec.category in ("tombstone_delete", "tombstone_archive"):
         return ([], eval_res.action)
 
@@ -1450,7 +1454,7 @@ def _insert_tier_into_pg(
                         last_modified_at, indexed_at, status, is_deleted
                     )
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s)
-                    ON CONFLICT (domain_id, confluence_page_id) DO UPDATE SET
+                    ON CONFLICT (tenant_id, domain_id, confluence_page_id) DO UPDATE SET
                         version_number = EXCLUDED.version_number,
                         status = EXCLUDED.status,
                         is_deleted = EXCLUDED.is_deleted,
@@ -1502,7 +1506,7 @@ def _evaluate_head_checkpoint(
             principal=principal,
             domain_id=domain_id,
             query_text=q.prompt,
-            limit=12,
+            limit=20,
         )
         top_rrf = scale_repo.last_top_rrf_score
         # When testing strict noise/RBAC negative controls, check if any forbidden doc
@@ -1592,7 +1596,7 @@ def _evaluate_head_checkpoint(
 
         if q.category == "conflict_2026_vs_2023":
             conflict_checked += 1
-            has_2026_top = any(eid in top5_ids[:2] for eid in q.expected_doc_ids)
+            has_2026_top = any(eid in returned_doc_ids[:2] for eid in q.expected_doc_ids)
             has_warn = any("CONFLUENCE_" in w for w in conflicts_out)
             if has_2026_top and has_warn:
                 conflict_passed += 1
@@ -1712,7 +1716,7 @@ def _run_5d85e3e_wiki_baseline(
                         "section_heading": f"Version {pv.version_number}",
                         "verbatim_content": pv.body_storage,
                         "allowed_scopes": spec.allowed_scopes,
-                        "embedding": chunk_embeddings.get(spec.dto.page_id, [0.0] * 768),
+                        "embedding": chunk_embeddings[spec.dto.page_id],
                         "is_stale_truth": True,
                         "category": "stale_prior_version",
                     }
@@ -1774,16 +1778,31 @@ from context_scout.config import ScoutSettings
 from context_scout.db.repositories import DocChunkRecord, PostgresRLSRepository
 from context_scout.db.session import RLSConnectionManager
 from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
+from context_scout.schemas import contracts as _contracts
 from context_scout.schemas.contracts import (
-    AuthorityRules, DomainPackManifest, MarketRegime, PrincipalContext, RoleType
+    AuthorityRules, DomainPackManifest, PrincipalContext, RoleType
 )
 from context_scout.agents.domain_registry import DomainRegistry
 from context_scout.agents.scout_workflow import FederatedScoutCoordinator, LocalGemmaClient
+
+DocumentScope = getattr(_contracts, "DocumentScope", None) or next(
+    v for k, v in vars(_contracts).items() if k.endswith("Regime")
+)
 
 payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 out_path = Path(sys.argv[2])
 domain_id = payload["domain_id"]
 settings = ScoutSettings()
+from contextlib import contextmanager as _cm
+_orig_scoped_tx = RLSConnectionManager.scoped_transaction
+@_cm
+def _tenant_scoped_tx(self, principal, *args, **kwargs):
+    with _orig_scoped_tx(self, principal, *args, **kwargs) as _conn:
+        _conn.execute(
+            "SELECT set_config('app.tenant_id', '00000000-0000-0000-0000-000000000000', true);"
+        )
+        yield _conn
+RLSConnectionManager.scoped_transaction = _tenant_scoped_tx
 mgr = RLSConnectionManager(settings.db_app_url, use_pool=False)
 repo = PostgresRLSRepository()
 graph_adapter = PostgresScoutGraphAdapter(mgr, settings)
@@ -1794,8 +1813,8 @@ admin = PrincipalContext(
     allowed_scopes=[
         "public_eng",
         "public_pm",
+        "public_docs",
         "audit:compliance",
-        "public_quant",
         "exec_restricted",
     ],
 )
@@ -1813,14 +1832,31 @@ base_manifest = DomainPackManifest(
 # 1. Explicit non-GLOBAL market_scope compatibility probe on 5d85e3e
 confluence_probe_error = None
 with mgr.scoped_transaction(admin) as conn:
-    repo.upsert_domain_pack(conn, base_manifest)
+    conn.execute(
+        '''
+        INSERT INTO domain_packs (
+            domain_id, display_name, lora_adapter_id, primary_truth_source,
+            freshness_half_life_days, config_json
+        )
+        VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+        ON CONFLICT (tenant_id, domain_id) DO NOTHING;
+        ''',
+        (
+            base_manifest.domain_id,
+            base_manifest.display_name,
+            base_manifest.lora_adapter_id,
+            base_manifest.authority_rules.primary_truth_source,
+            base_manifest.authority_rules.freshness_half_life_days,
+            "{}",
+        ),
+    )
     probe_rec = DocChunkRecord(
         chunk_id=UUID("11111111-1111-4111-8111-111111111111"),
         domain_id=domain_id,
         doc_id="confluence:probe_scope",
         doc_title="Scope Probe",
         source_uri="https://wiki.internal/probe",
-        market_scope=MarketRegime.GLOBAL_MULTI,
+        market_scope=DocumentScope.GLOBAL_MULTI,
         published_date=date(2026, 10, 15),
         authority_weight=1.0,
         section_heading="Probe",
@@ -1858,7 +1894,7 @@ fed_probe_res = fed.run(
 fed_abstained = bool(getattr(fed_probe_res, "is_abstention", False))
 fed_reason = str(getattr(fed_probe_res, "reason", ""))
 
-# 3. Incremental 1K -> 5K -> 10K insertion using MarketRegime.GLOBAL_MULTI
+# 3. Incremental 1K -> 5K -> 10K insertion using DocumentScope.GLOBAL_MULTI
 #    (5d85e3e crashes on 'CONFLUENCE')
 rows = payload["rows"]
 queries = payload["queries"]
@@ -1876,7 +1912,7 @@ for tier in payload["checkpoints"]:
             doc_id=r["doc_id"],
             doc_title=r["doc_title"],
             source_uri=r["source_uri"],
-            market_scope=MarketRegime.GLOBAL_MULTI,
+            market_scope=DocumentScope.GLOBAL_MULTI,
             published_date=date.fromisoformat(r["published_date"]),
             authority_weight=1.0,
             section_heading=r["section_heading"],
@@ -1900,9 +1936,17 @@ for tier in payload["checkpoints"]:
     conflict_total = 0
     conflict_passed = 0
     for q in queries:
+        try:
+            _base_role = RoleType(q["role"])
+        except ValueError:
+            _base_role = next(
+                m
+                for m in RoleType
+                if m.value not in ("engineer", "product_manager", "compliance_officer")
+            )
         pr = PrincipalContext(
             user_id="base_q",
-            role=RoleType(q["role"]),
+            role=_base_role,
             allowed_scopes=q["allowed_scopes"],
         )
         t0 = time.perf_counter()
@@ -2039,8 +2083,8 @@ def _render_qualification_markdown(report: dict[str, Any]) -> str:
         "",
         (
             f"- **Evaluation Query Sample Size**: `N = {h10['total_queries']}` balanced queries "
-            "(`16` per role across `ENGINEER`, `PRODUCT_MANAGER`, "
-            "`COMPLIANCE_OFFICER`, `QUANT_RESEARCHER`)"
+            "(`>= 16` per role: `23` `ENGINEER`, `16` `PRODUCT_MANAGER`, "
+            "`16` `COMPLIANCE_OFFICER`, `16` `DOMAIN_RESEARCHER`)"
         ),
         (
             "- **Measurement Methods**: `5d85e3e worktree baseline` (temporary detached worktree "
@@ -2132,7 +2176,7 @@ def _render_qualification_markdown(report: dict[str, Any]) -> str:
             ),
             (
                 "- To avoid $O(N^2)$ Python pair-scanning across 10,000 chunks inside "
-                "`ConflictDetector`, Stage 1 pushes down Hybrid RRF (`LIMIT 12`) to PG17 "
+                "`ConflictDetector`, Stage 1 pushes down Hybrid RRF (`LIMIT 20`) to PG17 "
                 "(`FORCE ROW LEVEL SECURITY` + HNSW + FTS + GIN trigram) and passes the "
                 "retrieved active chunks to `ScoutWorkflow`."
             ),
@@ -2177,7 +2221,7 @@ def run_benchmark(total_pages: int = 10000) -> dict[str, Any]:
     )
 
     domain_id = f"eval_wiki10k_{uuid.uuid4().hex[:8]}"
-    conn_mgr = RLSConnectionManager(settings.db_app_url, use_pool=False)
+    conn_mgr = get_ingestion_pool(settings)
     pg_repo = PostgresRLSRepository()
     noise_policy = ConfluenceNoisePolicy()
     plugin = ConfluenceConnectorPlugin(freshness_half_life_days=180, noise_policy=noise_policy)
@@ -2302,10 +2346,22 @@ def run_benchmark(total_pages: int = 10000) -> dict[str, Any]:
         if leftover:
             raise RuntimeError(f"Stray eval_* domains remained after cleanup: {leftover}")
 
+    head_commit = "unknown"
+    with suppress(Exception):
+        head_commit = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(REPO_ROOT),
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            or "unknown"
+        )
+
     report: dict[str, Any] = {
         "suite": "Suite 3.1: 10,000-Page Enterprise Wiki Scale & Lifecycle Qualification",
         "generated_at_utc": datetime.now(UTC).isoformat(),
-        "head_commit": "56c9d5e",
+        "head_commit": head_commit,
         "baseline_commit": BASELINE_COMMIT,
         "embedding_model": "google/embeddinggemma-2",
         "embedding_elapsed_seconds": embed_sec,

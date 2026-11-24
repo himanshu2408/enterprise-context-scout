@@ -24,7 +24,6 @@ lora_enabled: false
 default_scopes:
   - "public"
   - "public_eng"
-  - "public_quant"
   - "domain:data_engineering"
   - "domain:data_engineering_scout"
 sample_queries:

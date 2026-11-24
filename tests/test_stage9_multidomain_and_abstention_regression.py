@@ -73,7 +73,7 @@ def test_rc5_doc_domains_disable_rule_distilled_lora_and_fail_closed_offline() -
     """RC-5: Doc domains default lora_enabled=False; offline LocalGemmaClient returns None."""
     registry = DomainRegistry(DOMAINS_DIR)
     registry.load_all()
-    for dom_id in ("data_engineering_scout", "quant_research_scout"):
+    for dom_id in ("data_engineering_scout", "enterprise_docs_scout"):
         manifest = registry.get(dom_id)
         assert manifest is not None
         assert manifest.lora_enabled is False
@@ -81,7 +81,7 @@ def test_rc5_doc_domains_disable_rule_distilled_lora_and_fail_closed_offline() -
     client = LocalGemmaClient(offline_mode=True)
     repo = InMemoryRLSRepository()
     p = PrincipalContext(user_id="u", role=RoleType.ENGINEER, allowed_scopes=["public"])
-    assert client.generate_quant_brief("test", "quant_research_scout", repo, p) is None
+    assert client.generate_research_brief("test", "enterprise_docs_scout", repo, p) is None
 
 
 def test_rc6_unscripted_eval_suite_has_zero_spoilers_and_covers_all_domains() -> None:
@@ -93,8 +93,8 @@ def test_rc6_unscripted_eval_suite_has_zero_spoilers_and_covers_all_domains() ->
     assert {
         "data_engineering_scout",
         "polyglot_unseen_v2",
-        "quant_research_scout",
-        "trading_code_scout",
+        "enterprise_docs_scout",
+        "code_architecture_scout",
         "federated_all",
     }.issubset(domains_covered)
     assert sum(1 for t in unscripted if t.expected_abstain) >= 4
@@ -227,8 +227,8 @@ def test_rc1_rc2_rc7_live_pg17_api_acid_cap_iceberg_and_zero_dollar_abstention()
             assert {
                 "data_engineering_scout",
                 "polyglot_unseen_v2",
-                "quant_research_scout",
-                "trading_code_scout",
+                "enterprise_docs_scout",
+                "code_architecture_scout",
             }.issubset(domain_ids)
 
             # 2. Unscripted DE queries under federated_all route to data_engineering_scout & pass
@@ -367,4 +367,3 @@ def test_rc2_stage4_gate_blocks_insufficient_citations_when_stage3_completes() -
     assert len(fed_res.stage_traces[3].checks) >= 1
     assert fed_res.stage_traces[3].final_decision == "abstain_zero_paid"
     assert fed_res.stage_traces[3].sufficiency_verdict == "insufficient"
-

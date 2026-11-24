@@ -50,7 +50,7 @@ def principal_a() -> PrincipalContext:
     return PrincipalContext(
         user_id="principal_alpha",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "repo:trading_strategies"],
+        allowed_scopes=["public_eng", "repo:code_architecture_scout"],
         session_budget_tokens=20_000,
     )
 
@@ -60,7 +60,7 @@ def principal_b() -> PrincipalContext:
     return PrincipalContext(
         user_id="principal_beta",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "repo:trading_strategies"],
+        allowed_scopes=["public_eng", "repo:code_architecture_scout"],
         max_session_paid_tokens=50_000,
     )
 

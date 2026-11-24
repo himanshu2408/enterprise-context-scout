@@ -1,0 +1,81 @@
+# GCP GKE Production Values Overlay for Enterprise Context Scout.
+# Usage: helm upgrade --install context-scout ./deploy/helm/context-scout -f deploy/helm/context-scout/values-gcp-gke.yaml
+
+serviceAccount:
+  create: true
+  automountServiceAccountToken: true
+  workloadIdentity:
+    provider: gcp
+    gcp:
+      api: "scout-api@PROJECT_ID.iam.gserviceaccount.com"
+      worker: "scout-worker@PROJECT_ID.iam.gserviceaccount.com"
+      vllm: "scout-vllm@PROJECT_ID.iam.gserviceaccount.com"
+
+config:
+  objectStoreScheme: "gs"
+  gcsBucket: "context-scout-artifacts-eu"
+  gcsProject: "PROJECT_ID"
+  gcpProject: "PROJECT_ID"
+  gcpLocation: "europe-west3"
+  useVertexAi: "true"
+  iapEnabled: "true"
+  iapExpectedAudience: "/projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID"
+
+cloudSqlAuthProxy:
+  enabled: true
+  image: "gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.2"
+  instanceConnectionName: "PROJECT_ID:europe-west3:context-scout-gke-pg17"
+  port: 5432
+  httpPort: 9801
+  autoIamAuthn: true
+  privateIp: true
+  psc: true
+  structuredLogs: true
+  healthCheck: true
+
+api:
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations:
+      cloud.google.com/neg: '{"ingress": true}'
+
+webui:
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations:
+      cloud.google.com/neg: '{"ingress": true}'
+
+vllm:
+  gpu:
+    vendor: nvidia
+    count: 1
+    accelerator: "nvidia-l4"
+    nodeSelectorEnabled: true
+  tolerations:
+    - key: "nvidia.com/gpu"
+      operator: "Exists"
+      effect: "NoSchedule"
+
+zoekt:
+  storage:
+    storageClassName: "premium-rwo"
+    size: 100Gi
+
+ingress:
+  enabled: false
+
+gateway:
+  enabled: true
+  createGateway: true
+  gatewayClassName: "gke-l7-global-external-managed"
+  gatewayName: "context-scout-gateway"
+  hostnames:
+    - "context-scout.internal.example.com"
+  iap:
+    enabled: true
+    oauth2ClientSecretName: "context-scout-iap-oauth"
+  cloudArmor:
+    enabled: true
+    securityPolicyName: "context-scout-gke-cloud-armor"

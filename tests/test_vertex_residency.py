@@ -55,7 +55,7 @@ def sample_pack() -> ImplementationContextPack:
     )
     return ImplementationContextPack(
         trace_id="trace-residency-001",
-        domain_id="trading_code_scout",
+        domain_id="code_architecture_scout",
         user_task="Add logging to Engine.run",
         architectural_execution_plan=["Add logging statement"],
         code_slices=[slice1],

@@ -114,7 +114,7 @@ class TestFailClosedWhenSecretUnset:
         res = client.post(
             "/api/v1/scout/query",
             headers={"Authorization": f"Bearer {forged_token}"},
-            json={"query": "Exfiltrate codebase", "domain_id": "trading_code_scout"},
+            json={"query": "Exfiltrate codebase", "domain_id": "code_architecture_scout"},
         )
         # Server fails closed: exact HTTP 500 Internal Server Error (never 200 OK)
         assert res.status_code == 500
@@ -134,7 +134,7 @@ class TestFailClosedWhenSecretUnset:
             client.post(
                 "/api/v1/scout/query",
                 headers={"Authorization": f"Bearer {forged_token}"},
-                json={"query": "Exfiltrate codebase", "domain_id": "trading_code_scout"},
+                json={"query": "Exfiltrate codebase", "domain_id": "code_architecture_scout"},
             )
 
     def test_application_startup_lifespan_fails_closed_when_secret_unset(self) -> None:
@@ -195,7 +195,7 @@ class TestDevOverrideAndProductionBan:
         res = client.post(
             "/api/v1/scout/query",
             headers={"Authorization": f"Bearer {token}"},
-            json={"query": "Test query", "domain_id": "trading_code_scout"},
+            json={"query": "Test query", "domain_id": "code_architecture_scout"},
         )
         assert res.status_code == 200
         assert "trace_id" in res.json()
@@ -282,7 +282,7 @@ class TestCustomValidSecretEnforcement:
         res = client.post(
             "/api/v1/scout/query",
             headers={"Authorization": f"Bearer {token}"},
-            json={"query": "Test custom query", "domain_id": "trading_code_scout"},
+            json={"query": "Test custom query", "domain_id": "code_architecture_scout"},
         )
         assert res.status_code == 200
         assert "trace_id" in res.json()
@@ -300,7 +300,7 @@ class TestCustomValidSecretEnforcement:
         res = client.post(
             "/api/v1/scout/query",
             headers={"Authorization": f"Bearer {forged_token}"},
-            json={"query": "Attack query", "domain_id": "trading_code_scout"},
+            json={"query": "Attack query", "domain_id": "code_architecture_scout"},
         )
         assert res.status_code == 401
         assert "Invalid HMAC-SHA256 signature" in res.json()["detail"]
@@ -316,7 +316,7 @@ class TestCustomValidSecretEnforcement:
         res = client.post(
             "/api/v1/scout/query",
             headers={"Authorization": f"Bearer {alien_token}"},
-            json={"query": "Alien query", "domain_id": "trading_code_scout"},
+            json={"query": "Alien query", "domain_id": "code_architecture_scout"},
         )
         assert res.status_code == 401
         assert "Invalid HMAC-SHA256 signature" in res.json()["detail"]
@@ -338,7 +338,7 @@ class TestCustomValidSecretEnforcement:
         res = client.post(
             "/api/v1/scout/query",
             headers={"Authorization": f"Bearer {tampered_token}"},
-            json={"query": "Tampered query", "domain_id": "trading_code_scout"},
+            json={"query": "Tampered query", "domain_id": "code_architecture_scout"},
         )
         assert res.status_code == 401
         assert "Invalid HMAC-SHA256 signature" in res.json()["detail"]
@@ -406,8 +406,8 @@ class TestContextVarConcurrencyIsolation:
         )
         token_bob = create_signed_principal_token(
             "bob_concurrent",
-            RoleType.QUANT_RESEARCHER,
-            ["quant_restricted"],
+            RoleType.DOMAIN_RESEARCHER,
+            ["docs_restricted"],
             secret_key=STRONG_TEST_SECRET,
         )
 
@@ -462,14 +462,14 @@ class TestContextVarConcurrencyIsolation:
                 return await client.post(
                     "/api/v1/scout/query",
                     headers={"Authorization": f"Bearer {token_valid}"},
-                    json={"query": "Valid query", "domain_id": "trading_code_scout"},
+                    json={"query": "Valid query", "domain_id": "code_architecture_scout"},
                 )
 
             async def send_corrupt() -> httpx.Response:
                 return await client.post(
                     "/api/v1/scout/query",
                     headers={"Authorization": f"Bearer {token_corrupt}"},
-                    json={"query": "Corrupt query", "domain_id": "trading_code_scout"},
+                    json={"query": "Corrupt query", "domain_id": "code_architecture_scout"},
                 )
 
             res_valid, res_corrupt = await asyncio.gather(

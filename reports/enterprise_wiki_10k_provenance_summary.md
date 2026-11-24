@@ -4,7 +4,7 @@ Every document section and Markdown/HTML table in Suite 3.1 was harvested from r
 
 - **Total Indexed Confluence Pages Constructed**: `10000`
 - **Unique Real Source Files Used**: `463`
-- **Real Documentation Sections Harvested**: `67097`
+- **Real Documentation Sections Harvested**: `67270`
 - **Real Markdown & HTML Tables Harvested**: `76`
 - **Deterministic Corpus Manifest SHA-256**: `cbf278aad71b2c8b85fb42849e9e8e6ea31347844f6299672c67ba536095e53e`
 
@@ -20,8 +20,8 @@ Every document section and Markdown/HTML table in Suite 3.1 was harvested from r
 |---|---|
 | `ENG_RUNBOOKS` | 1295 |
 | `SRE_INCIDENTS` | 1276 |
-| `ARCH_ADR` | 1296 |
-| `PRODUCT_SPECS` | 1296 |
+| `ARCH_ADR` | 1295 |
+| `PRODUCT_SPECS` | 1297 |
 | `COMPLIANCE_POLICY` | 2145 |
 | `~personal_notes` | 1415 |
 | `EXEC_RESTRICTED` | 1277 |

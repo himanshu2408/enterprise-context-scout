@@ -21,23 +21,20 @@ import contextlib
 import fcntl
 import json
 import logging
-import math
 import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
 import huggingface_hub
-import torch
-import torch.nn as nn
 from pydantic import BaseModel, Field
-from safetensors.torch import save_file as save_safetensors_file
 
-from context_scout.config import ScoutSettings, validate_google_model_id
+from context_scout.config import ModelGovernancePolicy, ScoutSettings
 
 logger = logging.getLogger(__name__)
 
@@ -296,8 +293,9 @@ def verify_model_weights(model_dir: Path | str) -> ModelVerificationResult:
             error_message=f"Directory does not exist: {directory}",
         )
 
-    # Collect .safetensors files
-    safetensors_files = sorted(f.name for f in directory.glob("*.safetensors") if f.is_file())
+    # Collect directory files & enforce .safetensors-only + trust_remote_code=False
+    all_files = sorted((f for f in directory.iterdir() if f.is_file()), key=lambda p: p.name)
+    safetensors_files = [f.name for f in all_files if f.suffix.lower() == ".safetensors"]
     tokenizer_path = directory / "tokenizer.json"
     config_path = directory / "config.json"
 
@@ -310,26 +308,44 @@ def verify_model_weights(model_dir: Path | str) -> ModelVerificationResult:
 
     num_experts = 0
     architecture = "Gemma4ForConditionalGeneration"
+    cfg: dict[str, Any] | None = None
 
     if has_config:
         try:
             with open(config_path, encoding="utf-8") as f:
-                cfg = json.load(f)
-            architecture = cfg.get("architectures", [architecture])[0]
+                loaded_cfg = json.load(f)
+            if isinstance(loaded_cfg, dict):
+                cfg = loaded_cfg
+            architecture = (cfg or {}).get("architectures", [architecture])[0]
             # Check for MoE config (either top-level or under text_config)
-            text_cfg = cfg.get("text_config", cfg)
+            text_cfg = (cfg or {}).get("text_config", cfg or {})
             if text_cfg.get("enable_moe_block", False):
                 num_experts = int(text_cfg.get("num_experts", 128))
-            elif cfg.get("num_experts"):
-                num_experts = int(cfg.get("num_experts", 0))
+            elif (cfg or {}).get("num_experts"):
+                num_experts = int((cfg or {}).get("num_experts", 0))
         except Exception as exc:
             logger.warning("Could not parse config.json in %s: %s", directory, exc)
 
-    is_valid = bool(safetensors_files) and has_tokenizer and has_config
+    safety_error: str | None = None
+    try:
+        ModelGovernancePolicy.default().validate_weights_safety(
+            [f.name for f in all_files],
+            config_payload=cfg,
+        )
+    except ValueError as exc:
+        safety_error = str(exc)
+
+    is_valid = bool(safetensors_files) and has_tokenizer and has_config and safety_error is None
 
     error_msg = None
     if not safetensors_files:
-        error_msg = "Missing .safetensors weight shards."
+        error_msg = (
+            safety_error
+            if safety_error and "unsafe binary/pickle" in safety_error
+            else "Missing .safetensors weight shards."
+        )
+    elif safety_error is not None:
+        error_msg = safety_error
     elif not has_tokenizer:
         error_msg = "Missing tokenizer.json."
     elif not has_config:
@@ -357,15 +373,16 @@ def acquire_hf_model(
     verify_on_disk: bool = True,
     local_files_only: bool = False,
 ) -> ModelAcquisitionResult:
-    """Acquires and verifies un-gated 4-bit MLX models using huggingface_hub.snapshot_download.
+    """Acquires and verifies un-gated 4-bit MLX / BYO models via huggingface_hub.
 
     Enforces:
-    - 100% Google model prefix whitelist via validate_google_model_id.
+    - ModelGovernancePolicy allowlist & retired model rejection.
+    - .safetensors-only weight safety & trust_remote_code=False.
     - snapshot_download acquisition with automatic cache or explicit local_dir.
     - Offline fallback to existing local cache when network is unreachable.
     - Weights and tokenizer verification on disk.
     """
-    clean_model_id = validate_google_model_id(model_id)
+    clean_model_id = ModelGovernancePolicy.default().validate_local_model_id(model_id)
 
     # 1. Check if already present in explicit local_dir
     target_path: Path | None = Path(local_dir) if local_dir else None
@@ -506,91 +523,6 @@ class TrainingRunResult:
     status: str
 
 
-class LowRankLinearAdapter(nn.Module):
-    """Low-rank decomposition Delta W = (alpha / r) * (A @ B) for linear projections."""
-
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        r: int = 16,
-        alpha: int = 32,
-    ) -> None:
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.r = r
-        self.alpha = alpha
-        self.scaling = alpha / r
-
-        # Kaiming uniform initialization for lora_a
-        self.lora_a = nn.Parameter(torch.empty(r, in_features))
-        nn.init.kaiming_uniform_(self.lora_a, a=math.sqrt(5))
-
-        # Zeros initialization for lora_b
-        self.lora_b = nn.Parameter(torch.zeros(out_features, r))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch, seq_len, in_features)
-        # Delta W x = (alpha / r) * (x @ A.T @ B.T)
-        delta = torch.matmul(x, self.lora_a.t())
-        delta = torch.matmul(delta, self.lora_b.t())
-        return self.scaling * delta
-
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward(x)
-
-
-class Gemma4AdapterBlock(nn.Module):
-    """Container of target LoRA adapters for a single Gemma 4 transformer layer."""
-
-    def __init__(
-        self,
-        hidden_size: int = 2816,
-        intermediate_size: int = 10240,
-        r: int = 16,
-        alpha: int = 32,
-    ) -> None:
-        super().__init__()
-        # Attention projection adapters
-        self.q_proj = LowRankLinearAdapter(hidden_size, hidden_size, r=r, alpha=alpha)
-        self.k_proj = LowRankLinearAdapter(hidden_size, hidden_size // 2, r=r, alpha=alpha)
-        self.v_proj = LowRankLinearAdapter(hidden_size, hidden_size // 2, r=r, alpha=alpha)
-        self.o_proj = LowRankLinearAdapter(hidden_size, hidden_size, r=r, alpha=alpha)
-
-        # Shared MLP adapters
-        self.gate_proj = LowRankLinearAdapter(hidden_size, intermediate_size, r=r, alpha=alpha)
-        self.up_proj = LowRankLinearAdapter(hidden_size, intermediate_size, r=r, alpha=alpha)
-        self.down_proj = LowRankLinearAdapter(intermediate_size, hidden_size, r=r, alpha=alpha)
-
-    def adapt_attention(self, h: torch.Tensor) -> torch.Tensor:
-        """Computes attention LoRA projection updates."""
-        return self.q_proj(h) + self.o_proj(h)
-
-    def adapt_mlp(self, h: torch.Tensor) -> torch.Tensor:
-        """Computes shared MLP LoRA projection updates."""
-        return self.down_proj(torch.relu(self.gate_proj(h)))
-
-    def get_lora_tensors(self, prefix: str) -> dict[str, torch.Tensor]:
-        """Extracts CPU tensor representations for safetensors export."""
-        return {
-            f"{prefix}.self_attn.q_proj.lora_a": self.q_proj.lora_a.detach().cpu(),
-            f"{prefix}.self_attn.q_proj.lora_b": self.q_proj.lora_b.detach().cpu(),
-            f"{prefix}.self_attn.k_proj.lora_a": self.k_proj.lora_a.detach().cpu(),
-            f"{prefix}.self_attn.k_proj.lora_b": self.k_proj.lora_b.detach().cpu(),
-            f"{prefix}.self_attn.v_proj.lora_a": self.v_proj.lora_a.detach().cpu(),
-            f"{prefix}.self_attn.v_proj.lora_b": self.v_proj.lora_b.detach().cpu(),
-            f"{prefix}.self_attn.o_proj.lora_a": self.o_proj.lora_a.detach().cpu(),
-            f"{prefix}.self_attn.o_proj.lora_b": self.o_proj.lora_b.detach().cpu(),
-            f"{prefix}.mlp.gate_proj.lora_a": self.gate_proj.lora_a.detach().cpu(),
-            f"{prefix}.mlp.gate_proj.lora_b": self.gate_proj.lora_b.detach().cpu(),
-            f"{prefix}.mlp.up_proj.lora_a": self.up_proj.lora_a.detach().cpu(),
-            f"{prefix}.mlp.up_proj.lora_b": self.up_proj.lora_b.detach().cpu(),
-            f"{prefix}.mlp.down_proj.lora_a": self.down_proj.lora_a.detach().cpu(),
-            f"{prefix}.mlp.down_proj.lora_b": self.down_proj.lora_b.detach().cpu(),
-        }
-
-
 def _encode_text(tokenizer: Any, text: str) -> list[int]:
     """Extracts integer token IDs regardless of tokenizer type."""
     encoded = tokenizer.encode(text)
@@ -601,14 +533,87 @@ def _encode_text(tokenizer: Any, text: str) -> list[int]:
     return list(encoded)
 
 
+def _tokenize_mlx_chat_example(
+    mlx_tok: Any,
+    msgs: Sequence[dict[str, Any]],
+    *,
+    full_seq_limit: int,
+    policy: ModelGovernancePolicy,
+) -> tuple[list[int], list[float], int, bool]:
+    """Tokenizes a chat sample with assistant-only loss masking and zero hardcoded tags."""
+    prompt_msgs = list(msgs[:-1])
+    if hasattr(mlx_tok, "apply_chat_template"):
+        try:
+            prompt_str = str(
+                mlx_tok.apply_chat_template(
+                    prompt_msgs,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+            )
+        except TypeError:
+            prompt_str = str(
+                mlx_tok.apply_chat_template(
+                    prompt_msgs,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            )
+        try:
+            full_str = str(
+                mlx_tok.apply_chat_template(
+                    list(msgs),
+                    tokenize=False,
+                    add_generation_prompt=False,
+                    enable_thinking=False,
+                )
+            )
+        except TypeError:
+            full_str = str(
+                mlx_tok.apply_chat_template(
+                    list(msgs),
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+            )
+    else:
+        prompt_str = policy.format_chat_prompt(prompt_msgs, add_generation_prompt=True)
+        full_str = prompt_str + str(msgs[-1].get("content", ""))
+
+    if full_str.startswith(prompt_str) and len(full_str) > len(prompt_str):
+        target_str = full_str[len(prompt_str) :]
+    else:
+        target_str = str(msgs[-1].get("content", ""))
+
+    prompt_ids = _encode_text(mlx_tok, prompt_str)
+    target_ids = _encode_text(mlx_tok, target_str)
+    if not target_ids:
+        target_ids = [1]
+
+    was_truncated = False
+    if len(prompt_ids) + len(target_ids) > full_seq_limit:
+        was_truncated = True
+        keep_prompt = max(64, full_seq_limit - len(target_ids))
+        prompt_ids = prompt_ids[-keep_prompt:]
+
+    full_ids = (prompt_ids + target_ids)[:full_seq_limit]
+    if len(full_ids) < 2:
+        full_ids = [*full_ids, 1]
+    p_len = min(len(prompt_ids), max(0, len(full_ids) - 1))
+    t_len = len(full_ids) - p_len
+    full_mask = [0.0] * p_len + [1.0] * t_len
+    return full_ids, full_mask, t_len, was_truncated
+
+
 class LocalQLoRATrainer:
-    """Apple Silicon M5 Pro 48GB Unified Memory 4-bit QLoRA Trainer.
+    """Apple Silicon Unified Memory 4-bit QLoRA Trainer (`mlx-lm` native GPU backend).
 
     Enforces:
     - Process mutual exclusion lock HW-01 (fcntl.flock on /tmp/context_scout_gpu.lock).
     - Memory math verification (~19.6 GB on 48GB M5 Pro, leaving >28.4 GB free headroom).
     - MoE router gate freezing: strictly freezes the 128 MoE router gate projections.
-    - Low-rank matrix gradient descent on Metal/MPS or MLX pipeline.
+    - Native Apple Silicon ``mlx-lm`` gradient descent over distilled train/valid JSONL.
     - Generates genuine adapters.safetensors, adapter_config.json, and training_metrics.json.
     """
 
@@ -620,14 +625,18 @@ class LocalQLoRATrainer:
         dense_baseline: bool = False,
         lock_path: Path | str = DEFAULT_GPU_LOCK_PATH,
         lock_timeout: float = 30.0,
+        mlx_model_loader: Callable[[str], tuple[Any, Any]] | None = None,
     ) -> None:
         self.settings = settings or ScoutSettings()
         self.dense_baseline = dense_baseline
+        self._mlx_model_loader = mlx_model_loader
 
         if self.dense_baseline:
             self.base_model_id = DEFAULT_DENSE_MODEL_ID
         else:
-            self.base_model_id = validate_google_model_id(base_model_id)
+            self.base_model_id = ModelGovernancePolicy.default().validate_local_model_id(
+                base_model_id
+            )
 
         self.hyperparameters = hyperparameters or QLoRAHyperparameters()
         self.lock_path = Path(lock_path)
@@ -677,9 +686,13 @@ class LocalQLoRATrainer:
         try:
             from transformers import AutoTokenizer
 
+            policy = ModelGovernancePolicy.default()
             try:
                 return AutoTokenizer.from_pretrained(
-                    self.base_model_id, local_files_only=True, fix_markdown=False
+                    self.base_model_id,
+                    local_files_only=True,
+                    fix_markdown=False,
+                    trust_remote_code=policy.trust_remote_code,
                 )
             except Exception as exc:
                 logger.debug(
@@ -689,7 +702,11 @@ class LocalQLoRATrainer:
                     exc,
                 )
                 try:
-                    return AutoTokenizer.from_pretrained(self.base_model_id, fix_markdown=False)
+                    return AutoTokenizer.from_pretrained(
+                        self.base_model_id,
+                        fix_markdown=False,
+                        trust_remote_code=policy.trust_remote_code,
+                    )
                 except Exception as remote_exc:
                     logger.debug(
                         "Remote AutoTokenizer lookup failed for %s (%s): %s",
@@ -754,18 +771,18 @@ class LocalQLoRATrainer:
         output_adapter_dir: Path | str,
         domain_id: str | None = None,
         num_steps: int | None = None,
-        use_mlx_native: bool = False,
+        use_mlx_native: bool = True,
         learning_rate: float | None = None,
         max_seq_length: int | None = None,
     ) -> TrainingRunResult:
-        """Executes genuine QLoRA fine-tuning with process mutual exclusion lock (HW-01).
+        """Executes native Apple Silicon ``mlx-lm`` QLoRA training with HW-01 GPU lock."""
+        if not use_mlx_native:
+            raise ValueError(
+                "Toy PyTorch loop was removed. Pass use_mlx_native=True for Apple "
+                "Silicon mlx-lm QLoRA or use PEFTRsLoRATrainer in "
+                "context_scout.tuning.train_peft_lora."
+            )
 
-        1. Acquires GPUMutualExclusionLock on /tmp/context_scout_gpu.lock.
-        2. Ingests train.jsonl and valid.jsonl.
-        3. Initializes low-rank matrix gradient-descent optimization on Metal/MPS or MLX GPU.
-        4. Tracks step loss progression showing loss reduction across steps.
-        5. Writes genuine adapters.safetensors, adapter_config.json, and training_metrics.json.
-        """
         output_dir = Path(output_adapter_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         if domain_id is None:
@@ -799,356 +816,171 @@ class LocalQLoRATrainer:
         # Hardware Mutual Exclusion Lock (HW-01)
         with GPUMutualExclusionLock(self.lock_path, timeout_seconds=self.lock_timeout):
             logger.info(
-                "Starting QLoRA training for domain '%s' on %s "
-                "(train=%d, valid=%d, mlx_native=%s)...",
+                "Starting native mlx-lm QLoRA training for domain '%s' on %s "
+                "(train=%d, valid=%d)...",
                 domain_id,
                 self.base_model_id,
                 len(train_data),
                 len(valid_data),
-                use_mlx_native,
             )
 
             steps_to_run = num_steps if num_steps is not None else min(len(train_data), 30)
             step_history: list[dict[str, Any]] = []
-            max_len = min(self.hyperparameters.max_seq_length, 64)
             safetensors_path = output_dir / "adapters.safetensors"
 
-            if use_mlx_native:
+            try:
                 import mlx.core as mx
                 import mlx.nn as mnn
                 import mlx.optimizers as moptim
                 import mlx_lm
                 from mlx.utils import tree_flatten
                 from mlx_lm.tuner.utils import linear_to_lora_layers
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Apple Silicon mlx/mlx-lm runtime is unavailable on this host. "
+                    "Use PEFTRsLoRATrainer (context_scout.tuning.train_peft_lora) for "
+                    "Linux/CUDA/CPU PEFT rsLoRA training."
+                ) from exc
 
-                mx.random.seed(self.hyperparameters.seed)
-                loaded_pair: Any = mlx_lm.load(self.base_model_id)
-                mlx_model: Any = loaded_pair[0]
-                mlx_tok: Any = loaded_pair[1]
-                mlx_model.freeze()
-                linear_to_lora_layers(
-                    mlx_model,
-                    num_layers=4,
-                    config={
-                        "rank": self.hyperparameters.r,
-                        "scale": self.hyperparameters.scaling,
-                        "dropout": self.hyperparameters.lora_dropout,
-                        "keys": lora_keys,
-                    },
+            mx.random.seed(self.hyperparameters.seed)
+            loader = self._mlx_model_loader or mlx_lm.load
+            loaded_pair: Any = loader(self.base_model_id)
+            mlx_model: Any = loaded_pair[0]
+            mlx_tok: Any = loaded_pair[1]
+            mlx_model.freeze()
+            linear_to_lora_layers(
+                mlx_model,
+                num_layers=4,
+                config={
+                    "rank": self.hyperparameters.r,
+                    "scale": self.hyperparameters.scaling,
+                    "dropout": self.hyperparameters.lora_dropout,
+                    "keys": lora_keys,
+                },
+            )
+
+            raw_trainable: Any = tree_flatten(mlx_model.trainable_parameters())
+            flat_trainable: list[tuple[str, Any]] = list(raw_trainable)
+            for name, _ in flat_trainable:
+                assert "router" not in name, f"Router parameter unexpectedly trainable: {name}"
+
+            full_seq_limit = (
+                max_seq_length
+                if max_seq_length is not None
+                else self.hyperparameters.max_seq_length
+            )
+            active_lr = (
+                learning_rate if learning_rate is not None else self.hyperparameters.learning_rate
+            )
+            policy = ModelGovernancePolicy.default()
+            mlx_samples: list[tuple[Any, Any, Any, int]] = []
+            total_tokens = 0
+            truncated_rows = 0
+            for ex in train_data:
+                msgs = ex.get("messages", [])
+                if len(msgs) < 2:
+                    continue
+                full_ids, full_mask, t_len, was_trunc = _tokenize_mlx_chat_example(
+                    mlx_tok,
+                    msgs,
+                    full_seq_limit=full_seq_limit,
+                    policy=policy,
+                )
+                if was_trunc:
+                    truncated_rows += 1
+                x_arr = mx.array([full_ids[:-1]])
+                y_arr = mx.array([full_ids[1:]])
+                m_arr = mx.array([full_mask[1:]], dtype=mx.float32)
+                mlx_samples.append((x_arr, y_arr, m_arr, t_len))
+
+            if not mlx_samples:
+                raise ValueError(f"No valid sequences tokenized in {train_jsonl}")
+
+            if truncated_rows > 0:
+                logger.warning(
+                    "Truncated %d/%d MLX training sequences at max_seq_length=%d",
+                    truncated_rows,
+                    len(train_data),
+                    full_seq_limit,
                 )
 
-                raw_trainable: Any = tree_flatten(mlx_model.trainable_parameters())
-                flat_trainable: list[tuple[str, Any]] = list(raw_trainable)
-                for name, _ in flat_trainable:
-                    assert "router" not in name, f"Router parameter unexpectedly trainable: {name}"
+            def _mlx_loss_fn(model_obj: Any, x_arr: Any, y_tgt: Any, m_arr: Any) -> Any:
+                logits_out = model_obj(x_arr)
+                unreduced = mnn.losses.cross_entropy(logits_out, y_tgt, reduction="none")
+                denom = mx.maximum(m_arr.sum(), mx.array(1.0, dtype=mx.float32))
+                return (unreduced * m_arr).sum() / denom
 
-                full_seq_limit = (
-                    max_seq_length
-                    if max_seq_length is not None
-                    else self.hyperparameters.max_seq_length
-                )
-                active_lr = (
-                    learning_rate
-                    if learning_rate is not None
-                    else self.hyperparameters.learning_rate
-                )
-                mlx_samples: list[tuple[Any, Any, Any, int]] = []
-                total_tokens = 0
-                truncated_rows = 0
-                for ex in train_data:
-                    msgs = ex.get("messages", [])
-                    if len(msgs) < 2:
-                        continue
-                    prompt_str = mlx_tok.apply_chat_template(
-                        msgs[:-1],
-                        tokenize=False,
-                        add_generation_prompt=True,
-                        enable_thinking=False,
-                    )
-                    target_str = msgs[-1].get("content", "") + "<turn|>\n"
-                    prompt_ids = [int(t) for t in mlx_tok.encode(prompt_str)]
-                    target_ids = [int(t) for t in mlx_tok.encode(target_str)]
-                    if len(prompt_ids) + len(target_ids) > full_seq_limit:
-                        truncated_rows += 1
-                        keep_prompt = max(64, full_seq_limit - len(target_ids))
-                        prompt_ids = prompt_ids[-keep_prompt:]
-                    full_ids = (prompt_ids + target_ids)[:full_seq_limit]
-                    p_len = min(len(prompt_ids), max(0, len(full_ids) - 1))
-                    t_len = len(full_ids) - p_len
-                    full_mask = [0.0] * p_len + [1.0] * t_len
-                    x_arr = mx.array([full_ids[:-1]])
-                    y_arr = mx.array([full_ids[1:]])
-                    m_arr = mx.array([full_mask[1:]], dtype=mx.float32)
-                    mlx_samples.append((x_arr, y_arr, m_arr, t_len))
+            mnn_any: Any = mnn
+            val_grad_builder: Any = mnn_any.value_and_grad
+            loss_and_grad_fn: Any = val_grad_builder(mlx_model, _mlx_loss_fn)
+            sched_fn: Any = moptim.cosine_decay(
+                init=active_lr,
+                decay_steps=max(1, steps_to_run),
+                end=active_lr * 0.1,
+            )
+            mlx_opt = moptim.AdamW(
+                learning_rate=sched_fn,
+                weight_decay=0.01,
+            )
+            clip_fn: Any = moptim.clip_grad_norm
 
-                if not mlx_samples:
-                    raise ValueError(f"No valid sequences tokenized in {train_jsonl}")
-
-                if truncated_rows > 0:
-                    logger.warning(
-                        "Truncated %d/%d MLX training sequences at max_seq_length=%d",
-                        truncated_rows,
-                        len(train_data),
-                        full_seq_limit,
-                    )
-
-                def _mlx_loss_fn(model_obj: Any, x_arr: Any, y_tgt: Any, m_arr: Any) -> Any:
-                    logits_out = model_obj(x_arr)
-                    unreduced = mnn.losses.cross_entropy(logits_out, y_tgt, reduction="none")
-                    return (unreduced * m_arr).sum() / m_arr.sum()
-
-                mnn_any: Any = mnn
-                val_grad_builder: Any = mnn_any.value_and_grad
-                loss_and_grad_fn: Any = val_grad_builder(mlx_model, _mlx_loss_fn)
-                sched_fn: Any = moptim.cosine_decay(
-                    init=active_lr,
-                    decay_steps=steps_to_run,
-                    end=active_lr * 0.1,
-                )
-                mlx_opt = moptim.AdamW(
-                    learning_rate=sched_fn,
-                    weight_decay=0.01,
-                )
-                clip_fn: Any = moptim.clip_grad_norm
-
-                initial_loss = 0.0
-                final_loss = 0.0
-                for step in range(1, steps_to_run + 1):
-                    x_in, y_tgt, m_mask, t_len = mlx_samples[(step - 1) % len(mlx_samples)]
-                    total_tokens += t_len
-                    loss_val, grads = loss_and_grad_fn(mlx_model, x_in, y_tgt, m_mask)
-                    grads, grad_norm = clip_fn(grads, max_norm=1.0)
-                    mlx_opt.update(mlx_model, grads)
-                    mx.eval(mlx_model.parameters(), mlx_opt.state, loss_val)
-                    current_loss = float(loss_val.item())
-                    if step == 1:
-                        initial_loss = current_loss
-                    final_loss = current_loss
-                    cur_lr = float(sched_fn(step).item()) if callable(sched_fn) else active_lr
-                    step_history.append(
-                        {
-                            "step": step,
-                            "epoch": ((step - 1) // len(mlx_samples)) + 1,
-                            "loss": round(current_loss, 4),
-                            "lr": round(cur_lr, 8),
-                            "grad_norm": round(float(grad_norm.item()), 4),
-                            "target_tokens": t_len,
-                        }
-                    )
-
-                val_losses_mlx: list[float] = []
-                for v_ex in valid_data:
-                    v_msgs = v_ex.get("messages", [])
-                    if len(v_msgs) < 2:
-                        continue
-                    vp_str = mlx_tok.apply_chat_template(
-                        v_msgs[:-1],
-                        tokenize=False,
-                        add_generation_prompt=True,
-                        enable_thinking=False,
-                    )
-                    vt_str = v_msgs[-1].get("content", "") + "<turn|>\n"
-                    vp_ids = [int(t) for t in mlx_tok.encode(vp_str)]
-                    vt_ids = [int(t) for t in mlx_tok.encode(vt_str)]
-                    if len(vp_ids) + len(vt_ids) > full_seq_limit:
-                        v_keep = max(64, full_seq_limit - len(vt_ids))
-                        vp_ids = vp_ids[-v_keep:]
-                    v_full = (vp_ids + vt_ids)[:full_seq_limit]
-                    vp_len = min(len(vp_ids), max(0, len(v_full) - 1))
-                    vt_len = len(v_full) - vp_len
-                    v_mask = [0.0] * vp_len + [1.0] * vt_len
-                    vx_arr = mx.array([v_full[:-1]])
-                    vy_arr = mx.array([v_full[1:]])
-                    vm_arr = mx.array([v_mask[1:]], dtype=mx.float32)
-                    v_loss_val = _mlx_loss_fn(mlx_model, vx_arr, vy_arr, vm_arr)
-                    mx.eval(v_loss_val)
-                    val_losses_mlx.append(float(v_loss_val.item()))
-
-                val_loss = (
-                    sum(val_losses_mlx) / len(val_losses_mlx) if val_losses_mlx else final_loss
-                )
-                loss_reduction_pct = round(
-                    max(0.0, ((initial_loss - final_loss) / initial_loss) * 100.0),
-                    2,
-                )
-                peak_mem_gb = round(mx.get_peak_memory() / (1024**3), 2)
-                device_str = "mlx:gpu"
-
-                final_trainable: Any = tree_flatten(mlx_model.trainable_parameters())
-                mlx_tensors_dict: dict[str, Any] = dict(final_trainable)
-                mx.save_safetensors(str(safetensors_path), mlx_tensors_dict)
-            else:
-                # Select compute device: MPS (Apple Silicon Metal) -> CPU fallback
-                if torch.backends.mps.is_available():
-                    device = torch.device("mps")
-                else:
-                    device = torch.device("cpu")
-
-                # Low-rank architecture setup: 4 attention layers + 3 shared MLP layers
-                hidden_size = 2816 if self.is_moe else 2560
-                intermediate_size = 10240
-
-                # Number of layers to adapt (top 4 critical layers for domain routing & schema)
-                num_adapted_layers = 4
-                blocks: list[Gemma4AdapterBlock] = [
-                    Gemma4AdapterBlock(
-                        hidden_size=hidden_size,
-                        intermediate_size=intermediate_size,
-                        r=self.hyperparameters.r,
-                        alpha=self.hyperparameters.lora_alpha,
-                    )
-                    for _ in range(num_adapted_layers)
-                ]
-                adapter_blocks = nn.ModuleList(blocks).to(device)
-
-                # Freeze any potential router modules: verify none exist in adapter blocks
-                for name, param in adapter_blocks.named_parameters():
-                    assert "router" not in name, f"Router parameter unexpectedly found: {name}"
-                    param.requires_grad = True
-
-                # Resolve tokenizer and tokenize dataset
-                tokenizer = self.resolve_tokenizer()
-
-                tokenized_records: list[tuple[list[int], list[int]]] = []
-                all_token_ids: set[int] = set()
-
-                for ex in train_data:
-                    msgs = ex.get("messages", [])
-                    if not msgs:
-                        continue
-                    prompt_str = ""
-                    for m in msgs[:-1]:
-                        role = "user" if m.get("role") == "user" else "model"
-                        content_str = m.get("content", "")
-                        prompt_str += f"<start_of_turn>{role}\n{content_str}<end_of_turn>\n"
-                    prompt_str += "<start_of_turn>model\n"
-                    target_str = msgs[-1].get("content", "") + "<end_of_turn>\n"
-
-                    p_ids = _encode_text(tokenizer, prompt_str)
-                    t_ids = _encode_text(tokenizer, target_str)
-                    if not t_ids:
-                        t_ids = [1]
-
-                    all_token_ids.update(p_ids)
-                    all_token_ids.update(t_ids)
-                    tokenized_records.append((p_ids, t_ids))
-
-                if not tokenized_records:
-                    raise ValueError(
-                        f"No valid conversational messages could be tokenized in {train_jsonl}"
-                    )
-
-                # Contiguous active vocabulary mapping
-                vocab_map: dict[int, int] = {
-                    tid: idx for idx, tid in enumerate(sorted(all_token_ids))
-                }
-                vocab_size: int = max(len(vocab_map), 2)
-
-                total_tokens = sum(len(p) + len(t) for p, t in tokenized_records)
-
-                # Sequence embedding and language model head
-                emb = nn.Embedding(vocab_size, hidden_size).to(device)
-                lm_head = nn.Linear(hidden_size, vocab_size, bias=False).to(device)
-                loss_fn = nn.CrossEntropyLoss()
-
-                trainable_params = (
-                    list(adapter_blocks.parameters())
-                    + list(emb.parameters())
-                    + list(lm_head.parameters())
-                )
-                optimizer = torch.optim.AdamW(
-                    trainable_params,
-                    lr=self.hyperparameters.learning_rate,
-                    weight_decay=0.01,
+            initial_loss = 0.0
+            final_loss = 0.0
+            for step in range(1, steps_to_run + 1):
+                x_in, y_tgt, m_mask, t_len = mlx_samples[(step - 1) % len(mlx_samples)]
+                total_tokens += t_len
+                loss_val, grads = loss_and_grad_fn(mlx_model, x_in, y_tgt, m_mask)
+                grads, grad_norm = clip_fn(grads, max_norm=1.0)
+                mlx_opt.update(mlx_model, grads)
+                mx.eval(mlx_model.parameters(), mlx_opt.state, loss_val)
+                current_loss = float(loss_val.item())
+                if step == 1:
+                    initial_loss = current_loss
+                final_loss = current_loss
+                cur_lr = float(sched_fn(step).item()) if callable(sched_fn) else active_lr
+                step_history.append(
+                    {
+                        "step": step,
+                        "epoch": ((step - 1) // len(mlx_samples)) + 1,
+                        "loss": round(current_loss, 4),
+                        "lr": round(cur_lr, 8),
+                        "grad_norm": round(float(grad_norm.item()), 4),
+                        "target_tokens": t_len,
+                    }
                 )
 
-                # Set torch seed for reproducibility
-                torch.manual_seed(self.hyperparameters.seed)
-
-                # Real gradient-descent loop
-                adapter_blocks.train()
-                initial_loss = 0.0
-                final_loss = 0.0
-
-                for step in range(1, steps_to_run + 1):
-                    optimizer.zero_grad()
-
-                    p_ids, t_ids = tokenized_records[(step - 1) % len(tokenized_records)]
-                    tgt_indices = [vocab_map[tid] for tid in t_ids[:max_len]]
-                    if len(tgt_indices) < 2:
-                        tgt_indices = [*tgt_indices, 0]
-                    seq_tgt = torch.tensor([tgt_indices], dtype=torch.long, device=device)
-
-                    # Forward pass: embed completion tokens through adapter blocks
-                    h = emb(seq_tgt)
-                    for b in blocks:
-                        h = h + b.adapt_attention(h) + b.adapt_mlp(h)
-
-                    logits = lm_head(h)
-                    shift_logits = logits[:, :-1, :].contiguous()
-                    shift_targets = seq_tgt[:, 1:].contiguous()
-                    loss = loss_fn(shift_logits.view(-1, vocab_size), shift_targets.view(-1))
-
-                    loss.backward()
-                    optimizer.step()
-
-                    current_loss = float(loss.item())
-                    if step == 1:
-                        initial_loss = current_loss
-                    final_loss = current_loss
-
-                    step_history.append(
-                        {
-                            "step": step,
-                            "loss": round(current_loss, 4),
-                            "lr": self.hyperparameters.learning_rate,
-                        }
-                    )
-
-                # Final loss is strictly the final logged step (NO * 0.75 multiplier!)
-                loss_reduction_pct = round(
-                    max(0.0, ((initial_loss - final_loss) / initial_loss) * 100.0),
-                    2,
+            val_losses_mlx: list[float] = []
+            for v_ex in valid_data:
+                v_msgs = v_ex.get("messages", [])
+                if len(v_msgs) < 2:
+                    continue
+                v_full, v_mask, _vt_len, _ = _tokenize_mlx_chat_example(
+                    mlx_tok,
+                    v_msgs,
+                    full_seq_limit=full_seq_limit,
+                    policy=policy,
                 )
+                vx_arr = mx.array([v_full[:-1]])
+                vy_arr = mx.array([v_full[1:]])
+                vm_arr = mx.array([v_mask[1:]], dtype=mx.float32)
+                v_loss_val = _mlx_loss_fn(mlx_model, vx_arr, vy_arr, vm_arr)
+                mx.eval(v_loss_val)
+                val_losses_mlx.append(float(v_loss_val.item()))
 
-                # Validation loss evaluation over real validation set tokens
-                adapter_blocks.eval()
-                val_losses: list[float] = []
-                with torch.no_grad():
-                    for v_ex in valid_data[: min(len(valid_data), 10)]:
-                        v_msgs = v_ex.get("messages", [])
-                        if not v_msgs:
-                            continue
-                        v_target = v_msgs[-1].get("content", "") + "<end_of_turn>\n"
-                        v_ids = _encode_text(tokenizer, v_target)
-                        v_indices = [vocab_map.get(tid, 0) for tid in v_ids[:max_len]]
-                        if len(v_indices) < 2:
-                            continue
-                        v_seq = torch.tensor([v_indices], dtype=torch.long, device=device)
-                        h_v = emb(v_seq)
-                        for b in blocks:
-                            h_v = h_v + b.adapt_attention(h_v) + b.adapt_mlp(h_v)
-                        v_logits = lm_head(h_v)
-                        v_shift_logits = v_logits[:, :-1, :].contiguous()
-                        v_shift_targets = v_seq[:, 1:].contiguous()
-                        v_loss = loss_fn(
-                            v_shift_logits.view(-1, vocab_size), v_shift_targets.view(-1)
-                        )
-                        val_losses.append(float(v_loss.item()))
+            val_loss = sum(val_losses_mlx) / len(val_losses_mlx) if val_losses_mlx else final_loss
+            loss_reduction_pct = (
+                round(max(0.0, ((initial_loss - final_loss) / initial_loss) * 100.0), 2)
+                if initial_loss > 0.0
+                else 0.0
+            )
+            peak_mem_gb = round(mx.get_peak_memory() / (1024**3), 2)
+            device_str = "mlx:gpu"
 
-                val_loss = sum(val_losses) / len(val_losses) if val_losses else final_loss
-                peak_mem_gb = self.memory_profile.total_active_memory_gb
-                device_str = str(device)
+            final_trainable: Any = tree_flatten(mlx_model.trainable_parameters())
+            mlx_tensors_dict: dict[str, Any] = dict(final_trainable)
+            mx.save_safetensors(str(safetensors_path), mlx_tensors_dict)
 
-                # 1. Save genuine adapters.safetensors
-                tensors_to_save: dict[str, torch.Tensor] = {}
-                for layer_idx, b in enumerate(blocks):
-                    prefix = f"language_model.model.layers.{layer_idx}"
-                    tensors_to_save.update(b.get_lora_tensors(prefix))
-
-                save_safetensors_file(tensors_to_save, str(safetensors_path))
-
-            # 2. Save adapter_config.json matching Hugging Face PEFT & MLX format
+            # Save adapter_config.json matching Hugging Face PEFT & MLX format
             adapter_config: dict[str, Any] = {
                 "base_model_name_or_path": self.base_model_id,
                 "r": self.hyperparameters.r,
@@ -1158,6 +990,9 @@ class LocalQLoRATrainer:
                 "frozen_modules": list(FROZEN_MODULES_MOE) if self.is_moe else [],
                 "peft_type": "LORA",
                 "task_type": "CAUSAL_LM",
+                "use_rslora": True,
+                "use_dora": False,
+                "trust_remote_code": False,
                 "scaling": self.hyperparameters.scaling,
                 "num_experts": 128 if self.is_moe else 0,
                 "is_moe": self.is_moe,

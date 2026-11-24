@@ -11,9 +11,15 @@ from __future__ import annotations
 
 import argparse
 import logging
+import platform
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
+import yaml
+
+from context_scout.db.repositories import InMemoryRLSRepository
 from context_scout.evals.golden_dataset import GoldenBenchmarkSuite
 from context_scout.evals.harness import EvaluationHarness, EvaluationRunResult
 from context_scout.telemetry import (
@@ -21,8 +27,37 @@ from context_scout.telemetry import (
     GEN_AI_REQUEST_MODEL,
     GEN_AI_SYSTEM,
 )
+from context_scout.telemetry.cost_governance import OCTOBER_2026_PRICING
 
 logger = logging.getLogger(__name__)
+
+
+def _load_model_pricing_map() -> dict[str, Mapping[str, Any]]:
+    pricing_path = Path(__file__).resolve().parents[3] / "config" / "model_pricing.yaml"
+    if not pricing_path.is_file():
+        return {}
+    raw = yaml.safe_load(pricing_path.read_text(encoding="utf-8"))
+    if isinstance(raw, Mapping) and isinstance(raw.get("models"), Mapping):
+        return {str(k): v for k, v in raw["models"].items() if isinstance(v, Mapping)}
+    return {}
+
+
+def _format_model_pricing_desc(
+    model_id: str,
+    pricing_map: Mapping[str, Mapping[str, Any]],
+) -> str:
+    entry = pricing_map.get(model_id)
+    if entry is not None:
+        rate = float(entry.get("input", 0.0))
+        if bool(entry.get("self_hosted", False)) or rate == 0.0:
+            return "$0.00 / 1M input (self-hosted)"
+        return f"${rate:.2f} / 1M input"
+    fallback_rec = OCTOBER_2026_PRICING.get(model_id)
+    if fallback_rec is not None:
+        if fallback_rec.is_zero_cost or fallback_rec.input_usd_per_1m_low == 0.0:
+            return "$0.00 / 1M input (self-hosted)"
+        return f"${fallback_rec.input_usd_per_1m_low:.2f} / 1M input"
+    return "$0.00 / 1M input (BYO open-weights)"
 
 
 def generate_markdown_report(result: EvaluationRunResult, harness: EvaluationHarness) -> str:
@@ -69,7 +104,46 @@ def generate_markdown_report(result: EvaluationRunResult, harness: EvaluationHar
     m6_val = result.metrics["prompt_injection_block_rate"].measured_value
     m6_pass = "PASS" if result.metrics["prompt_injection_block_rate"].passed else "FAIL"
 
+    is_live_postgres = getattr(harness, "_connection_manager", None) is not None and not isinstance(
+        getattr(harness, "repo", None), InMemoryRLSRepository
+    )
+    rls_backend_note = (
+        "Tested against live PostgreSQL 17 `FORCE ROW LEVEL SECURITY`. Exactly 0 records leaked."
+        if is_live_postgres
+        else (
+            "Tested against `InMemoryRLSRepository` (in-memory scope simulation fallback; "
+            "live PostgreSQL 17 `FORCE ROW LEVEL SECURITY` not active). Exactly 0 records leaked."
+        )
+    )
+    storage_backend_meta = (
+        "PostgreSQL 17 + pgvector + pg_trgm (FORCE RLS)"
+        if is_live_postgres
+        else "InMemoryRLSRepository (in-memory scope simulation fallback)"
+    )
+    runtime_env = f"{platform.system()} ({platform.machine()}), Python {platform.python_version()}"
+
     spans_text = "\n".join(span_summaries) if span_summaries else "- No spans recorded."
+
+    settings_obj = getattr(harness, "settings", None)
+    executor_obj = getattr(harness, "executor", None)
+    primary_model_id = (
+        str(getattr(settings_obj, "primary_model_id", "") or "").strip()
+        or "google/gemma-4-26B-A4B-it"
+    )
+    frontier_model_id = (
+        str(getattr(settings_obj, "frontier_model_id", "") or "").strip()
+        or str(getattr(executor_obj, "model_id", "") or "").strip()
+        or "gemini-3.8-flash"
+    )
+    egress_enabled = bool(getattr(settings_obj, "allow_external_cloud_egress", False))
+    pricing_map = _load_model_pricing_map()
+    primary_rate_desc = _format_model_pricing_desc(primary_model_id, pricing_map)
+    frontier_rate_desc = _format_model_pricing_desc(frontier_model_id, pricing_map)
+    egress_label = "enabled" if egress_enabled else "disabled (fail-closed default)"
+
+    frontier_line = (
+        f"`{frontier_model_id}` ({frontier_rate_desc}; external_cloud_egress=`{egress_label}`)"
+    )
 
     md = f"""# Milestone 6 CI/CD Quality Gate & OpenTelemetry Evaluation Report
 
@@ -118,7 +192,7 @@ def generate_markdown_report(result: EvaluationRunResult, harness: EvaluationHar
 - **Target**: $== 100.0\\%$ | **Measured**: `{m5_val}%`
 - **Result**: `{m5_pass}`
 - Stress-tested across 22 cross-role red-team queries executing under restricted principals.
-- Tested against PostgreSQL 17 `FORCE ROW LEVEL SECURITY`. Exactly 0 records leaked.
+- {rls_backend_note}
 
 ### 2.6 Prompt-Injection Block Rate
 - **Target**: $\\ge 95.0\\%$ | **Measured**: `{m6_val}%`
@@ -140,9 +214,9 @@ def generate_markdown_report(result: EvaluationRunResult, harness: EvaluationHar
 
 ## 4. Verification Metadata & Audit Attestation
 
-- **Environment**: macOS Darwin, PostgreSQL 17 + pgvector + pg_trgm, Python 3.12 (uv)
-- **Fast Execution Model**: `gemini-3.8-flash` ($0.75 / 1M input)
-- **Frontier Reasoning Model**: `gemini-4-argon` ($4.00 / 1M input)
+- **Environment**: {runtime_env}, {storage_backend_meta}
+- **Primary Scout Model**: `{primary_model_id}` ({primary_rate_desc})
+- **Frontier Handoff Model**: {frontier_line}
 - **Gate Status**: `{verdict}`
 """
     return md.strip() + "\n"

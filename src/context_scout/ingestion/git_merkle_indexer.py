@@ -1,15 +1,23 @@
 """Git Blob-SHA Merkle incremental indexer with Tree-Sitter AST extraction and RLS persistence."""
 
+import functools
+import gc
 import hashlib
 import logging
-import math
+import os
+import shutil
+import stat
 import subprocess
+import sys
 import time
-from collections import defaultdict
+import weakref
+from collections import OrderedDict, defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import replace as dc_replace
 from pathlib import Path
-from typing import Any, Final
-from uuid import UUID, uuid4
+from typing import Any, Final, Literal, TypeVar
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from psycopg import Connection
 from pydantic import BaseModel
@@ -21,11 +29,48 @@ from context_scout.db.repositories import (
     ASTSymbolRecord,
     CodeFileRecord,
     InMemoryRLSRepository,
+    OverlayFileDeltaRecord,
     PostgresRLSRepository,
+    RefSnapshotRecord,
+)
+from context_scout.ingestion.ownership_graph import (
+    CATALOG_INFO_FILENAMES,
+    CODEOWNERS_FILENAMES,
+    FileWeightClassification,
+    GitAttributesMatcher,
+    OwnershipGraphExtractor,
+    has_ownership_or_attr_files,
+    normalize_rel_path,
 )
 from context_scout.schemas.contracts import PrincipalContext
 
 logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=1)
+def _resolve_git_executable() -> str:
+    """Resolves direct git binary once (bypasses macOS /usr/bin/git xcrun double-spawn)."""
+    git_path = shutil.which("git") or "git"
+    if sys.platform == "darwin" and git_path == "/usr/bin/git":
+        try:
+            proc = subprocess.run(
+                ["xcrun", "-f", "git"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2.0,
+            )
+            candidate = proc.stdout.strip()
+            if proc.returncode == 0 and candidate and Path(candidate).is_file():
+                return candidate
+        except Exception as exc:
+            logger.debug(
+                "xcrun direct git resolution fallback (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+    return git_path
+
 
 CODE_EXTENSIONS: Final[set[str]] = {
     ".py",
@@ -51,21 +96,6 @@ def compute_git_blob_sha(raw_bytes: bytes) -> str:
     return hashlib.sha1(header + raw_bytes).hexdigest()
 
 
-def generate_deterministic_embedding(text: str, dim: int = 768) -> list[float]:
-    """Generates a repeatable 768-dim normalized float vector from text hash."""
-    h = hashlib.sha256(text.encode("utf-8")).digest()
-    seed_int = int.from_bytes(h[:4], "big")
-    extended: list[float] = []
-    for i in range(dim):
-        seed_int = (1103515245 * seed_int + 12345 + i) & 0x7FFFFFFF
-        val = (seed_int / 0x7FFFFFFF) * 2.0 - 1.0
-        extended.append(val)
-    norm = math.sqrt(sum(x * x for x in extended))
-    if norm == 0.0:
-        return [1.0 / math.sqrt(dim)] * dim
-    return [round(x / norm, 6) for x in extended]
-
-
 LANG_MAP: Final[dict[str, str]] = {
     ".py": "python",
     ".tsx": "tsx",
@@ -83,8 +113,39 @@ LANG_MAP: Final[dict[str, str]] = {
     ".java": "java",
 }
 
-_SYMBOL_EMBEDDING_CACHE: dict[tuple[str, str], list[float]] = {}
-_TRACKED_IN_MEMORY_REPOS: dict[tuple[int, str, str], tuple[Path, list[str] | None, str]] = {}
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+
+_SYMBOL_EMBEDDING_CACHE_MAX_ENTRIES: Final[int] = 16_384
+_COMMIT_TREE_CACHE_MAX_ENTRIES: Final[int] = 128
+_DIFF_TREE_CACHE_MAX_ENTRIES: Final[int] = 256
+_WT_BLOB_CACHE_MAX_ENTRIES: Final[int] = 8_192
+
+
+def _lru_get(cache: OrderedDict[_K, _V], key: _K) -> _V | None:
+    """Returns cached value and promotes key to most-recently-used."""
+    if key not in cache:
+        return None
+    cache.move_to_end(key)
+    return cache[key]
+
+
+def _lru_set(cache: OrderedDict[_K, _V], key: _K, value: _V, max_entries: int) -> None:
+    """Inserts/updates key in bounded OrderedDict and evicts least-recently-used entries."""
+    if max_entries <= 0:
+        return
+    if key in cache:
+        cache.move_to_end(key)
+    cache[key] = value
+    while len(cache) > max_entries:
+        cache.popitem(last=False)
+
+
+_SYMBOL_EMBEDDING_CACHE: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+_TRACKED_IN_MEMORY_REPOS: dict[
+    tuple[int, str, str],
+    tuple[weakref.ReferenceType[InMemoryRLSRepository], Path, list[str], str],
+] = {}
 
 SKIP_BINARY_EXTENSIONS: Final[set[str]] = {
     ".png",
@@ -121,11 +182,15 @@ SKIP_BINARY_EXTENSIONS: Final[set[str]] = {
 }
 
 
-# Cache immutable git ls-tree -r output by (resolved_repo_dir, commit_sha).
-_COMMIT_TREE_CACHE: dict[tuple[str, str], dict[str, str]] = {}
+# Bounded LRU cache for immutable git ls-tree -r output by (resolved_repo_dir, commit_sha).
+_COMMIT_TREE_CACHE: OrderedDict[tuple[str, str], dict[str, str]] = OrderedDict()
 
-# Cache working-tree dirty file blob SHAs by (abs_path, st_mtime_ns, st_size).
-_WT_BLOB_CACHE: dict[tuple[str, int, int], str] = {}
+# Bounded LRU cache for immutable git diff-tree -r --raw output by
+# (repo_dir, before_sha, after_sha, renames).
+_DIFF_TREE_CACHE: OrderedDict[tuple[str, str, str, bool], "MerkleBlobDiff"] = OrderedDict()
+
+# Bounded LRU cache for working-tree dirty file blob SHAs by (abs_path, st_mtime_ns, st_size).
+_WT_BLOB_CACHE: OrderedDict[tuple[str, int, int], str] = OrderedDict()
 
 
 @dataclass(frozen=True)
@@ -189,11 +254,11 @@ def _resolve_commit_sha(repo_dir: Path, ref: str = "HEAD") -> str:
             )
 
     rev_cmd = subprocess.run(
-        ["git", "rev-parse", ref],
-        cwd=repo_dir,
+        [_resolve_git_executable(), "--no-optional-locks", "-C", str(repo_dir), "rev-parse", ref],
         capture_output=True,
         text=True,
         check=True,
+        close_fds=(os.name != "posix"),
     )
     return rev_cmd.stdout.strip()
 
@@ -230,42 +295,83 @@ class GitMerkleIndexer:
         blob_sha = blob_sha or git_blob_sha
         if not symbols:
             return []
-        if self.use_semantic_embeddings and self.embedder is not None:
-            results: list[list[float] | None] = [None] * len(symbols)
-            missing_indices: list[int] = []
-            missing_texts: list[str] = []
-            for idx, s in enumerate(symbols):
-                cache_key = (blob_sha, s.qualified_name)
-                if blob_sha and cache_key in _SYMBOL_EMBEDDING_CACHE:
-                    results[idx] = _SYMBOL_EMBEDDING_CACHE[cache_key]
-                else:
-                    missing_indices.append(idx)
-                    missing_texts.append(
-                        f"{s.qualified_name} {s.signature_skeleton} {s.contextual_summary}".strip()
-                    )
-            if missing_texts:
-                batch_vecs = self.embedder.embed_batch(missing_texts, is_query=False)
-                if len(batch_vecs) == len(missing_indices):
-                    for m_idx, vec in zip(missing_indices, batch_vecs, strict=True):
-                        flt_vec = [float(x) for x in vec]
-                        results[m_idx] = flt_vec
-                        if blob_sha:
-                            _SYMBOL_EMBEDDING_CACHE[(blob_sha, symbols[m_idx].qualified_name)] = (
-                                flt_vec
-                            )
-            if all(r is not None for r in results):
-                return [r for r in results if r is not None]
-        out_vecs: list[list[float]] = []
-        for s in symbols:
+        active_embedder = self.embedder
+        if active_embedder is None:
+            from context_scout.retrieval.embedder import get_embedding_provider
+
+            active_embedder = get_embedding_provider()
+        results: list[list[float] | None] = [None] * len(symbols)
+        missing_indices: list[int] = []
+        missing_texts: list[str] = []
+        for idx, s in enumerate(symbols):
             cache_key = (blob_sha, s.qualified_name)
-            if blob_sha and cache_key in _SYMBOL_EMBEDDING_CACHE:
-                out_vecs.append(_SYMBOL_EMBEDDING_CACHE[cache_key])
+            cached_vec = _lru_get(_SYMBOL_EMBEDDING_CACHE, cache_key) if blob_sha else None
+            if cached_vec is not None:
+                results[idx] = cached_vec
             else:
-                det_v = generate_deterministic_embedding(s.signature_skeleton + " " + s.docstring)
+                missing_indices.append(idx)
+                missing_texts.append(
+                    f"{s.qualified_name} {s.signature_skeleton} {s.contextual_summary}".strip()
+                )
+        if missing_texts:
+            batch_vecs = active_embedder.embed_batch(missing_texts, is_query=False)
+            if len(batch_vecs) != len(missing_indices):
+                raise RuntimeError(
+                    f"Embedder returned {len(batch_vecs)} vectors "
+                    f"for {len(missing_indices)} symbols."
+                )
+            for m_idx, vec in zip(missing_indices, batch_vecs, strict=True):
+                flt_vec = [float(x) for x in vec]
+                results[m_idx] = flt_vec
                 if blob_sha:
-                    _SYMBOL_EMBEDDING_CACHE[cache_key] = det_v
-                out_vecs.append(det_v)
-        return out_vecs
+                    _lru_set(
+                        _SYMBOL_EMBEDDING_CACHE,
+                        (blob_sha, symbols[m_idx].qualified_name),
+                        flt_vec,
+                        _SYMBOL_EMBEDDING_CACHE_MAX_ENTRIES,
+                    )
+        return [r for r in results if r is not None]
+
+    def _batch_prepopulate_symbol_embeddings(
+        self,
+        items: Sequence[tuple[str, list[ParsedSymbol]]],
+    ) -> None:
+        """Pre-populates `_SYMBOL_EMBEDDING_CACHE` for uncached (blob_sha, symbol) pairs."""
+        pending_keys: list[tuple[str, str]] = []
+        pending_texts: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for blob_sha, symbols in items:
+            if not blob_sha or not symbols:
+                continue
+            for sym in symbols:
+                cache_key = (blob_sha, sym.qualified_name)
+                if cache_key in _SYMBOL_EMBEDDING_CACHE or cache_key in seen:
+                    continue
+                seen.add(cache_key)
+                pending_keys.append(cache_key)
+                raw_text = (
+                    f"{sym.qualified_name} {sym.signature_skeleton} {sym.contextual_summary}"
+                ).strip()
+                pending_texts.append(raw_text)
+        if not pending_texts:
+            return
+        active_embedder = self.embedder
+        if active_embedder is None:
+            from context_scout.retrieval.embedder import get_embedding_provider
+
+            active_embedder = get_embedding_provider()
+        batch_vecs = active_embedder.embed_batch(pending_texts, is_query=False)
+        if len(batch_vecs) != len(pending_keys):
+            raise RuntimeError(
+                f"Embedder returned {len(batch_vecs)} vectors for {len(pending_keys)} symbols."
+            )
+        for cache_key, vec in zip(pending_keys, batch_vecs, strict=True):
+            _lru_set(
+                _SYMBOL_EMBEDDING_CACHE,
+                cache_key,
+                [float(x) for x in vec],
+                _SYMBOL_EMBEDDING_CACHE_MAX_ENTRIES,
+            )
 
     def get_git_tree(
         self,
@@ -274,93 +380,132 @@ class GitMerkleIndexer:
         include_working_tree: bool | None = None,
     ) -> tuple[str, dict[str, str]]:
         """Extracts current commit SHA and mapping of {file_path: blob_sha} via git ls-tree."""
-        commit_sha = _resolve_commit_sha(repo_dir, ref)
-        cache_key = (str(repo_dir.resolve()), commit_sha)
-        cached_base = _COMMIT_TREE_CACHE.get(cache_key)
-        if cached_base is not None:
-            tree: dict[str, str] = dict(cached_base)
-        else:
-            ls_cmd = subprocess.run(
-                ["git", "ls-tree", "-r", ref],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
+        was_gc = gc.isenabled()
+        gc.disable()
+        try:
+            commit_sha = _resolve_commit_sha(repo_dir, ref)
+            cache_key = (str(repo_dir.resolve()), commit_sha)
+            cached_base = _lru_get(_COMMIT_TREE_CACHE, cache_key)
+            if cached_base is not None:
+                tree: dict[str, str] = dict(cached_base)
+            else:
+                ls_cmd = subprocess.run(
+                    [
+                        _resolve_git_executable(),
+                        "--no-optional-locks",
+                        "-C",
+                        str(repo_dir),
+                        "ls-tree",
+                        "-r",
+                        ref,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    close_fds=(os.name != "posix"),
+                )
 
-            tree = {}
-            for line in ls_cmd.stdout.strip().splitlines():
-                if not line:
-                    continue
-                parts = line.split("\t", 1)
-                if len(parts) != 2:
-                    continue
-                meta, file_path = parts
-                if not self._is_indexable_text_path(file_path):
-                    continue
-                meta_parts = meta.split()
-                if len(meta_parts) >= 3:
-                    blob_sha = meta_parts[2]
-                    tree[file_path] = blob_sha
-            _COMMIT_TREE_CACHE[cache_key] = dict(tree)
+                tree = {}
+                for line in ls_cmd.stdout.strip().splitlines():
+                    if not line:
+                        continue
+                    parts = line.split("\t", 1)
+                    if len(parts) != 2:
+                        continue
+                    meta, file_path = parts
+                    if not self._is_indexable_text_path(file_path):
+                        continue
+                    meta_parts = meta.split()
+                    if len(meta_parts) >= 3:
+                        blob_sha = meta_parts[2]
+                        tree[file_path] = blob_sha
+                _lru_set(
+                    _COMMIT_TREE_CACHE,
+                    cache_key,
+                    dict(tree),
+                    _COMMIT_TREE_CACHE_MAX_ENTRIES,
+                )
 
-        overlay_wt = (
-            self.include_working_tree if include_working_tree is None else include_working_tree
-        )
-        if overlay_wt and ref == "HEAD":
-            st_cmd = subprocess.run(
-                ["git", "--no-optional-locks", "status", "--porcelain", "-unormal"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                check=False,
+            overlay_wt = (
+                self.include_working_tree if include_working_tree is None else include_working_tree
             )
-            if st_cmd.returncode == 0 and st_cmd.stdout.strip():
-                dirty_mutations: list[str] = []
-                for raw_ln in st_cmd.stdout.splitlines():
-                    if len(raw_ln) < 4:
-                        continue
-                    xy = raw_ln[:2]
-                    rel_part = raw_ln[3:].strip().strip('"')
-                    if " -> " in rel_part:
-                        old_rel, new_rel = rel_part.split(" -> ", 1)
-                        old_rel = old_rel.strip().strip('"')
-                        new_rel = new_rel.strip().strip('"')
-                        tree.pop(old_rel, None)
-                        dirty_mutations.append(f"D:{old_rel}")
-                        rel_part = new_rel
-                    if not self._is_indexable_text_path(rel_part):
-                        continue
-                    disk_f = repo_dir / rel_part
-                    if "D" in xy or not disk_f.exists():
-                        if rel_part in tree:
-                            tree.pop(rel_part, None)
-                            dirty_mutations.append(f"D:{rel_part}")
-                    elif disk_f.is_file():
+            if overlay_wt and ref == "HEAD":
+                st_cmd = subprocess.run(
+                    [
+                        _resolve_git_executable(),
+                        "--no-optional-locks",
+                        "-C",
+                        str(repo_dir),
+                        "status",
+                        "--porcelain",
+                        "-unormal",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    close_fds=(os.name != "posix"),
+                )
+                if st_cmd.returncode == 0 and st_cmd.stdout.strip():
+                    dirty_mutations: list[str] = []
+                    for raw_ln in st_cmd.stdout.splitlines():
+                        if len(raw_ln) < 4:
+                            continue
+                        xy = raw_ln[:2]
+                        rel_part = raw_ln[3:].strip().strip('"')
+                        if " -> " in rel_part:
+                            old_rel, new_rel = rel_part.split(" -> ", 1)
+                            old_rel = old_rel.strip().strip('"')
+                            new_rel = new_rel.strip().strip('"')
+                            tree.pop(old_rel, None)
+                            dirty_mutations.append(f"D:{old_rel}")
+                            rel_part = new_rel
+                        if not self._is_indexable_text_path(rel_part):
+                            continue
+                        disk_f = repo_dir / rel_part
+                        if "D" in xy:
+                            if rel_part in tree:
+                                tree.pop(rel_part, None)
+                                dirty_mutations.append(f"D:{rel_part}")
+                            continue
                         try:
-                            st = disk_f.stat()
-                            wt_key = (str(disk_f), st.st_mtime_ns, st.st_size)
-                            wt_blob = _WT_BLOB_CACHE.get(wt_key)
-                            if wt_blob is None:
-                                wt_blob = compute_git_blob_sha(disk_f.read_bytes())
-                                _WT_BLOB_CACHE[wt_key] = wt_blob
-                            if tree.get(rel_part) != wt_blob:
-                                tree[rel_part] = wt_blob
-                                dirty_mutations.append(f"M:{rel_part}:{wt_blob}")
-                        except Exception as exc:
-                            logger.warning(
-                                "Failed to hash working-tree file %s (%s): %s",
-                                rel_part,
-                                type(exc).__name__,
-                                exc,
-                            )
-                if dirty_mutations:
-                    wt_digest = hashlib.sha1(
-                        "|".join(sorted(dirty_mutations)).encode("utf-8")
-                    ).hexdigest()
-                    commit_sha = f"{commit_sha[:32]}dddd{wt_digest[:4]}"
+                            st_res = disk_f.stat()
+                        except OSError:
+                            if rel_part in tree:
+                                tree.pop(rel_part, None)
+                                dirty_mutations.append(f"D:{rel_part}")
+                            continue
+                        if stat.S_ISREG(st_res.st_mode):
+                            try:
+                                wt_key = (str(disk_f), st_res.st_mtime_ns, st_res.st_size)
+                                wt_blob = _lru_get(_WT_BLOB_CACHE, wt_key)
+                                if wt_blob is None:
+                                    wt_blob = compute_git_blob_sha(disk_f.read_bytes())
+                                    _lru_set(
+                                        _WT_BLOB_CACHE,
+                                        wt_key,
+                                        wt_blob,
+                                        _WT_BLOB_CACHE_MAX_ENTRIES,
+                                    )
+                                if tree.get(rel_part) != wt_blob:
+                                    tree[rel_part] = wt_blob
+                                    dirty_mutations.append(f"M:{rel_part}:{wt_blob}")
+                            except Exception as exc:
+                                logger.warning(
+                                    "Failed to hash working-tree file %s (%s): %s",
+                                    rel_part,
+                                    type(exc).__name__,
+                                    exc,
+                                )
+                    if dirty_mutations:
+                        wt_digest = hashlib.sha1(
+                            "|".join(sorted(dirty_mutations)).encode("utf-8")
+                        ).hexdigest()
+                        commit_sha = f"{commit_sha[:32]}dddd{wt_digest[:4]}"
 
-        return commit_sha, tree
+            return commit_sha, tree
+        finally:
+            if was_gc:
+                gc.enable()
 
     def diff_merkle_tree(
         self, current: dict[str, str], existing: dict[str, str]
@@ -377,6 +522,9 @@ class GitMerkleIndexer:
         repo_dir: Path,
         before_sha: str,
         after_sha: str,
+        *,
+        detect_renames: bool = False,
+        use_cache: bool = True,
     ) -> MerkleBlobDiff:
         """Diffs commit trees using git diff-tree -r --raw in <25ms (F08)."""
         effective_before = (
@@ -384,48 +532,94 @@ class GitMerkleIndexer:
             if not before_sha or before_sha == "0" * 40 or before_sha.strip() == ""
             else before_sha
         )
-        proc = subprocess.run(
-            ["git", "-C", str(repo_dir), "diff-tree", "-r", "--raw", effective_before, after_sha],
-            capture_output=True,
-            text=True,
-            check=True,
+        is_immutable_sha = (
+            len(effective_before) == 40
+            and len(after_sha) == 40
+            and all(c in "0123456789abcdefABCDEF" for c in effective_before)
+            and all(c in "0123456789abcdefABCDEF" for c in after_sha)
         )
+        diff_cache_key = (
+            str(repo_dir.resolve()),
+            effective_before,
+            after_sha,
+            detect_renames,
+        )
+        if use_cache and is_immutable_sha:
+            cached_diff = _lru_get(_DIFF_TREE_CACHE, diff_cache_key)
+            if cached_diff is not None:
+                return cached_diff
 
-        added: dict[str, str] = {}
-        modified: dict[str, tuple[str, str]] = {}
-        deleted: dict[str, str] = {}
-        renamed: list[tuple[str, str, str, str]] = []
+        cmd = [
+            _resolve_git_executable(),
+            "--no-optional-locks",
+            "-C",
+            str(repo_dir),
+            "diff-tree",
+            "-r",
+        ]
+        if detect_renames:
+            cmd.append("-M")
+        cmd.extend(["--raw", effective_before, after_sha])
 
-        for line in proc.stdout.splitlines():
-            if not line.startswith(":"):
-                continue
-            parts = line.split("\t")
-            if len(parts) < 2:
-                continue
-            meta = parts[0]
-            file_path = parts[1]
-            meta_tokens = meta[1:].split()
-            if len(meta_tokens) < 5:
-                continue
-            old_blob = meta_tokens[2]
-            new_blob = meta_tokens[3]
-            status = meta_tokens[4]
+        was_gc = gc.isenabled()
+        gc.disable()
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                close_fds=(os.name != "posix"),
+            )
 
-            if not self._is_indexable_text_path(file_path):
-                continue
+            added: dict[str, str] = {}
+            modified: dict[str, tuple[str, str]] = {}
+            deleted: dict[str, str] = {}
+            renamed: list[tuple[str, str, str, str]] = []
 
-            if status == "A":
-                added[file_path] = new_blob
-            elif status == "M":
-                modified[file_path] = (old_blob, new_blob)
-            elif status == "D":
-                deleted[file_path] = old_blob
-            elif status.startswith("R"):
-                old_path = file_path
-                new_path = parts[2] if len(parts) > 2 else file_path
-                renamed.append((old_path, new_path, old_blob, new_blob))
+            for line in proc.stdout.splitlines():
+                if not line.startswith(":"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 2:
+                    continue
+                meta = parts[0]
+                file_path = parts[1]
+                meta_tokens = meta[1:].split()
+                if len(meta_tokens) < 5:
+                    continue
+                old_blob = meta_tokens[2]
+                new_blob = meta_tokens[3]
+                status = meta_tokens[4]
 
-        return MerkleBlobDiff(added=added, modified=modified, deleted=deleted, renamed=renamed)
+                if not self._is_indexable_text_path(file_path):
+                    continue
+
+                if status == "A":
+                    added[file_path] = new_blob
+                elif status == "M":
+                    modified[file_path] = (old_blob, new_blob)
+                elif status == "D":
+                    deleted[file_path] = old_blob
+                elif status.startswith("R"):
+                    old_path = file_path
+                    new_path = parts[2] if len(parts) > 2 else file_path
+                    renamed.append((old_path, new_path, old_blob, new_blob))
+
+            result = MerkleBlobDiff(
+                added=added, modified=modified, deleted=deleted, renamed=renamed
+            )
+            if use_cache and is_immutable_sha:
+                _lru_set(
+                    _DIFF_TREE_CACHE,
+                    diff_cache_key,
+                    result,
+                    _DIFF_TREE_CACHE_MAX_ENTRIES,
+                )
+            return result
+        finally:
+            if was_gc:
+                gc.enable()
 
     def _detect_language(self, file_path: str) -> str | None:
         for ext, lang in LANG_MAP.items():
@@ -456,15 +650,112 @@ class GitMerkleIndexer:
                 )
         if blob_sha:
             proc = subprocess.run(
-                ["git", "-C", str(repo_dir), "cat-file", "-p", blob_sha],
+                [
+                    _resolve_git_executable(),
+                    "--no-optional-locks",
+                    "-C",
+                    str(repo_dir),
+                    "cat-file",
+                    "-p",
+                    blob_sha,
+                ],
                 capture_output=True,
                 check=False,
+                close_fds=(os.name != "posix"),
             )
             if proc.returncode == 0:
                 return proc.stdout.decode("utf-8", errors="replace").replace("\x00", "")
         if not disk_file.exists():
             return None
         return disk_file.read_text(encoding="utf-8", errors="replace").replace("\x00", "")
+
+    @staticmethod
+    def _is_attr_or_ownership_path(file_path: str) -> bool:
+        norm = normalize_rel_path(file_path)
+        base = norm.rsplit("/", 1)[-1]
+        return (
+            base == ".gitattributes"
+            or norm in CODEOWNERS_FILENAMES
+            or base in CATALOG_INFO_FILENAMES
+        )
+
+    def _build_attr_matcher_and_manifests(
+        self,
+        repo_dir: Path,
+        tree: Mapping[str, str],
+        ref: str,
+        *,
+        prefer_working_tree: bool,
+    ) -> tuple[GitAttributesMatcher | None, dict[str, str]]:
+        """Loads .gitattributes, CODEOWNERS, and catalog-info.y*ml only if present in tree."""
+        if not has_ownership_or_attr_files(tree):
+            return None, {}
+        attr_files: dict[str, str] = {}
+        manifest_files: dict[str, str] = {}
+        for rel_path, blob_sha in tree.items():
+            if not self._is_attr_or_ownership_path(rel_path):
+                continue
+            content = self._read_blob_or_disk(
+                repo_dir, rel_path, blob_sha, ref, prefer_working_tree=prefer_working_tree
+            )
+            if content is None:
+                continue
+            manifest_files[rel_path] = content
+            norm = normalize_rel_path(rel_path)
+            if norm == ".gitattributes" or norm.endswith("/.gitattributes"):
+                attr_files[norm] = content
+        matcher = GitAttributesMatcher.from_repo_files(attr_files) if attr_files else None
+        return matcher, manifest_files
+
+    @staticmethod
+    def _classify_path(
+        matcher: GitAttributesMatcher | None, file_path: str
+    ) -> FileWeightClassification:
+        if matcher is None:
+            return FileWeightClassification(
+                file_path=file_path, ranking_weight=1.0, is_generated=False, is_vendored=False
+            )
+        return matcher.classify_file(file_path)
+
+    def _serialize_delta_symbols_edges(
+        self,
+        *,
+        domain_id: str,
+        repo_name: str,
+        file_path: str,
+        symbols: Sequence[ParsedSymbol],
+        edges: Sequence[ParsedEdge],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        sym_dicts: list[dict[str, Any]] = []
+        for s in symbols:
+            det_id = uuid5(
+                NAMESPACE_URL,
+                f"overlay:{domain_id}:{repo_name}:{file_path}:{s.qualified_name}:{s.start_line}",
+            )
+            sym_dicts.append(
+                {
+                    "symbol_id": str(det_id),
+                    "qualified_name": s.qualified_name,
+                    "symbol_kind": s.symbol_kind,
+                    "start_line": s.start_line,
+                    "end_line": s.end_line,
+                    "signature_skeleton": s.signature_skeleton,
+                    "contextual_summary": s.contextual_summary,
+                    "repo_qualified_id": s.repo_qualified_id or f"{repo_name}::{s.qualified_name}",
+                    "bare_name": s.bare_name or s.name,
+                }
+            )
+        edge_dicts: list[dict[str, Any]] = [
+            {
+                "source_qualified_name": e.source_qualified_name,
+                "target_qualified_name": e.target_qualified_name,
+                "edge_kind": e.edge_kind,
+                "target_repo_qualified_id": e.target_repo_qualified_id,
+                "is_cross_repo": e.is_cross_repo,
+            }
+            for e in edges
+        ]
+        return sym_dicts, edge_dicts
 
     def sync_in_memory(
         self,
@@ -485,34 +776,44 @@ class GitMerkleIndexer:
             and ref == "HEAD"
             and not isolate_by_commit
         )
-        commit_sha, current_tree = self.get_git_tree(repo_dir, ref, include_working_tree=use_wt)
-        effective_repo_name = f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
-        if ref == "HEAD" and not isolate_by_commit:
-            _TRACKED_IN_MEMORY_REPOS[(id(repo), domain_id, effective_repo_name)] = (
-                repo_dir.resolve(),
-                allowed_scopes,
-                commit_sha,
+        was_gc = gc.isenabled()
+        gc.disable()
+        try:
+            commit_sha, current_tree = self.get_git_tree(repo_dir, ref, include_working_tree=use_wt)
+            effective_repo_name = (
+                f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
             )
-        existing_hashes = repo.get_file_blob_hashes(principal, domain_id, effective_repo_name)
-        existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
+            effective_scopes = list(allowed_scopes or principal.allowed_scopes)
+            if ref == "HEAD" and not isolate_by_commit:
+                _TRACKED_IN_MEMORY_REPOS[(id(repo), domain_id, effective_repo_name)] = (
+                    weakref.ref(repo),
+                    repo_dir.resolve(),
+                    effective_scopes,
+                    commit_sha,
+                )
+            existing_hashes = repo.get_file_blob_hashes(principal, domain_id, effective_repo_name)
+            existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
 
-        unchanged, new, modified, deleted = self.diff_merkle_tree(current_tree, existing_map)
+            unchanged, new, modified, deleted = self.diff_merkle_tree(current_tree, existing_map)
 
-        # Fast-exit cache hit (<50ms)
-        if not new and not modified and not deleted:
-            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
-            return MerkleSyncStats(
-                total_files_scanned=len(current_tree),
-                unchanged_files_skipped=len(unchanged),
-                new_files_indexed=0,
-                modified_files_reindexed=0,
-                deleted_files_removed=0,
-                total_symbols_stored=0,
-                total_edges_stored=0,
-                duration_ms=duration_ms,
-                commit_sha=commit_sha,
-                cache_hit=True,
-            )
+            # Fast-exit cache hit (<50ms)
+            if not new and not modified and not deleted:
+                duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                return MerkleSyncStats(
+                    total_files_scanned=len(current_tree),
+                    unchanged_files_skipped=len(unchanged),
+                    new_files_indexed=0,
+                    modified_files_reindexed=0,
+                    deleted_files_removed=0,
+                    total_symbols_stored=0,
+                    total_edges_stored=0,
+                    duration_ms=duration_ms,
+                    commit_sha=commit_sha,
+                    cache_hit=True,
+                )
+        finally:
+            if was_gc:
+                gc.enable()
 
         # 1. Remove deleted files
         for d in deleted:
@@ -525,6 +826,26 @@ class GitMerkleIndexer:
             if m in existing_hashes:
                 file_id, _ = existing_hashes[m]
                 repo.delete_code_file(principal, file_id)
+
+        attr_matcher, manifest_files = self._build_attr_matcher_and_manifests(
+            repo_dir, current_tree, ref, prefer_working_tree=use_wt
+        )
+        # Re-classify unchanged files when .gitattributes was added/modified/deleted.
+        if any(p.rsplit("/", 1)[-1] == ".gitattributes" for p in (new | modified | deleted)):
+            for fid, cf in list(repo._files.items()):
+                if (
+                    cf.tenant_id == principal.tenant_id
+                    and cf.domain_id == domain_id
+                    and cf.repo_name == effective_repo_name
+                    and cf.file_path in unchanged
+                ):
+                    cls_res = self._classify_path(attr_matcher, cf.file_path)
+                    repo._files[fid] = dc_replace(
+                        cf,
+                        ranking_weight=cls_res.ranking_weight,
+                        is_generated=cls_res.is_generated,
+                        is_vendored=cls_res.is_vendored,
+                    )
 
         scopes = allowed_scopes or principal.allowed_scopes
         to_index = sorted(new | modified)
@@ -544,6 +865,10 @@ class GitMerkleIndexer:
             global_symbol_map[s.qualified_name] = s.symbol_id
             short_name_map[s.qualified_name.split(".")[-1]].append(s.symbol_id)
 
+        pre_parsed_inmem: dict[
+            str, tuple[str, str | None, list[ParsedSymbol], list[ParsedEdge]]
+        ] = {}
+        batch_emb_items: list[tuple[str, list[ParsedSymbol]]] = []
         for file_path in to_index:
             blob_sha = current_tree[file_path]
             raw_content = self._read_blob_or_disk(
@@ -551,10 +876,25 @@ class GitMerkleIndexer:
             )
             if raw_content is None:
                 continue
-
             lang = self._detect_language(file_path)
+            if lang:
+                symbols, edges = self.extractor.parse_source(raw_content, lang, file_path=file_path)
+                batch_emb_items.append((blob_sha, symbols))
+            else:
+                symbols, edges = [], []
+            pre_parsed_inmem[file_path] = (raw_content, lang, symbols, edges)
+
+        self._batch_prepopulate_symbol_embeddings(batch_emb_items)
+
+        for file_path in to_index:
+            parsed_entry = pre_parsed_inmem.get(file_path)
+            if parsed_entry is None:
+                continue
+            blob_sha = current_tree[file_path]
+            raw_content, lang, symbols, edges = parsed_entry
             lines = raw_content.splitlines()
             file_id = uuid4()
+            cls_res = self._classify_path(attr_matcher, file_path)
 
             file_rec = CodeFileRecord(
                 file_id=file_id,
@@ -567,13 +907,16 @@ class GitMerkleIndexer:
                 allowed_scopes=scopes,
                 raw_content=raw_content,
                 line_count=len(lines),
+                tenant_id=principal.tenant_id,
+                ranking_weight=cls_res.ranking_weight,
+                is_generated=cls_res.is_generated,
+                is_vendored=cls_res.is_vendored,
             )
             repo.insert_code_file(principal, file_rec)
 
             if not lang:
                 continue
 
-            symbols, edges = self.extractor.parse_source(raw_content, lang, file_path=file_path)
             file_symbol_map: dict[str, UUID] = {}
             symbol_embeddings = self._compute_symbol_embeddings(symbols, blob_sha=blob_sha)
 
@@ -591,6 +934,9 @@ class GitMerkleIndexer:
                     contextual_summary=parsed_sym.contextual_summary,
                     allowed_scopes=scopes,
                     embedding=emb,
+                    repo_qualified_id=parsed_sym.repo_qualified_id,
+                    bare_name=parsed_sym.bare_name or parsed_sym.name,
+                    tenant_id=principal.tenant_id,
                 )
                 repo.insert_ast_symbol(principal, sym_rec)
                 file_symbol_map[parsed_sym.qualified_name] = sym_id
@@ -630,9 +976,27 @@ class GitMerkleIndexer:
                     target_symbol_id=target_id,
                     edge_kind=edge.edge_kind,
                     allowed_scopes=file_rec.allowed_scopes,
+                    tenant_id=principal.tenant_id,
                 )
                 repo.insert_ast_edge(principal, edge_rec)
                 total_edges += 1
+
+        # Pass 3: CODEOWNERS & Backstage catalog-info.yaml ownership graph extraction
+        if manifest_files and any(
+            p in CODEOWNERS_FILENAMES or p.rsplit("/", 1)[-1] in CATALOG_INFO_FILENAMES
+            for p in manifest_files
+        ):
+            extra_syms, extra_edges = self._sync_ownership_in_memory(
+                repo=repo,
+                principal=principal,
+                domain_id=domain_id,
+                repo_name=effective_repo_name,
+                current_tree=current_tree,
+                manifest_files=manifest_files,
+                allowed_scopes=scopes,
+            )
+            total_symbols += extra_syms
+            total_edges += extra_edges
 
         duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
         return MerkleSyncStats(
@@ -668,28 +1032,36 @@ class GitMerkleIndexer:
             and ref == "HEAD"
             and not isolate_by_commit
         )
-        commit_sha, current_tree = self.get_git_tree(repo_dir, ref, include_working_tree=use_wt)
-        effective_repo_name = f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
-        existing_hashes = repo.get_file_blob_hashes(conn, domain_id, effective_repo_name)
-        existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
-
-        unchanged, new, modified, deleted = self.diff_merkle_tree(current_tree, existing_map)
-
-        # Fast-exit cache hit (<50ms)
-        if not new and not modified and not deleted:
-            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
-            return MerkleSyncStats(
-                total_files_scanned=len(current_tree),
-                unchanged_files_skipped=len(unchanged),
-                new_files_indexed=0,
-                modified_files_reindexed=0,
-                deleted_files_removed=0,
-                total_symbols_stored=0,
-                total_edges_stored=0,
-                duration_ms=duration_ms,
-                commit_sha=commit_sha,
-                cache_hit=True,
+        was_gc = gc.isenabled()
+        gc.disable()
+        try:
+            commit_sha, current_tree = self.get_git_tree(repo_dir, ref, include_working_tree=use_wt)
+            effective_repo_name = (
+                f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
             )
+            existing_hashes = repo.get_file_blob_hashes(conn, domain_id, effective_repo_name)
+            existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
+
+            unchanged, new, modified, deleted = self.diff_merkle_tree(current_tree, existing_map)
+
+            # Fast-exit cache hit (<50ms)
+            if not new and not modified and not deleted:
+                duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                return MerkleSyncStats(
+                    total_files_scanned=len(current_tree),
+                    unchanged_files_skipped=len(unchanged),
+                    new_files_indexed=0,
+                    modified_files_reindexed=0,
+                    deleted_files_removed=0,
+                    total_symbols_stored=0,
+                    total_edges_stored=0,
+                    duration_ms=duration_ms,
+                    commit_sha=commit_sha,
+                    cache_hit=True,
+                )
+        finally:
+            if was_gc:
+                gc.enable()
 
         # 1. Remove deleted files
         for d in deleted:
@@ -702,6 +1074,28 @@ class GitMerkleIndexer:
             if m in existing_hashes:
                 file_id, _ = existing_hashes[m]
                 repo.delete_code_file(conn, file_id)
+
+        attr_matcher, manifest_files = self._build_attr_matcher_and_manifests(
+            repo_dir, current_tree, ref, prefer_working_tree=use_wt
+        )
+        if any(p.rsplit("/", 1)[-1] == ".gitattributes" for p in (new | modified | deleted)):
+            for u_path in unchanged:
+                cls_res = self._classify_path(attr_matcher, u_path)
+                conn.execute(
+                    """
+                    UPDATE code_files
+                    SET ranking_weight = %s, is_generated = %s, is_vendored = %s
+                    WHERE domain_id = %s AND repo_name = %s AND file_path = %s;
+                    """,
+                    (
+                        cls_res.ranking_weight,
+                        cls_res.is_generated,
+                        cls_res.is_vendored,
+                        domain_id,
+                        effective_repo_name,
+                        u_path,
+                    ),
+                )
 
         scopes = allowed_scopes or principal.allowed_scopes
         to_index = sorted(new | modified)
@@ -737,6 +1131,7 @@ class GitMerkleIndexer:
             lang = self._detect_language(file_path)
             lines = raw_content.splitlines()
             file_id = uuid4()
+            cls_res = self._classify_path(attr_matcher, file_path)
 
             file_rec = CodeFileRecord(
                 file_id=file_id,
@@ -749,6 +1144,10 @@ class GitMerkleIndexer:
                 allowed_scopes=scopes,
                 raw_content=raw_content,
                 line_count=len(lines),
+                tenant_id=principal.tenant_id,
+                ranking_weight=cls_res.ranking_weight,
+                is_generated=cls_res.is_generated,
+                is_vendored=cls_res.is_vendored,
             )
             repo.insert_code_file(conn, file_rec)
 
@@ -773,6 +1172,9 @@ class GitMerkleIndexer:
                     contextual_summary=parsed_sym.contextual_summary,
                     allowed_scopes=scopes,
                     embedding=emb,
+                    repo_qualified_id=parsed_sym.repo_qualified_id,
+                    bare_name=parsed_sym.bare_name or parsed_sym.name,
+                    tenant_id=principal.tenant_id,
                 )
                 repo.insert_ast_symbol(conn, sym_rec)
                 file_symbol_map[parsed_sym.qualified_name] = sym_id
@@ -811,9 +1213,28 @@ class GitMerkleIndexer:
                     target_symbol_id=target_id,
                     edge_kind=edge.edge_kind,
                     allowed_scopes=file_rec.allowed_scopes,
+                    tenant_id=principal.tenant_id,
                 )
                 repo.insert_ast_edge(conn, edge_rec)
                 total_edges += 1
+
+        # Pass 3: CODEOWNERS & Backstage catalog-info.yaml ownership graph extraction
+        if manifest_files and any(
+            p in CODEOWNERS_FILENAMES or p.rsplit("/", 1)[-1] in CATALOG_INFO_FILENAMES
+            for p in manifest_files
+        ):
+            extra_syms, extra_edges = self._sync_ownership_postgres(
+                conn=conn,
+                repo=repo,
+                principal=principal,
+                domain_id=domain_id,
+                repo_name=effective_repo_name,
+                current_tree=current_tree,
+                manifest_files=manifest_files,
+                allowed_scopes=scopes,
+            )
+            total_symbols += extra_syms
+            total_edges += extra_edges
 
         duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
         return MerkleSyncStats(
@@ -878,6 +1299,20 @@ class GitMerkleIndexer:
         total_symbols = 0
         total_edges = 0
 
+        existing_paths_rows = conn.execute(
+            "SELECT file_path FROM code_files WHERE domain_id = %s AND repo_name = %s;",
+            (domain_id, repo_name),
+        ).fetchall()
+        existing_paths = [str(r[0]) for r in existing_paths_rows]
+        attr_matcher: GitAttributesMatcher | None = None
+        if has_ownership_or_attr_files(existing_paths) or has_ownership_or_attr_files(
+            list(to_index_paths)
+        ):
+            _, head_tree = self.get_git_tree(repo_dir, after_sha, include_working_tree=False)
+            attr_matcher, _ = self._build_attr_matcher_and_manifests(
+                repo_dir, head_tree, after_sha, prefer_working_tree=False
+            )
+
         repo_symbol_map: dict[str, UUID] = {}
         existing_sym_rows = conn.execute(
             """
@@ -905,26 +1340,36 @@ class GitMerkleIndexer:
                 continue
             lang = self._detect_language(f_path)
             lines = raw_content.splitlines()
+            cls_res = self._classify_path(attr_matcher, f_path)
 
             file_id = uuid4()
             row = conn.execute(
                 """
                 INSERT INTO code_files (
-                    file_id, domain_id, repo_name, file_path,
+                    file_id, tenant_id, domain_id, repo_name, file_path,
                     git_commit_sha, git_blob_sha, language,
-                    allowed_scopes, raw_content, line_count
+                    allowed_scopes, raw_content, line_count,
+                    ranking_weight, is_generated, is_vendored
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (domain_id, repo_name, file_path) DO UPDATE SET
+                VALUES (
+                    %s,
+                    %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (tenant_id, domain_id, repo_name, file_path) DO UPDATE SET
                     git_commit_sha = EXCLUDED.git_commit_sha,
                     git_blob_sha = EXCLUDED.git_blob_sha,
                     raw_content = EXCLUDED.raw_content,
                     line_count = EXCLUDED.line_count,
+                    ranking_weight = EXCLUDED.ranking_weight,
+                    is_generated = EXCLUDED.is_generated,
+                    is_vendored = EXCLUDED.is_vendored,
                     indexed_at = NOW()
                 RETURNING file_id;
                 """,
                 (
                     file_id,
+                    principal.tenant_id,
                     domain_id,
                     repo_name,
                     f_path,
@@ -934,6 +1379,9 @@ class GitMerkleIndexer:
                     scopes,
                     raw_content,
                     len(lines),
+                    cls_res.ranking_weight,
+                    cls_res.is_generated,
+                    cls_res.is_vendored,
                 ),
             ).fetchone()
             actual_file_id = UUID(str(row[0])) if row else file_id
@@ -964,6 +1412,7 @@ class GitMerkleIndexer:
                     contextual_summary=parsed_sym.contextual_summary,
                     allowed_scopes=scopes,
                     embedding=emb,
+                    tenant_id=principal.tenant_id,
                 )
                 repo.insert_ast_symbol(conn, sym_rec)
                 file_symbol_map[parsed_sym.qualified_name] = sym_id
@@ -996,6 +1445,7 @@ class GitMerkleIndexer:
                     allowed_scopes=file_scopes,
                     target_repo_qualified_id=parsed_edge.target_repo_qualified_id,
                     is_cross_repo=parsed_edge.is_cross_repo or target_id is None,
+                    tenant_id=principal.tenant_id,
                 )
                 repo.insert_ast_edge(conn, edge_rec)
                 total_edges += 1
@@ -1152,6 +1602,20 @@ class GitMerkleIndexer:
         total_symbols = 0
         total_edges = 0
 
+        existing_paths = [
+            f_rec.file_path
+            for f_rec in repo._files.values()
+            if f_rec.domain_id == domain_id and f_rec.repo_name == repo_name
+        ]
+        attr_matcher: GitAttributesMatcher | None = None
+        if has_ownership_or_attr_files(existing_paths) or has_ownership_or_attr_files(
+            list(to_index_paths)
+        ):
+            _, head_tree = self.get_git_tree(repo_dir, after_sha, include_working_tree=False)
+            attr_matcher, _ = self._build_attr_matcher_and_manifests(
+                repo_dir, head_tree, after_sha, prefer_working_tree=False
+            )
+
         repo_symbol_map: dict[str, UUID] = {}
         for s_id, s_rec in repo._symbols.items():
             if s_rec.domain_id == domain_id:
@@ -1162,6 +1626,10 @@ class GitMerkleIndexer:
         newly_inserted_file_ids: list[UUID] = []
         parsed_files_data = []
 
+        pre_parsed_inc: dict[
+            str, tuple[str, str, str | None, list[ParsedSymbol], list[ParsedEdge]]
+        ] = {}
+        batch_emb_inc: list[tuple[str, list[ParsedSymbol]]] = []
         for f_path in sorted(to_index_paths):
             new_blob_sha = (
                 diff.added.get(f_path)
@@ -1172,7 +1640,24 @@ class GitMerkleIndexer:
             if raw_content is None:
                 continue
             lang = self._detect_language(f_path)
+            if lang:
+                symbols, edges = self.extractor.parse_source(
+                    raw_content, lang, file_path=f_path, repo_name=repo_name
+                )
+                batch_emb_inc.append((new_blob_sha or "", symbols))
+            else:
+                symbols, edges = [], []
+            pre_parsed_inc[f_path] = (new_blob_sha or "", raw_content, lang, symbols, edges)
+
+        self._batch_prepopulate_symbol_embeddings(batch_emb_inc)
+
+        for f_path in sorted(to_index_paths):
+            parsed_inc = pre_parsed_inc.get(f_path)
+            if parsed_inc is None:
+                continue
+            new_blob_sha, raw_content, lang, symbols, edges = parsed_inc
             lines = raw_content.splitlines()
+            cls_res = self._classify_path(attr_matcher, f_path)
 
             # Existing file_id if modifying
             existing_fid = next(
@@ -1198,6 +1683,10 @@ class GitMerkleIndexer:
                 allowed_scopes=scopes,
                 raw_content=raw_content,
                 line_count=len(lines),
+                tenant_id=principal.tenant_id,
+                ranking_weight=cls_res.ranking_weight,
+                is_generated=cls_res.is_generated,
+                is_vendored=cls_res.is_vendored,
             )
             repo.insert_code_file(principal, file_rec)
             newly_inserted_file_ids.append(actual_file_id)
@@ -1205,9 +1694,6 @@ class GitMerkleIndexer:
             if not lang:
                 continue
 
-            symbols, edges = self.extractor.parse_source(
-                raw_content, lang, file_path=f_path, repo_name=repo_name
-            )
             file_symbol_map: dict[str, UUID] = {}
             symbol_embeddings = self._compute_symbol_embeddings(
                 symbols, blob_sha=new_blob_sha or ""
@@ -1227,6 +1713,7 @@ class GitMerkleIndexer:
                     contextual_summary=parsed_sym.contextual_summary,
                     allowed_scopes=scopes,
                     embedding=emb,
+                    tenant_id=principal.tenant_id,
                 )
                 repo.insert_ast_symbol(principal, sym_rec)
                 file_symbol_map[parsed_sym.qualified_name] = sym_id
@@ -1259,6 +1746,7 @@ class GitMerkleIndexer:
                     allowed_scopes=file_scopes,
                     target_repo_qualified_id=parsed_edge.target_repo_qualified_id,
                     is_cross_repo=parsed_edge.is_cross_repo or target_id is None,
+                    tenant_id=principal.tenant_id,
                 )
                 repo.insert_ast_edge(principal, edge_rec)
                 total_edges += 1
@@ -1353,6 +1841,486 @@ class GitMerkleIndexer:
 
         return resolved_count
 
+    def _build_ownership_records(
+        self,
+        *,
+        domain_id: str,
+        repo_name: str,
+        tenant_id: UUID,
+        allowed_scopes: list[str],
+        current_tree: Mapping[str, str],
+        manifest_files: Mapping[str, str],
+        code_files_by_path: Mapping[str, CodeFileRecord],
+        code_symbols: Sequence[ASTSymbolRecord],
+    ) -> tuple[list[ASTSymbolRecord], list[ASTEdgeRecord]]:
+        file_id_to_path = {cf.file_id: cf.file_path for cf in code_files_by_path.values()}
+        code_symbols_by_path: dict[str, list[str]] = defaultdict(list)
+        symbol_ids_by_qn: dict[str, UUID] = {}
+        for sym in code_symbols:
+            symbol_ids_by_qn[sym.qualified_name] = sym.symbol_id
+            if sym.symbol_kind in {"team", "system", "component", "api"}:
+                continue
+            f_path = file_id_to_path.get(sym.file_id)
+            if f_path is not None:
+                code_symbols_by_path[f_path].append(sym.qualified_name)
+
+        extract_input: dict[str, str] = {p: manifest_files.get(p, "") for p in current_tree}
+        graph = OwnershipGraphExtractor().extract(
+            repo_name=repo_name,
+            files=extract_input,
+            code_symbols_by_path=code_symbols_by_path,
+        )
+        if not graph.symbols and not graph.edges:
+            return [], []
+
+        host_file: CodeFileRecord | None = None
+        for p in sorted(manifest_files):
+            base = p.rsplit("/", 1)[-1]
+            if base in CATALOG_INFO_FILENAMES and p in code_files_by_path:
+                host_file = code_files_by_path[p]
+                break
+        if host_file is None:
+            for p in CODEOWNERS_FILENAMES:
+                if p in code_files_by_path:
+                    host_file = code_files_by_path[p]
+                    break
+        if host_file is None and code_files_by_path:
+            host_file = next(iter(code_files_by_path.values()))
+        if host_file is None:
+            return [], []
+
+        new_symbols: list[ASTSymbolRecord] = []
+        pending_parsed: list[ParsedSymbol] = []
+        for p_sym in graph.symbols:
+            if p_sym.qualified_name in symbol_ids_by_qn:
+                continue
+            pending_parsed.append(p_sym)
+
+        if pending_parsed:
+            embs = self._compute_symbol_embeddings(pending_parsed, blob_sha=host_file.git_blob_sha)
+            for p_sym, emb in zip(pending_parsed, embs, strict=True):
+                sid = uuid4()
+                symbol_ids_by_qn[p_sym.qualified_name] = sid
+                new_symbols.append(
+                    ASTSymbolRecord(
+                        symbol_id=sid,
+                        file_id=host_file.file_id,
+                        domain_id=domain_id,
+                        qualified_name=p_sym.qualified_name,
+                        symbol_kind=p_sym.symbol_kind,
+                        start_line=p_sym.start_line,
+                        end_line=p_sym.end_line,
+                        signature_skeleton=p_sym.signature_skeleton,
+                        contextual_summary=p_sym.contextual_summary,
+                        allowed_scopes=list(allowed_scopes),
+                        embedding=emb,
+                        repo_qualified_id=p_sym.repo_qualified_id,
+                        bare_name=p_sym.bare_name or p_sym.name,
+                        tenant_id=tenant_id,
+                    )
+                )
+
+        new_edges: list[ASTEdgeRecord] = []
+        for p_edge in graph.edges:
+            src_id = symbol_ids_by_qn.get(p_edge.source_qualified_name)
+            tgt_id = symbol_ids_by_qn.get(p_edge.target_qualified_name)
+            if src_id is None:
+                continue
+            new_edges.append(
+                ASTEdgeRecord(
+                    edge_id=uuid4(),
+                    domain_id=domain_id,
+                    source_symbol_id=src_id,
+                    target_qualified_name=p_edge.target_qualified_name,
+                    target_symbol_id=tgt_id,
+                    edge_kind=p_edge.edge_kind,
+                    allowed_scopes=list(allowed_scopes),
+                    target_repo_qualified_id=p_edge.target_repo_qualified_id,
+                    is_cross_repo=False,
+                    tenant_id=tenant_id,
+                )
+            )
+        return new_symbols, new_edges
+
+    def _sync_ownership_in_memory(
+        self,
+        *,
+        repo: InMemoryRLSRepository,
+        principal: PrincipalContext,
+        domain_id: str,
+        repo_name: str,
+        current_tree: Mapping[str, str],
+        manifest_files: Mapping[str, str],
+        allowed_scopes: list[str],
+    ) -> tuple[int, int]:
+        code_files_by_path = {
+            cf.file_path: cf
+            for cf in repo.list_visible_code_files(principal, domain_id)
+            if cf.repo_name == repo_name
+        }
+        repo_file_ids = {cf.file_id for cf in code_files_by_path.values()}
+        # Clear prior ownership edges/symbols for this repo before re-materializing.
+        ownership_sym_ids = {
+            s.symbol_id
+            for s in repo.list_visible_ast_symbols(principal, domain_id)
+            if s.file_id in repo_file_ids
+            and s.symbol_kind in {"team", "system", "component", "api"}
+        }
+        for e_id, e in list(repo._edges.items()):
+            src_sym = repo._symbols.get(e.source_symbol_id)
+            if (
+                e.tenant_id == principal.tenant_id
+                and e.domain_id == domain_id
+                and e.edge_kind in {"OWNED_BY_TEAM", "PART_OF_SYSTEM"}
+                and (
+                    e.source_symbol_id in ownership_sym_ids
+                    or e.target_symbol_id in ownership_sym_ids
+                    or (src_sym is not None and src_sym.file_id in repo_file_ids)
+                )
+            ):
+                repo._edges.pop(e_id, None)
+        for sid in ownership_sym_ids:
+            repo._symbols.pop(sid, None)
+
+        repo_syms = [
+            s
+            for s in repo.list_visible_ast_symbols(principal, domain_id)
+            if s.file_id in repo_file_ids
+        ]
+        new_syms, new_edges = self._build_ownership_records(
+            domain_id=domain_id,
+            repo_name=repo_name,
+            tenant_id=principal.tenant_id,
+            allowed_scopes=allowed_scopes,
+            current_tree=current_tree,
+            manifest_files=manifest_files,
+            code_files_by_path=code_files_by_path,
+            code_symbols=repo_syms,
+        )
+        for sym in new_syms:
+            repo.insert_ast_symbol(principal, sym)
+        for edge in new_edges:
+            repo.insert_ast_edge(principal, edge)
+        return len(new_syms), len(new_edges)
+
+    def _sync_ownership_postgres(
+        self,
+        *,
+        conn: Connection[tuple[object, ...]],
+        repo: PostgresRLSRepository,
+        principal: PrincipalContext,
+        domain_id: str,
+        repo_name: str,
+        current_tree: Mapping[str, str],
+        manifest_files: Mapping[str, str],
+        allowed_scopes: list[str],
+    ) -> tuple[int, int]:
+        code_files_by_path = {
+            cf.file_path: cf
+            for cf in repo.get_code_files_by_paths(conn, domain_id, list(current_tree.keys()))
+            if cf.repo_name == repo_name
+        }
+        repo_file_ids = [cf.file_id for cf in code_files_by_path.values()]
+        if not repo_file_ids:
+            return 0, 0
+
+        conn.execute(
+            """
+            DELETE FROM ast_edges
+            WHERE domain_id = %s
+              AND edge_kind IN ('OWNED_BY_TEAM', 'PART_OF_SYSTEM')
+              AND source_symbol_id IN (
+                  SELECT symbol_id FROM ast_symbols
+                  WHERE domain_id = %s AND file_id = ANY(%s::uuid[])
+              );
+            """,
+            (domain_id, domain_id, repo_file_ids),
+        )
+        conn.execute(
+            """
+            DELETE FROM ast_symbols
+            WHERE domain_id = %s
+              AND file_id = ANY(%s::uuid[])
+              AND symbol_kind IN ('team', 'system', 'component', 'api');
+            """,
+            (domain_id, repo_file_ids),
+        )
+
+        sym_rows = conn.execute(
+            """
+            SELECT symbol_id, file_id, domain_id, qualified_name, symbol_kind,
+                   start_line, end_line, signature_skeleton, contextual_summary,
+                   allowed_scopes, repo_qualified_id, bare_name, tenant_id
+            FROM ast_symbols
+            WHERE domain_id = %s AND file_id = ANY(%s::uuid[]);
+            """,
+            (domain_id, repo_file_ids),
+        ).fetchall()
+        repo_syms = [
+            ASTSymbolRecord(
+                symbol_id=UUID(str(r[0])),
+                file_id=UUID(str(r[1])),
+                domain_id=str(r[2]),
+                qualified_name=str(r[3]),
+                symbol_kind=str(r[4]),
+                start_line=int(str(r[5])),
+                end_line=int(str(r[6])),
+                signature_skeleton=str(r[7]),
+                contextual_summary=str(r[8]),
+                allowed_scopes=[str(s) for s in r[9]] if isinstance(r[9], list) else [],
+                embedding=[],
+                repo_qualified_id=str(r[10]) if r[10] is not None else None,
+                bare_name=str(r[11]) if r[11] is not None else None,
+                tenant_id=UUID(str(r[12])),
+            )
+            for r in sym_rows
+        ]
+        new_syms, new_edges = self._build_ownership_records(
+            domain_id=domain_id,
+            repo_name=repo_name,
+            tenant_id=principal.tenant_id,
+            allowed_scopes=allowed_scopes,
+            current_tree=current_tree,
+            manifest_files=manifest_files,
+            code_files_by_path=code_files_by_path,
+            code_symbols=repo_syms,
+        )
+        for sym in new_syms:
+            repo.insert_ast_symbol(conn, sym)
+        for edge in new_edges:
+            repo.insert_ast_edge(conn, edge)
+        return len(new_syms), len(new_edges)
+
+    def _build_overlay_snapshot_and_deltas(
+        self,
+        repo_dir: Path,
+        *,
+        principal: PrincipalContext,
+        domain_id: str,
+        repo_name: str,
+        ref_name: str,
+        base_ref: str,
+        head_ref: str,
+        ref_kind: Literal["base_branch", "feature_branch", "merge_request", "pull_request"],
+        mr_iid: str | None,
+        base_snapshot_id: UUID | None,
+        state: Literal["active", "open", "merged", "closed"],
+        scopes: list[str],
+        metadata_json: dict[str, Any] | None,
+    ) -> tuple[RefSnapshotRecord, list[OverlayFileDeltaRecord]]:
+        base_sha = _resolve_commit_sha(repo_dir, base_ref)
+        head_sha = _resolve_commit_sha(repo_dir, head_ref)
+        diff = self.diff_commit_blobs(repo_dir, base_sha, head_sha, detect_renames=True)
+
+        _, head_tree = self.get_git_tree(repo_dir, head_sha, include_working_tree=False)
+        attr_matcher, _ = self._build_attr_matcher_and_manifests(
+            repo_dir, head_tree, head_sha, prefer_working_tree=False
+        )
+
+        snapshot = RefSnapshotRecord(
+            snapshot_id=uuid5(
+                NAMESPACE_URL, f"snapshot:{principal.tenant_id}:{domain_id}:{repo_name}:{ref_name}"
+            ),
+            domain_id=domain_id,
+            repo_name=repo_name,
+            ref_name=ref_name,
+            ref_kind=ref_kind,
+            mr_iid=mr_iid,
+            base_snapshot_id=base_snapshot_id,
+            base_commit_sha=base_sha,
+            head_commit_sha=head_sha,
+            state=state,
+            allowed_scopes=scopes,
+            metadata_json=metadata_json or {},
+            tenant_id=principal.tenant_id,
+        )
+
+        deltas: list[OverlayFileDeltaRecord] = []
+        for path, old_blob in sorted(diff.deleted.items()):
+            lang = self._detect_language(path) or "text"
+            deltas.append(
+                OverlayFileDeltaRecord(
+                    delta_id=uuid4(),
+                    snapshot_id=snapshot.snapshot_id,
+                    domain_id=domain_id,
+                    repo_name=repo_name,
+                    file_path=path,
+                    change_type="deleted",
+                    base_blob_sha=old_blob,
+                    overlay_blob_sha=None,
+                    language=lang,
+                    raw_content=None,
+                    line_count=0,
+                    allowed_scopes=scopes,
+                    tenant_id=principal.tenant_id,
+                )
+            )
+
+        upserted_specs: list[
+            tuple[str, str | None, Literal["added", "modified", "renamed"], str | None, str]
+        ] = []
+        for path, blob_sha in sorted(diff.added.items()):
+            upserted_specs.append((path, None, "added", None, blob_sha))
+        for path, (old_blob, new_blob) in sorted(diff.modified.items()):
+            upserted_specs.append((path, None, "modified", old_blob, new_blob))
+        for old_path, new_path, old_blob, new_blob in sorted(diff.renamed):
+            upserted_specs.append((new_path, old_path, "renamed", old_blob, new_blob))
+
+        for new_path, prev_path, change_type, base_blob, overlay_blob in upserted_specs:
+            raw_content = self._read_blob_or_disk(
+                repo_dir, new_path, overlay_blob, head_sha, prefer_working_tree=False
+            )
+            if raw_content is None:
+                continue
+            detected_lang = self._detect_language(new_path)
+            cls_res = self._classify_path(attr_matcher, new_path)
+            sym_dicts: list[dict[str, Any]] = []
+            edge_dicts: list[dict[str, Any]] = []
+            if detected_lang:
+                parsed_syms, parsed_edges = self.extractor.parse_source(
+                    raw_content, detected_lang, file_path=new_path, repo_name=repo_name
+                )
+                sym_dicts, edge_dicts = self._serialize_delta_symbols_edges(
+                    domain_id=domain_id,
+                    repo_name=repo_name,
+                    file_path=new_path,
+                    symbols=parsed_syms,
+                    edges=parsed_edges,
+                )
+
+            deltas.append(
+                OverlayFileDeltaRecord(
+                    delta_id=uuid4(),
+                    snapshot_id=snapshot.snapshot_id,
+                    domain_id=domain_id,
+                    repo_name=repo_name,
+                    file_path=new_path,
+                    previous_file_path=prev_path,
+                    change_type=change_type,
+                    base_blob_sha=base_blob,
+                    overlay_blob_sha=overlay_blob,
+                    language=detected_lang or "text",
+                    raw_content=raw_content,
+                    line_count=len(raw_content.splitlines()),
+                    ranking_weight=cls_res.ranking_weight,
+                    is_generated=cls_res.is_generated,
+                    is_vendored=cls_res.is_vendored,
+                    symbols_json=sym_dicts,
+                    edges_json=edge_dicts,
+                    allowed_scopes=scopes,
+                    tenant_id=principal.tenant_id,
+                )
+            )
+        return snapshot, deltas
+
+    def sync_overlay_postgres(
+        self,
+        repo_dir: Path,
+        conn: Connection[tuple[object, ...]],
+        repo: PostgresRLSRepository,
+        principal: PrincipalContext,
+        domain_id: str,
+        repo_name: str,
+        *,
+        ref_name: str,
+        base_ref: str = "HEAD",
+        head_ref: str,
+        ref_kind: Literal["base_branch", "feature_branch", "merge_request", "pull_request"] = (
+            "merge_request"
+        ),
+        mr_iid: str | None = None,
+        base_snapshot_id: UUID | None = None,
+        state: Literal["active", "open", "merged", "closed"] = "open",
+        allowed_scopes: list[str] | None = None,
+        metadata_json: dict[str, Any] | None = None,
+    ) -> tuple[RefSnapshotRecord, list[OverlayFileDeltaRecord]]:
+        """Computes branch/MR diff and stores CoW overlay_file_deltas in PG17 under RLS."""
+        scopes = list(allowed_scopes or principal.allowed_scopes)
+        snapshot, deltas = self._build_overlay_snapshot_and_deltas(
+            repo_dir,
+            principal=principal,
+            domain_id=domain_id,
+            repo_name=repo_name,
+            ref_name=ref_name,
+            base_ref=base_ref,
+            head_ref=head_ref,
+            ref_kind=ref_kind,
+            mr_iid=mr_iid,
+            base_snapshot_id=base_snapshot_id,
+            state=state,
+            scopes=scopes,
+            metadata_json=metadata_json,
+        )
+        stored_snap = repo.upsert_ref_snapshot(conn, snapshot)
+        active_paths = [d.file_path for d in deltas]
+        conn.execute(
+            """
+            DELETE FROM overlay_file_deltas
+            WHERE domain_id = %s AND snapshot_id = %s
+              AND NOT (file_path = ANY(%s::text[]));
+            """,
+            (domain_id, stored_snap.snapshot_id, active_paths),
+        )
+        stored_deltas = [
+            repo.upsert_overlay_file_delta(conn, dc_replace(d, snapshot_id=stored_snap.snapshot_id))
+            for d in deltas
+        ]
+        return stored_snap, stored_deltas
+
+    def sync_overlay_in_memory(
+        self,
+        repo_dir: Path,
+        repo: InMemoryRLSRepository,
+        principal: PrincipalContext,
+        domain_id: str,
+        repo_name: str,
+        *,
+        ref_name: str,
+        base_ref: str = "HEAD",
+        head_ref: str,
+        ref_kind: Literal["base_branch", "feature_branch", "merge_request", "pull_request"] = (
+            "merge_request"
+        ),
+        mr_iid: str | None = None,
+        base_snapshot_id: UUID | None = None,
+        state: Literal["active", "open", "merged", "closed"] = "open",
+        allowed_scopes: list[str] | None = None,
+        metadata_json: dict[str, Any] | None = None,
+    ) -> tuple[RefSnapshotRecord, list[OverlayFileDeltaRecord]]:
+        """Computes branch/MR diff and stores CoW overlay_file_deltas in InMemoryRLSRepository."""
+        scopes = list(allowed_scopes or principal.allowed_scopes)
+        snapshot, deltas = self._build_overlay_snapshot_and_deltas(
+            repo_dir,
+            principal=principal,
+            domain_id=domain_id,
+            repo_name=repo_name,
+            ref_name=ref_name,
+            base_ref=base_ref,
+            head_ref=head_ref,
+            ref_kind=ref_kind,
+            mr_iid=mr_iid,
+            base_snapshot_id=base_snapshot_id,
+            state=state,
+            scopes=scopes,
+            metadata_json=metadata_json,
+        )
+        stored_snap = repo.upsert_ref_snapshot(principal, snapshot)
+        active_paths = {d.file_path for d in deltas}
+        for key in list(repo._overlay_deltas.keys()):
+            if (
+                key[0] == principal.tenant_id
+                and key[1] == stored_snap.snapshot_id
+                and key[2] not in active_paths
+            ):
+                repo._overlay_deltas.pop(key, None)
+        stored_deltas = [
+            repo.upsert_overlay_file_delta(
+                principal, dc_replace(d, snapshot_id=stored_snap.snapshot_id)
+            )
+            for d in deltas
+        ]
+        return stored_snap, stored_deltas
+
 
 def sync_tracked_in_memory_repos(
     repo: Any, principal: PrincipalContext, domain_id: str
@@ -1369,7 +2337,13 @@ def sync_tracked_in_memory_repos(
     results: list[MerkleSyncStats] = []
     for key in matching_keys:
         _repo_id, _dom_id, repo_name = key
-        repo_dir, allowed_scopes, _last_sha = _TRACKED_IN_MEMORY_REPOS[key]
+        entry = _TRACKED_IN_MEMORY_REPOS.get(key)
+        if entry is None:
+            continue
+        repo_ref, repo_dir, allowed_scopes, _last_sha = entry
+        if repo_ref() is not repo:
+            _TRACKED_IN_MEMORY_REPOS.pop(key, None)
+            continue
         if not repo_dir.exists() or not (repo_dir / ".git").exists():
             continue
         try:
@@ -1400,6 +2374,5 @@ __all__ = [
     "MerkleBlobDiff",
     "MerkleSyncStats",
     "compute_git_blob_sha",
-    "generate_deterministic_embedding",
     "sync_tracked_in_memory_repos",
 ]

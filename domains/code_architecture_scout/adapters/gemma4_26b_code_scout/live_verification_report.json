@@ -1,0 +1,18 @@
+{
+  "domain_id": "code_architecture_scout",
+  "adapter_dir": "domains/code_architecture_scout/adapters/gemma4_26b_code_scout",
+  "all_valid": true,
+  "results": [
+    {
+      "sample_index": 0,
+      "num_turns": 2,
+      "generation_time_s": 1.65,
+      "raw_output": "[{\"repo_name\": \"enterprise-context-scout\", \"file_path\": \"src/context_scout/telemetry/otel.py\", \"start_line\": 205, \"end_line\": 349, \"qualified_symbol\": \"context_scout.telemetry.otel.ScoutTelemetryTracer\", \"selection_reason\": \"Identified target symbol ScoutTelemetryTracer\", \"modification_intent\": \"modify_target\"}]",
+      "is_valid_json": true,
+      "is_valid_schema": true,
+      "is_grounded": true,
+      "error_msg": null
+    }
+  ],
+  "verified_at": "2026-11-18T00:00:00+00:00"
+}
