@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import re
 
@@ -126,6 +127,26 @@ class StorybookPlugin:
             self.last_parse_diagnostics = ParseDiagnostics(parser_backend="tree-sitter-typescript")
             return [], []
 
+        was_gc = gc.isenabled()
+        gc.disable()
+        try:
+            return self._extract_ast_impl(
+                code=code,
+                file_path=file_path,
+                repo_name=repo_name,
+                module_prefix=module_prefix,
+            )
+        finally:
+            if was_gc:
+                gc.enable()
+
+    def _extract_ast_impl(
+        self,
+        code: str,
+        file_path: str = "",
+        repo_name: str = "",
+        module_prefix: str = "",
+    ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
         prefix = module_prefix or self._derive_module_prefix(file_path)
 
         if file_path.lower().endswith(".mdx"):
@@ -365,31 +386,86 @@ class StorybookPlugin:
     ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
         symbols: list[ParsedSymbol] = []
         edges: list[ParsedEdge] = []
-        lines = code.splitlines(keepends=True)
-        line_offsets: list[int] = []
-        offset = 0
-        for line in lines:
-            line_offsets.append(offset)
-            offset += len(line.encode("utf-8"))
 
-        meta_match = re.search(
-            r'<Meta\b[^>]*?title=["\']([^"\']+)["\'][^>]*?/?>',
-            code,
-        )
-        of_match = re.search(
-            r"<Meta\b[^>]*?(?:of|component)=\{([A-Za-z_]\w*)\}[^>]*?/?>",
-            code,
-        )
-
+        # O(n) single-pass scanner for <Meta ...> and <Story ...> tags in MDX
+        meta_title = ""
+        meta_span: tuple[int, int] | None = None
         comp_name = ""
-        if of_match:
-            comp_name = of_match.group(1)
+        story_matches: list[tuple[str, int, int]] = []
 
-        if meta_match:
-            title = meta_match.group(1)
-            start_line = code[: meta_match.start()].count("\n") + 1
-            start_byte = len(code[: meta_match.start()].encode("utf-8"))
-            end_byte = len(code[: meta_match.end()].encode("utf-8"))
+        re_title = re.compile(r'\btitle=["\']([^"\']+)["\']')
+        re_of = re.compile(r"\b(?:of|component)=\{([A-Za-z_]\w*)\}")
+        re_story_name = re.compile(r'\bname=["\']([^"\']+)["\']')
+
+        n = len(code)
+        i = 0
+        while i < n:
+            lt = code.find("<", i)
+            fence = code.find("```", i)
+            if fence != -1 and (lt == -1 or fence < lt):
+                end_f = code.find("```", fence + 3)
+                i = end_f + 3 if end_f != -1 else n
+                continue
+            if lt == -1:
+                break
+            if code.startswith("<!--", lt):
+                end_c = code.find("-->", lt + 4)
+                i = end_c + 3 if end_c != -1 else n
+                continue
+            if code.startswith("<Meta", lt) and (
+                lt + 5 == n or code[lt + 5].isspace() or code[lt + 5] in {"/", ">"}
+            ):
+                gt = code.find(">", lt + 5)
+                if gt == -1:
+                    break
+                tag_body = code[lt : gt + 1]
+                if not comp_name:
+                    m_of = re_of.search(tag_body)
+                    if m_of:
+                        comp_name = m_of.group(1)
+                if not meta_title:
+                    m_title = re_title.search(tag_body)
+                    if m_title:
+                        meta_title = m_title.group(1)
+                        meta_span = (lt, gt + 1)
+                i = gt + 1
+                continue
+            if code.startswith("<Story", lt) and (
+                lt + 6 == n or code[lt + 6].isspace() or code[lt + 6] in {"/", ">"}
+            ):
+                gt = code.find(">", lt + 6)
+                if gt == -1:
+                    break
+                tag_body = code[lt : gt + 1]
+                m_name = re_story_name.search(tag_body)
+                if m_name:
+                    story_matches.append((m_name.group(1), lt, gt + 1))
+                i = gt + 1
+                continue
+            i = lt + 1
+
+        # Compute line and byte offsets in one linear pass over sorted positions
+        positions: list[int] = []
+        if meta_span is not None:
+            positions.extend(meta_span)
+        for _, sb, eb in story_matches:
+            positions.extend((sb, eb))
+        pos_info: dict[int, tuple[int, int]] = {}
+        if positions:
+            sorted_pos = sorted(set(positions))
+            cur_idx = 0
+            cur_line = 1
+            cur_byte = 0
+            for target_pos in sorted_pos:
+                chunk = code[cur_idx:target_pos]
+                cur_line += chunk.count("\n")
+                cur_byte += len(chunk.encode("utf-8"))
+                pos_info[target_pos] = (cur_line, cur_byte)
+                cur_idx = target_pos
+
+        if meta_span is not None and meta_title:
+            start_line, start_byte = pos_info[meta_span[0]]
+            _, end_byte = pos_info[meta_span[1]]
             meta_qn = f"{module_prefix}.Meta"
             symbols.append(
                 ParsedSymbol(
@@ -401,8 +477,8 @@ class StorybookPlugin:
                     end_line=start_line,
                     start_byte=start_byte,
                     end_byte=end_byte,
-                    signature=f'<Meta title="{title}" />',
-                    signature_skeleton=f'<Meta title="{title}" />',
+                    signature=f'<Meta title="{meta_title}" />',
+                    signature_skeleton=f'<Meta title="{meta_title}" />',
                     repo_name=repo_name,
                 )
             )
@@ -415,11 +491,9 @@ class StorybookPlugin:
                     )
                 )
 
-        for smatch in re.finditer(r'<Story\b[^>]*?name=["\']([^"\']+)["\']', code):
-            sname = smatch.group(1)
-            start_line = code[: smatch.start()].count("\n") + 1
-            start_byte = len(code[: smatch.start()].encode("utf-8"))
-            end_byte = len(code[: smatch.end()].encode("utf-8"))
+        for sname, s_pos, e_pos in story_matches:
+            start_line, start_byte = pos_info[s_pos]
+            _, end_byte = pos_info[e_pos]
             sqn = f"{module_prefix}.{sname}"
             symbols.append(
                 ParsedSymbol(

@@ -1,4 +1,4 @@
-"""Core Pydantic v2 contracts and deterministic scoring/friction validators."""
+"""Core Pydantic v2 contracts and deterministic scoring validators."""
 
 import json
 import re
@@ -13,24 +13,29 @@ from context_scout.config import (
     ClaimVerificationPolicy,
     ClaimVerifierConfig,
     DomainConfig,
+    ModelGovernancePolicy,
     ScoutConfig,
-    validate_google_model_id,
 )
+
+DEFAULT_TENANT_ID: Final[UUID] = UUID("00000000-0000-0000-0000-000000000001")
 
 
 class RoleType(StrEnum):
     ENGINEER = "engineer"
-    QUANT_RESEARCHER = "quant_researcher"
+    DOMAIN_RESEARCHER = "domain_researcher"
     PRODUCT_MANAGER = "product_manager"
     COMPLIANCE_OFFICER = "compliance_officer"
 
 
-class MarketRegime(StrEnum):
-    INDIA_NSE_BSE = "IN_NSE"
-    GERMANY_XETRA_DAX = "DE_XETRA"
-    US_NYSE_NASDAQ = "US_EQUITY"
+class DocumentScope(StrEnum):
     GLOBAL_MULTI = "GLOBAL"
     INTERNAL_ADR = "INTERNAL_ADR"
+    ENTERPRISE_DOC = "ENTERPRISE_DOC"
+    CONFLUENCE = "CONFLUENCE"
+    JIRA = "JIRA"
+    REGIONAL_EU = "REGIONAL_EU"
+    REGIONAL_US = "REGIONAL_US"
+    REGIONAL_APAC = "REGIONAL_APAC"
 
 
 class ExecutionMode(StrEnum):
@@ -46,28 +51,12 @@ class ModificationIntent(StrEnum):
     REFERENCE_ONLY = "reference_only"
 
 
-class FrictionVerdict(StrEnum):
-    REALISTIC_FRICTION = "REALISTIC_FRICTION"
-    UNVERIFIED_FRICTION_WARNING = "UNVERIFIED_FRICTION_WARNING"
-    FAILS_AFTER_COSTS = "FAILS_AFTER_COSTS"
-
-
-# FIN-01: Realistic minimum round-trip transaction cost floors (bps) per market regime
-MARKET_MIN_FRICTION_BPS: Final[dict[MarketRegime, float]] = {
-    MarketRegime.INDIA_NSE_BSE: 15.0,
-    MarketRegime.GERMANY_XETRA_DAX: 10.0,
-    MarketRegime.US_NYSE_NASDAQ: 5.0,
-    MarketRegime.GLOBAL_MULTI: 10.0,
-    MarketRegime.INTERNAL_ADR: 0.0,
-}
-
-
 def compute_normalized_rrf(
     ranks_by_modality: list[int | None],
     num_modalities: int = 3,
     k: int = 60,
 ) -> float:
-    """Computes Normalized Reciprocal Rank Fusion in [0.0, 1.0] (BLK-01 remediation).
+    """Computes Normalized Reciprocal Rank Fusion in [0.0, 1.0].
 
     Raw RRF score is sum(1 / (k + rank_i)). Since the theoretical maximum when a
     item is rank #1 across all M modalities is M / (k + 1), dividing by M / (k + 1)
@@ -88,35 +77,28 @@ def compute_normalized_rrf(
     return round(min(max(normalized, 0.0), 1.0), 6)
 
 
-def evaluate_market_friction_floor(
-    target_markets: list[MarketRegime],
-    assumed_bps: float | None,
-    is_intraday_futures: bool = False,
-) -> FrictionVerdict:
-    """Evaluates whether a paper's transaction cost assumption meets market reality (FIN-01)."""
-    if assumed_bps is None:
-        return FrictionVerdict.UNVERIFIED_FRICTION_WARNING
-
-    required_bps = 5.0
-    for mkt in target_markets:
-        floor = MARKET_MIN_FRICTION_BPS.get(mkt, 10.0)
-        if mkt == MarketRegime.INDIA_NSE_BSE and is_intraday_futures:
-            floor = 5.0
-        required_bps = max(required_bps, floor)
-
-    if assumed_bps < required_bps:
-        return FrictionVerdict.UNVERIFIED_FRICTION_WARNING
-    return FrictionVerdict.REALISTIC_FRICTION
-
-
 class PrincipalContext(BaseModel):
     """Server-side verified identity and RBAC/ABAC scopes (never LLM-supplied)."""
 
     user_id: str = Field(min_length=1)
     role: RoleType
     allowed_scopes: list[str] = Field(min_length=1)
+    tenant_id: UUID = Field(default=DEFAULT_TENANT_ID)
+    team_id: str | None = Field(default=None)
     session_budget_tokens: int = Field(default=64_000, ge=1_000, le=500_000)
     max_session_paid_tokens: int = Field(default=64_000, ge=1_000, le=500_000)
+
+    def resolved_team_id(self) -> str:
+        """Resolves team identifier from explicit team_id or team:/enclave: scopes."""
+        if self.team_id and self.team_id.strip():
+            return self.team_id.strip()
+        for scope in self.allowed_scopes:
+            low = scope.strip().lower()
+            if low.startswith(("team:", "enclave:")) and ":" in scope:
+                suffix = scope.split(":", 1)[1].strip()
+                if suffix:
+                    return suffix
+        return "default_team"
 
     @model_validator(mode="before")
     @classmethod
@@ -166,7 +148,6 @@ class DomainPackManifest(BaseModel):
     authority_rules: AuthorityRules
     output_contract: Literal[
         "ImplementationContextPack",
-        "QuantStrategyBrief",
         "DomainKnowledgeBrief",
     ]
     description: str = Field(default="")
@@ -177,8 +158,8 @@ class DomainPackManifest(BaseModel):
 
     @field_validator("base_model_id", "contextualizer_model_id", "embedding_model_id")
     @classmethod
-    def _check_google_model(cls, value: str) -> str:
-        return validate_google_model_id(value)
+    def _check_governed_local_model(cls, value: str) -> str:
+        return ModelGovernancePolicy.default().validate_local_model_id(value)
 
 
 class CodeSlicePointer(BaseModel):
@@ -316,9 +297,9 @@ class StageExecutionTrace(BaseModel):
     grounded_facets: int | None = None
     total_facets: int | None = None
     checks: list[PreFlightCheckLedgerItem] = Field(default_factory=list)
-    final_decision: Literal[
-        "handoff_ready", "abstain_zero_paid", "bounce_back", "blocked"
-    ] | None = None
+    final_decision: (
+        Literal["handoff_ready", "abstain_zero_paid", "bounce_back", "blocked"] | None
+    ) = None
     paid_tokens_spent: int | None = None
 
 
@@ -387,6 +368,7 @@ class DomainKnowledgeBrief(BaseModel):
         "live_qlora_json",
         "live_base_gemma4_json",
         "deterministic_extractive_fallback",
+        "degraded_extractive_reranked",
     ] = "deterministic_extractive_fallback"
 
 
@@ -466,52 +448,6 @@ def parse_domain_knowledge_brief_json(
         return DomainKnowledgeBrief.model_validate(normalized), False
     except Exception:
         return None, False
-
-
-class QuantStrategyBrief(BaseModel):
-    """Structured extraction contract for Model 2 with Market-Regime Friction Gate (FIN-01)."""
-
-    strategy_name: str = Field(min_length=1)
-    target_markets: list[MarketRegime] = Field(min_length=1)
-    is_intraday_futures: bool = False
-    mathematical_signal_latex: str = Field(min_length=1)
-    entry_exit_rules: list[str] = Field(min_length=1)
-    sample_period_years: str = Field(min_length=1)
-    reported_sharpe_ratio: float | None = None
-    reported_max_drawdown_pct: float | None = None
-    transaction_cost_bps_assumed: float | None = None
-    friction_verdict: FrictionVerdict = FrictionVerdict.UNVERIFIED_FRICTION_WARNING
-    market_specific_caveats: list[str] = Field(min_length=1)
-    known_failure_regimes: list[str] = Field(min_length=1)
-    verified_citations: list[DocCitationSpan] = Field(min_length=1)
-    sufficiency_verdict: Literal["sufficient", "partial", "insufficient"] = "sufficient"
-    missing_aspects: list[str] = Field(default_factory=list)
-    synthesis_mode: Literal[
-        "live_qlora_json",
-        "live_base_gemma4_json",
-        "deterministic_extractive_fallback",
-    ] = "deterministic_extractive_fallback"
-
-    @model_validator(mode="after")
-    def _enforce_scepticism_gate(self) -> "QuantStrategyBrief":
-        is_non_financial_custom_domain = (
-            set(self.target_markets) <= {MarketRegime.GLOBAL_MULTI, MarketRegime.INTERNAL_ADR}
-            and self.reported_sharpe_ratio is None
-            and self.reported_max_drawdown_pct is None
-            and self.transaction_cost_bps_assumed is None
-            and self.friction_verdict == FrictionVerdict.REALISTIC_FRICTION
-        )
-        if is_non_financial_custom_domain:
-            return self
-        if self.friction_verdict != FrictionVerdict.FAILS_AFTER_COSTS:
-            computed_verdict = evaluate_market_friction_floor(
-                target_markets=self.target_markets,
-                assumed_bps=self.transaction_cost_bps_assumed,
-                is_intraday_futures=self.is_intraday_futures,
-            )
-            if computed_verdict == FrictionVerdict.UNVERIFIED_FRICTION_WARNING:
-                self.friction_verdict = FrictionVerdict.UNVERIFIED_FRICTION_WARNING
-        return self
 
 
 class MissingItemRecord(BaseModel):
@@ -684,6 +620,28 @@ class GateAbstentionResult(BaseModel):
     report: PreFlightValidationReport
 
 
+SideEffectMatrixCategory = Literal[
+    "DB_WRITE",
+    "HTTP_EGRESS",
+    "AUTH_GUARD",
+    "QUEUE_PUBLISH",
+    "ENV_CONTRACT",
+]
+
+
+class SideEffectMatrixItem(BaseModel):
+    """Server-verified side-effect row for ProductTruthView and ArchitectureMapViewer."""
+
+    side_effect_id: str = Field(min_length=1)
+    effect_type: SideEffectMatrixCategory
+    qualified_symbol: str = Field(min_length=1)
+    file_path: str = Field(min_length=1)
+    line_range: str = Field(min_length=1)
+    target_resource: str = Field(min_length=1)
+    spec_status: Literal["VERIFIED", "SPEC_DRIFT_WARNING"] = "VERIFIED"
+    verification_note: str = Field(min_length=1)
+
+
 class ImplementationContextPack(BaseModel):
     """Compiler-complete context bundle handed to paid Gemini 2.5 / 3.8 Flash."""
 
@@ -695,7 +653,6 @@ class ImplementationContextPack(BaseModel):
     doc_vs_code_conflicts_detected: list[str] = Field(default_factory=list)
     code_slices: list[VerbatimCodeSlice] = Field(default_factory=list)
     supporting_doc_citations: list[DocCitationSpan] = Field(default_factory=list)
-    quant_strategy_spec: QuantStrategyBrief | None = None
     domain_knowledge_brief: DomainKnowledgeBrief | None = None
     preflight_report: PreFlightValidationReport
     local_tokens_consumed: int = Field(ge=0)
@@ -707,9 +664,27 @@ class ImplementationContextPack(BaseModel):
         "live_qlora_json",
         "live_base_gemma4_json",
         "deterministic_extractive_fallback",
+        "degraded_extractive_reranked",
         "ast_extractive",
         "hybrid_federated",
     ] = "ast_extractive"
+    graph_executed: Literal[
+        "graph_0_preflight",
+        "graph_1_swe_grep",
+        "graph_2_deep_mapreduce",
+    ] = "graph_1_swe_grep"
+    complexity_tier: Literal[
+        "single_symbol",
+        "feature",
+        "cross_repo",
+        "uncapped_mapreduce",
+    ] = "feature"
+    effective_token_budget: int | None = None
+    session_id: str | None = None
+    commit_drift_warnings: list[str] = Field(default_factory=list)
+    spec_drift_warnings: list[str] = Field(default_factory=list)
+    side_effects: list[SideEffectMatrixItem] = Field(default_factory=list)
+    architecture_mermaid: str | None = None
     stage_confidences: list[StageConfidence] = Field(default_factory=list)
     stage_traces: list[StageExecutionTrace] = Field(default_factory=list)
 
@@ -784,6 +759,7 @@ class ExecutionTelemetryRecord(BaseModel):
     missing_context_requests: list[dict[str, Any]] = Field(default_factory=list)
     latency_ms: int = Field(ge=0)
     created_at: datetime | None = None
+    tenant_id: UUID = Field(default=DEFAULT_TENANT_ID)
 
 
 class PatchExecutionResult(BaseModel):
@@ -801,7 +777,7 @@ class PatchExecutionResult(BaseModel):
 
 
 __all__ = [
-    "MARKET_MIN_FRICTION_BPS",
+    "DEFAULT_TENANT_ID",
     "ClaimVerificationPolicy",
     "ClaimVerifierConfig",
     "CodeSlicePointer",
@@ -809,6 +785,7 @@ __all__ = [
     "ContextMissEvent",
     "DocCitationSpan",
     "DocSpanPointer",
+    "DocumentScope",
     "DomainConfig",
     "DomainKnowledgeBrief",
     "DomainPackManifest",
@@ -816,12 +793,10 @@ __all__ = [
     "ExecutionMode",
     "ExecutionTelemetryRecord",
     "ExtractiveDiscoveryPack",
-    "FrictionVerdict",
     "GateAbstentionResult",
     "GatePassResult",
     "ImplementationContextPack",
     "InsufficientContextDiagnostic",
-    "MarketRegime",
     "MissingContextRequest",
     "MissingItemRecord",
     "ModificationIntent",
@@ -829,7 +804,6 @@ __all__ = [
     "PreFlightCheckLedgerItem",
     "PreFlightValidationReport",
     "PrincipalContext",
-    "QuantStrategyBrief",
     "QueryFacetCoverage",
     "RawQuoteItem",
     "RetrievalHitTrace",
@@ -840,6 +814,5 @@ __all__ = [
     "VerbatimCodeSlice",
     "build_domain_knowledge_brief_prompt",
     "compute_normalized_rrf",
-    "evaluate_market_friction_floor",
     "parse_domain_knowledge_brief_json",
 ]

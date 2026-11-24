@@ -26,11 +26,11 @@ from context_scout.ingestion.doc_parser import (
     is_license_or_stub_text,
 )
 from context_scout.retrieval.embedder import LocalSemanticEmbedder
-from context_scout.schemas.contracts import MarketRegime
+from context_scout.schemas.contracts import DocumentScope
 
 logger = logging.getLogger(__name__)
 
-TARGET_CLEANUP_DOMAINS: tuple[str, ...] = ("data_engineering_scout", "quant_research_scout")
+TARGET_CLEANUP_DOMAINS: tuple[str, ...] = ("data_engineering_scout", "enterprise_docs_scout")
 
 WIKIPEDIA_FOUNDATIONAL_PAGES: tuple[tuple[str, str, str], ...] = (
     (
@@ -222,7 +222,7 @@ def build_foundational_chunks(repo_root: Path) -> list[DocumentChunk]:
             doc_id=doc_id,
             doc_title=title,
             source_uri=source_uri,
-            market_scope=MarketRegime.GLOBAL_MULTI,
+            market_scope=DocumentScope.GLOBAL_MULTI,
             markdown_content=f"# {title}\n\n{md_text}",
             min_chunk_tokens=300,
             max_chunk_tokens=700,
@@ -235,7 +235,7 @@ def build_foundational_chunks(repo_root: Path) -> list[DocumentChunk]:
                     doc_id=doc_id,
                     doc_title=title,
                     source_uri=source_uri,
-                    market_scope=MarketRegime.GLOBAL_MULTI,
+                    market_scope=DocumentScope.GLOBAL_MULTI,
                     section_heading=ch.section_heading if ch.section_heading != "Main" else title,
                     verbatim_content=ch.verbatim_content,
                     formulas_latex=ch.formulas_latex,
@@ -269,7 +269,7 @@ def build_foundational_chunks(repo_root: Path) -> list[DocumentChunk]:
             doc_id=doc_id,
             doc_title=title,
             source_uri=source_uri,
-            market_scope=MarketRegime.GLOBAL_MULTI,
+            market_scope=DocumentScope.GLOBAL_MULTI,
             markdown_content=md_text,
             min_chunk_tokens=350,
             max_chunk_tokens=750,
@@ -282,7 +282,7 @@ def build_foundational_chunks(repo_root: Path) -> list[DocumentChunk]:
                     doc_id=doc_id,
                     doc_title=title,
                     source_uri=source_uri,
-                    market_scope=MarketRegime.GLOBAL_MULTI,
+                    market_scope=DocumentScope.GLOBAL_MULTI,
                     section_heading=ch.section_heading if ch.section_heading != "Main" else title,
                     verbatim_content=ch.verbatim_content,
                     formulas_latex=ch.formulas_latex,
@@ -327,7 +327,7 @@ def enrich_data_engineering_corpus(settings: ScoutSettings, repo_root: Path) -> 
             %s, %s, %s,
             %s::jsonb,
             ARRAY[
-                'public', 'public_eng', 'public_quant', 'public_de',
+                'public', 'public_eng', 'public_docs', 'public_de',
                 'domain:data_engineering', 'domain:data_engineering_scout'
             ],
             %s::vector

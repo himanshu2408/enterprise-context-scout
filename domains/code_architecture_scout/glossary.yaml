@@ -1,0 +1,5 @@
+domain_id: code_architecture_scout
+terms:
+  PreFlightValidator: Deterministic Stage 4 gate checking AST symbol resolution, RRF score, citation grounding, and zero-spend abstention.
+  DeterministicSlicer: Python slicer that hydrates CodeSlicePointer spans verbatim from Git commits and blobs.
+  FORCE_RLS: PostgreSQL 17 Row-Level Security enforcement under NOBYPASSRLS.

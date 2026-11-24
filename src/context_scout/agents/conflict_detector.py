@@ -35,6 +35,7 @@ _TOPIC_CONCEPTS: tuple[str, ...] = (
     "interval",
     "window",
     "threshold",
+    "limit",
 )
 
 _CONCEPT_ALIASES: dict[str, str] = {
@@ -57,6 +58,8 @@ _CONCEPT_ALIASES: dict[str, str] = {
     "connections": "connections",
     "rate_limit": "rate_limit",
     "ratelimit": "rate_limit",
+    "limit": "limit",
+    "max_limit": "limit",
     "batch_size": "batch_size",
     "uptime": "sla",
     "availability": "sla",

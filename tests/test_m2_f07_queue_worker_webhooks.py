@@ -42,7 +42,7 @@ def test_f07_equal_jitter_backoff() -> None:
 
 def test_f07_in_memory_queue_claim_and_dlq(in_memory_queue: InMemoryTaskQueue) -> None:
     """Verifies atomic claim, concurrent skip, and DLQ routing on max attempts."""
-    domain_id = "trading_code_scout"
+    domain_id = "code_architecture_scout"
     payload = {"repo_name": "order-service", "before_sha": "0" * 40, "after_sha": "a" * 40}
 
     # 1. Enqueue task
@@ -130,7 +130,7 @@ def test_f07_indexing_worker_run_once(in_memory_queue: InMemoryTaskQueue) -> Non
 
     # Enqueue a gitlab_push task
     in_memory_queue.enqueue_task(
-        domain_id="trading_code_scout",
+        domain_id="code_architecture_scout",
         event_type="gitlab_push",
         payload={
             "repo_name": "pricing-service",

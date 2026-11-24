@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
+from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from context_scout import __version__
 from context_scout.schemas.contracts import (
+    DEFAULT_TENANT_ID,
     DocCitationSpan,
     DomainPackManifest,
     ExecutionTelemetryRecord,
@@ -16,20 +20,76 @@ from context_scout.schemas.contracts import (
     MissingContextRequest,
     PreFlightValidationReport,
     PrincipalContext,
-    QuantStrategyBrief,
     RoleType,
     StageConfidence,
     StageExecutionTrace,
 )
 
 
+def _reject_nul_or_surrogate_str(value: str | None, field_name: str) -> str | None:
+    if value is not None and ("\x00" in value or any(0xD800 <= ord(ch) <= 0xDFFF for ch in value)):
+        raise ValueError(f"{field_name} must not contain NUL bytes or lone UTF-16 surrogates.")
+    return value
+
+
+def reject_nul_and_surrogates_recursive(
+    value: Any,
+    path: str,
+    *,
+    depth: int = 0,
+) -> None:
+    """Recursively rejects NUL bytes and lone UTF-16 surrogates up to depth 32."""
+    if depth > 32:
+        raise ValueError(f"{path} exceeds maximum nesting depth (32).")
+    if isinstance(value, str):
+        _reject_nul_or_surrogate_str(value, path)
+        return
+    if isinstance(value, BaseModel):
+        for field_name in type(value).model_fields:
+            reject_nul_and_surrogates_recursive(
+                getattr(value, field_name),
+                f"{path}.{field_name}",
+                depth=depth + 1,
+            )
+        return
+    if isinstance(value, Mapping):
+        for k, v in value.items():
+            if isinstance(k, str):
+                _reject_nul_or_surrogate_str(k, f"{path}.<key>")
+            reject_nul_and_surrogates_recursive(v, f"{path}.{k}", depth=depth + 1)
+        return
+    if isinstance(value, (list, tuple, set, frozenset)):
+        for idx, item in enumerate(value):
+            reject_nul_and_surrogates_recursive(item, f"{path}[{idx}]", depth=depth + 1)
+
+
 class AuthSessionRequest(BaseModel):
-    """Non-production session exchange request for minting signed Bearer tokens."""
+    """Development-only session exchange request for minting signed Bearer tokens."""
 
     user_id: str = Field(default="demo_engineer", min_length=1, max_length=128)
     role: RoleType = Field(default=RoleType.ENGINEER)
     allowed_scopes: list[str] | None = None
+    tenant_id: UUID = Field(default=DEFAULT_TENANT_ID)
     max_session_paid_tokens: int = Field(default=50_000, ge=1_000, le=500_000)
+
+    @field_validator("user_id")
+    @classmethod
+    def _validate_user_id_no_nul(cls, v: str) -> str:
+        _reject_nul_or_surrogate_str(v, "user_id")
+        return v
+
+    @field_validator("allowed_scopes")
+    @classmethod
+    def _validate_allowed_scopes_no_nul(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None:
+            for item in v:
+                _reject_nul_or_surrogate_str(item, "allowed_scopes")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_no_nul_or_surrogates_recursive(self) -> Self:
+        reject_nul_and_surrogates_recursive(self, "AuthSessionRequest")
+        return self
 
 
 class AuthSessionResponse(BaseModel):
@@ -60,7 +120,9 @@ class HealthHardwareProfile(BaseModel):
 class HealthResponse(BaseModel):
     """Health check response schema."""
 
+    version: str = Field(default=__version__)
     status: Literal["healthy", "degraded", "unhealthy"] = "healthy"
+    overall_status: Literal["healthy", "degraded", "unhealthy"] = "healthy"
     database_connected: bool
     database_status: str
     registered_domains: list[str]
@@ -134,11 +196,31 @@ class ScoutStreamRequest(BaseModel):
     """Request payload for scout query or SSE stream."""
 
     query: str = Field(min_length=1, max_length=16_000)
-    domain_id: str = Field(default="default")
-    trace_id: str | None = None
+    domain_id: str = Field(default="default", min_length=1, max_length=128)
+    trace_id: str | None = Field(default=None, max_length=128)
+    session_id: str | None = Field(default=None, max_length=128)
+    branch_id: str | None = Field(default=None, max_length=128)
+    snapshot_id: str | None = Field(default=None, max_length=128)
+    graph_mode: Literal["auto", "graph_1", "graph_2"] = "auto"
     normalized_rrf_score: float | None = Field(default=None, ge=0.0, le=1.0)
     max_bounce_backs: int = Field(default=1, ge=0, le=3)
     source_filter: Literal["all", "code", "wiki", "jira"] = "all"
+
+    @field_validator("query", "domain_id")
+    @classmethod
+    def _validate_required_no_nul(cls, v: str, info: Any) -> str:
+        _reject_nul_or_surrogate_str(v, info.field_name or "field")
+        return v
+
+    @field_validator("trace_id", "session_id", "branch_id", "snapshot_id")
+    @classmethod
+    def _validate_optional_no_nul(cls, v: str | None, info: Any) -> str | None:
+        return _reject_nul_or_surrogate_str(v, info.field_name or "field")
+
+    @model_validator(mode="after")
+    def _validate_no_nul_or_surrogates_recursive(self) -> Self:
+        reject_nul_and_surrogates_recursive(self, "ScoutStreamRequest")
+        return self
 
 
 class ScoutTokenSavingsBreakdown(BaseModel):
@@ -162,7 +244,6 @@ class ScoutQueryResponse(BaseModel):
     diagnostic: InsufficientContextDiagnostic | None = None
     citations: list[DocCitationSpan] = Field(default_factory=list)
     preflight_report: PreFlightValidationReport | None = None
-    quant_strategy_spec: QuantStrategyBrief | None = None
     token_savings: ScoutTokenSavingsBreakdown
     trace_attributes: dict[str, Any] = Field(default_factory=dict)
     stage_traces: list[StageExecutionTrace] = Field(default_factory=list)
@@ -203,7 +284,6 @@ class SSEContextPackReadyEvent(BaseModel):
     event_type: Literal["context_pack_ready"] = "context_pack_ready"
     status: Literal["ready"] = "ready"
     pack: ImplementationContextPack | None = None
-    quant_strategy_spec: QuantStrategyBrief | None = None
     token_savings: ScoutTokenSavingsBreakdown
     stage_traces: list[StageExecutionTrace] = Field(default_factory=list)
     timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
@@ -228,6 +308,23 @@ class HandoffPreviewRequest(BaseModel):
     model_id: str = Field(default="gemini-3.8-flash")
     custom_patch: str | None = None
     missing_context_requests: list[MissingContextRequest] | None = None
+
+    @field_validator("model_id")
+    @classmethod
+    def _validate_model_id_no_nul(cls, v: str) -> str:
+        _reject_nul_or_surrogate_str(v, "model_id")
+        return v
+
+    @field_validator("pack")
+    @classmethod
+    def _validate_pack_no_nul(cls, v: ImplementationContextPack) -> ImplementationContextPack:
+        reject_nul_and_surrogates_recursive(v, "pack")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_no_nul_or_surrogates_recursive(self) -> Self:
+        reject_nul_and_surrogates_recursive(self, "HandoffPreviewRequest")
+        return self
 
 
 class HandoffPreviewResponse(BaseModel):
@@ -257,6 +354,17 @@ class HandoffApplyRequest(BaseModel):
     confirmed: bool
     custom_patch: str | None = None
 
+    @field_validator("confirmation_token")
+    @classmethod
+    def _validate_token_no_nul(cls, v: str) -> str:
+        _reject_nul_or_surrogate_str(v, "confirmation_token")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_no_nul_or_surrogates_recursive(self) -> Self:
+        reject_nul_and_surrogates_recursive(self, "HandoffApplyRequest")
+        return self
+
 
 class HandoffApplyResponse(BaseModel):
     """Handoff apply verification result."""
@@ -282,9 +390,7 @@ class AggregateROISummary(BaseModel):
     frontier_savings_ratio_pct: float
     qlora_overhead_eliminated_per_query: float = 1634.0
     total_qlora_overhead_eliminated: float
-    telemetry_source: Literal["postgresql_live", "in_memory_session", "m6_eval_baseline"] = (
-        "postgresql_live"
-    )
+    telemetry_source: Literal["postgresql_live", "in_memory_session"] = "postgresql_live"
 
 
 class ROIMetricsResponse(BaseModel):

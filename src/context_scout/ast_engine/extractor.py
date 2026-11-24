@@ -1,5 +1,6 @@
 """Multi-language Tree-Sitter AST extractor for Python, TypeScript/TSX, and HCL."""
 
+import gc
 import logging
 import re
 from dataclasses import dataclass
@@ -33,18 +34,21 @@ def inspect_tree_errors(root_node: Node) -> tuple[bool, int, int]:
 
     Returns ``(has_error, error_node_count, missing_node_count)``.
     """
+    if not root_node.has_error:
+        return False, 0, 0
     error_count = 0
     missing_count = 0
     stack: list[Node] = [root_node]
     while stack:
         node = stack.pop()
+        if not node.has_error:
+            continue
         if node.is_error or node.type == "ERROR":
             error_count += 1
         if node.is_missing:
             missing_count += 1
         stack.extend(reversed(node.children))
-    has_error = bool(root_node.has_error or error_count > 0 or missing_count > 0)
-    return has_error, error_count, missing_count
+    return True, error_count, missing_count
 
 
 _HCL_PARSER: Parser | None = None
@@ -70,45 +74,50 @@ def _unquote_hcl_string(node: Node, code_bytes: bytes) -> str:
 def _collect_hcl_attr_chains(node: Node, code_bytes: bytes) -> list[list[str]]:
     """Extracts identifier chains (e.g. ['var', 'region'] or ['data', 'img', 'debian']) from AST."""
     chains: list[list[str]] = []
-
-    def _walk(curr: Node) -> None:
-        if curr.type == "expression":
+    stack: list[Node] = [node]
+    while stack:
+        curr = stack.pop()
+        ctype = curr.type
+        if ctype == "literal_value":
+            continue
+        if ctype == "expression":
             children = [c for c in curr.children if c.is_named]
-            if children and children[0].type == "variable_expr":
-                ident = _node_text(children[0], code_bytes).strip()
-                parts = [ident]
-                for sibling in children[1:]:
-                    if sibling.type == "get_attr":
-                        attr_id = next(
-                            (gc for gc in sibling.children if gc.type == "identifier"),
-                            None,
-                        )
-                        if attr_id is not None:
-                            parts.append(_node_text(attr_id, code_bytes).strip())
-                    else:
-                        break
-                if len(parts) >= 2:
-                    chains.append(parts)
-                # Still inspect any remaining non-chain children (e.g. index expressions)
-                for sibling in children[len(parts) :]:
-                    _walk(sibling)
-                return
-        for child in curr.children:
-            _walk(child)
-
-    _walk(node)
+            if children:
+                first_type = children[0].type
+                if len(children) == 1 and first_type == "literal_value":
+                    continue
+                if first_type == "variable_expr":
+                    ident = _node_text(children[0], code_bytes).strip()
+                    parts = [ident]
+                    for sibling in children[1:]:
+                        if sibling.type == "get_attr":
+                            attr_id = next(
+                                (c for c in sibling.children if c.type == "identifier"),
+                                None,
+                            )
+                            if attr_id is not None:
+                                parts.append(_node_text(attr_id, code_bytes).strip())
+                        else:
+                            break
+                    if len(parts) >= 2:
+                        chains.append(parts)
+                    # Still inspect any remaining non-chain children (e.g. index expressions)
+                    for sibling in reversed(children[len(parts) :]):
+                        stack.append(sibling)
+                    continue
+        stack.extend(reversed(curr.children))
     return chains
 
 
-def parse_hcl_ast(
+def parse_hcl_ast_with_tree(
     code: str,
     file_path: str = "",
     repo_name: str = "",
     module_prefix: str = "",
     *,
     module_symbol_kind: Literal["class", "interface"] = "class",
-) -> tuple[list[ParsedSymbol], list[ParsedEdge], ParseDiagnostics]:
-    """Parses Terraform HCL using tree-sitter-hcl and fails closed on syntax errors."""
+) -> tuple[list[ParsedSymbol], list[ParsedEdge], ParseDiagnostics, Tree, bytes]:
+    """Parses Terraform HCL once and returns AST symbols, edges, diagnostics, tree, and bytes."""
     code_bytes = code.encode("utf-8")
     tree = _get_hcl_parser().parse(code_bytes)
     has_err, err_cnt, miss_cnt = inspect_tree_errors(tree.root_node)
@@ -130,13 +139,19 @@ def parse_hcl_ast(
                 missing_node_count=miss_cnt,
                 reason=reason,
             ),
+            tree,
+            code_bytes,
         )
 
     symbols: list[ParsedSymbol] = []
     edges: list[ParsedEdge] = []
-    top_body = next((c for c in tree.root_node.children if c.type == "body"), None)
+    top_body: Node | None = None
+    for child in tree.root_node.children:
+        if child.type == "body":
+            top_body = child
+            break
     if top_body is None:
-        return symbols, edges, ParseDiagnostics(parser_backend="tree-sitter-hcl")
+        return symbols, edges, ParseDiagnostics(parser_backend="tree-sitter-hcl"), tree, code_bytes
 
     def _qualify(bare_name: str) -> str:
         if repo_name:
@@ -146,7 +161,14 @@ def parse_hcl_ast(
     for block in top_body.children:
         if block.type != "block":
             continue
-        block_type_node = next((c for c in block.children if c.type == "identifier"), None)
+        block_children = block.children
+        block_type_node: Node | None = None
+        body_node: Node | None = None
+        for c in block_children:
+            if c.type == "identifier" and block_type_node is None:
+                block_type_node = c
+            elif c.type == "body" and body_node is None:
+                body_node = c
         if block_type_node is None:
             continue
         block_type = _node_text(block_type_node, code_bytes).strip()
@@ -154,12 +176,13 @@ def parse_hcl_ast(
             continue
 
         labels: list[str] = []
-        for child in block.children:
-            if child.type == "block_start":
+        for child in block_children:
+            ctype = child.type
+            if ctype == "block_start":
                 break
-            if child.type == "string_lit":
+            if ctype == "string_lit":
                 labels.append(_unquote_hcl_string(child, code_bytes))
-            elif child.type == "identifier" and child is not block_type_node:
+            elif ctype == "identifier" and child is not block_type_node:
                 labels.append(_node_text(child, code_bytes).strip())
 
         if not labels:
@@ -187,8 +210,14 @@ def parse_hcl_ast(
         repo_qual = _qualify(bare)
         start_line = block.start_point[0] + 1
         end_line = block.end_point[0] + 1
-        block_text = _node_text(block, code_bytes)
-        sig_line = block_text.splitlines()[0].strip() if block_text else f"{block_type} {bare}"
+        nl_pos = code_bytes.find(b"\n", block.start_byte, block.end_byte)
+        search_end = nl_pos if nl_pos != -1 else block.end_byte
+        cr_pos = code_bytes.find(b"\r", block.start_byte, search_end)
+        line_end = cr_pos if cr_pos != -1 else search_end
+        sig_line = (
+            code_bytes[block.start_byte : line_end].decode("utf-8", errors="replace").strip()
+            or f"{block_type} {bare}"
+        )
 
         symbols.append(
             ParsedSymbol(
@@ -212,7 +241,6 @@ def parse_hcl_ast(
             )
         )
 
-        body_node = next((c for c in block.children if c.type == "body"), None)
         if body_node is None:
             continue
 
@@ -222,10 +250,16 @@ def parse_hcl_ast(
             self_bare: str = bare,
         ) -> None:
             for item in b_node.children:
-                if item.type == "attribute":
-                    attr_id_node = next((c for c in item.children if c.type == "identifier"), None)
+                itype = item.type
+                if itype == "attribute":
+                    attr_id_node: Node | None = None
+                    expr_node: Node | None = None
+                    for c in item.children:
+                        if c.type == "identifier" and attr_id_node is None:
+                            attr_id_node = c
+                        elif c.type == "expression" and expr_node is None:
+                            expr_node = c
                     attr_name = _node_text(attr_id_node, code_bytes).strip()
-                    expr_node = next((c for c in item.children if c.type == "expression"), None)
                     if expr_node is None:
                         continue
                     chains = _collect_hcl_attr_chains(expr_node, code_bytes)
@@ -303,14 +337,37 @@ def parse_hcl_ast(
                                         edge_kind=edge_kind,
                                     )
                                 )
-                elif item.type == "block":
-                    nested_body = next((c for c in item.children if c.type == "body"), None)
+                elif itype == "block":
+                    nested_body: Node | None = None
+                    for c in item.children:
+                        if c.type == "body":
+                            nested_body = c
+                            break
                     if nested_body is not None:
                         _visit_body(nested_body, source_qual, self_bare)
 
         _visit_body(body_node, repo_qual, bare)
 
-    return symbols, edges, ParseDiagnostics(parser_backend="tree-sitter-hcl")
+    return symbols, edges, ParseDiagnostics(parser_backend="tree-sitter-hcl"), tree, code_bytes
+
+
+def parse_hcl_ast(
+    code: str,
+    file_path: str = "",
+    repo_name: str = "",
+    module_prefix: str = "",
+    *,
+    module_symbol_kind: Literal["class", "interface"] = "class",
+) -> tuple[list[ParsedSymbol], list[ParsedEdge], ParseDiagnostics]:
+    """Parses Terraform HCL using tree-sitter-hcl and fails closed on syntax errors."""
+    symbols, edges, diag, _tree, _code_bytes = parse_hcl_ast_with_tree(
+        code=code,
+        file_path=file_path,
+        repo_name=repo_name,
+        module_prefix=module_prefix,
+        module_symbol_kind=module_symbol_kind,
+    )
+    return symbols, edges, diag
 
 
 PY_PRIMITIVES: Final[set[str]] = {
@@ -413,6 +470,32 @@ def _derive_module_prefix(file_path: str) -> str:
     return ".".join(p for p in parts if p)
 
 
+_LANGUAGE_ALIASES: Final[dict[str, str]] = {
+    "golang": "go",
+    "rs": "rust",
+    "kt": "kotlin",
+    "kts": "kotlin",
+    "proto": "protobuf",
+    "grpc": "protobuf",
+    "graphql": "api_specs",
+    "gql": "api_specs",
+    "openapi": "api_specs",
+    "asyncapi": "api_specs",
+    "dbt": "sql",
+    "jinja": "templates_i18n",
+    "jinja2": "templates_i18n",
+    "mjml": "templates_i18n",
+    "handlebars": "templates_i18n",
+    "hbs": "templates_i18n",
+    "i18n": "templates_i18n",
+    "po": "templates_i18n",
+    "cs": "csharp",
+    "c#": "csharp",
+    "hcl": "terraform",
+    "tf": "terraform",
+}
+
+
 class ASTExtractor:
     """Extracts symbols and relations from polyglot enterprise repositories."""
 
@@ -450,7 +533,8 @@ class ASTExtractor:
             if file_path:
                 plugin = PluginRegistry.get_plugin_for_file(file_path)
             if plugin is None and language:
-                plugin = PluginRegistry.get_language_plugin(language)
+                lang_key = _LANGUAGE_ALIASES.get(language.lower(), language.lower())
+                plugin = PluginRegistry.get_language_plugin(lang_key)
 
             if plugin is not None and plugin.language_id == "react_redux":
                 lang_norm = language.lower()
@@ -489,62 +573,138 @@ class ASTExtractor:
                 bridge_exc,
             )
 
+        was_gc = gc.isenabled()
+        gc.disable()
+        try:
+            return self._parse_source_builtin(
+                code=code,
+                language=language,
+                file_path=file_path,
+                module_prefix=module_prefix,
+                repo_name=repo_name,
+            )
+        finally:
+            if was_gc:
+                gc.enable()
+
+    def _parse_source_builtin(
+        self,
+        code: str,
+        language: str,
+        file_path: str = "",
+        module_prefix: str = "",
+        repo_name: str = "",
+    ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
         code_bytes = code.encode("utf-8")
         lang_lower = language.lower()
 
         raw_symbols: list[ParsedSymbol]
         raw_edges: list[ParsedEdge]
 
+        def _parse_and_check(parser: Parser, backend: str) -> Node | None:
+            self._active_tree = parser.parse(code_bytes)
+            root = self._active_tree.root_node
+            has_err, err_cnt, miss_cnt = inspect_tree_errors(root)
+            if has_err:
+                logger.warning(
+                    "Tree-sitter parse error in %s (%s): errors=%d missing=%d; abstaining.",
+                    file_path or "<source>",
+                    backend,
+                    err_cnt,
+                    miss_cnt,
+                )
+                self.last_parse_diagnostics = ParseDiagnostics(
+                    parser_backend=backend,
+                    has_parse_error=True,
+                    abstained=True,
+                    error_node_count=err_cnt,
+                    missing_node_count=miss_cnt,
+                    reason=f"syntax_error:errors={err_cnt},missing={miss_cnt}",
+                )
+                return None
+            self.last_parse_diagnostics = ParseDiagnostics(parser_backend=backend)
+            return root
+
         if lang_lower in ("python", "py"):
-            self._active_tree = self.py_parser.parse(code_bytes)
+            root = _parse_and_check(self.py_parser, "tree-sitter-python")
+            if root is None:
+                return [], []
             raw_symbols, raw_edges = self._extract_python(
-                self._active_tree.root_node, code_bytes, module_prefix, file_path
+                root, code_bytes, module_prefix, file_path
             )
         elif lang_lower in ("typescript", "ts", "javascript", "js", "mjs", "cjs"):
-            self._active_tree = self.ts_parser.parse(code_bytes)
+            root = _parse_and_check(self.ts_parser, "tree-sitter-typescript")
+            if root is None:
+                return [], []
             raw_symbols, raw_edges = self._extract_typescript(
-                self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=False
+                root, code_bytes, module_prefix, file_path, is_tsx=False
             )
         elif lang_lower in ("tsx", "jsx"):
-            self._active_tree = self.tsx_parser.parse(code_bytes)
+            root = _parse_and_check(self.tsx_parser, "tree-sitter-tsx")
+            if root is None:
+                return [], []
             raw_symbols, raw_edges = self._extract_typescript(
-                self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=True
+                root, code_bytes, module_prefix, file_path, is_tsx=True
             )
         elif lang_lower == "sql" or file_path.endswith(".sql"):
+            self.last_parse_diagnostics = ParseDiagnostics(
+                parser_backend="regex-sql", low_confidence_fallback=True
+            )
             raw_symbols, raw_edges = self._extract_sql(code, code_bytes, module_prefix)
         elif lang_lower in ("yaml", "yml") or file_path.endswith((".yaml", ".yml")):
+            self.last_parse_diagnostics = ParseDiagnostics(
+                parser_backend="regex-yaml", low_confidence_fallback=True
+            )
             raw_symbols, raw_edges = self._extract_yaml(code, code_bytes, module_prefix, file_path)
         elif lang_lower in ("terraform", "hcl", "tf") or file_path.endswith(".tf"):
             raw_symbols, raw_edges = self._extract_terraform(code, code_bytes, module_prefix)
         elif lang_lower in ("go", "golang") or file_path.endswith(".go"):
+            self.last_parse_diagnostics = ParseDiagnostics(
+                parser_backend="regex-go", low_confidence_fallback=True
+            )
             raw_symbols, raw_edges = self._extract_compiled_lang(
                 code, code_bytes, module_prefix, "go"
             )
         elif lang_lower in ("rust", "rs") or file_path.endswith(".rs"):
+            self.last_parse_diagnostics = ParseDiagnostics(
+                parser_backend="regex-rust", low_confidence_fallback=True
+            )
             raw_symbols, raw_edges = self._extract_compiled_lang(
                 code, code_bytes, module_prefix, "rust"
             )
         elif lang_lower == "java" or file_path.endswith(".java"):
+            self.last_parse_diagnostics = ParseDiagnostics(
+                parser_backend="regex-java", low_confidence_fallback=True
+            )
             raw_symbols, raw_edges = self._extract_compiled_lang(
                 code, code_bytes, module_prefix, "java"
             )
         elif lang_lower in ("markdown", "md") or file_path.endswith(".md"):
+            self.last_parse_diagnostics = ParseDiagnostics(
+                parser_backend="regex-markdown", low_confidence_fallback=True
+            )
             raw_symbols, raw_edges = self._extract_markdown(code, code_bytes, module_prefix)
         else:
             if file_path.endswith(".py"):
-                self._active_tree = self.py_parser.parse(code_bytes)
+                root = _parse_and_check(self.py_parser, "tree-sitter-python")
+                if root is None:
+                    return [], []
                 raw_symbols, raw_edges = self._extract_python(
-                    self._active_tree.root_node, code_bytes, module_prefix, file_path
+                    root, code_bytes, module_prefix, file_path
                 )
             elif file_path.endswith((".tsx", ".jsx")):
-                self._active_tree = self.tsx_parser.parse(code_bytes)
+                root = _parse_and_check(self.tsx_parser, "tree-sitter-tsx")
+                if root is None:
+                    return [], []
                 raw_symbols, raw_edges = self._extract_typescript(
-                    self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=True
+                    root, code_bytes, module_prefix, file_path, is_tsx=True
                 )
             else:
-                self._active_tree = self.ts_parser.parse(code_bytes)
+                root = _parse_and_check(self.ts_parser, "tree-sitter-typescript")
+                if root is None:
+                    return [], []
                 raw_symbols, raw_edges = self._extract_typescript(
-                    self._active_tree.root_node, code_bytes, module_prefix, file_path, is_tsx=False
+                    root, code_bytes, module_prefix, file_path, is_tsx=False
                 )
 
         if not repo_name:

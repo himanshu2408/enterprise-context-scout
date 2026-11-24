@@ -61,7 +61,7 @@ M1 remediates `SEC-VULN-01` via:
   - Validation: Constant-time signature comparison using `hmac.compare_digest` to prevent timing attacks.
   - Expiration: Strict TTL enforcement rejecting expired tokens with HTTP 401.
 - **Header Stripping:** If an incoming request provides spoofed `X-Principal-*` headers alongside a signed token, the spoofed headers are completely ignored; identity is extracted exclusively from the cryptographically verified token claims.
-- **Production Secret Validation:** Detection of default or insecure development secrets (`scout-dev-hmac-secret-override-in-prod-sec04`, `changeme`, keys < 32 characters) triggers an immediate fatal `RuntimeError` on startup when `SCOUT_ENV=production`.
+- **Production Secret Validation:** Detection of default or insecure development secrets (placeholder values or keys < 32 characters) triggers an immediate fatal `RuntimeError` on startup when `SCOUT_ENV=production`.
 
 ### 3.2 Out-of-Band Session Principal Binding (`SEC-04`)
 To prevent Prompt Injection attacks from escalating privileges by tricking the LLM into calling tools with elevated credentials, `PrincipalContext` is bound out-of-band:

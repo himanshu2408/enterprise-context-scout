@@ -1,0 +1,80 @@
+{{- if .Values.api.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "context-scout.fullname" . }}-api
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  minAvailable: {{ int .Values.api.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+{{- end }}
+{{- if .Values.worker.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "context-scout.fullname" . }}-worker
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  minAvailable: {{ int .Values.worker.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+{{- end }}
+{{- if .Values.webui.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "context-scout.fullname" . }}-webui
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webui
+spec:
+  minAvailable: {{ int .Values.webui.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: webui
+{{- end }}
+{{- if and .Values.vllm.enabled .Values.vllm.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "context-scout.fullname" . }}-vllm
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vllm
+spec:
+  minAvailable: {{ int .Values.vllm.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: vllm
+{{- end }}
+{{- if and .Values.zoekt.enabled .Values.zoekt.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "context-scout.fullname" . }}-zoekt
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: zoekt
+spec:
+  minAvailable: {{ int .Values.zoekt.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: zoekt
+{{- end }}

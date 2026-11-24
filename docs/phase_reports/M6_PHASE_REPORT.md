@@ -43,7 +43,7 @@ Milestone 6 employed an **Inverted Red-Team Challenger Architecture** wherein tw
 +--------------------------------------------------------------------------------------------------+
 |                                                                                                  |
 |   CHALLENGER 1: White-Box Coverage Hardening             CHALLENGER 2: Scale, Concurrency & Stats |
-|   (teamwork_challenger_m6_1_v3)                          (teamwork_challenger_m6_2_rep)          |
+|   (Tier 5 White-Box Suite)                               (Tier 5 Scale & Concurrency Suite)       |
 |                                                                                                  |
 |   - PreFlightValidator Boundary Invariants              - Clopper-Pearson Exact Beta Bounds      |
 |     * AST nesting depth > 10 boundary check               * k=0, n=300 lower bound >= 98.77%      |
@@ -301,8 +301,8 @@ In accordance with strict integrity and zero-trust engineering standards:
 
 With Milestone 6 implementation and qualification complete, the following open item ledger entries in `docs/phase_reports/OPEN_ITEMS.md` have been updated:
 
-- **`M6-OI-01` (Tier 5 White-Box Adversarial Coverage Hardening):** RESOLVED. Verified by Challenger 1 (`teamwork_challenger_m6_1_v3`) across 22 tests covering `PreFlightValidator`, `ExactClaimVerifier`, `GitWorktreeSandbox`, `CostGovernance`, and `OpenTelemetry`.
-- **`M6-OI-02` (Tier 5 Multi-Tenant Concurrency & PostgreSQL 17 Forced RLS Storage):** RESOLVED. Verified by Challenger 2 (`teamwork_challenger_m6_2_rep`) across 8 tests covering 150 concurrent scoped transactions, connection pool session cleanup, recursive CTE isolation, and non-tautological teardown mutation.
+- **`M6-OI-01` (Tier 5 White-Box Adversarial Coverage Hardening):** RESOLVED. Verified across 22 tests covering `PreFlightValidator`, `ExactClaimVerifier`, handoff guardrails, `CostGovernance`, and `OpenTelemetry`. *(Note: host-side code execution and `pytest` on the API host were subsequently eliminated under `OWASP ASI05` in `v1.0.0`.)*
+- **`M6-OI-02` (Tier 5 Multi-Tenant Concurrency & PostgreSQL 17 Forced RLS Storage):** RESOLVED. Verified across 8 tests covering 150 concurrent scoped transactions, connection pool session cleanup, recursive CTE isolation, and non-tautological teardown mutation.
 - **`M6-OI-03` (Tier 5 Scale Ladder Corpus Routing & Merkle Latency SLA):** RESOLVED. Verified by Challenger 2 across 7 tests covering 10/100/500 repo routing, 50-repo colliding symbol disambiguation, and 100-run Merkle blob-diffing P95 = 26.40ms < 50ms SLA.
 - **`M6-OI-04` (Tier 5 Statistical Evaluation Rigor):** RESOLVED. Verified by Challenger 2 across 10 tests covering dynamic Clopper-Pearson exact bounds, boundary alpha, $n=100,000$ numerical stability, Rule of Three convergence, and Wilcoxon signed-rank edge distributions.
 - **`B7` (Security & Concurrency Verification):** RESOLVED in M6. Merkle diffing P95 latency (26.40ms), Recursive CTE cross-tenant isolation, and 150-transaction concurrent RLS execution verified empirically.

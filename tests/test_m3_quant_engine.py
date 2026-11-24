@@ -8,6 +8,23 @@ import uuid
 from datetime import date
 
 import pytest
+from examples.quant_dogfood.contracts import (
+    FrictionVerdict,
+    MarketRegime,
+    QuantStrategyBrief,
+)
+from examples.quant_dogfood.ingestion.paper_harvester import (
+    MARKET_QUERY_PRESETS,
+    HarvesterSource,
+    MockPaperHarvesterClient,
+    build_arxiv_query_url,
+    build_openalex_query_url,
+    parse_arxiv_atom_feed,
+    parse_openalex_response,
+)
+from examples.quant_dogfood.ingestion.scepticism_gate import (
+    MarketRegimeScepticismGate,
+)
 
 from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
 from context_scout.db.repositories import (
@@ -24,25 +41,10 @@ from context_scout.ingestion.doc_parser import (
     LatexDocParser,
     MarkdownTableChunker,
 )
-from context_scout.ingestion.git_merkle_indexer import generate_deterministic_embedding
-from context_scout.ingestion.paper_harvester import (
-    MARKET_QUERY_PRESETS,
-    HarvesterSource,
-    MockPaperHarvesterClient,
-    build_arxiv_query_url,
-    build_openalex_query_url,
-    parse_arxiv_atom_feed,
-    parse_openalex_response,
-)
-from context_scout.ingestion.scepticism_gate import (
-    MarketRegimeScepticismGate,
-)
+from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import (
     DocCitationSpan,
-    FrictionVerdict,
-    MarketRegime,
     PrincipalContext,
-    QuantStrategyBrief,
     RoleType,
 )
 
@@ -273,7 +275,7 @@ def test_contextual_retrieval_situated_headers() -> None:
     assert "2018-2023" in header
     assert "15.0 bps floor" in header or "15" in header
 
-    # Test prompt formatter for Gemma 4 turn template
+    # Test prompt formatter delegates to ModelGovernancePolicy.format_chat_prompt with nonce framing
     prompt = build_situated_context_prompt(
         doc_title=chunk.doc_title,
         doc_id=chunk.doc_id,
@@ -282,8 +284,10 @@ def test_contextual_retrieval_situated_headers() -> None:
         section_heading=chunk.section_heading,
         verbatim_content=chunk.verbatim_content,
     )
-    assert "<start_of_turn>user" in prompt
-    assert "<start_of_turn>model" in prompt
+    assert "<|user|>" in prompt
+    assert "<|assistant|>" in prompt
+    assert "<start_of_turn>" not in prompt
+    assert "<untrusted_data_" in prompt
     assert "google/gemma-4-E4B-it" not in prompt  # Model ID not in prompt text
 
     # Test cleaner
@@ -299,14 +303,20 @@ def test_doc_chunks_3way_normalized_rrf_scoring() -> None:
     """Verifies that 3-way RRF fuses BM25, dense vector, and trigram/authority scores."""
     principal = PrincipalContext(
         user_id="quant_trader_1",
-        role=RoleType.QUANT_RESEARCHER,
+        role=RoleType.DOMAIN_RESEARCHER,
         allowed_scopes=["quant_public", "quant_in"],
     )
     repo = InMemoryRLSRepository()
 
-    emb_1 = generate_deterministic_embedding("Indian STT securities transaction tax momentum", 768)
-    emb_2 = generate_deterministic_embedding("German DAX Xetra liquidity auction tick size", 768)
-    emb_3 = generate_deterministic_embedding("US limit order book Almgren Chriss execution", 768)
+    emb_1 = get_embedding_provider(dimensions=768).embed_text(
+        "Indian STT securities transaction tax momentum", is_query=False
+    )
+    emb_2 = get_embedding_provider(dimensions=768).embed_text(
+        "German DAX Xetra liquidity auction tick size", is_query=False
+    )
+    emb_3 = get_embedding_provider(dimensions=768).embed_text(
+        "US limit order book Almgren Chriss execution", is_query=False
+    )
 
     chunk_1 = DocChunkRecord(
         chunk_id=uuid.uuid4(),
@@ -731,7 +741,7 @@ def test_in_memory_rls_isolation_on_doc_chunks() -> None:
 
     admin_principal = PrincipalContext(
         user_id="admin",
-        role=RoleType.QUANT_RESEARCHER,
+        role=RoleType.DOMAIN_RESEARCHER,
         allowed_scopes=["quant_public", "quant_restricted"],
     )
     repo.insert_doc_chunks_batch(admin_principal, [public_chunk, restricted_chunk])
@@ -739,7 +749,7 @@ def test_in_memory_rls_isolation_on_doc_chunks() -> None:
     # Public principal MUST see only 1 chunk
     public_principal = PrincipalContext(
         user_id="junior_quant",
-        role=RoleType.QUANT_RESEARCHER,
+        role=RoleType.DOMAIN_RESEARCHER,
         allowed_scopes=["quant_public"],
     )
     visible_to_public = repo.list_visible_doc_chunks(public_principal, "quant_research_scout")

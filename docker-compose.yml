@@ -1,12 +1,18 @@
+# Local development PostgreSQL 17 (pgvector + pg_trgm + FORCE RLS).
+# Quickstart:
+#   cp .env.example .env
+#   docker compose up -d postgres
+#   uv run context-scout seed-demo
+#   uv run uvicorn context_scout.api.main:app --env-file .env --host 127.0.0.1 --port 8080
 services:
   postgres:
     image: pgvector/pgvector:pg17
     container_name: context-scout-pg17
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres_local_admin_pw
-      POSTGRES_DB: context_scout
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_local_admin_pw}
+      POSTGRES_DB: ${POSTGRES_DB:-context_scout}
     ports:
       - "54329:5432"
     volumes:
@@ -19,7 +25,7 @@ services:
       - "-c"
       - "work_mem=32MB"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d context_scout"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-context_scout}"]
       interval: 3s
       timeout: 3s
       retries: 10

@@ -3,7 +3,7 @@
 Enforces four deterministic gates before calling paid Gemini execution models:
 - Check 1: Internal symbol resolution via AST indexing & 1-hop ASTDependencyExpander closure.
 - Check 2: Prompt identifier partitioning (VAL-01) distinguishing reference vs novel symbols.
-- Check 3: Normalized RRF threshold (BLK-01, >=0.65 or cross-encoder score >=0.60).
+- Check 3: Normalized RRF threshold (>=0.65 or cross-encoder score >=0.60).
 - Check 4: Verbatim citation verification (VAL-02, >=0.98 token overlap with NFKC normalization).
 """
 
@@ -38,11 +38,15 @@ from context_scout.db.repositories import (
     CalibratedRankedSearchHit,
     CodeFileRecord,
     DocChunkRecord,
+    DomainSyncManifestRecord,
     InMemoryRLSRepository,
+    JiraIssueRecord,
     PostgresRLSRepository,
     RepositoryRecord,
+    ScoutSessionRecord,
+    SideEffectRecord,
 )
-from context_scout.db.session import RLSConnectionManager
+from context_scout.db.session import RLSConnectionManager, get_ingestion_pool, get_query_pool
 from context_scout.ingestion.doc_parser import (
     DocumentChunk,
     chunk_custom_domain_document,
@@ -53,24 +57,25 @@ from context_scout.ingestion.doc_parser import (
 if TYPE_CHECKING:
     from context_scout.retrieval.embedder import LocalSemanticEmbedder
 from context_scout.schemas.contracts import (
+    DEFAULT_TENANT_ID,
     AuthorityRules,
     CodeSlicePointer,
     DocCitationSpan,
+    DocumentScope,
     DomainConfig,
     DomainPackManifest,
     GateAbstentionResult,
     GatePassResult,
     ImplementationContextPack,
     InsufficientContextDiagnostic,
-    MarketRegime,
     MissingItemRecord,
     ModificationIntent,
     PreFlightValidationReport,
     PrincipalContext,
-    QuantStrategyBrief,
     RoleType,
     VerbatimCodeSlice,
 )
+from context_scout.storage.object_store import build_tenant_domain_key, get_artifact_object_store
 from context_scout.telemetry import ScoutTelemetryTracer
 
 logger = logging.getLogger(__name__)
@@ -376,7 +381,6 @@ PROMPT_STOPWORDS: Final[set[str]] = {
     "private",
     "cluster",
     "encryption",
-    "quantstrategybrief",
     "domainknowledgebrief",
     "implementationcontextpack",
     "strategybrief",
@@ -384,8 +388,10 @@ PROMPT_STOPWORDS: Final[set[str]] = {
 }
 
 CUSTOM_CORPUS_INDEX_PATHS: dict[str, Path] = {}
+_IN_MEMORY_SYNC_MANIFESTS: dict[tuple[UUID, str], dict[str, Any]] = {}
+_SYNC_MANIFEST_LOCK = threading.Lock()
 _FILE_STAT_BLOB_CACHE: dict[Path, tuple[int, int, str]] = {}
-_DOMAIN_SYNC_EPOCHS: dict[str, int] = {}
+_DOMAIN_SYNC_EPOCHS: dict[tuple[UUID, str], int] = {}
 _QUERY_EMBEDDER_LOCK = threading.Lock()
 _SHARED_QUERY_EMBEDDER: Any = None
 
@@ -403,7 +409,6 @@ def _embed_query_for_hybrid_rrf(query_text: str) -> list[float]:
     return vec
 
 
-_DEFAULT_DUMMY_EMBEDDING: Final[list[float]] = [0.05] * 768
 _SYNC_MANIFEST_FILENAME: Final[str] = "sync_manifest.json"
 _PG_STORAGE_BACKEND: Final[str] = "postgresql_17_rls"
 
@@ -422,6 +427,13 @@ _PG_ALLOWED_SYMBOL_KINDS: Final[frozenset[str]] = frozenset(
         "tf_resource",
         "tf_module",
         "gcp_resource",
+        "component",
+        "system",
+        "team",
+        "service",
+        "module",
+        "api",
+        "domain",
     }
 )
 _PG_ALLOWED_EDGE_KINDS: Final[frozenset[str]] = frozenset(
@@ -435,6 +447,8 @@ _PG_ALLOWED_EDGE_KINDS: Final[frozenset[str]] = frozenset(
         "DISPATCHES",
         "SELECTS",
         "DOCUMENTS_COMPONENT",
+        "OWNED_BY_TEAM",
+        "PART_OF_SYSTEM",
     }
 )
 _PG_EDGE_REMAP: Final[dict[str, str]] = {
@@ -442,9 +456,9 @@ _PG_EDGE_REMAP: Final[dict[str, str]] = {
     "BINDS_SERVICE_ACCOUNT": "PROVISIONED_BY",
     "ACCESSES_SECRET": "PROVISIONED_BY",
 }
-_MARKET_REGIME_VALUES: Final[frozenset[str]] = frozenset(m.value for m in MarketRegime)
+_DOCUMENT_SCOPE_VALUES: Final[frozenset[str]] = frozenset(m.value for m in DocumentScope)
 _PG_ALLOWED_MARKET_SCOPES: Final[frozenset[str]] = frozenset(
-    {*_MARKET_REGIME_VALUES, "ENTERPRISE_DOC", "CONFLUENCE", "JIRA"}
+    {*_DOCUMENT_SCOPE_VALUES, "ENTERPRISE_DOC", "CONFLUENCE", "JIRA"}
 )
 _EFFECTIVE_EXTRA_EXTENSIONS: Final[dict[str, str]] = {".cs": "csharp"}
 
@@ -467,12 +481,15 @@ CUSTOM_DOC_EXTENSIONS: Final[tuple[str, ...]] = (
     ".txt",
     ".tex",
     ".pdf",
+    ".docx",
+    ".pptx",
     ".rst",
     ".adoc",
     ".sgml",
     ".json",
     ".csv",
     ".html",
+    ".htm",
     ".sql",
     ".tf",
     ".thrift",
@@ -494,13 +511,9 @@ def embed_custom_domain_texts(
     texts: list[str],
     batch_size: int = 64,
 ) -> list[list[float]]:
-    """Embeds custom-domain chunks via LocalSemanticEmbedder (hash stub only if flag set)."""
+    """Embeds custom-domain chunks via LocalSemanticEmbedder."""
     if not texts:
         return []
-    if os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() == "1":
-        from context_scout.ingestion.git_merkle_indexer import generate_deterministic_embedding
-
-        return [generate_deterministic_embedding(t) for t in texts]
     embedder = _get_custom_doc_embedder()
     return embedder.embed_batch(texts, is_query=False, batch_size=batch_size)
 
@@ -510,6 +523,7 @@ def build_custom_doc_chunk_records(
     domain_id: str,
     file_entries: list[tuple[Path, str, str, bytes, str]],
     batch_size: int = 64,
+    tenant_id: UUID = DEFAULT_TENANT_ID,
 ) -> list[DocChunkRecord]:
     """Chunks multi-format custom documents (400-800 tokens) and embeds them in batches.
 
@@ -528,6 +542,7 @@ def build_custom_doc_chunk_records(
             domain_id=domain_id,
             rel_path=rel_p,
             blob_sha=blob_sha,
+            tenant_id=tenant_id,
         )
         for chk in chunks:
             parsed_chunks.append(chk)
@@ -541,9 +556,10 @@ def build_custom_doc_chunk_records(
     vectors = embed_custom_domain_texts(embed_inputs, batch_size=batch_size)
     records: list[DocChunkRecord] = []
     default_scopes = [
+        "public",
         "public_eng",
-        "public_quant",
-        "quant_restricted",
+        "public_docs",
+        "docs_restricted",
         f"domain:{domain_id}",
     ]
     for chk, vec in zip(parsed_chunks, vectors, strict=True):
@@ -563,31 +579,32 @@ def build_custom_doc_chunk_records(
                 metadata_json=dict(chk.metadata_json),
                 allowed_scopes=list(default_scopes),
                 embedding=vec,
+                tenant_id=tenant_id,
             )
         )
     return records
 
 
 def extract_document_text(file_path: Path) -> str:
-    """Extracts UTF-8 text from supported markdown, SGML, PDF, code pattern, and text formats."""
+    """Extracts UTF-8 text from supported markdown, Office/Docling, PDF, and text formats."""
     suffix = file_path.suffix.lower()
-    if suffix == ".pdf":
+    raw_bytes = file_path.read_bytes()
+    if suffix in (".pdf", ".docx", ".pptx", ".html", ".htm"):
         try:
-            from pypdf import PdfReader
+            from context_scout.ingestion.docling_extractor import get_doc_extractor
 
-            reader = PdfReader(str(file_path))
-            pages = [page.extract_text() or "" for page in reader.pages]
-            extracted = "\n\n".join(p.strip() for p in pages if p.strip())
-            if extracted.strip():
-                return extracted
+            extracted = get_doc_extractor().extract(raw_bytes, filename=file_path.name)
+            if extracted.markdown_text.strip():
+                return extracted.markdown_text
         except Exception as exc:
             logger.debug(
-                "PDF text extraction fallback to raw bytes for %s (%s): %s",
+                "DocExtractorSPI fallback for %s (%s): %s",
                 file_path,
                 type(exc).__name__,
                 exc,
             )
-    raw_bytes = file_path.read_bytes()
+        if suffix in (".docx", ".pptx"):
+            return ""
     if b"\x00" in raw_bytes[:8192] and suffix != ".pdf":
         return ""
     decoded = raw_bytes.decode("utf-8", errors="replace").replace("\x00", "")
@@ -664,34 +681,49 @@ def register_custom_corpus_index(domain_id: str, index_path: Path) -> None:
     CUSTOM_CORPUS_INDEX_PATHS[safe_domain] = resolved
 
 
-def invalidate_custom_corpus_cache(domain_id: str | None = None) -> None:
+def invalidate_custom_corpus_cache(
+    domain_id: str | None = None,
+    *,
+    tenant_id: UUID | None = None,
+) -> None:
     """Clears file stat SHA cache and bumps domain epoch (corpora live in PostgreSQL 17)."""
     _FILE_STAT_BLOB_CACHE.clear()
     if domain_id is None:
         for k in list(_DOMAIN_SYNC_EPOCHS):
-            _DOMAIN_SYNC_EPOCHS[k] = _DOMAIN_SYNC_EPOCHS.get(k, 0) + 1
+            if tenant_id is None or k[0] == tenant_id:
+                _DOMAIN_SYNC_EPOCHS[k] = _DOMAIN_SYNC_EPOCHS.get(k, 0) + 1
+    elif tenant_id is not None:
+        key = (tenant_id, domain_id)
+        _DOMAIN_SYNC_EPOCHS[key] = _DOMAIN_SYNC_EPOCHS.get(key, 0) + 1
     else:
-        _DOMAIN_SYNC_EPOCHS[domain_id] = _DOMAIN_SYNC_EPOCHS.get(domain_id, 0) + 1
+        matched = [k for k in _DOMAIN_SYNC_EPOCHS if k[1] == domain_id]
+        if not matched:
+            matched = [(DEFAULT_TENANT_ID, domain_id)]
+        for k in matched:
+            _DOMAIN_SYNC_EPOCHS[k] = _DOMAIN_SYNC_EPOCHS.get(k, 0) + 1
 
 
 def _resolve_custom_corpus_index_path(domain_id: str) -> Path | None:
     if not _SAFE_DOMAIN_SLUG_RE.fullmatch(domain_id) or ".." in domain_id:
         return None
     allowed_prefixes = _trusted_manifest_prefixes()
-    candidates: list[Path] = []
     if domain_id in CUSTOM_CORPUS_INDEX_PATHS:
-        candidates.append(CUSTOM_CORPUS_INDEX_PATHS[domain_id])
-    else:
-        candidates.append(ScoutSettings().domains_dir / domain_id / _SYNC_MANIFEST_FILENAME)
-        candidates.append(Path("domains") / domain_id / _SYNC_MANIFEST_FILENAME)
-        repo_domains = Path(__file__).resolve().parents[3] / "domains"
-        candidates.append(repo_domains / domain_id / _SYNC_MANIFEST_FILENAME)
+        real_cand = os.path.realpath(str(CUSTOM_CORPUS_INDEX_PATHS[domain_id]))
+        if real_cand.startswith(allowed_prefixes):
+            return Path(real_cand)
+    candidates: list[Path] = [
+        ScoutSettings().domains_dir / domain_id / _SYNC_MANIFEST_FILENAME,
+        Path("domains") / domain_id / _SYNC_MANIFEST_FILENAME,
+        Path(__file__).resolve().parents[3] / "domains" / domain_id / _SYNC_MANIFEST_FILENAME,
+    ]
     for cand in candidates:
         real_cand = os.path.realpath(str(cand))
         if not real_cand.startswith(allowed_prefixes):
             continue
         if os.path.exists(real_cand):
             return Path(real_cand)
+    if read_custom_sync_manifest(domain_id) is not None:
+        return Path(os.path.realpath(str(candidates[0])))
     return None
 
 
@@ -734,9 +766,25 @@ def derive_custom_repo_name(file_path: Path, source_dir: Path, domain_id: str) -
     return domain_id
 
 
-def _format_pg_vector(embedding: list[float]) -> str:
-    vec = embedding if len(embedding) == 768 else _DEFAULT_DUMMY_EMBEDDING
-    return "[" + ",".join(f"{float(v):.6f}" for v in vec) + "]"
+def _format_pg_vector(embedding: list[float], fallback_text: str = "") -> str:
+    from context_scout.db.repositories import _format_db_vector_and_halfvec
+
+    vec = embedding
+    if not vec:
+        vec = embed_custom_domain_texts([fallback_text or "symbol"])[0]
+    vec_lit, _ = _format_db_vector_and_halfvec(vec)
+    return vec_lit
+
+
+def _format_pg_vector_and_halfvec(
+    embedding: list[float], fallback_text: str = ""
+) -> tuple[str, str]:
+    from context_scout.db.repositories import _format_db_vector_and_halfvec
+
+    vec = embedding
+    if not vec:
+        vec = embed_custom_domain_texts([fallback_text or "symbol"])[0]
+    return _format_db_vector_and_halfvec(vec)
 
 
 def _normalize_pg_symbol_kind(kind: str) -> str:
@@ -749,7 +797,7 @@ def _normalize_pg_edge_kind(kind: str) -> str | None:
     return _PG_EDGE_REMAP.get(kind)
 
 
-def _normalize_pg_market_scope(scope: MarketRegime | str | None) -> str | None:
+def _normalize_pg_market_scope(scope: DocumentScope | str | None) -> str | None:
     if scope is None:
         return "ENTERPRISE_DOC"
     val = scope.value if hasattr(scope, "value") else str(scope)
@@ -758,22 +806,30 @@ def _normalize_pg_market_scope(scope: MarketRegime | str | None) -> str | None:
     return "ENTERPRISE_DOC"
 
 
-def _deserialize_pg_market_scope(raw_scope: object) -> MarketRegime | str | None:
+def _deserialize_pg_market_scope(raw_scope: object) -> DocumentScope | str | None:
     if raw_scope is None:
         return None
     text = str(raw_scope)
-    if text in _MARKET_REGIME_VALUES:
-        return MarketRegime(text)
+    if text in _DOCUMENT_SCOPE_VALUES:
+        return DocumentScope(text)
     return text
 
 
+def _tenant_uuid_prefix(domain_id: str, tenant_id: UUID) -> str:
+    return domain_id if tenant_id == DEFAULT_TENANT_ID else f"{tenant_id}:{domain_id}"
+
+
 def _build_sync_principal(
-    domain_id: str, extra_scopes: list[str] | None = None
+    domain_id: str,
+    extra_scopes: list[str] | None = None,
+    *,
+    tenant_id: UUID = DEFAULT_TENANT_ID,
 ) -> PrincipalContext:
     scopes = [
+        "public",
         "public_eng",
-        "public_quant",
-        "quant_restricted",
+        "public_docs",
+        "docs_restricted",
         f"domain:{domain_id}",
         f"repo:{domain_id}",
     ]
@@ -784,12 +840,82 @@ def _build_sync_principal(
         user_id="custom_domain_sync",
         role=RoleType.ENGINEER,
         allowed_scopes=scopes,
+        tenant_id=tenant_id,
     )
+
+
+def _sync_record_to_dict(record: DomainSyncManifestRecord) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "tenant_id": str(record.tenant_id),
+        "domain_id": record.domain_id,
+        "kind": record.kind,
+        "source_dir": record.source_dir,
+        "synced_at": (record.synced_at or datetime.datetime.now(datetime.UTC)).isoformat(),
+        "repo_commit_shas": dict(record.repo_commit_shas),
+        "code_files_indexed": record.code_files_indexed,
+        "ast_symbols_indexed": record.ast_symbols_indexed,
+        "ast_edges_indexed": record.ast_edges_indexed,
+        "doc_chunks_indexed": record.doc_chunks_indexed,
+        "storage_backend": _PG_STORAGE_BACKEND,
+    }
+    if record.empty_doc_shas:
+        payload["empty_doc_shas"] = dict(sorted(record.empty_doc_shas.items()))
+    if record.s3_manifest_uri:
+        payload["s3_manifest_uri"] = record.s3_manifest_uri
+    if record.manifest_sha256:
+        payload["manifest_sha256"] = record.manifest_sha256
+    return payload
+
+
+def read_custom_sync_manifest(
+    domain_id: str,
+    principal: PrincipalContext | None = None,
+) -> dict[str, Any] | None:
+    """Reads sync manifest metadata from PG17 domain_sync_manifests or ArtifactObjectStore."""
+    if not _SAFE_DOMAIN_SLUG_RE.fullmatch(domain_id) or ".." in domain_id:
+        return None
+    sync_principal = principal or _build_sync_principal(domain_id)
+    tenant_id = sync_principal.tenant_id
+    settings = ScoutSettings()
+
+    try:
+        mgr = get_query_pool(settings)
+        repo_helper = PostgresRLSRepository()
+        with mgr.scoped_transaction(sync_principal, enable_hnsw_iterative_scan=False) as conn:
+            rec = repo_helper.get_domain_sync_manifest(conn, domain_id)
+        if rec is not None:
+            return _sync_record_to_dict(rec)
+    except Exception as exc:
+        logger.debug(
+            "PG17 domain_sync_manifests read fallback for '%s' (%s): %s",
+            domain_id,
+            type(exc).__name__,
+            exc,
+        )
+
+    try:
+        store = get_artifact_object_store(settings)
+        obj_key = build_tenant_domain_key(tenant_id, domain_id, _SYNC_MANIFEST_FILENAME)
+        if store.exists(obj_key, expected_tenant_id=tenant_id):
+            raw = json.loads(store.get_bytes(obj_key, expected_tenant_id=tenant_id).decode("utf-8"))
+            if isinstance(raw, dict):
+                return raw
+    except Exception as exc:
+        logger.debug(
+            "Object store sync manifest read fallback for '%s' (%s): %s",
+            domain_id,
+            type(exc).__name__,
+            exc,
+        )
+
+    with _SYNC_MANIFEST_LOCK:
+        cached = _IN_MEMORY_SYNC_MANIFESTS.get((tenant_id, domain_id))
+        return dict(cached) if cached is not None else None
 
 
 def write_custom_sync_manifest(
     *,
-    manifest_path: Path,
+    manifest_path: Path | None = None,
     domain_id: str,
     kind: str,
     source_dir: str,
@@ -799,15 +925,22 @@ def write_custom_sync_manifest(
     ast_edges_indexed: int,
     doc_chunks_indexed: int,
     empty_doc_shas: dict[str, str] | None = None,
+    tenant_id: UUID = DEFAULT_TENANT_ID,
 ) -> Path:
-    """Writes a compact metadata-only sync_manifest.json without corpus payloads."""
+    """Persists stateless sync manifest metadata to PG17 + ArtifactObjectStore (zero disk I/O)."""
     safe_domain = _validate_domain_slug(domain_id)
-    allowed_prefixes = _trusted_manifest_prefixes()
-    real_manifest = os.path.realpath(str(manifest_path))
-    if not real_manifest.startswith(allowed_prefixes):
-        raise ValueError(f"Refusing untrusted sync manifest path: {manifest_path}")
-    safe_manifest = Path(real_manifest)
-    os.makedirs(os.path.dirname(real_manifest), exist_ok=True)
+    settings = ScoutSettings()
+    if manifest_path is not None:
+        allowed_prefixes = _trusted_manifest_prefixes()
+        real_manifest = os.path.realpath(str(manifest_path))
+        if not real_manifest.startswith(allowed_prefixes):
+            raise ValueError(f"Refusing untrusted sync manifest path: {manifest_path}")
+        safe_manifest = Path(real_manifest)
+    else:
+        safe_manifest = Path(
+            os.path.realpath(str(settings.domains_dir / safe_domain / _SYNC_MANIFEST_FILENAME))
+        )
+
     repo_root = Path(__file__).resolve().parents[3]
     portable_source_dir = source_dir
     if source_dir:
@@ -817,12 +950,15 @@ def write_custom_sync_manifest(
                 portable_source_dir = resolved_src.relative_to(repo_root).as_posix()
         except OSError:
             portable_source_dir = source_dir
+
+    now_dt = datetime.datetime.now(datetime.UTC)
     payload: dict[str, Any] = {
+        "tenant_id": str(tenant_id),
         "domain_id": safe_domain,
         "kind": kind,
         "source_dir": portable_source_dir,
-        "synced_at": datetime.datetime.now(datetime.UTC).isoformat(),
-        "repo_commit_shas": repo_commit_shas,
+        "synced_at": now_dt.isoformat(),
+        "repo_commit_shas": dict(repo_commit_shas),
         "code_files_indexed": code_files_indexed,
         "ast_symbols_indexed": ast_symbols_indexed,
         "ast_edges_indexed": ast_edges_indexed,
@@ -831,8 +967,68 @@ def write_custom_sync_manifest(
     }
     if empty_doc_shas:
         payload["empty_doc_shas"] = dict(sorted(empty_doc_shas.items()))
-    with open(real_manifest, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+
+    store = get_artifact_object_store(settings)
+    obj_key = build_tenant_domain_key(tenant_id, safe_domain, _SYNC_MANIFEST_FILENAME)
+    payload_bytes = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+    obj_meta = store.put_bytes(
+        obj_key,
+        payload_bytes,
+        content_type="application/json",
+        expected_tenant_id=tenant_id,
+    )
+    payload["s3_manifest_uri"] = obj_meta.uri
+    payload["manifest_sha256"] = obj_meta.sha256
+
+    with _SYNC_MANIFEST_LOCK:
+        _IN_MEMORY_SYNC_MANIFESTS[(tenant_id, safe_domain)] = dict(payload)
+
+    try:
+        sync_principal = _build_sync_principal(safe_domain, tenant_id=tenant_id)
+        mgr = get_ingestion_pool(settings)
+        repo_helper = PostgresRLSRepository()
+        sync_record = DomainSyncManifestRecord(
+            domain_id=safe_domain,
+            kind=kind,
+            source_dir=portable_source_dir,
+            repo_commit_shas=dict(repo_commit_shas),
+            empty_doc_shas=dict(sorted((empty_doc_shas or {}).items())),
+            code_files_indexed=code_files_indexed,
+            ast_symbols_indexed=ast_symbols_indexed,
+            ast_edges_indexed=ast_edges_indexed,
+            doc_chunks_indexed=doc_chunks_indexed,
+            tenant_id=tenant_id,
+            s3_manifest_uri=obj_meta.uri,
+            manifest_sha256=obj_meta.sha256,
+            synced_at=now_dt,
+        )
+        with mgr.scoped_transaction(sync_principal, enable_hnsw_iterative_scan=False) as conn:
+            conn.execute(
+                """
+                INSERT INTO domain_packs (
+                    tenant_id, domain_id, display_name, lora_adapter_id,
+                    primary_truth_source, config_json
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (tenant_id, domain_id) DO NOTHING
+                """,
+                (
+                    tenant_id,
+                    safe_domain,
+                    safe_domain,
+                    f"gemma4_26b_{safe_domain}",
+                    "code" if kind == "code" else "document",
+                    json.dumps({"kind": kind, "storage_backend": _PG_STORAGE_BACKEND}),
+                ),
+            )
+            repo_helper.upsert_domain_sync_manifest(conn, sync_record)
+    except Exception as exc:
+        logger.debug(
+            "PG17 domain_sync_manifests write skipped (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+
     register_custom_corpus_index(safe_domain, safe_manifest)
     return safe_manifest
 
@@ -851,6 +1047,7 @@ def persist_custom_domain_to_pg(
     deleted_doc_ids: list[UUID] | None = None,
     repo_commit_shas: dict[str, str] | None = None,
     reset_domain_rows: bool = False,
+    tenant_id: UUID = DEFAULT_TENANT_ID,
 ) -> tuple[int, int, int, int]:
     """Persists custom domain records directly into PostgreSQL 17 under FORCE RLS."""
     all_scopes: list[str] = []
@@ -868,13 +1065,13 @@ def persist_custom_domain_to_pg(
         if rscope not in all_scopes:
             all_scopes.append(rscope)
 
-    principal = _build_sync_principal(domain_id, all_scopes)
+    principal = _build_sync_principal(domain_id, all_scopes, tenant_id=tenant_id)
     settings = ScoutSettings()
-    mgr = RLSConnectionManager(settings.db_app_url, use_pool=False)
+    mgr = get_ingestion_pool(settings)
     primary_truth = "code" if kind == "code" else "document"
     repo_helper = PostgresRLSRepository()
 
-    with mgr.scoped_transaction(principal) as conn:
+    with mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn:
         raw_auth = manifest_config.get("authority_rules")
         auth_dict = dict(raw_auth) if isinstance(raw_auth, dict) else {}
         auth_rules = AuthorityRules(
@@ -901,7 +1098,6 @@ def persist_custom_domain_to_pg(
         )
         if raw_contract not in {
             "ImplementationContextPack",
-            "QuantStrategyBrief",
             "DomainKnowledgeBrief",
         }:
             raw_contract = "ImplementationContextPack" if kind == "code" else "DomainKnowledgeBrief"
@@ -932,6 +1128,7 @@ def persist_custom_domain_to_pg(
                 authority_rules=auth_rules,
                 output_contract=raw_contract,  # type: ignore[arg-type]
             ),
+            tenant_id=tenant_id,
         )
 
         if reset_domain_rows:
@@ -963,8 +1160,9 @@ def persist_custom_domain_to_pg(
             for rname in repo_commit_shas:
                 repo_scopes_by_name[rname] = list(principal.allowed_scopes)
 
+        uuid_ns = _tenant_uuid_prefix(domain_id, tenant_id)
         for rname, rscopes in repo_scopes_by_name.items():
-            rid = uuid5(NAMESPACE_URL, f"{domain_id}:repo:{rname}")
+            rid = uuid5(NAMESPACE_URL, f"{uuid_ns}:repo:{rname}")
             repo_id_by_name[rname] = rid
             head_sha = (repo_commit_shas or {}).get(rname, "custom_head")
             repo_helper.insert_repository(
@@ -979,6 +1177,7 @@ def persist_custom_domain_to_pg(
                     head_commit_sha=head_sha,
                     allowed_scopes=rscopes or list(principal.allowed_scopes),
                     metadata_json={"storage_backend": _PG_STORAGE_BACKEND},
+                    tenant_id=tenant_id,
                 ),
             )
 
@@ -999,11 +1198,11 @@ def persist_custom_domain_to_pg(
                 cur.executemany(
                     """
                     INSERT INTO code_files (
-                        file_id, domain_id, repo_id, repo_name, file_path,
+                        file_id, tenant_id, domain_id, repo_id, repo_name, file_path,
                         git_commit_sha, git_blob_sha, language, allowed_scopes,
                         raw_content, line_count
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (domain_id, repo_name, file_path) DO UPDATE SET
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (tenant_id, domain_id, repo_name, file_path) DO UPDATE SET
                         file_id = EXCLUDED.file_id,
                         repo_id = EXCLUDED.repo_id,
                         git_commit_sha = EXCLUDED.git_commit_sha,
@@ -1017,6 +1216,7 @@ def persist_custom_domain_to_pg(
                     [
                         (
                             cf.file_id,
+                            tenant_id,
                             domain_id,
                             cf.repo_id or repo_id_by_name.get(cf.repo_name),
                             cf.repo_name,
@@ -1038,14 +1238,47 @@ def persist_custom_domain_to_pg(
         file_to_repo_name = {cf.file_id: cf.repo_name for cf in code_files}
 
         if ast_symbols:
+            sym_params = []
+            for sym in ast_symbols:
+                vec_lit, hv_lit = _format_pg_vector_and_halfvec(sym.embedding, sym.qualified_name)
+                sym_params.append(
+                    (
+                        sym.symbol_id,
+                        tenant_id,
+                        sym.file_id,
+                        domain_id,
+                        sym.repo_id or file_to_repo_id.get(sym.file_id),
+                        sym.qualified_name,
+                        sym.repo_qualified_id
+                        or (
+                            f"{file_to_repo_name[sym.file_id]}::{sym.qualified_name}"
+                            if sym.file_id in file_to_repo_name
+                            else sym.qualified_name
+                        ),
+                        sym.bare_name or sym.qualified_name.rsplit(".", 1)[-1],
+                        _normalize_pg_symbol_kind(sym.symbol_kind),
+                        sym.start_line,
+                        max(sym.start_line, sym.end_line),
+                        sym.signature_skeleton,
+                        sym.contextual_summary,
+                        sym.allowed_scopes,
+                        vec_lit,
+                        sym.embedding_space_id,
+                        hv_lit,
+                    )
+                )
             with conn.cursor() as cur:
                 cur.executemany(
                     """
                     INSERT INTO ast_symbols (
-                        symbol_id, file_id, domain_id, repo_id, qualified_name,
+                        symbol_id, tenant_id, file_id, domain_id, repo_id, qualified_name,
                         repo_qualified_id, bare_name, symbol_kind, start_line, end_line,
-                        signature_skeleton, contextual_summary, allowed_scopes, embedding
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+                        signature_skeleton, contextual_summary, allowed_scopes,
+                        embedding, embedding_space_id, embedding_halfvec
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s::vector, %s, %s::halfvec
+                    )
                     ON CONFLICT (symbol_id) DO UPDATE SET
                         repo_id = EXCLUDED.repo_id,
                         qualified_name = EXCLUDED.qualified_name,
@@ -1057,32 +1290,11 @@ def persist_custom_domain_to_pg(
                         signature_skeleton = EXCLUDED.signature_skeleton,
                         contextual_summary = EXCLUDED.contextual_summary,
                         allowed_scopes = EXCLUDED.allowed_scopes,
-                        embedding = EXCLUDED.embedding
+                        embedding = EXCLUDED.embedding,
+                        embedding_space_id = EXCLUDED.embedding_space_id,
+                        embedding_halfvec = EXCLUDED.embedding_halfvec
                     """,
-                    [
-                        (
-                            sym.symbol_id,
-                            sym.file_id,
-                            domain_id,
-                            sym.repo_id or file_to_repo_id.get(sym.file_id),
-                            sym.qualified_name,
-                            sym.repo_qualified_id
-                            or (
-                                f"{file_to_repo_name[sym.file_id]}::{sym.qualified_name}"
-                                if sym.file_id in file_to_repo_name
-                                else sym.qualified_name
-                            ),
-                            sym.bare_name or sym.qualified_name.rsplit(".", 1)[-1],
-                            _normalize_pg_symbol_kind(sym.symbol_kind),
-                            sym.start_line,
-                            max(sym.start_line, sym.end_line),
-                            sym.signature_skeleton,
-                            sym.contextual_summary,
-                            sym.allowed_scopes,
-                            _format_pg_vector(sym.embedding),
-                        )
-                        for sym in ast_symbols
-                    ],
+                    sym_params,
                 )
 
         if ast_edges:
@@ -1102,6 +1314,7 @@ def persist_custom_domain_to_pg(
                 edge_params.append(
                     (
                         edge.edge_id,
+                        tenant_id,
                         domain_id,
                         edge.source_symbol_id,
                         edge.target_qualified_name,
@@ -1117,10 +1330,10 @@ def persist_custom_domain_to_pg(
                     cur.executemany(
                         """
                         INSERT INTO ast_edges (
-                            edge_id, domain_id, source_symbol_id, target_qualified_name,
+                            edge_id, tenant_id, domain_id, source_symbol_id, target_qualified_name,
                             target_symbol_id, edge_kind, allowed_scopes,
                             target_repo_qualified_id, is_cross_repo
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (edge_id) DO UPDATE SET
                             target_qualified_name = EXCLUDED.target_qualified_name,
                             target_symbol_id = EXCLUDED.target_symbol_id,
@@ -1133,17 +1346,46 @@ def persist_custom_domain_to_pg(
                     )
 
         if doc_chunks:
+            doc_params = []
+            for chk in doc_chunks:
+                vec_lit, hv_lit = _format_pg_vector_and_halfvec(chk.embedding, chk.doc_title)
+                doc_params.append(
+                    (
+                        chk.chunk_id,
+                        tenant_id,
+                        domain_id,
+                        chk.doc_id,
+                        chk.doc_title,
+                        chk.source_uri,
+                        _normalize_pg_market_scope(chk.market_scope),
+                        chk.published_date,
+                        float(chk.authority_weight),
+                        chk.section_heading,
+                        chk.contextual_header,
+                        chk.verbatim_content,
+                        json.dumps(chk.metadata_json),
+                        chk.allowed_scopes,
+                        vec_lit,
+                        chk.embedding_space_id,
+                        hv_lit,
+                        chk.source_type,
+                        chk.version_str,
+                        bool(chk.is_stale),
+                        chk.stale_reason,
+                    )
+                )
             with conn.cursor() as cur:
                 cur.executemany(
                     """
                     INSERT INTO doc_chunks (
-                        chunk_id, domain_id, doc_id, doc_title, source_uri,
+                        chunk_id, tenant_id, domain_id, doc_id, doc_title, source_uri,
                         market_scope, published_date, authority_weight, section_heading,
                         contextual_header, verbatim_content, metadata_json, allowed_scopes,
-                        embedding, source_type, version_str, is_stale, stale_reason
+                        embedding, embedding_space_id, embedding_halfvec,
+                        source_type, version_str, is_stale, stale_reason
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s,
-                        %s::vector, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s,
+                        %s::vector, %s, %s::halfvec, %s, %s, %s, %s
                     )
                     ON CONFLICT (chunk_id) DO UPDATE SET
                         doc_title = EXCLUDED.doc_title,
@@ -1157,34 +1399,14 @@ def persist_custom_domain_to_pg(
                         metadata_json = EXCLUDED.metadata_json,
                         allowed_scopes = EXCLUDED.allowed_scopes,
                         embedding = EXCLUDED.embedding,
+                        embedding_space_id = EXCLUDED.embedding_space_id,
+                        embedding_halfvec = EXCLUDED.embedding_halfvec,
                         source_type = EXCLUDED.source_type,
                         version_str = EXCLUDED.version_str,
                         is_stale = EXCLUDED.is_stale,
                         stale_reason = EXCLUDED.stale_reason
                     """,
-                    [
-                        (
-                            chk.chunk_id,
-                            domain_id,
-                            chk.doc_id,
-                            chk.doc_title,
-                            chk.source_uri,
-                            _normalize_pg_market_scope(chk.market_scope),
-                            chk.published_date,
-                            float(chk.authority_weight),
-                            chk.section_heading,
-                            chk.contextual_header,
-                            chk.verbatim_content,
-                            json.dumps(chk.metadata_json),
-                            chk.allowed_scopes,
-                            _format_pg_vector(chk.embedding),
-                            chk.source_type,
-                            chk.version_str,
-                            bool(chk.is_stale),
-                            chk.stale_reason,
-                        )
-                        for chk in doc_chunks
-                    ],
+                    doc_params,
                 )
 
         cf_row = conn.execute(
@@ -1203,7 +1425,8 @@ def persist_custom_domain_to_pg(
             "SELECT COUNT(*) FROM doc_chunks WHERE domain_id = %s", (domain_id,)
         ).fetchone()
         doc_cnt = int(str(doc_row[0])) if doc_row is not None else 0
-    _DOMAIN_SYNC_EPOCHS[domain_id] = _DOMAIN_SYNC_EPOCHS.get(domain_id, 0) + 1
+    epoch_key = (tenant_id, domain_id)
+    _DOMAIN_SYNC_EPOCHS[epoch_key] = _DOMAIN_SYNC_EPOCHS.get(epoch_key, 0) + 1
     return cf_cnt, sym_cnt, edge_cnt, doc_cnt
 
 
@@ -1211,6 +1434,9 @@ def sync_custom_domain_corpus_if_needed(
     domain_id: str,
     index_path: Path | None = None,
     force: bool = False,
+    *,
+    tenant_id: UUID = DEFAULT_TENANT_ID,
+    require_manifest: bool = False,
 ) -> dict[str, Any] | None:
     """Incrementally syncs custom domain working-tree files into PostgreSQL 17."""
     _ = force
@@ -1219,11 +1445,11 @@ def sync_custom_domain_corpus_if_needed(
     from context_scout.ingestion.git_merkle_indexer import (
         CODE_EXTENSIONS,
         LANG_MAP,
-        generate_deterministic_embedding,
     )
 
     if not _SAFE_DOMAIN_SLUG_RE.fullmatch(domain_id) or ".." in domain_id:
         return None
+    settings = ScoutSettings()
     allowed_prefixes = _trusted_manifest_prefixes()
     raw_cand = index_path or _resolve_custom_corpus_index_path(domain_id)
     real_cand: str | None = None
@@ -1232,60 +1458,34 @@ def sync_custom_domain_corpus_if_needed(
         if not resolved_raw.startswith(allowed_prefixes):
             return None
         real_cand = resolved_raw
-        if not os.path.exists(real_cand) and os.path.basename(real_cand) != _SYNC_MANIFEST_FILENAME:
-            real_alt = os.path.realpath(
-                os.path.join(os.path.dirname(real_cand), _SYNC_MANIFEST_FILENAME)
-            )
-            if real_alt.startswith(allowed_prefixes) and os.path.exists(real_alt):
-                real_cand = real_alt
 
-    manifest_data: dict[str, Any] = {}
-    if real_cand is not None and os.path.exists(real_cand):
-        try:
-            with open(real_cand, encoding="utf-8") as cf:
-                loaded = json.load(cf)
-            if isinstance(loaded, dict):
-                manifest_data = loaded
-        except Exception as exc:
-            logger.warning(
-                "Failed loading sync_manifest.json for '%s' (%s): %s",
-                domain_id,
-                type(exc).__name__,
-                exc,
-            )
-        cand = Path(real_cand)
-    else:
-        raw_domain_yaml = ScoutSettings().domains_dir / domain_id / "domain.yaml"
-        real_domain_yaml = os.path.realpath(str(raw_domain_yaml))
-        if not real_domain_yaml.startswith(allowed_prefixes) or not os.path.exists(
-            real_domain_yaml
-        ):
-            return None
-        real_cand = os.path.realpath(
-            os.path.join(os.path.dirname(real_domain_yaml), _SYNC_MANIFEST_FILENAME)
-        )
-        if not real_cand.startswith(allowed_prefixes):
-            return None
-        cand = Path(real_cand)
+    cand: Path | None = Path(real_cand) if real_cand is not None else None
+    sync_principal = _build_sync_principal(domain_id, tenant_id=tenant_id)
+    manifest_data = read_custom_sync_manifest(domain_id, principal=sync_principal) or {}
+    if require_manifest and not manifest_data:
+        return None
 
-    source_dir_str = str(manifest_data.get("source_dir", "")).strip()
-    kind = str(manifest_data.get("kind", "")).strip()
     yaml_cfg: dict[str, Any] = {}
-    real_manifest_yaml = os.path.realpath(os.path.join(os.path.dirname(real_cand), "domain.yaml"))
+    has_domain_yaml = False
+    yaml_dir = (
+        os.path.dirname(real_cand)
+        if real_cand is not None
+        else str(settings.domains_dir / domain_id)
+    )
+    real_manifest_yaml = os.path.realpath(os.path.join(yaml_dir, "domain.yaml"))
+    if not real_manifest_yaml.startswith(allowed_prefixes) or not os.path.exists(
+        real_manifest_yaml
+    ):
+        fallback_yaml = os.path.realpath(str(settings.domains_dir / domain_id / "domain.yaml"))
+        if fallback_yaml.startswith(allowed_prefixes) and os.path.exists(fallback_yaml):
+            real_manifest_yaml = fallback_yaml
     if real_manifest_yaml.startswith(allowed_prefixes) and os.path.exists(real_manifest_yaml):
+        has_domain_yaml = True
         try:
             import yaml
 
             with open(real_manifest_yaml, encoding="utf-8") as mf:
                 yaml_cfg = yaml.safe_load(mf) or {}
-            if not source_dir_str:
-                source_dir_str = str(yaml_cfg.get("source_dir", "")).strip()
-            if not kind:
-                kind = (
-                    "code"
-                    if yaml_cfg.get("output_contract") == "ImplementationContextPack"
-                    else "knowledge"
-                )
         except Exception as exc:
             logger.warning(
                 "Failed loading domain.yaml for '%s' (%s): %s",
@@ -1294,12 +1494,60 @@ def sync_custom_domain_corpus_if_needed(
                 exc,
             )
 
+    pg_pack_cfg: dict[str, Any] = {}
+    if not has_domain_yaml:
+        try:
+            query_mgr = get_query_pool(settings)
+            with query_mgr.scoped_transaction(
+                sync_principal, enable_hnsw_iterative_scan=False
+            ) as qconn:
+                pg_pack = PostgresRLSRepository().get_domain_pack(qconn, domain_id)
+                if pg_pack is not None:
+                    pg_pack_cfg = pg_pack.model_dump(mode="json")
+                else:
+                    raw_row = qconn.execute(
+                        "SELECT config_json FROM domain_packs WHERE domain_id = %s",
+                        (domain_id,),
+                    ).fetchone()
+                    if raw_row is not None:
+                        raw_cfg = raw_row[0]
+                        if isinstance(raw_cfg, dict):
+                            pg_pack_cfg = dict(raw_cfg)
+                        elif isinstance(raw_cfg, str):
+                            loaded_cfg = json.loads(raw_cfg)
+                            if isinstance(loaded_cfg, dict):
+                                pg_pack_cfg = loaded_cfg
+        except Exception as exc:
+            logger.debug(
+                "PG17 domain_packs fallback skipped for '%s' (%s): %s",
+                domain_id,
+                type(exc).__name__,
+                exc,
+            )
+
+    if not manifest_data and not has_domain_yaml and not pg_pack_cfg:
+        return None
+
+    effective_cfg = yaml_cfg or pg_pack_cfg
+    source_dir_str = str(
+        manifest_data.get("source_dir") or effective_cfg.get("source_dir") or ""
+    ).strip()
+    kind = str(manifest_data.get("kind", "")).strip()
+    if not kind and effective_cfg:
+        raw_kind = str(effective_cfg.get("kind", "")).strip()
+        if raw_kind:
+            kind = raw_kind
+        elif "output_contract" in effective_cfg:
+            kind = (
+                "code"
+                if effective_cfg.get("output_contract") == "ImplementationContextPack"
+                else "knowledge"
+            )
     if not kind:
         kind = "code"
+    yaml_cfg = effective_cfg
 
-    sync_principal = _build_sync_principal(domain_id)
-    settings = ScoutSettings()
-    mgr = RLSConnectionManager(settings.db_app_url, use_pool=False)
+    mgr = get_ingestion_pool(settings)
 
     with mgr.scoped_transaction(sync_principal) as conn:
         cf_meta_rows = conn.execute(
@@ -1486,6 +1734,7 @@ def sync_custom_domain_corpus_if_needed(
                     ast_edges_indexed=edge_cnt,
                     doc_chunks_indexed=len(doc_rows),
                     empty_doc_shas=updated_empty_shas,
+                    tenant_id=tenant_id,
                 )
             return {
                 "synced": False,
@@ -1502,6 +1751,7 @@ def sync_custom_domain_corpus_if_needed(
             domain_id=domain_id,
             file_entries=doc_file_entries,
             batch_size=64,
+            tenant_id=tenant_id,
         )
         cf_cnt, sym_cnt, edge_cnt, doc_cnt = persist_custom_domain_to_pg(
             domain_id=domain_id,
@@ -1513,6 +1763,7 @@ def sync_custom_domain_corpus_if_needed(
             ast_edges=[],
             doc_chunks=new_doc_records,
             deleted_doc_ids=del_doc_ids,
+            tenant_id=tenant_id,
         )
         write_custom_sync_manifest(
             manifest_path=cand,
@@ -1525,6 +1776,7 @@ def sync_custom_domain_corpus_if_needed(
             ast_edges_indexed=edge_cnt,
             doc_chunks_indexed=doc_cnt,
             empty_doc_shas=updated_empty_shas,
+            tenant_id=tenant_id,
         )
         return {
             "synced": True,
@@ -1632,6 +1884,7 @@ def sync_custom_domain_corpus_if_needed(
         repo_sym_to_id[(rn, qn.split(".")[-1])] = sid
         short_to_sym_ids.setdefault(qn.split(".")[-1], []).append(sid)
 
+    uuid_ns = _tenant_uuid_prefix(domain_id, tenant_id)
     for rel_path in sorted(changed_or_new):
         disk_p, repo_n, blob_sha = live_files_meta[rel_path]
         try:
@@ -1644,13 +1897,13 @@ def sync_custom_domain_corpus_if_needed(
         file_uuid = (
             existing_by_path[rel_path][0]
             if rel_path in existing_by_path
-            else uuid5(NAMESPACE_URL, f"{domain_id}:file:{rel_path}")
+            else uuid5(NAMESPACE_URL, f"{uuid_ns}:file:{rel_path}")
         )
         commit_sha = hashlib.sha256(f"{domain_id}:{rel_path}:{blob_sha}".encode()).hexdigest()[:40]
         repo_commit_shas[repo_n] = commit_sha
         lang = effective_langs.get(disk_p.suffix.lower(), "python")
         file_scopes = ["public_eng", f"domain:{domain_id}", f"repo:{repo_n}"]
-        repo_uuid = uuid5(NAMESPACE_URL, f"{domain_id}:repo:{repo_n}")
+        repo_uuid = uuid5(NAMESPACE_URL, f"{uuid_ns}:repo:{repo_n}")
         new_code_files.append(
             CodeFileRecord(
                 file_id=file_uuid,
@@ -1664,6 +1917,7 @@ def sync_custom_domain_corpus_if_needed(
                 raw_content=raw_text,
                 line_count=max(1, len(raw_text.splitlines())),
                 repo_id=repo_uuid,
+                tenant_id=tenant_id,
             )
         )
         sub_rel = (
@@ -1679,10 +1933,18 @@ def sync_custom_domain_corpus_if_needed(
             )
             parsed_syms, parsed_edges = [], []
 
+        sym_texts_for_file = [
+            f"{ps.qualified_name}\n{ps.signature_skeleton}\n"
+            f"{ps.contextual_summary or ps.docstring or ps.signature_skeleton or ps.signature}"
+            for ps in parsed_syms
+        ]
+        sym_vecs_for_file = (
+            embed_custom_domain_texts(sym_texts_for_file) if sym_texts_for_file else []
+        )
         for sym_idx, ps in enumerate(parsed_syms):
             sym_uuid = uuid5(
                 NAMESPACE_URL,
-                f"{domain_id}:sym:{rel_path}:{ps.qualified_name}:{ps.start_line}:{sym_idx}",
+                f"{uuid_ns}:sym:{rel_path}:{ps.qualified_name}:{ps.start_line}:{sym_idx}",
             )
             qual_to_sym_id[ps.qualified_name] = sym_uuid
             repo_sym_to_id[(repo_n, ps.qualified_name)] = sym_uuid
@@ -1701,12 +1963,11 @@ def sync_custom_domain_corpus_if_needed(
                     signature_skeleton=ps.signature_skeleton,
                     contextual_summary=summary,
                     allowed_scopes=file_scopes,
-                    embedding=generate_deterministic_embedding(
-                        f"{ps.qualified_name}\n{ps.signature_skeleton}\n{summary}"
-                    ),
+                    embedding=sym_vecs_for_file[sym_idx],
                     repo_id=repo_uuid,
                     repo_qualified_id=f"{repo_n}::{ps.qualified_name}",
                     bare_name=ps.bare_name or ps.name,
+                    tenant_id=tenant_id,
                 )
             )
         for pe in parsed_edges:
@@ -1736,7 +1997,7 @@ def sync_custom_domain_corpus_if_needed(
             ASTEdgeRecord(
                 edge_id=uuid5(
                     NAMESPACE_URL,
-                    f"{domain_id}:edge:sync:{src_uuid}:{tgt_q}:{e_kind}:{edge_idx}",
+                    f"{uuid_ns}:edge:sync:{src_uuid}:{tgt_q}:{e_kind}:{edge_idx}",
                 ),
                 domain_id=domain_id,
                 source_symbol_id=src_uuid,
@@ -1745,6 +2006,7 @@ def sync_custom_domain_corpus_if_needed(
                 edge_kind=e_kind,
                 allowed_scopes=e_scopes,
                 is_cross_repo=False,
+                tenant_id=tenant_id,
             )
         )
 
@@ -1759,6 +2021,7 @@ def sync_custom_domain_corpus_if_needed(
         doc_chunks=[],
         deleted_file_ids=del_file_ids,
         repo_commit_shas=repo_commit_shas,
+        tenant_id=tenant_id,
     )
 
     # Recompute cross-boundary contracts over PG17 visible symbols/files for this domain
@@ -1769,6 +2032,7 @@ def sync_custom_domain_corpus_if_needed(
         domain_id=domain_id,
         symbols=all_dom_syms,
         code_files=all_dom_files,
+        tenant_id=tenant_id,
     )
     if cross_edges:
         cf_cnt, sym_cnt, edge_cnt, doc_cnt = persist_custom_domain_to_pg(
@@ -1781,6 +2045,7 @@ def sync_custom_domain_corpus_if_needed(
             ast_edges=cross_edges,
             doc_chunks=[],
             repo_commit_shas=repo_commit_shas,
+            tenant_id=tenant_id,
         )
     _ = mutated_file_id_set
 
@@ -1794,6 +2059,7 @@ def sync_custom_domain_corpus_if_needed(
         ast_symbols_indexed=sym_cnt,
         ast_edges_indexed=edge_cnt,
         doc_chunks_indexed=doc_cnt,
+        tenant_id=tenant_id,
     )
     return {
         "synced": True,
@@ -1817,11 +2083,13 @@ class BoundGraphRepository:
     ) -> None:
         self._repo = repo
         self._conn = conn
-        self._files_cache: dict[tuple[tuple[str, ...], str, int], list[CodeFileRecord]] = {}
-        self._symbols_cache: dict[tuple[tuple[str, ...], str, int], list[ASTSymbolRecord]] = {}
-        self._edges_cache: dict[tuple[tuple[str, ...], str, int], list[ASTEdgeRecord]] = {}
+        self._files_cache: dict[tuple[UUID, tuple[str, ...], str, int], list[CodeFileRecord]] = {}
+        self._symbols_cache: dict[
+            tuple[UUID, tuple[str, ...], str, int], list[ASTSymbolRecord]
+        ] = {}
+        self._edges_cache: dict[tuple[UUID, tuple[str, ...], str, int], list[ASTEdgeRecord]] = {}
         self._chunks_cache: dict[
-            tuple[tuple[str, ...], str, str | None, bool, int], list[DocChunkRecord]
+            tuple[UUID, tuple[str, ...], str, str | None, bool, int], list[DocChunkRecord]
         ] = {}
 
     def _use_pg17(self) -> bool:
@@ -1849,13 +2117,18 @@ class BoundGraphRepository:
             with conn_mgr.scoped_transaction(principal) as conn:
                 yield conn
             return
-        mgr = RLSConnectionManager(ScoutSettings().db_app_url, use_pool=False)
+        mgr = get_query_pool()
         with mgr.scoped_transaction(principal) as conn:
             yield conn
 
     def _query_pg_code_files(
-        self, principal: PrincipalContext, domain_id: str
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        *,
+        limit: int = 5_000,
     ) -> list[CodeFileRecord]:
+        safe_limit = max(1, min(limit, 25_000))
         try:
             with self._pg_tx(principal) as conn:
                 rows = conn.execute(
@@ -1865,8 +2138,9 @@ class BoundGraphRepository:
                     FROM code_files
                     WHERE domain_id = %s
                     ORDER BY repo_name, file_path
+                    LIMIT %s
                     """,
-                    (domain_id,),
+                    (domain_id, safe_limit),
                 ).fetchall()
             return [
                 CodeFileRecord(
@@ -1883,6 +2157,7 @@ class BoundGraphRepository:
                     raw_content=str(r[8]),
                     line_count=int(str(r[9])),
                     repo_id=UUID(str(r[10])) if r[10] is not None else None,
+                    tenant_id=principal.tenant_id,
                 )
                 for r in rows
             ]
@@ -1946,6 +2221,7 @@ class BoundGraphRepository:
                     repo_id=UUID(str(r[10])) if r[10] is not None else None,
                     repo_qualified_id=str(r[11]) if r[11] is not None else None,
                     bare_name=str(r[12]) if r[12] is not None else None,
+                    tenant_id=principal.tenant_id,
                 )
                 for r in rows
             ]
@@ -1986,6 +2262,7 @@ class BoundGraphRepository:
                     else [],
                     target_repo_qualified_id=str(r[7]) if r[7] is not None else None,
                     is_cross_repo=bool(r[8]),
+                    tenant_id=principal.tenant_id,
                 )
                 for r in rows
             ]
@@ -2002,7 +2279,7 @@ class BoundGraphRepository:
         self,
         principal: PrincipalContext,
         domain_id: str,
-        market_scope: MarketRegime | None = None,
+        market_scope: DocumentScope | None = None,
         include_stale: bool = False,
         chunk_ids: list[UUID] | None = None,
     ) -> list[DocChunkRecord]:
@@ -2065,10 +2342,11 @@ class BoundGraphRepository:
                         if isinstance(r[12], (list, tuple))
                         else [],
                         embedding=[],
-                        source_type=str(r[13]) if r[13] is not None else "quant_paper",
+                        source_type=str(r[13]) if r[13] is not None else "enterprise_doc",
                         version_str=str(r[14]) if r[14] is not None else "1",
                         is_stale=bool(r[15]),
                         stale_reason=str(r[16]) if r[16] is not None else None,
+                        tenant_id=principal.tenant_id,
                     )
                 )
             return out
@@ -2082,7 +2360,10 @@ class BoundGraphRepository:
             return []
 
     def _row_to_symbol_and_file(
-        self, row: tuple[object, ...]
+        self,
+        row: tuple[object, ...],
+        *,
+        tenant_id: UUID = DEFAULT_TENANT_ID,
     ) -> tuple[ASTSymbolRecord, CodeFileRecord]:
         sym = ASTSymbolRecord(
             symbol_id=UUID(str(row[0])),
@@ -2099,6 +2380,7 @@ class BoundGraphRepository:
             repo_id=UUID(str(row[10])) if row[10] is not None else None,
             repo_qualified_id=str(row[11]) if row[11] is not None else None,
             bare_name=str(row[12]) if row[12] is not None else None,
+            tenant_id=tenant_id,
         )
         cf = CodeFileRecord(
             file_id=UUID(str(row[13])),
@@ -2114,6 +2396,7 @@ class BoundGraphRepository:
             raw_content=str(row[21]),
             line_count=int(str(row[22])),
             repo_id=UUID(str(row[23])) if row[23] is not None else None,
+            tenant_id=tenant_id,
         )
         return sym, cf
 
@@ -2198,7 +2481,8 @@ class BoundGraphRepository:
                       AND (
                           e.edge_kind IN (
                               'USES_TYPE', 'IMPORTS', 'INHERITS',
-                              'PROVISIONED_BY', 'DISPATCHES', 'SELECTS', 'DOCUMENTS_COMPONENT'
+                              'PROVISIONED_BY', 'DISPATCHES', 'SELECTS', 'DOCUMENTS_COMPONENT',
+                              'OWNED_BY_TEAM', 'PART_OF_SYSTEM'
                           )
                           OR (
                               e.edge_kind = 'CALLS'
@@ -2282,7 +2566,7 @@ class BoundGraphRepository:
 
             neighbors: list[ASTNeighborhoodRecord] = []
             for row in out_rows:
-                sym, cf = self._row_to_symbol_and_file(row[:-1])
+                sym, cf = self._row_to_symbol_and_file(row[:-1], tenant_id=principal.tenant_id)
                 neighbors.append(
                     ASTNeighborhoodRecord(
                         symbol=sym,
@@ -2293,7 +2577,7 @@ class BoundGraphRepository:
                     )
                 )
             for row in in_rows:
-                sym, cf = self._row_to_symbol_and_file(row[:-1])
+                sym, cf = self._row_to_symbol_and_file(row[:-1], tenant_id=principal.tenant_id)
                 neighbors.append(
                     ASTNeighborhoodRecord(
                         symbol=sym,
@@ -2304,7 +2588,7 @@ class BoundGraphRepository:
                     )
                 )
             for row in test_rows:
-                sym, cf = self._row_to_symbol_and_file(row[:-1])
+                sym, cf = self._row_to_symbol_and_file(row[:-1], tenant_id=principal.tenant_id)
                 neighbors.append(
                     ASTNeighborhoodRecord(
                         symbol=sym,
@@ -2326,8 +2610,13 @@ class BoundGraphRepository:
     def list_visible_code_files(
         self, principal: PrincipalContext, domain_id: str
     ) -> list[CodeFileRecord]:
-        epoch = _DOMAIN_SYNC_EPOCHS.get(domain_id, 0)
-        inst_cache_key = (tuple(sorted(set(principal.allowed_scopes))), domain_id, epoch)
+        epoch = _DOMAIN_SYNC_EPOCHS.get((principal.tenant_id, domain_id), 0)
+        inst_cache_key = (
+            principal.tenant_id,
+            tuple(sorted(set(principal.allowed_scopes))),
+            domain_id,
+            epoch,
+        )
         if inst_cache_key in self._files_cache:
             return list(self._files_cache[inst_cache_key])
         if not self._use_pg17() and hasattr(self._repo, "list_visible_code_files"):
@@ -2352,8 +2641,13 @@ class BoundGraphRepository:
     def list_visible_ast_symbols(
         self, principal: PrincipalContext, domain_id: str
     ) -> list[ASTSymbolRecord]:
-        epoch = _DOMAIN_SYNC_EPOCHS.get(domain_id, 0)
-        inst_cache_key = (tuple(sorted(set(principal.allowed_scopes))), domain_id, epoch)
+        epoch = _DOMAIN_SYNC_EPOCHS.get((principal.tenant_id, domain_id), 0)
+        inst_cache_key = (
+            principal.tenant_id,
+            tuple(sorted(set(principal.allowed_scopes))),
+            domain_id,
+            epoch,
+        )
         if inst_cache_key in self._symbols_cache:
             return list(self._symbols_cache[inst_cache_key])
         if not self._use_pg17() and hasattr(self._repo, "list_visible_ast_symbols"):
@@ -2378,8 +2672,13 @@ class BoundGraphRepository:
     def list_visible_ast_edges(
         self, principal: PrincipalContext, domain_id: str
     ) -> list[ASTEdgeRecord]:
-        epoch = _DOMAIN_SYNC_EPOCHS.get(domain_id, 0)
-        inst_cache_key = (tuple(sorted(set(principal.allowed_scopes))), domain_id, epoch)
+        epoch = _DOMAIN_SYNC_EPOCHS.get((principal.tenant_id, domain_id), 0)
+        inst_cache_key = (
+            principal.tenant_id,
+            tuple(sorted(set(principal.allowed_scopes))),
+            domain_id,
+            epoch,
+        )
         if inst_cache_key in self._edges_cache:
             return list(self._edges_cache[inst_cache_key])
         if not self._use_pg17() and hasattr(self._repo, "list_visible_ast_edges"):
@@ -2405,12 +2704,13 @@ class BoundGraphRepository:
         self,
         principal: PrincipalContext,
         domain_id: str,
-        market_scope: MarketRegime | None = None,
+        market_scope: DocumentScope | None = None,
         include_stale: bool = False,
     ) -> list[DocChunkRecord]:
         mkt_key = market_scope.value if market_scope is not None else None
-        epoch = _DOMAIN_SYNC_EPOCHS.get(domain_id, 0)
+        epoch = _DOMAIN_SYNC_EPOCHS.get((principal.tenant_id, domain_id), 0)
         cache_key = (
+            principal.tenant_id,
             tuple(sorted(set(principal.allowed_scopes))),
             domain_id,
             mkt_key,
@@ -2504,7 +2804,7 @@ class BoundGraphRepository:
         principal: PrincipalContext,
         domain_id: str,
         query_text: str,
-        market_scope: MarketRegime | None = None,
+        market_scope: DocumentScope | None = None,
         limit: int = 50,
         min_calibrated_score: float = 0.0,
     ) -> tuple[list[DocChunkRecord], list[CalibratedRankedSearchHit]]:
@@ -2642,11 +2942,7 @@ class BoundGraphRepository:
             if missing_named_entity:
                 cal_sc = round(min(0.38, 0.20 + 0.30 * cov), 4)
             else:
-                base_cal = (
-                    0.30 + 0.60 * cov
-                    if (wh >= 2 or len(words) == 1)
-                    else 0.28 + 0.42 * cov
-                )
+                base_cal = 0.30 + 0.60 * cov if (wh >= 2 or len(words) == 1) else 0.28 + 0.42 * cov
                 cal_sc = round(min(0.95, base_cal), 4)
             rrf_sc = (
                 round(min(0.96, max(cal_sc, 0.68 + 0.25 * cov)), 4)
@@ -2679,12 +2975,84 @@ class BoundGraphRepository:
             return [c for c, _ in filtered], [h for _, h in filtered]
         return [chk for chk, _wh, _sc, _tit, _ph in selected], synth_hits
 
+    def search_hybrid_rrf_doc_chunks(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        query_text: str,
+        *,
+        market_scope: DocumentScope | None = None,
+        top_k: int = 5,
+        min_calibrated_score: float = 0.0,
+    ) -> tuple[list[DocChunkRecord], list[CalibratedRankedSearchHit]]:
+        """Execute real 3-way hybrid RRF doc search across PG17 or InMemoryRLSRepository."""
+        if not query_text.strip():
+            return self.list_visible_doc_chunks(principal, domain_id, market_scope)[:top_k], []
+
+        if self._use_pg17():
+            return self.search_visible_doc_chunks_calibrated(
+                principal,
+                domain_id,
+                query_text,
+                market_scope=market_scope,
+                limit=top_k,
+                min_calibrated_score=min_calibrated_score,
+            )
+
+        if (
+            hasattr(self._repo, "search_doc_chunks_hybrid_rrf")
+            and os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() != "1"
+        ):
+            base_chunks = self.list_visible_doc_chunks(principal, domain_id, market_scope)
+            if not base_chunks:
+                return [], []
+            query_vec = _embed_query_for_hybrid_rrf(query_text)
+            chunk_dim = len(base_chunks[0].embedding) if base_chunks[0].embedding else 0
+            if chunk_dim > 0 and chunk_dim == len(query_vec):
+                raw_hits = self._repo.search_doc_chunks_hybrid_rrf(
+                    principal=principal,
+                    domain_id=domain_id,
+                    query_text=query_text,
+                    query_embedding=query_vec,
+                    market_scope=market_scope,
+                    top_k=top_k,
+                    min_calibrated_score=min_calibrated_score,
+                )
+                cal_hits = [
+                    h
+                    if isinstance(h, CalibratedRankedSearchHit)
+                    else CalibratedRankedSearchHit(
+                        item_id=h.item_id,
+                        qualified_name_or_title=h.qualified_name_or_title,
+                        normalized_rrf_score=h.normalized_rrf_score,
+                        trigram_rank=h.trigram_rank,
+                        bm25_rank=h.bm25_rank,
+                        vector_rank=h.vector_rank,
+                        calibrated_score=h.normalized_rrf_score,
+                        domain_id=domain_id,
+                    )
+                    for h in raw_hits
+                ]
+                by_id = {c.chunk_id: c for c in base_chunks}
+                ranked_chunks = [by_id[h.item_id] for h in cal_hits if h.item_id in by_id]
+                matched_hits = [h for h in cal_hits if h.item_id in by_id]
+                return ranked_chunks[:top_k], matched_hits[:top_k]
+
+        return self.search_visible_doc_chunks_calibrated(
+            principal,
+            domain_id,
+            query_text,
+            market_scope=market_scope,
+            limit=top_k,
+            min_calibrated_score=min_calibrated_score,
+        )
+
     def search_visible_doc_chunks(
         self,
         principal: PrincipalContext,
         domain_id: str,
         query_text: str,
-        market_scope: MarketRegime | None = None,
+        market_scope: DocumentScope | None = None,
         limit: int = 50,
     ) -> list[DocChunkRecord]:
         if hasattr(self._repo, "search_visible_doc_chunks"):
@@ -2827,9 +3195,7 @@ class BoundGraphRepository:
             raw_leaf = s.qualified_name.split(".")[-1]
             short_sym = raw_leaf.lower()
             is_code_style_sym = (
-                "_" in raw_leaf
-                or any(ch.isupper() for ch in raw_leaf[1:])
-                or len(words) <= 1
+                "_" in raw_leaf or any(ch.isupper() for ch in raw_leaf[1:]) or len(words) <= 1
             )
             exact_short = (
                 len(short_sym) >= 3
@@ -2960,6 +3326,196 @@ class BoundGraphRepository:
         visible = self.list_visible_code_files(principal, domain_id)
         wanted = {p.strip() for p in file_paths if p and p.strip()}
         return [f for f in visible if f.file_path in wanted]
+
+    def list_visible_side_effects(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        *,
+        effect_category: str | None = None,
+        repo_name: str | None = None,
+        file_path: str | None = None,
+    ) -> list[SideEffectRecord]:
+        """Lists side effects visible under RLS across PG17 or InMemoryRLSRepository."""
+        if not self._use_pg17() and hasattr(self._repo, "list_visible_side_effects"):
+            return list(
+                self._repo.list_visible_side_effects(
+                    principal,
+                    domain_id,
+                    effect_category=effect_category,
+                    repo_name=repo_name,
+                    file_path=file_path,
+                )
+            )
+        if not self._use_pg17() and self._has_in_memory_domain_records(domain_id):
+            return []
+        pg_repo = (
+            self._repo if isinstance(self._repo, PostgresRLSRepository) else PostgresRLSRepository()
+        )
+        try:
+            with self._pg_tx(principal) as conn:
+                return pg_repo.list_visible_side_effects(
+                    conn,
+                    domain_id,
+                    effect_category=effect_category,
+                    repo_name=repo_name,
+                    file_path=file_path,
+                )
+        except Exception as exc:
+            logger.debug(
+                "PG17 list_visible_side_effects skipped (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+            return []
+
+    def list_visible_jira_issues(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        *,
+        project_key: str | None = None,
+    ) -> list[JiraIssueRecord]:
+        """Lists Jira issues visible under RLS across PG17 or InMemoryRLSRepository."""
+        if not self._use_pg17() and hasattr(self._repo, "list_jira_issues"):
+            return list(self._repo.list_jira_issues(principal, domain_id, project_key=project_key))
+        if not self._use_pg17() and self._has_in_memory_domain_records(domain_id):
+            return []
+        pg_repo = (
+            self._repo if isinstance(self._repo, PostgresRLSRepository) else PostgresRLSRepository()
+        )
+        try:
+            with self._pg_tx(principal) as conn:
+                return pg_repo.list_jira_issues(conn, domain_id, project_key=project_key)
+        except Exception as exc:
+            logger.debug(
+                "PG17 list_visible_jira_issues skipped (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+            return []
+
+    def get_scout_session(
+        self,
+        principal: PrincipalContext,
+        session_id: str,
+    ) -> ScoutSessionRecord | None:
+        """Loads a multi-turn scout session under RLS (never using admin pool)."""
+        if not self._use_pg17() and hasattr(self._repo, "get_scout_session"):
+            res = self._repo.get_scout_session(principal, session_id)
+            return res if isinstance(res, ScoutSessionRecord) else None
+        if not self._use_pg17():
+            return None
+        pg_repo = (
+            self._repo if isinstance(self._repo, PostgresRLSRepository) else PostgresRLSRepository()
+        )
+        try:
+            with self._pg_tx(principal) as conn:
+                return pg_repo.get_scout_session(conn, session_id, principal_id=principal.user_id)
+        except Exception as exc:
+            logger.debug(
+                "PG17 get_scout_session skipped (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+            return None
+
+    def upsert_scout_session(
+        self,
+        principal: PrincipalContext,
+        record: ScoutSessionRecord,
+    ) -> ScoutSessionRecord:
+        """Persists a multi-turn scout session under RLS (never using admin pool)."""
+        if not self._use_pg17() and hasattr(self._repo, "upsert_scout_session"):
+            res = self._repo.upsert_scout_session(principal, record)
+            if isinstance(res, ScoutSessionRecord):
+                return res
+        if not self._use_pg17():
+            return record
+        pg_repo = (
+            self._repo if isinstance(self._repo, PostgresRLSRepository) else PostgresRLSRepository()
+        )
+        try:
+            with self._pg_tx(principal) as conn:
+                return pg_repo.upsert_scout_session(conn, record)
+        except Exception as exc:
+            logger.debug(
+                "PG17 upsert_scout_session skipped (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+            return record
+
+    def resolve_branch_overlay(
+        self,
+        principal: PrincipalContext,
+        domain_id: str,
+        branch_id: str | None,
+    ) -> tuple[Any | None, list[Any]]:
+        """Resolves active MR/branch RefSnapshotRecord and OverlayFileDeltaRecords under RLS."""
+        clean_branch = (branch_id or "").strip()
+        if not clean_branch or clean_branch.lower() in {"main", "master", "head"}:
+            return (None, [])
+
+        def _match_snapshot(snaps: list[Any]) -> Any | None:
+            if not snaps:
+                return None
+            norm = clean_branch.lower()
+            # Exact match on snapshot_id, ref_name, mr_iid, or "mr/<iid>" / "mr-!<iid>"
+            for snap in snaps:
+                sid_l = str(getattr(snap, "snapshot_id", "") or "").lower()
+                ref_l = str(getattr(snap, "ref_name", "") or "").lower()
+                iid_l = str(getattr(snap, "mr_iid", "") or "").lower()
+                if norm in {
+                    sid_l,
+                    ref_l,
+                    iid_l,
+                    f"mr/{iid_l}",
+                    f"mr-{iid_l}",
+                    f"mr:!{iid_l}",
+                    f"!{iid_l}",
+                }:
+                    return snap
+            # Generic overlay selector picks the latest open merge_request/branch snapshot.
+            if norm in {"mr-overlay-active", "mr:overlay-draft", "overlay", "mr-active"}:
+                for snap in snaps:
+                    if str(getattr(snap, "ref_kind", "")) in {"merge_request", "pull_request"}:
+                        return snap
+                return snaps[0]
+            return None
+
+        if not self._use_pg17():
+            if hasattr(self._repo, "list_ref_snapshots") and hasattr(
+                self._repo, "list_overlay_file_deltas"
+            ):
+                snaps = list(self._repo.list_ref_snapshots(principal, domain_id))
+                matched = _match_snapshot(snaps)
+                if matched is None:
+                    return (None, [])
+                deltas = list(
+                    self._repo.list_overlay_file_deltas(principal, domain_id, matched.snapshot_id)
+                )
+                return (matched, deltas)
+            return (None, [])
+
+        pg_repo = (
+            self._repo if isinstance(self._repo, PostgresRLSRepository) else PostgresRLSRepository()
+        )
+        try:
+            with self._pg_tx(principal) as conn:
+                snaps = pg_repo.list_ref_snapshots(conn, domain_id)
+                matched = _match_snapshot(snaps)
+                if matched is None:
+                    return (None, [])
+                deltas = pg_repo.list_overlay_file_deltas(conn, domain_id, matched.snapshot_id)
+                return (matched, deltas)
+        except Exception as exc:
+            logger.debug(
+                "PG17 resolve_branch_overlay skipped (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+            return (None, [])
 
 
 def create_insufficient_context_diagnostic(
@@ -3348,6 +3904,7 @@ class PreFlightValidator:
                         break
                     if (
                         s.file_path == candidate
+                        or s.repo_name == candidate
                         or s.file_path.endswith("/" + candidate)
                         or s.file_path.split("/")[-1].rsplit(".", 1)[0] == candidate
                         or candidate in s.file_path.split("/")
@@ -3398,6 +3955,7 @@ class PreFlightValidator:
                         break
                     if (
                         s.file_path == candidate
+                        or s.repo_name == candidate
                         or s.file_path.endswith("/" + candidate)
                         or s.file_path.split("/")[-1].rsplit(".", 1)[0] == candidate
                         or candidate in s.file_path.split("/")
@@ -3526,6 +4084,7 @@ class PreFlightValidator:
         bound_repo: BoundGraphRepository,
         principal: PrincipalContext,
         domain_id: str,
+        overlay_files_by_path: dict[str, CodeFileRecord] | None = None,
     ) -> tuple[list[str], int]:
         """Verifies 100% internal symbol resolution via AST indexing and 1-hop closure (Check 1).
 
@@ -3560,6 +4119,9 @@ class PreFlightValidator:
             covered_symbols.add(slice_rec.qualified_symbol.split(".")[-1])
 
         for target_slice in target_slices:
+            if overlay_files_by_path and target_slice.file_path in overlay_files_by_path:
+                # New/modified CoW MR overlay symbols are verified by Check 5 overlay SHA anchoring.
+                continue
             # Look up focus symbol in repository AST symbols
             focus_sym: ASTSymbolRecord | None = None
             for sym_rec in visible_symbols:
@@ -3977,8 +4539,8 @@ class PreFlightValidator:
             for line in s.verbatim_code_with_lines.splitlines():
                 m = re.match(r"^\s*\d+\s*\|\s?(.*)$", line)
                 raw_lines.append(m.group(1) if m else line)
-            cleaned_code = textwrap.dedent("\n".join(raw_lines)).strip()
-            if not cleaned_code:
+            cleaned_code = textwrap.dedent("\n".join(raw_lines)).strip("\n")
+            if not cleaned_code.strip():
                 continue
 
             has_error = False
@@ -4033,8 +4595,49 @@ class PreFlightValidator:
                 if ext in (".py",) and py_parser is not None:
                     tree = py_parser.parse(code_b)
                     if tree.root_node.has_error:
-                        has_error = True
-                        err_msg = "Tree-sitter Python parser reported syntax error"
+                        # Indented class members (fields, properties, methods) or slicer-elided
+                        # skeletons are syntactically valid inside a class body.
+                        wrapped_ok = False
+                        indented = "\n".join(
+                            f"    {ln}" if ln.strip() else "" for ln in cleaned_code.splitlines()
+                        )
+                        wrap_tree = py_parser.parse(f"class _SliceWrap:\n{indented}\n".encode())
+                        if not wrap_tree.root_node.has_error:
+                            wrapped_ok = True
+                        elif bound_repo is not None:
+                            b_repo = (
+                                bound_repo
+                                if isinstance(bound_repo, BoundGraphRepository)
+                                else BoundGraphRepository(bound_repo)
+                            )
+                            p_ctx = self._resolve_principal(principal)
+                            dom = domain_id or ScoutSettings().default_domain_id
+                            parent_files = b_repo.get_code_files_by_paths(p_ctx, dom, [s.file_path])
+                            if parent_files:
+                                p_raw = parent_files[0].raw_content
+                                p_lines = p_raw.splitlines()
+                                # Only accept sub-file context-window slices whose lines match
+                                # a verified parent module that itself parses with 0 AST errors.
+                                is_subfile = s.start_line > 1 or s.end_line < len(p_lines)
+                                slice_matches_parent = True
+                                for raw_ln in s.verbatim_code_with_lines.splitlines():
+                                    lm = re.match(r"^\s*(\d+)\s*\|\s?(.*)$", raw_ln)
+                                    if not lm:
+                                        continue
+                                    ln_no = int(lm.group(1))
+                                    txt_part = lm.group(2).split("...  # [lines ", 1)[0]
+                                    if not (
+                                        1 <= ln_no <= len(p_lines)
+                                        and p_lines[ln_no - 1].rstrip() == txt_part.rstrip()
+                                    ):
+                                        slice_matches_parent = False
+                                        break
+                                if is_subfile and slice_matches_parent:
+                                    p_tree = py_parser.parse(p_raw.encode("utf-8"))
+                                    wrapped_ok = not p_tree.root_node.has_error
+                        if not wrapped_ok:
+                            has_error = True
+                            err_msg = "Tree-sitter Python parser reported syntax error"
                 elif ext in (".ts", ".js") and ts_parser is not None:
                     tree = ts_parser.parse(code_b)
                     if tree.root_node.has_error:
@@ -4204,6 +4807,7 @@ class PreFlightValidator:
         bound_repo: BoundGraphRepository,
         principal: PrincipalContext,
         domain_id: str,
+        overlay_files_by_path: dict[str, CodeFileRecord] | None = None,
     ) -> tuple[bool, list[str], list[MissingItemRecord]]:
         """Check 5: Cryptographic provenance anchor verification."""
         unanchored: list[str] = []
@@ -4254,7 +4858,9 @@ class PreFlightValidator:
                 )
                 continue
 
-            f_rec = files_by_path.get(s.file_path)
+            f_rec = (
+                overlay_files_by_path.get(s.file_path) if overlay_files_by_path else None
+            ) or files_by_path.get(s.file_path)
             if f_rec is None:
                 unanchored.append(f"Phantom file not found in repository: {s.file_path}")
                 missing_items.append(
@@ -4347,7 +4953,6 @@ class PreFlightValidator:
         code_slices: list[VerbatimCodeSlice] | None = None,
         user_prompt: str | None = None,
         supporting_doc_citations: list[DocCitationSpan] | None = None,
-        quant_strategy_spec: QuantStrategyBrief | None = None,
         normalized_rrf_score: float | None = None,
         cross_encoder_score: float | None = None,
         repo: Any = None,
@@ -4355,6 +4960,7 @@ class PreFlightValidator:
         domain_id: str | None = None,
         conn: Connection[tuple[object, ...]] | None = None,
         doc_chunks: dict[str, str] | list[DocChunkRecord] | None = None,
+        overlay_files_by_path: dict[str, CodeFileRecord] | None = None,
     ) -> PreFlightValidationReport:
         """Executes all 6 deterministic preflight checks, returning a PreFlightValidationReport."""
         # Unpack parameters from pack if provided
@@ -4371,11 +4977,7 @@ class PreFlightValidator:
             if supporting_doc_citations is not None
             else (list(pack.supporting_doc_citations) if pack is not None else [])
         )
-        active_quant = (
-            quant_strategy_spec
-            if quant_strategy_spec is not None
-            else (pack.quant_strategy_spec if pack is not None else None)
-        )
+        active_brief = pack.domain_knowledge_brief if pack is not None else None
         active_domain = (
             domain_id
             if domain_id is not None
@@ -4398,10 +5000,10 @@ class PreFlightValidator:
             domain_id=active_domain,
             prompt=active_prompt,
         ) as pf_span:
-            # Incorporate verified citations from quant strategy specification if present
+            # Incorporate verified citations from domain knowledge brief if present
             all_citations: list[DocCitationSpan] = list(active_citations)
-            if active_quant and active_quant.verified_citations:
-                for c in active_quant.verified_citations:
+            if active_brief and active_brief.verified_citations:
+                for c in active_brief.verified_citations:
                     if c not in all_citations:
                         all_citations.append(c)
 
@@ -4420,6 +5022,7 @@ class PreFlightValidator:
                 bound_repo=bound_repo,
                 principal=active_principal,
                 domain_id=active_domain,
+                overlay_files_by_path=overlay_files_by_path,
             )
             visible_symbols = bound_repo.list_visible_ast_symbols(active_principal, active_domain)
             visible_files = bound_repo.list_visible_code_files(active_principal, active_domain)
@@ -4500,6 +5103,7 @@ class PreFlightValidator:
                     bound_repo=bound_repo,
                     principal=active_principal,
                     domain_id=active_domain,
+                    overlay_files_by_path=overlay_files_by_path,
                 )
             )
 
@@ -4550,9 +5154,7 @@ class PreFlightValidator:
                 "check_6_freshness": check_6_passed,
             }
             all_passed = all(check_results.values())
-            brief_obj = (
-                pack.domain_knowledge_brief if pack is not None else None
-            ) or active_quant
+            brief_obj = active_brief
             if (
                 brief_obj is not None
                 and getattr(brief_obj, "sufficiency_verdict", "sufficient") == "insufficient"
@@ -4607,7 +5209,7 @@ class PreFlightValidator:
                         )
                 if not check_3_passed:
                     feedback_parts.append(
-                        f"- Check 3 (Normalized RRF Score, BLK-01): Top Normalized RRF score "
+                        f"- Check 3 (Normalized RRF Score): Top Normalized RRF score "
                         f"{final_rrf_score:.4f} is below threshold {self.min_rrf_score:.2f}."
                     )
                 if not check_4_passed:
@@ -4665,7 +5267,6 @@ class PreFlightValidator:
         code_slices: list[VerbatimCodeSlice] | None = None,
         user_prompt: str | None = None,
         supporting_doc_citations: list[DocCitationSpan] | None = None,
-        quant_strategy_spec: QuantStrategyBrief | None = None,
         normalized_rrf_score: float | None = None,
         cross_encoder_score: float | None = None,
         repo: Any = None,
@@ -4681,7 +5282,6 @@ class PreFlightValidator:
             code_slices=code_slices,
             user_prompt=user_prompt,
             supporting_doc_citations=supporting_doc_citations,
-            quant_strategy_spec=quant_strategy_spec,
             normalized_rrf_score=normalized_rrf_score,
             cross_encoder_score=cross_encoder_score,
             repo=repo,

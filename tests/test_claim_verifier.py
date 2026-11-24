@@ -211,3 +211,25 @@ def test_empty_claim_and_empty_source() -> None:
     rec_empty_src = verifier.verify_single_claim("Valid claim", [])
     assert rec_empty_src.is_verified is False
     assert rec_empty_src.failure_code == ClaimFailureCode.EMPTY_SOURCE
+
+
+def test_homoglyph_spoofing_boundary_cases() -> None:
+    """Verifies punctuation-only, pure-script, and pure-homoglyph lookalike boundaries."""
+    assert detect_homoglyph_spoofing("!!!") == (False, "")
+    assert detect_homoglyph_spoofing("") == (False, "")
+
+    hg_greek_mix, _ = detect_homoglyph_spoofing("Verify s\u03bfme")
+    assert hg_greek_mix is True
+
+    hg_pure_cyr, reason_cyr = detect_homoglyph_spoofing("Valid Latin \u0430\u0441")
+    assert hg_pure_cyr is True
+    assert "Pure homoglyph" in reason_cyr
+
+    hg_pure_gr, _ = detect_homoglyph_spoofing("Valid Latin \u03bf\u03bd")
+    assert hg_pure_gr is True
+
+    assert (
+        detect_homoglyph_spoofing("\u041f\u0440\u0438\u0432\u0435\u0442 123 \u043c\u0438\u0440")[0]
+        is False
+    )
+    assert detect_homoglyph_spoofing("\u0391\u03b2\u03b3 \u03b4\u03b5\u03b6")[0] is False

@@ -46,6 +46,10 @@ describe("App Integration", () => {
       expect(screen.getByTestId("header-auth-badge")).toHaveTextContent(
         "Bearer: engineer"
       );
+      expect(
+        screen.getByTestId("domain-card-code_architecture_scout")
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("run-scout-btn")).toBeEnabled();
     });
 
     // Run SSE workflow as Engineer
@@ -100,7 +104,7 @@ describe("App Integration", () => {
     ).not.toBeInTheDocument();
     expect(document.body.textContent ?? "").not.toContain("Apple M5 Pro");
     expect(
-      screen.queryByTestId("domain-card-trading_code_scout")
+      screen.queryByTestId("domain-card-code_architecture_scout")
     ).not.toBeInTheDocument();
   });
 
@@ -148,7 +152,7 @@ describe("App Integration", () => {
         "Apple Silicon MLX"
       );
       expect(
-        screen.getByTestId("domain-card-trading_code_scout")
+        screen.getByTestId("domain-card-code_architecture_scout")
       ).toBeInTheDocument();
     });
 
@@ -180,14 +184,14 @@ describe("App Integration", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("domain-card-trading_code_scout")
+        screen.getByTestId("domain-card-code_architecture_scout")
       ).toBeInTheDocument();
     });
 
-    // Select a code domain, then switch source filter to wiki -> auto-switches domain to quant_research_scout
-    fireEvent.click(screen.getByTestId("domain-card-trading_code_scout"));
+    // Select a code domain, then switch source filter to wiki -> auto-switches domain to enterprise_docs_scout
+    fireEvent.click(screen.getByTestId("domain-card-code_architecture_scout"));
     expect(
-      screen.getByTestId("domain-card-trading_code_scout")
+      screen.getByTestId("domain-card-code_architecture_scout")
     ).toHaveClass("domain-row-active");
 
     fireEvent.click(screen.getByTestId("source-filter-wiki"));
@@ -195,14 +199,17 @@ describe("App Integration", () => {
       "Confluence & Docs"
     );
     expect(
-      screen.queryByTestId("domain-card-trading_code_scout")
+      screen.queryByTestId("domain-card-code_architecture_scout")
     ).not.toBeInTheDocument();
     expect(
-      screen.getByTestId("domain-card-quant_research_scout")
+      screen.getByTestId("domain-card-enterprise_docs_scout")
     ).toHaveClass("domain-row-active");
 
     // Switch back to all and run a query with both code + wiki + jira citations
     fireEvent.click(screen.getByTestId("source-filter-all"));
+    await waitFor(() => {
+      expect(screen.getByTestId("run-scout-btn")).toBeEnabled();
+    });
     fireEvent.click(screen.getByTestId("run-scout-btn"));
 
     await waitFor(() => {
@@ -216,7 +223,7 @@ describe("App Integration", () => {
     fireEvent.click(screen.getByTestId("source-filter-jira"));
     expect(screen.queryByTestId("inline-cite-code-0")).not.toBeInTheDocument();
     expect(
-      screen.queryByTestId("inline-cite-doc-chunk_hawkes_01")
+      screen.queryByTestId("inline-cite-doc-chunk_rls_01")
     ).not.toBeInTheDocument();
     expect(
       screen.getByTestId("inline-cite-doc-chunk_jira_eng412")
@@ -252,6 +259,10 @@ describe("App Integration", () => {
       expect(screen.getByTestId("header-auth-badge")).toHaveTextContent(
         "Bearer: engineer"
       );
+      expect(
+        screen.getByTestId("domain-card-code_architecture_scout")
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("run-scout-btn")).toBeEnabled();
     });
 
     fireEvent.click(screen.getByTestId("run-scout-btn"));
@@ -407,9 +418,9 @@ describe("App Integration", () => {
   it("hydrates extended engineer default_scopes from /api/v1/workspace-config on initial mount without manual click", async () => {
     const extendedScopes = [
       "public_eng",
-      "public_quant",
+      "public_docs",
       "public_de",
-      "repo:trading_strategies",
+      "repo:core_services",
     ];
     installMockApiFetch({
       workspaceConfigResponse: {
@@ -434,7 +445,7 @@ describe("App Integration", () => {
         "public_de"
       );
       expect(screen.getByTestId("active-scopes-list")).toHaveTextContent(
-        "repo:trading_strategies"
+        "repo:core_services"
       );
       expect(screen.getByTestId("header-auth-badge")).toHaveTextContent(
         "Bearer: engineer"

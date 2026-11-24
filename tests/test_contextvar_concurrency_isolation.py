@@ -55,9 +55,9 @@ async def test_concurrent_tasks_distinct_principals_zero_leakage() -> None:
         allowed_scopes=["repo:repo_alpha", "public_eng"],
     )
     token_b = create_signed_principal_token(
-        user_id="bob_quant",
-        role=RoleType.QUANT_RESEARCHER,
-        allowed_scopes=["corpus:alpha_factors", "quant_restricted"],
+        user_id="bob_researcher",
+        role=RoleType.DOMAIN_RESEARCHER,
+        allowed_scopes=["corpus:enterprise_docs", "docs_restricted"],
     )
 
     observed_in_a: list[str] = []
@@ -82,13 +82,13 @@ async def test_concurrent_tasks_distinct_principals_zero_leakage() -> None:
 
     await asyncio.gather(
         task_worker(token_a, "alice_engineer", RoleType.ENGINEER, observed_in_a),
-        task_worker(token_b, "bob_quant", RoleType.QUANT_RESEARCHER, observed_in_b),
+        task_worker(token_b, "bob_researcher", RoleType.DOMAIN_RESEARCHER, observed_in_b),
     )
 
     assert len(observed_in_a) == 5
     assert set(observed_in_a) == {"alice_engineer"}
     assert len(observed_in_b) == 5
-    assert set(observed_in_b) == {"bob_quant"}
+    assert set(observed_in_b) == {"bob_researcher"}
     assert _CURRENT_PRINCIPAL.get() is None
 
 
@@ -136,7 +136,7 @@ async def test_high_volume_concurrency_scale_50_tasks() -> None:
     tokens = [
         create_signed_principal_token(
             user_id=f"principal_{i:03d}",
-            role=RoleType.ENGINEER if i % 2 == 0 else RoleType.QUANT_RESEARCHER,
+            role=RoleType.ENGINEER if i % 2 == 0 else RoleType.DOMAIN_RESEARCHER,
             allowed_scopes=[f"scope:tenant_{i:03d}"],
         )
         for i in range(task_count)
@@ -206,7 +206,7 @@ async def test_fastapi_http_concurrent_request_isolation() -> None:
     )
     token_b = create_signed_principal_token(
         user_id="http_quant_bob",
-        role=RoleType.QUANT_RESEARCHER,
+        role=RoleType.DOMAIN_RESEARCHER,
         allowed_scopes=["corpus:market_microstructure"],
     )
 
@@ -237,7 +237,7 @@ async def test_fastapi_http_concurrent_request_isolation() -> None:
 
         assert data_b["user_id"] == "http_quant_bob"
         assert data_b["ctx_user_id"] == "http_quant_bob"
-        assert data_b["role"] == "quant_researcher"
+        assert data_b["role"] == "domain_researcher"
 
         # Verify no cross-talk occurred between the responses
         assert data_a["user_id"] != data_b["user_id"]
@@ -271,7 +271,7 @@ async def test_unauthenticated_request_concurrency_does_not_affect_authenticated
         async def send_invalid() -> httpx.Response:
             return await client.post(
                 "/api/v1/scout/query",
-                json={"query": "test query", "domain_id": "trading_code_scout"},
+                json={"query": "test query", "domain_id": "code_architecture_scout"},
                 headers={"Authorization": "Bearer bad.token.value"},
             )
 

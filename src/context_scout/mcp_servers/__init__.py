@@ -1,4 +1,4 @@
-"""Enterprise MCP Servers Package for Codebase and Quant Research Retrieval."""
+"""Enterprise MCP Servers Package for Codebase and Document Retrieval."""
 
 from context_scout.mcp_servers.common import (
     MAX_PAYLOAD_BYTES,

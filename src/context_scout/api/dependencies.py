@@ -13,11 +13,14 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Final
 
-from fastapi import Header, HTTPException
+from fastapi import Depends, Header, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 if TYPE_CHECKING:
     from context_scout.agents.scout_workflow import LocalGemmaClient
@@ -31,56 +34,88 @@ from context_scout.db.repositories import (
 )
 from context_scout.db.session import RLSConnectionManager
 from context_scout.plugins.registry import PluginRegistry
+from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import (
+    DEFAULT_TENANT_ID,
     ImplementationContextPack,
     PrincipalContext,
     RoleType,
+)
+from context_scout.security.betrvg_privacy import BetrVGPrivacyGuard
+from context_scout.security.oidc_iap_auth import (
+    AuthVerificationError,
+    CloudIAPVerifier,
+    OIDCJWKSVerifier,
+    build_iap_verifier_from_env,
+    build_oidc_verifier_from_env,
 )
 from context_scout.security.rbac import _CURRENT_PRINCIPAL
 from context_scout.telemetry import ScoutTelemetryTracer
 
 logger = logging.getLogger(__name__)
 
+_REQUEST_PRINCIPAL_SLOT: Final[ContextVar[list[PrincipalContext] | None]] = ContextVar(
+    "scout_request_principal_slot",
+    default=None,
+)
+
+
+def _record_authenticated_principal(principal: PrincipalContext) -> None:
+    """Binds authenticated principal into ContextVar and per-request mutable holder."""
+    _CURRENT_PRINCIPAL.set(principal)
+    slot = _REQUEST_PRINCIPAL_SLOT.get()
+    if slot is not None:
+        slot.clear()
+        slot.append(principal)
+
+
 DEFAULT_ROLE_SCOPES: Final[dict[RoleType, list[str]]] = {
     RoleType.ENGINEER: [
         "public",
         "public_eng",
-        "public_quant",
+        "public_docs",
         "public_de",
         "public_polyglot",
-        "repo:trading_strategies",
+        "repo:code_architecture_scout",
         "repo:polyglot_unseen_v2",
         "domain:data_engineering",
         "domain:data_engineering_scout",
+        "domain:code_architecture_scout",
+        "domain:enterprise_docs_scout",
     ],
-    RoleType.QUANT_RESEARCHER: [
+    RoleType.DOMAIN_RESEARCHER: [
         "public",
-        "public_quant",
+        "public_docs",
         "public_de",
-        "quant_restricted",
-        "corpus:quant_papers",
+        "docs_restricted",
+        "corpus:enterprise_docs",
         "domain:data_engineering",
         "domain:data_engineering_scout",
+        "domain:enterprise_docs_scout",
     ],
     RoleType.PRODUCT_MANAGER: [
         "public",
         "public_eng",
-        "public_quant",
+        "public_docs",
         "public_de",
         "public_polyglot",
         "domain:data_engineering",
         "domain:data_engineering_scout",
+        "domain:code_architecture_scout",
+        "domain:enterprise_docs_scout",
     ],
     RoleType.COMPLIANCE_OFFICER: [
         "public",
         "public_eng",
-        "public_quant",
+        "public_docs",
         "public_de",
         "public_polyglot",
-        "quant_restricted",
+        "docs_restricted",
         "audit:compliance",
         "domain:data_engineering",
         "domain:data_engineering_scout",
+        "domain:code_architecture_scout",
+        "domain:enterprise_docs_scout",
     ],
 }
 
@@ -99,19 +134,25 @@ INSECURE_DEFAULT_SECRETS: Final[frozenset[str]] = frozenset(
 )
 
 
-def is_production_environment() -> bool:
-    """Detects whether context-scout is operating in a production or staging environment."""
+def is_development_environment() -> bool:
+    """Returns True strictly when running in development/local/test mode."""
     env = (
         (
             os.environ.get("SCOUT_ENV")
+            or os.environ.get("SCOUT_ENVIRONMENT")
             or os.environ.get("ENVIRONMENT")
             or os.environ.get("ENV")
-            or ""
+            or "development"
         )
         .strip()
         .lower()
     )
-    return env in {"production", "prod", "staging"}
+    return env in {"", "development", "dev", "local", "test", "testing"}
+
+
+def is_production_environment() -> bool:
+    """Detects whether context-scout is operating in a non-development environment."""
+    return not is_development_environment()
 
 
 def _resolve_auth_secret(secret_key: str | None = None) -> bytes:
@@ -212,6 +253,14 @@ def _resolve_auth_secret(secret_key: str | None = None) -> bytes:
 
 def validate_auth_secret() -> bytes:
     """Validates application HMAC authentication configuration fail-closed on startup."""
+    has_external_idp = bool(
+        os.environ.get("SCOUT_IAP_EXPECTED_AUDIENCE", "").strip()
+        or os.environ.get("SCOUT_OIDC_ISSUER", "").strip()
+        or os.environ.get("SCOUT_OIDC_JWKS_URL", "").strip()
+    )
+    has_hmac_env = bool(os.environ.get("SCOUT_AUTH_HMAC_SECRET", "").strip())
+    if has_external_idp and not has_hmac_env:
+        return b""
     return _resolve_auth_secret()
 
 
@@ -222,14 +271,17 @@ def create_signed_principal_token(
     secret_key: str | None = None,
     ttl_seconds: int = 3600,
     max_session_paid_tokens: int = 50_000,
+    tenant_id: uuid.UUID | str = DEFAULT_TENANT_ID,
 ) -> str:
     """Create an HMAC-SHA256 signed principal attestation token (SEC-04)."""
     role_val = role.value if isinstance(role, RoleType) else str(role).strip().lower()
+    tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
     now_ts = int(time.time())
     payload = {
         "sub": user_id.strip(),
         "role": role_val,
         "scopes": list(allowed_scopes),
+        "tid": str(tenant_uuid),
         "max_tokens": max_session_paid_tokens,
         "iat": now_ts,
         "exp": now_ts + ttl_seconds,
@@ -296,21 +348,102 @@ def verify_signed_principal_token(
         if isinstance(scopes_raw, list) and scopes_raw
         else list(DEFAULT_ROLE_SCOPES[role])
     )
-    return PrincipalContext(
+    raw_tid = data.get("tid")
+    try:
+        tenant_uuid = uuid.UUID(str(raw_tid)) if raw_tid else DEFAULT_TENANT_ID
+    except ValueError:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid tenant_id inside signed principal token.",
+        ) from None
+
+    principal = PrincipalContext(
         user_id=str(data.get("sub") or "authenticated_user").strip(),
         role=role,
         allowed_scopes=scopes,
+        tenant_id=tenant_uuid,
         max_session_paid_tokens=int(data.get("max_tokens", 50_000)),
     )
+    if "\x00" in principal.user_id or any("\x00" in s for s in principal.allowed_scopes):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid NUL byte inside signed principal token.",
+        )
+    return BetrVGPrivacyGuard().apply_to_principal(principal)
 
 
-def get_principal_context(
-    x_principal_user_id: Annotated[str | None, Header()] = "demo_engineer",
-    x_principal_role: Annotated[str | None, Header()] = "engineer",
-    x_principal_scopes: Annotated[str | None, Header()] = None,
-    authorization: Annotated[str | None, Header()] = None,
+def _header_get(headers: Mapping[str, str], target: str) -> str | None:
+    target_l = target.lower()
+    for k, v in headers.items():
+        if k.lower() == target_l:
+            return v
+    return None
+
+
+def _parse_optional_tenant_id(raw_tid: str | None) -> uuid.UUID | None:
+    if not raw_tid or not raw_tid.strip():
+        return None
+    try:
+        return uuid.UUID(raw_tid.strip())
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid X-Principal-Tenant-Id UUID: {raw_tid!r}.",
+        ) from None
+
+
+def _authenticate_principal_components(
+    *,
+    x_principal_user_id: str | None = "demo_engineer",
+    x_principal_role: str | None = "engineer",
+    x_principal_scopes: str | None = None,
+    authorization: str | None = None,
+    x_goog_iap_jwt_assertion: str | None = None,
+    x_principal_tenant_id: str | None = None,
+    iap_verifier: CloudIAPVerifier | None = None,
+    oidc_verifier: OIDCJWKSVerifier | None = None,
 ) -> PrincipalContext:
-    """Extracts immutable PrincipalContext out-of-band from signed token or headers (SEC-04)."""
+    # 1. Google Cloud IAP ES256 assertion takes precedence (never falls back on failure)
+    # Never trust untrusted X-Principal-Tenant-Id header when authenticating via IAP/OIDC (ASI03).
+    if x_goog_iap_jwt_assertion and x_goog_iap_jwt_assertion.strip():
+        verifier = iap_verifier or build_iap_verifier_from_env()
+        try:
+            principal = verifier.verify(
+                x_goog_iap_jwt_assertion.strip(),
+            )
+        except AuthVerificationError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
+        _record_authenticated_principal(principal)
+        return principal
+
+    # 2. Signed Bearer token (3-part OIDC JWKS JWT or 2-part HMAC attestation token)
+    if authorization and authorization.strip():
+        auth_val = authorization.strip()
+        if not auth_val.lower().startswith("bearer "):
+            raise HTTPException(
+                status_code=401,
+                detail="Authorization header must use 'Bearer <signed_token>' scheme.",
+            )
+        raw_token = auth_val[7:].strip()
+        if raw_token.count(".") == 2:
+            verifier_oidc = oidc_verifier or build_oidc_verifier_from_env()
+            if verifier_oidc is None:
+                raise HTTPException(
+                    status_code=401,
+                    detail="OIDC Bearer JWT rejected: OIDC JWKS issuer is not configured.",
+                )
+            try:
+                principal = verifier_oidc.verify(raw_token)
+            except AuthVerificationError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
+            _record_authenticated_principal(principal)
+            return principal
+
+        principal = verify_signed_principal_token(raw_token)
+        _record_authenticated_principal(principal)
+        return principal
+
+    # 3. Unsigned header fallback strictly disabled unless dev opt-out is explicit
     raw_require = os.environ.get("SCOUT_REQUIRE_SIGNED_AUTH")
     if raw_require is None or not raw_require.strip():
         require_signed = True
@@ -324,26 +457,32 @@ def get_principal_context(
             "disabled",
         }
 
-    if authorization and authorization.strip():
-        auth_val = authorization.strip()
-        if not auth_val.lower().startswith("bearer "):
-            raise HTTPException(
-                status_code=401,
-                detail="Authorization header must use 'Bearer <signed_token>' scheme.",
-            )
-        raw_token = auth_val[7:].strip()
-        principal = verify_signed_principal_token(raw_token)
-        _CURRENT_PRINCIPAL.set(principal)
-        return principal
-
-    if require_signed:
-        raise HTTPException(
-            status_code=401,
-            detail="Signed Authorization Bearer token is required.",
+    if require_signed or not is_development_environment():
+        iap_enabled = os.environ.get("SCOUT_IAP_ENABLED", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        detail_msg = (
+            "Cloud IAP x-goog-iap-jwt-assertion or Signed Authorization Bearer token is required."
+            if iap_enabled
+            else "Signed Authorization Bearer token is required."
         )
+        raise HTTPException(status_code=401, detail=detail_msg)
+
+    tenant_override = _parse_optional_tenant_id(x_principal_tenant_id)
 
     user_id = (x_principal_user_id or "demo_engineer").strip()
     raw_role = (x_principal_role or "engineer").strip().lower()
+    if (
+        "\x00" in user_id
+        or "\x00" in raw_role
+        or (x_principal_scopes is not None and "\x00" in x_principal_scopes)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Principal headers must not contain NUL bytes.",
+        )
 
     try:
         role = RoleType(raw_role)
@@ -363,12 +502,63 @@ def get_principal_context(
         user_id=user_id,
         role=role,
         allowed_scopes=scopes,
+        tenant_id=tenant_override or DEFAULT_TENANT_ID,
         max_session_paid_tokens=50_000,
     )
-
-    # Bind out-of-band contextvar
-    _CURRENT_PRINCIPAL.set(principal)
+    principal = BetrVGPrivacyGuard().apply_to_principal(principal)
+    _record_authenticated_principal(principal)
     return principal
+
+
+def authenticate_headers(
+    headers: Mapping[str, str],
+    *,
+    iap_verifier: CloudIAPVerifier | None = None,
+    oidc_verifier: OIDCJWKSVerifier | None = None,
+) -> PrincipalContext:
+    """Authenticates raw HTTP/ASGI headers into PrincipalContext and binds ContextVar."""
+    return _authenticate_principal_components(
+        x_principal_user_id=_header_get(headers, "x-principal-user-id") or "demo_engineer",
+        x_principal_role=_header_get(headers, "x-principal-role") or "engineer",
+        x_principal_scopes=_header_get(headers, "x-principal-scopes"),
+        authorization=_header_get(headers, "authorization"),
+        x_goog_iap_jwt_assertion=_header_get(headers, "x-goog-iap-jwt-assertion"),
+        x_principal_tenant_id=_header_get(headers, "x-principal-tenant-id"),
+        iap_verifier=iap_verifier,
+        oidc_verifier=oidc_verifier,
+    )
+
+
+_HTTP_BEARER = HTTPBearer(auto_error=False)
+
+
+def get_principal_context(
+    x_principal_user_id: Annotated[str | None, Header()] = "demo_engineer",
+    x_principal_role: Annotated[str | None, Header()] = "engineer",
+    x_principal_scopes: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
+    bearer_credentials: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(_HTTP_BEARER)
+    ] = None,
+    x_goog_iap_jwt_assertion: Annotated[
+        str | None, Header(alias="X-Goog-IAP-JWT-Assertion")
+    ] = None,
+    x_principal_tenant_id: Annotated[str | None, Header(alias="X-Principal-Tenant-Id")] = None,
+) -> PrincipalContext:
+    """Extracts immutable PrincipalContext out-of-band from IAP/OIDC/HMAC tokens (SEC-04)."""
+    effective_auth = authorization or (
+        f"{bearer_credentials.scheme} {bearer_credentials.credentials}"
+        if bearer_credentials is not None
+        else None
+    )
+    return _authenticate_principal_components(
+        x_principal_user_id=x_principal_user_id,
+        x_principal_role=x_principal_role,
+        x_principal_scopes=x_principal_scopes,
+        authorization=effective_auth,
+        x_goog_iap_jwt_assertion=x_goog_iap_jwt_assertion,
+        x_principal_tenant_id=x_principal_tenant_id,
+    )
 
 
 def reset_current_principal(token: Any = None) -> None:
@@ -445,6 +635,33 @@ class ConfirmationTokenStore:
         with self._lock:
             self._records.pop(token, None)
 
+    def consume(
+        self,
+        token: str,
+        principal: PrincipalContext,
+        *,
+        pre_commit_check: Any | None = None,
+    ) -> TokenRecord:
+        """Atomically verifies tenant + user ownership and consumes the confirmation token."""
+        with self._lock:
+            rec = self._records.get(token)
+            if rec is None:
+                raise KeyError("Invalid or expired confirmation token.")
+            if time.time() - rec.created_at > rec.ttl_seconds:
+                del self._records[token]
+                raise KeyError("Invalid or expired confirmation token.")
+            if (
+                rec.principal.tenant_id != principal.tenant_id
+                or rec.principal.user_id != principal.user_id
+            ):
+                raise PermissionError(
+                    "Confirmation token belongs to a different principal or tenant (SEC-04)."
+                )
+            if callable(pre_commit_check):
+                pre_commit_check(rec)
+            del self._records[token]
+            return rec
+
 
 _token_store = ConfirmationTokenStore()
 
@@ -487,7 +704,17 @@ def _populate_in_memory_repository(repo_root: Path) -> InMemoryRLSRepository:
     admin_principal = PrincipalContext(
         user_id="api_bootstrapper",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "public_quant", "quant_restricted", "audit:compliance"],
+        allowed_scopes=[
+            "public",
+            "public_eng",
+            "public_docs",
+            "docs_restricted",
+            "audit:compliance",
+            "repo:code_architecture_scout",
+            "corpus:enterprise_docs",
+            "domain:code_architecture_scout",
+            "domain:enterprise_docs_scout",
+        ],
     )
     primary_plugin = PluginRegistry.get_primary_domain_plugin()
     code_domain_id = (
@@ -548,7 +775,10 @@ def _populate_in_memory_repository(repo_root: Path) -> InMemoryRLSRepository:
                                 signature_skeleton=f"class {cls_name}:",
                                 contextual_summary=f"Class definition for {cls_name}",
                                 allowed_scopes=["public_eng"],
-                                embedding=[0.05] * 768,
+                                embedding=get_embedding_provider().embed_text(
+                                    f"class {cls_name}: Class definition for {cls_name}",
+                                    is_query=False,
+                                ),
                             ),
                         )
             except Exception as exc:
@@ -576,7 +806,10 @@ def _populate_in_memory_repository(repo_root: Path) -> InMemoryRLSRepository:
                                 signature_skeleton=f"class {cls_name}:",
                                 contextual_summary=f"Class definition for {cls_name}",
                                 allowed_scopes=["public_eng"],
-                                embedding=[0.05] * 768,
+                                embedding=get_embedding_provider().embed_text(
+                                    f"class {cls_name}: Class definition for {cls_name}",
+                                    is_query=False,
+                                ),
                             ),
                         )
 
@@ -625,6 +858,20 @@ def get_telemetry_tracer() -> ScoutTelemetryTracer:
 
 _local_gemma_client: LocalGemmaClient | None = None
 _local_gemma_lock = threading.Lock()
+
+
+def reset_shared_repository() -> None:
+    """Clears the cached shared repository singleton (for runtime mode switches/tests)."""
+    global _shared_repo
+    with _shared_repo_lock:
+        _shared_repo = None
+
+
+def reset_local_gemma_client() -> None:
+    """Clears the cached LocalGemmaClient singleton (for live/offline MLX switches)."""
+    global _local_gemma_client
+    with _local_gemma_lock:
+        _local_gemma_client = None
 
 
 def get_local_gemma_client() -> LocalGemmaClient:

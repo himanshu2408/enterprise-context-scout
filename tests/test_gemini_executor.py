@@ -43,7 +43,7 @@ from context_scout.schemas.contracts import (
 )
 from context_scout.telemetry.cost_governance import BudgetExceededError
 
-DOMAIN_ID: Final[str] = "trading_code_scout"
+DOMAIN_ID: Final[str] = "code_architecture_scout"
 REPO_NAME: Final[str] = "trading-engine"
 
 
@@ -52,7 +52,7 @@ def principal() -> PrincipalContext:
     return PrincipalContext(
         user_id="quant_engineer_1",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "repo:trading_strategies"],
+        allowed_scopes=["public_eng", "repo:code_architecture_scout"],
         max_session_paid_tokens=16_000,
     )
 
@@ -61,7 +61,7 @@ def principal() -> PrincipalContext:
 def sample_context_pack() -> ImplementationContextPack:
     slice1 = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/order_manager.py",
+        file_path="src/service_core/order_manager.py",
         start_line=1,
         end_line=5,
         qualified_symbol="OrderManager.submit_order",
@@ -112,7 +112,7 @@ def temp_git_repo(tmp_path: Path) -> Path:
         capture_output=True,
     )
 
-    src_dir = repo_dir / "src" / "trading_strategies"
+    src_dir = repo_dir / "src" / "service_core"
     src_dir.mkdir(parents=True, exist_ok=True)
     target_file = src_dir / "order_manager.py"
     target_file.write_text(
@@ -133,7 +133,7 @@ def temp_git_repo(tmp_path: Path) -> Path:
 
 
 def test_gemini_model_validation_gates() -> None:
-    """Verifies allowed Google model IDs and rejection of legacy/prohibited models."""
+    """Verifies governed model IDs (cloud handoff + BYO) and rejection of retired/unapproved IDs."""
     # 1. Default fast model accepted
     executor_default = GeminiImplementationExecutor(model_id=DEFAULT_FAST_MODEL_ID)
     assert executor_default.model_id == "gemini-3.8-flash"
@@ -142,18 +142,17 @@ def test_gemini_model_validation_gates() -> None:
     executor_frontier = GeminiImplementationExecutor(model_id=FRONTIER_REASONING_MODEL_ID)
     assert executor_frontier.model_id == "gemini-4-argon"
 
-    # 3. Prohibited stale models rejected with ValueError
-    with pytest.raises(ValueError, match="Prohibited or retired model ID"):
-        GeminiImplementationExecutor(model_id="codegemma")
+    # 3. Approved BYO open-weights model accepted
+    executor_byo = GeminiImplementationExecutor(model_id="Qwen/Qwen3-Coder-30B-A3B")
+    assert executor_byo.model_id == "Qwen/Qwen3-Coder-30B-A3B"
 
-    with pytest.raises(ValueError, match="Prohibited or retired model ID"):
-        GeminiImplementationExecutor(model_id="text-embedding-004")
+    # 4. Prohibited / retired models rejected with ValueError
+    for retired in ("gemini-2.5-pro", "codegemma", "text-embedding-004", "gemini-ultra"):
+        with pytest.raises(ValueError, match="Prohibited or retired model ID"):
+            GeminiImplementationExecutor(model_id=retired)
 
-    with pytest.raises(ValueError, match="Prohibited or retired model ID"):
-        GeminiImplementationExecutor(model_id="gemini-ultra")
-
-    # 4. Non-Google models rejected
-    with pytest.raises(ValueError, match="violates the 100% Google-only model policy"):
+    # 5. Unapproved models rejected
+    with pytest.raises(ValueError, match="violates ModelGovernancePolicy"):
         GeminiImplementationExecutor(model_id="claude-3-5-sonnet")
 
 
@@ -211,8 +210,8 @@ def test_deterministic_patch_synthesizer_fallback(
     executor = GeminiImplementationExecutor(api_key=None)
     patch_diff = executor._generate_deterministic_patch(sample_context_pack, temp_git_repo)
 
-    assert "--- a/src/trading_strategies/order_manager.py" in patch_diff
-    assert "+++ b/src/trading_strategies/order_manager.py" in patch_diff
+    assert "--- a/src/service_core/order_manager.py" in patch_diff
+    assert "+++ b/src/service_core/order_manager.py" in patch_diff
     assert "@@ -" in patch_diff
     assert "Context Scout Verified Implementation" in patch_diff
 
@@ -228,7 +227,7 @@ def test_missing_context_request_flywheel_event(
 
     missing_req = MissingContextRequest(
         missing_symbol="OrderManager",
-        file_hint="src/trading_strategies/order_manager.py",
+        file_hint="src/service_core/order_manager.py",
         reason="Need class definition to confirm method signature",
     )
 
@@ -282,8 +281,8 @@ def test_git_worktree_sandbox_lifecycle_and_patch_application(
 ) -> None:
     """Verifies temporary worktree creation, patch apply, and clean exit."""
     valid_patch = (
-        "--- a/src/trading_strategies/order_manager.py\n"
-        "+++ b/src/trading_strategies/order_manager.py\n"
+        "--- a/src/service_core/order_manager.py\n"
+        "+++ b/src/service_core/order_manager.py\n"
         "@@ -1,3 +1,4 @@\n"
         " class OrderManager:\n"
         "+    # Added parameter doc\n"
@@ -303,7 +302,7 @@ def test_git_worktree_sandbox_lifecycle_and_patch_application(
 
         # Verify modified content in sandbox
         modified_content = (
-            sandbox.worktree_dir / "src" / "trading_strategies" / "order_manager.py"
+            sandbox.worktree_dir / "src" / "service_core" / "order_manager.py"
         ).read_text(encoding="utf-8")
         assert "# Added parameter doc" in modified_content
 
@@ -311,7 +310,7 @@ def test_git_worktree_sandbox_lifecycle_and_patch_application(
     assert not sandbox.worktree_dir.exists()
 
     # Original repo remains untouched on main branch
-    orig_content = (temp_git_repo / "src" / "trading_strategies" / "order_manager.py").read_text(
+    orig_content = (temp_git_repo / "src" / "service_core" / "order_manager.py").read_text(
         encoding="utf-8"
     )
     assert "# Added parameter doc" not in orig_content
@@ -435,12 +434,12 @@ def test_worst_case_output_projection_prevents_mid_stream_budget_breach(
     principal = PrincipalContext(
         user_id="budget_constrained_engineer",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "repo:trading_strategies"],
+        allowed_scopes=["public_eng", "repo:code_architecture_scout"],
         session_budget_tokens=1000,
     )
     slice1 = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/order_manager.py",
+        file_path="src/service_core/order_manager.py",
         start_line=1,
         end_line=5,
         qualified_symbol="OrderManager.submit_order",

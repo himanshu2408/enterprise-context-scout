@@ -112,7 +112,7 @@ def test_decompose_query_facets_t01_to_t11() -> None:
     assert p7.facets[1].expected_source_kind == "issue"
 
     p6 = decompose_query_facets(
-        "List the top 3 risk and execution models in trading_strategies, their core classes, "
+        "List the top 3 domain and execution models in service_core, their core classes, "
         "and how GARCH volatility or covariance shrinkage feeds into them."
     )
     assert p6.requested_cardinality == 3
@@ -685,7 +685,7 @@ def test_doc_citation_span_grounds_auto_research_route_facets() -> None:
         plan.facets[0],
         doc_chunks=[cit],
         code_slices=[],
-        domain_id="quant_research_scout",
+        domain_id="enterprise_docs_scout",
     )
     assert cov.status == "grounded"
     assert miss is None

@@ -21,8 +21,8 @@ def test_cleanup_refuses_non_ephemeral_domains() -> None:
     settings = ScoutSettings()
     with psycopg.connect(settings.db_admin_url) as conn:
         for forbidden in (
-            "trading_code_scout",
-            "quant_research_scout",
+            "code_architecture_scout",
+            "enterprise_docs_scout",
             "polyglot_unseen_v2",
             "eval_",
             "",
@@ -68,7 +68,7 @@ def test_ephemeral_pg_domain_canary_isolation(ephemeral_pg_domain: str) -> None:
                     VALUES (%s::uuid, %s, 'doc-1', 'Canary Doc', 'docs/a.md', 'GLOBAL',
                             'Intro', 'Header', 'body text', %s, %s)
                     """,
-                    (c_id, dom_id, [f"domain:{dom_id}"], "[" + ",".join(["0.0"] * 768) + "]"),
+                    (c_id, dom_id, [f"domain:{dom_id}"], "[" + ",".join(["0.05"] * 768) + "]"),
                 )
             conn.commit()
 

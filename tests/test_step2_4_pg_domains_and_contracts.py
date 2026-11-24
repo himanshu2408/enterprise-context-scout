@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 from pathlib import Path
 from uuid import uuid4
@@ -11,7 +10,7 @@ from psycopg import connect
 
 from context_scout.agents import preflight_gate
 from context_scout.agents.domain_registry import DomainRegistry
-from context_scout.agents.preflight_gate import BoundGraphRepository
+from context_scout.agents.preflight_gate import BoundGraphRepository, read_custom_sync_manifest
 from context_scout.agents.scout_workflow import ScoutWorkflow
 from context_scout.ast_engine.contract_linker import (
     CrossBoundaryContractLinker,
@@ -48,6 +47,7 @@ _EVAL_CLEANUP_TABLES: tuple[str, ...] = (
     "indexing_queue",
     "indexing_dead_letter",
     "execution_telemetry",
+    "domain_sync_manifests",
     "domain_packs",
 )
 
@@ -63,7 +63,7 @@ def _cleanup_eval_domains(*domain_ids: str) -> None:
 
 
 def _copy_builtin_domains(domains_dir: Path) -> None:
-    for dname in ("trading_code_scout", "quant_research_scout"):
+    for dname in ("code_architecture_scout", "enterprise_docs_scout"):
         src = Path("domains") / dname
         if src.exists():
             shutil.copytree(src, domains_dir / dname, dirs_exist_ok=True)
@@ -121,11 +121,12 @@ def test_custom_domain_pg17_lifecycle_zero_corpus_index(tmp_path: Path) -> None:
 
         dom_dir = domains_dir / domain_id
         manifest_path = dom_dir / "sync_manifest.json"
-        assert manifest_path.exists()
+        assert not manifest_path.exists()
         assert not (dom_dir / "corpus_index.json").exists()
         assert list(dom_dir.rglob("corpus_index.json")) == []
 
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = read_custom_sync_manifest(domain_id)
+        assert manifest is not None
         assert manifest["domain_id"] == domain_id
         assert manifest["storage_backend"] == "postgresql_17_rls"
         assert manifest["code_files_indexed"] >= 1
@@ -250,7 +251,7 @@ def test_custom_domain_pg17_force_rls_tenant_isolation(tmp_path: Path) -> None:
         authorized = PrincipalContext(
             user_id="auth_eng",
             role=RoleType.ENGINEER,
-            allowed_scopes=["public_eng", "public_quant", f"domain:{code_domain}"],
+            allowed_scopes=["public_eng", "public_docs", f"domain:{code_domain}"],
         )
         unauthorized = PrincipalContext(
             user_id="intruder_eng",

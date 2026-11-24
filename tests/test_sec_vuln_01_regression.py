@@ -50,7 +50,10 @@ def test_unauthenticated_request_rejected_http_401_by_default(app_client: TestCl
     """SEC-VULN-01: Verifies requests lacking signed Bearer token are rejected with 401."""
     res = app_client.post(
         "/api/v1/scout/query",
-        json={"query": "Investigate trade order flow routing", "domain_id": "trading_code_scout"},
+        json={
+            "query": "Investigate trade order flow routing",
+            "domain_id": "code_architecture_scout",
+        },
     )
     assert res.status_code == 401
     assert res.json()["detail"] == "Signed Authorization Bearer token is required."
@@ -61,14 +64,14 @@ def test_header_spoofing_rejected_without_signed_bearer_token(app_client: TestCl
     spoofed_headers = {
         "X-Principal-User-Id": "adversary_attacker",
         "X-Principal-Role": "compliance_officer",
-        "X-Principal-Scopes": "audit:compliance,quant_restricted,super_admin",
+        "X-Principal-Scopes": "audit:compliance,docs_restricted,super_admin",
     }
     res = app_client.post(
         "/api/v1/scout/query",
         headers=spoofed_headers,
         json={
             "query": "Exfiltrate restricted compliance audit logs",
-            "domain_id": "trading_code_scout",
+            "domain_id": "code_architecture_scout",
         },
     )
     assert res.status_code == 401
@@ -85,7 +88,7 @@ def test_malformed_authorization_scheme_rejected_http_401(app_client: TestClient
     res = app_client.post(
         "/api/v1/scout/query",
         headers={"Authorization": f"Basic {token}"},
-        json={"query": "Investigate routing", "domain_id": "trading_code_scout"},
+        json={"query": "Investigate routing", "domain_id": "code_architecture_scout"},
     )
     assert res.status_code == 401
     assert "Bearer <signed_token>" in res.json()["detail"]
@@ -115,7 +118,7 @@ def test_tampered_token_signature_rejected_http_401(app_client: TestClient) -> N
     res = app_client.post(
         "/api/v1/scout/query",
         headers={"Authorization": f"Bearer {tampered_token}"},
-        json={"query": "Unauthorized action", "domain_id": "trading_code_scout"},
+        json={"query": "Unauthorized action", "domain_id": "code_architecture_scout"},
     )
     assert res.status_code == 401
     assert "Invalid HMAC-SHA256 signature" in res.json()["detail"]
@@ -132,7 +135,7 @@ def test_expired_token_rejected_http_401(app_client: TestClient) -> None:
     res = app_client.post(
         "/api/v1/scout/query",
         headers={"Authorization": f"Bearer {expired_token}"},
-        json={"query": "Test task", "domain_id": "trading_code_scout"},
+        json={"query": "Test task", "domain_id": "code_architecture_scout"},
     )
     assert res.status_code == 401
     assert "expired" in res.json()["detail"].lower()
@@ -149,7 +152,7 @@ def test_wrong_hmac_secret_key_rejected_http_401(app_client: TestClient) -> None
     res = app_client.post(
         "/api/v1/scout/query",
         headers={"Authorization": f"Bearer {alien_token}"},
-        json={"query": "Test task", "domain_id": "trading_code_scout"},
+        json={"query": "Test task", "domain_id": "code_architecture_scout"},
     )
     assert res.status_code == 401
     assert "Invalid HMAC-SHA256 signature" in res.json()["detail"]
@@ -160,7 +163,7 @@ def test_valid_signed_token_accepted_and_ignores_spoofed_headers(app_client: Tes
     valid_token = create_signed_principal_token(
         user_id="real_engineer_42",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "repo:trading_strategies"],
+        allowed_scopes=["public_eng", "repo:code_architecture_scout"],
     )
     headers = {
         "Authorization": f"Bearer {valid_token}",
@@ -171,7 +174,7 @@ def test_valid_signed_token_accepted_and_ignores_spoofed_headers(app_client: Tes
     res = app_client.post(
         "/api/v1/scout/query",
         headers=headers,
-        json={"query": "Safe query for strategy", "domain_id": "trading_code_scout"},
+        json={"query": "Safe query for strategy", "domain_id": "code_architecture_scout"},
     )
     assert res.status_code == 200
     data = res.json()
@@ -229,7 +232,7 @@ def test_explicit_opt_out_signed_auth_permits_header_fallback(
             "X-Principal-User-Id": "opt_out_engineer",
             "X-Principal-Role": "engineer",
         },
-        json={"query": "Fallback test query", "domain_id": "trading_code_scout"},
+        json={"query": "Fallback test query", "domain_id": "code_architecture_scout"},
     )
     assert res.status_code == 200
 
@@ -263,7 +266,7 @@ def test_fail_closed_blocks_api_token_verification(
     res = client.post(
         "/api/v1/scout/query",
         headers={"Authorization": f"Bearer {forged_token}"},
-        json={"query": "Test fail closed", "domain_id": "trading_code_scout"},
+        json={"query": "Test fail closed", "domain_id": "code_architecture_scout"},
     )
     assert res.status_code == 500
     assert res.status_code != 200

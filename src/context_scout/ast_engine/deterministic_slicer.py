@@ -338,8 +338,9 @@ class DeterministicSlicer:
             (sanitized_code, has_unclosed_quote_or_comment)
         """
         ext = file_path.lower()
+        is_rust = ext.endswith(".rs")
         is_hash_comment_lang = not is_doc_prose and not ext.endswith(
-            (".ts", ".tsx", ".js", ".jsx", ".cs", ".java", ".c", ".cpp")
+            (".ts", ".tsx", ".js", ".jsx", ".cs", ".java", ".c", ".cpp", ".rs", ".go")
         )
 
         chars: list[str] = []
@@ -410,12 +411,26 @@ class DeterministicSlicer:
                 i = j
                 chars.append(" ")
                 continue
-            # Single-quoted string literal '...' (or prose apostrophe in doc mode)
+            # Single-quoted string literal '...' (or prose apostrophe / Rust lifetime)
             if code[i] == "'":
                 if is_doc_prose and DeterministicSlicer._is_prose_apostrophe(code, i):
                     chars.append(code[i])
                     i += 1
                     continue
+                if is_rust:
+                    # Rust char literal is 'x' or '\x'; anything like 'a, 'py, 'static, '_
+                    # without a closing ' right after a single char/escape is a lifetime/label.
+                    is_char_lit = (i + 2 < n and code[i + 1] != "\\" and code[i + 2] == "'") or (
+                        i + 3 < n
+                        and code[i + 1] == "\\"
+                        and (code[i + 3] == "'" or (i + 5 < n and code[i + 2] == "x"))
+                    )
+                    if not is_char_lit:
+                        chars.append(" ")
+                        i += 1
+                        while i < n and (code[i].isalnum() or code[i] == "_"):
+                            i += 1
+                        continue
                 j = i + 1
                 closed = False
                 while j < n:

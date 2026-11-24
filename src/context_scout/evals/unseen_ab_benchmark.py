@@ -1368,7 +1368,7 @@ class UnseenRepoABBenchmarkRunner:
         principal = PrincipalContext(
             user_id="unseen_ab_benchmark",
             role=RoleType.ENGINEER,
-            allowed_scopes=["public_eng", "repo:trading_strategies"],
+            allowed_scopes=["public_eng", "repo:code_architecture_scout"],
         )
 
         # Phase 1: Prepare all Arm B ContextPacks + verify frozen QLoRA adapter

@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -53,7 +53,7 @@ from context_scout.db.schema import (
     CodeFileRecord,
     DocChunkRecord,
 )
-from context_scout.ingestion.git_merkle_indexer import generate_deterministic_embedding
+from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import (
     AuthorityRules,
     DomainPackManifest,
@@ -80,6 +80,7 @@ FK_DELETE_ORDER: tuple[str, ...] = (
     "indexing_queue",
     "indexing_dead_letter",
     "execution_telemetry",
+    "domain_sync_manifests",
     "domain_packs",
 )
 
@@ -361,8 +362,9 @@ def build_polyglot_scale_corpus(
                 signature_skeleton=ps.signature_skeleton,
                 contextual_summary=summary,
                 allowed_scopes=scopes,
-                embedding=generate_deterministic_embedding(
-                    f"{qn}\n{ps.signature_skeleton}\n{summary}"
+                embedding=get_embedding_provider().embed_text(
+                    f"{qn}\n{ps.signature_skeleton}\n{summary}",
+                    is_query=False,
                 ),
                 repo_qualified_id=rqid,
                 bare_name=bare,
@@ -579,7 +581,7 @@ def build_polyglot_scale_corpus(
                 verbatim_content=adr_text,
                 metadata_json={"source_type": "internal_adr"},
                 allowed_scopes=["public_eng", f"domain:{domain_id}"],
-                embedding=generate_deterministic_embedding(adr_text),
+                embedding=get_embedding_provider().embed_text(adr_text, is_query=False),
                 source_type="internal_adr",
                 version_str="1",
                 is_stale=False,
@@ -622,11 +624,11 @@ def build_polyglot_scale_corpus(
             ),
         ),
         (
-            "canary_quant",
+            "canary_research",
             "Research Signal Architecture Note",
-            ["public_quant"],
+            ["public_docs"],
             (
-                "CANARY_QUANT_ONLY: Hybrid RRF scoring combines HNSW vector rank with "
+                "CANARY_RESEARCH_ONLY: Hybrid RRF scoring combines HNSW vector rank with "
                 "full-text search rank."
             ),
         ),
@@ -647,7 +649,7 @@ def build_polyglot_scale_corpus(
                 verbatim_content=content,
                 metadata_json={"canary_id": c_id},
                 allowed_scopes=scopes,
-                embedding=generate_deterministic_embedding(content),
+                embedding=get_embedding_provider().embed_text(content, is_query=False),
                 source_type="internal_adr",
                 version_str="2",
                 is_stale=False,
@@ -708,25 +710,25 @@ async def _run_40_concurrent_sse_test(
             ["public_eng", f"domain:{domain_id}", "repo:scout-api", "repo:scout-ui"],
             "code",
             "Inspect stream_scout",
-            ("CANARY_PM_ONLY", "CANARY_COMPLIANCE_ONLY", "CANARY_QUANT_ONLY"),
+            ("CANARY_PM_ONLY", "CANARY_COMPLIANCE_ONLY", "CANARY_RESEARCH_ONLY"),
         ),
         (
             RoleType.PRODUCT_MANAGER,
             ["public_pm"],
             "wiki",
             "Summarize Product Roadmap Telemetry Spec milestone dashboard",
-            ("CANARY_ENG_ONLY", "CANARY_COMPLIANCE_ONLY", "CANARY_QUANT_ONLY"),
+            ("CANARY_ENG_ONLY", "CANARY_COMPLIANCE_ONLY", "CANARY_RESEARCH_ONLY"),
         ),
         (
             RoleType.COMPLIANCE_OFFICER,
             ["audit:compliance"],
             "wiki",
             "Verify Compliance Audit Retention Policy immutable trace rules",
-            ("CANARY_ENG_ONLY", "CANARY_PM_ONLY", "CANARY_QUANT_ONLY"),
+            ("CANARY_ENG_ONLY", "CANARY_PM_ONLY", "CANARY_RESEARCH_ONLY"),
         ),
         (
-            RoleType.QUANT_RESEARCHER,
-            ["public_quant"],
+            RoleType.DOMAIN_RESEARCHER,
+            ["public_docs"],
             "wiki",
             "Explain Research Signal Architecture Note Hybrid RRF scoring",
             ("CANARY_ENG_ONLY", "CANARY_PM_ONLY", "CANARY_COMPLIANCE_ONLY"),
@@ -949,7 +951,7 @@ from context_scout.agents.preflight_gate import BoundGraphRepository
 from context_scout.ast_engine.dependency_expander import ASTDependencyExpander
 from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
 from context_scout.schemas.contracts import (
-    AuthorityRules, DomainPackManifest, MarketRegime, PrincipalContext, RoleType
+    AuthorityRules, DomainPackManifest, PrincipalContext, RoleType
 )
 
 payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
@@ -971,11 +973,21 @@ except ImportError:
     has_conflict_detector = False
 
 settings = ScoutSettings()
+from contextlib import contextmanager as _cm
+_orig_scoped_tx = RLSConnectionManager.scoped_transaction
+@_cm
+def _tenant_scoped_tx(self, principal, *args, **kwargs):
+    with _orig_scoped_tx(self, principal, *args, **kwargs) as _conn:
+        _conn.execute(
+            "SELECT set_config('app.tenant_id', '00000000-0000-0000-0000-000000000000', true);"
+        )
+        yield _conn
+RLSConnectionManager.scoped_transaction = _tenant_scoped_tx
 mgr = RLSConnectionManager(settings.db_app_url, use_pool=False)
 repo = PostgresRLSRepository()
 all_scopes = sorted(
     {sc for s in payload["symbols"] for sc in s["allowed_scopes"]}
-    | {"public_eng", "public_pm", "audit:compliance", "public_quant"}
+    | {"public_eng", "public_pm", "public_docs", "audit:compliance"}
 )
 admin = PrincipalContext(user_id="base_poly", role=RoleType.ENGINEER, allowed_scopes=all_scopes)
 manifest = DomainPackManifest(
@@ -990,7 +1002,24 @@ manifest = DomainPackManifest(
 )
 
 with mgr.scoped_transaction(admin) as conn:
-    repo.upsert_domain_pack(conn, manifest)
+    conn.execute(
+        '''
+        INSERT INTO domain_packs (
+            domain_id, display_name, lora_adapter_id, primary_truth_source,
+            freshness_half_life_days, config_json
+        )
+        VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+        ON CONFLICT (tenant_id, domain_id) DO NOTHING;
+        ''',
+        (
+            manifest.domain_id,
+            manifest.display_name,
+            manifest.lora_adapter_id,
+            manifest.authority_rules.primary_truth_source,
+            manifest.authority_rules.freshness_half_life_days,
+            "{}",
+        ),
+    )
     for f in payload["files"]:
         repo.insert_code_file(conn, CodeFileRecord(
             file_id=UUID(f["file_id"]),
@@ -1399,12 +1428,24 @@ def run_benchmark() -> dict[str, Any]:
         ),
     }
 
+    head_commit = "unknown"
+    with suppress(Exception):
+        head_commit = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(REPO_ROOT),
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            or "unknown"
+        )
+
     report: dict[str, Any] = {
         "suite": (
             "Suite 3.2: Polyglot Cross-Boundary Contracts & 40-Way Concurrent SSE Qualification"
         ),
         "generated_at_utc": datetime.now(UTC).isoformat(),
-        "head_commit": "56c9d5e",
+        "head_commit": head_commit,
         "baseline_commit": BASELINE_COMMIT,
         "corpus_stats": corpus_stats,
         "head_metrics": head_metrics,

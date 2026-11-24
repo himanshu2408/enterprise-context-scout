@@ -27,11 +27,11 @@ from context_scout.ast_engine.models import ParsedEdge, ParsedSymbol
 from context_scout.config import DomainConfig, ScoutConfig
 from context_scout.db.repositories import InMemoryRLSRepository
 from context_scout.db.schema import DocChunkRecord
-from context_scout.ingestion.git_merkle_indexer import generate_deterministic_embedding
 from context_scout.plugins.base import DependencyEdge, LanguagePlugin, SourceConnectorPlugin
 from context_scout.plugins.connectors.confluence import ConfluenceConnectorPlugin
 from context_scout.plugins.connectors.jira import JiraConnectorPlugin, JiraIssueDTO
 from context_scout.plugins.registry import PluginRegistry
+from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import DocCitationSpan, PrincipalContext, RoleType
 
 
@@ -498,7 +498,9 @@ def test_confluence_v2_pagination_version_monotonicity_and_temporal_decay() -> N
         verbatim_content="Old v1 content.",
         metadata_json={"version_number": 1},
         allowed_scopes=connector.mirror_permissions("ENG"),
-        embedding=generate_deterministic_embedding("Old v1 content.", dim=768),
+        embedding=get_embedding_provider(dimensions=768).embed_text(
+            "Old v1 content.", is_query=False
+        ),
         source_type="confluence",
         version_str="1",
         is_stale=False,

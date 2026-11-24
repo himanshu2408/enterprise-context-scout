@@ -19,14 +19,14 @@ from context_scout.config import ScoutSettings
 from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
 from context_scout.db.schema import DocChunkRecord
 from context_scout.db.session import RLSConnectionManager
-from context_scout.ingestion.git_merkle_indexer import generate_deterministic_embedding
 from context_scout.plugins.connectors.confluence import (
     ConfluenceConnectorPlugin,
     ConfluenceNoisePolicy,
     ConfluencePageDTO,
 )
+from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import (
-    MarketRegime,
+    DocumentScope,
     ModificationIntent,
     PrincipalContext,
     RoleType,
@@ -35,26 +35,26 @@ from context_scout.schemas.contracts import (
 )
 
 _SHARED_BASELINE_LOCKED = {
-    "trading_code_scout_code_files": 273,
-    "trading_code_scout_ast_symbols": 3022,
-    "trading_code_scout_ast_edges": 26765,
-    "quant_research_scout_doc_chunks": 14318,
+    "code_architecture_scout_code_files": 273,
+    "code_architecture_scout_ast_symbols": 3022,
+    "code_architecture_scout_ast_edges": 26765,
+    "enterprise_docs_scout_doc_chunks": 14318,
 }
 
 
 def _snapshot_shared_counts(conn: psycopg.Connection[Any]) -> dict[str, int]:
     queries = {
-        "trading_code_scout_code_files": (
-            "SELECT COUNT(*) FROM code_files WHERE domain_id = 'trading_code_scout'"
+        "code_architecture_scout_code_files": (
+            "SELECT COUNT(*) FROM code_files WHERE domain_id = 'code_architecture_scout'"
         ),
-        "trading_code_scout_ast_symbols": (
-            "SELECT COUNT(*) FROM ast_symbols WHERE domain_id = 'trading_code_scout'"
+        "code_architecture_scout_ast_symbols": (
+            "SELECT COUNT(*) FROM ast_symbols WHERE domain_id = 'code_architecture_scout'"
         ),
-        "trading_code_scout_ast_edges": (
-            "SELECT COUNT(*) FROM ast_edges WHERE domain_id = 'trading_code_scout'"
+        "code_architecture_scout_ast_edges": (
+            "SELECT COUNT(*) FROM ast_edges WHERE domain_id = 'code_architecture_scout'"
         ),
-        "quant_research_scout_doc_chunks": (
-            "SELECT COUNT(*) FROM doc_chunks WHERE domain_id = 'quant_research_scout'"
+        "enterprise_docs_scout_doc_chunks": (
+            "SELECT COUNT(*) FROM doc_chunks WHERE domain_id = 'enterprise_docs_scout'"
         ),
     }
     counts: dict[str, int] = {}
@@ -111,7 +111,7 @@ def _make_doc_chunk(
     title: str,
     content: str,
     authority_weight: float = 1.0,
-    market_scope: MarketRegime | str | None = None,
+    market_scope: DocumentScope | str | None = None,
     source_type: str = "confluence",
     version_str: str = "1",
     is_stale: bool = False,
@@ -141,7 +141,9 @@ def _make_doc_chunk(
         verbatim_content=content,
         metadata_json={"space_key": space_key, "version": version_str},
         allowed_scopes=allowed_scopes or ["confluence_space_eng"],
-        embedding=generate_deterministic_embedding(f"{header} {content}", dim=768),
+        embedding=get_embedding_provider(dimensions=768).embed_text(
+            f"{header} {content}", is_query=False
+        ),
         source_type=source_type,
         version_str=version_str,
         is_stale=is_stale,

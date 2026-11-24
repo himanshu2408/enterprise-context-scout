@@ -1,16 +1,16 @@
 {
   "suite": "Suite 3.2: Polyglot Cross-Boundary Contracts & 40-Way Concurrent SSE Qualification",
-  "generated_at_utc": "2026-11-14T14:08:47.544472+00:00",
-  "head_commit": "56c9d5e",
+  "generated_at_utc": "2026-11-19T21:35:16.625502+00:00",
+  "head_commit": "d07b073",
   "baseline_commit": "5d85e3e",
   "corpus_stats": {
-    "files_indexed": 110,
-    "symbols_indexed": 1673,
-    "edges_indexed": 13981,
+    "files_indexed": 116,
+    "symbols_indexed": 1920,
+    "edges_indexed": 19511,
     "cross_boundary_edges": 3,
     "doc_chunks_indexed": 9,
     "languages": {
-      "python": 49,
+      "python": 55,
       "tsx": 13,
       "typescript": 31,
       "sql": 3,
@@ -18,8 +18,8 @@
       "go": 13
     },
     "repos": {
-      "scout-api": 12,
-      "scout-agents": 9,
+      "scout-api": 15,
+      "scout-agents": 12,
       "scout-ui": 15,
       "scout-sql": 2,
       "gitlab-ops": 4,
@@ -31,11 +31,11 @@
     }
   },
   "head_metrics": {
-    "contract_expansion_passed": 2,
+    "contract_expansion_passed": 3,
     "contract_expansion_total": 3,
     "contract_expansion_ci95": [
-      0.2077,
-      0.9385
+      0.4385,
+      1.0
     ],
     "drift_detection_passed": 5,
     "drift_detection_total": 5,
@@ -74,11 +74,11 @@
       0.9124,
       1.0
     ],
-    "latency_p50_ms": 1201.6,
-    "latency_p95_ms": 1203.21,
+    "latency_p50_ms": 7228.26,
+    "latency_p95_ms": 16585.38,
     "per_role_counts": {
       "engineer": 10,
-      "quant_researcher": 10,
+      "domain_researcher": 10,
       "product_manager": 10,
       "compliance_officer": 10
     }

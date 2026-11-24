@@ -1,0 +1,17 @@
+{
+  "domain_id": "code_architecture_scout",
+  "base_model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
+  "device": "mlx:gpu",
+  "total_steps": 100,
+  "initial_loss": 1.241,
+  "final_loss": 0.0012,
+  "loss_reduction_pct": 99.9,
+  "val_loss": 0.0021,
+  "step_history": [
+    {"step": 1, "loss": 1.241},
+    {"step": 25, "loss": 0.418},
+    {"step": 50, "loss": 0.094},
+    {"step": 75, "loss": 0.012},
+    {"step": 100, "loss": 0.0012}
+  ]
+}

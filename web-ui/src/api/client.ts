@@ -1,4 +1,6 @@
 import {
+  AdminPurgeRequest,
+  AdminPurgeResponse,
   AuthSessionRequest,
   AuthSessionResponse,
   BackendDomainDetail,
@@ -126,15 +128,29 @@ export async function ensureBearerToken(principal: PrincipalContext): Promise<st
 }
 
 export async function fetchCurrentPrincipal(
-  principal: PrincipalContext
+  principal?: PrincipalContext
 ): Promise<PrincipalContext> {
-  const token = await ensureBearerToken(principal);
-  const res = await fetch("/api/v1/auth/me", {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
+  const headers: Record<string, string> = {};
+  if (principal) {
+    const token = await ensureBearerToken(principal);
+    headers.Authorization = `Bearer ${token}`;
+  } else if (cachedSession && Date.now() < cachedSession.expiresAtMs) {
+    headers.Authorization = `Bearer ${cachedSession.token}`;
+  }
+
+  let res: Response;
+  try {
+    res = await fetch("/api/v1/auth/me", { headers });
+  } catch (err: unknown) {
+    throw new ApiClientError(
+      0,
+      `Current principal endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
   if (!res.ok) {
+    if (res.status === 401) {
+      clearCachedAuthSession();
+    }
     throw new ApiClientError(res.status, await parseErrorDetail(res));
   }
   return (await res.json()) as PrincipalContext;
@@ -271,10 +287,24 @@ export async function fetchDomains(): Promise<DomainInfo[]> {
   return list.map(mapDomainDetailToInfo);
 }
 
-export async function fetchROIMetrics(): Promise<ROIMetricsResponse> {
+export async function fetchROIMetrics(
+  principal?: PrincipalContext
+): Promise<ROIMetricsResponse> {
+  const headers: Record<string, string> = {};
+  if (principal) {
+    try {
+      const token = await ensureBearerToken(principal);
+      headers.Authorization = `Bearer ${token}`;
+    } catch {
+      // Fall through so /api/v1/telemetry/roi still executes and reports its own status/error
+    }
+  } else if (cachedSession && Date.now() < cachedSession.expiresAtMs) {
+    headers.Authorization = `Bearer ${cachedSession.token}`;
+  }
+
   let res: Response;
   try {
-    res = await fetch("/api/v1/telemetry/roi");
+    res = await fetch("/api/v1/telemetry/roi", { headers });
   } catch (err: unknown) {
     throw new ApiClientError(
       0,
@@ -300,14 +330,14 @@ export async function executeScoutQuery(
   if (request.trace_id !== undefined) {
     bodyPayload.trace_id = request.trace_id;
   }
-  if (
-    request.normalized_rrf_score !== undefined &&
-    request.normalized_rrf_score !== null
-  ) {
-    bodyPayload.normalized_rrf_score = request.normalized_rrf_score;
-  }
   if (request.max_bounce_backs !== undefined) {
     bodyPayload.max_bounce_backs = request.max_bounce_backs;
+  }
+  if (request.session_id !== undefined) {
+    bodyPayload.session_id = request.session_id;
+  }
+  if (request.branch_id !== undefined) {
+    bodyPayload.branch_id = request.branch_id;
   }
 
   let res: Response;
@@ -383,6 +413,10 @@ export async function applyHandoff(
   }
 
   const token = await ensureBearerToken(principal);
+  const safePayload: HandoffApplyRequest = {
+    confirmation_token: request.confirmation_token,
+    confirmed: request.confirmed,
+  };
   let res: Response;
   try {
     res = await fetch("/api/v1/handoff/apply", {
@@ -391,7 +425,7 @@ export async function applyHandoff(
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify(request),
+      body: JSON.stringify(safePayload),
     });
   } catch (err: unknown) {
     throw new ApiClientError(
@@ -406,4 +440,46 @@ export async function applyHandoff(
   }
 
   return (await res.json()) as HandoffApplyResponse;
+}
+
+export async function executeAdminPurge(
+  request: AdminPurgeRequest,
+  principal?: PrincipalContext
+): Promise<AdminPurgeResponse> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (principal) {
+    try {
+      const token = await ensureBearerToken(principal);
+      headers.Authorization = `Bearer ${token}`;
+    } catch {
+      // Production OIDC/IAP mode relies on ambient credentials if dev token exchange is disabled
+    }
+  } else if (cachedSession && Date.now() < cachedSession.expiresAtMs) {
+    headers.Authorization = `Bearer ${cachedSession.token}`;
+  }
+
+  let res: Response;
+  try {
+    res = await fetch("/api/v1/admin/purge", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(request),
+    });
+  } catch (err: unknown) {
+    throw new ApiClientError(
+      0,
+      `Admin purge endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  if (!res.ok) {
+    if (res.status === 401) {
+      clearCachedAuthSession();
+    }
+    throw new ApiClientError(res.status, await parseErrorDetail(res));
+  }
+
+  return (await res.json()) as AdminPurgeResponse;
 }

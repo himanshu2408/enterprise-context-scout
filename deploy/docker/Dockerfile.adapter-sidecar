@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1.7
+
+FROM python:3.12-slim-bookworm AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=0 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir "uv>=0.13.4,<0.14.0"
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+
+RUN uv sync --frozen --no-dev --extra api --no-editable \
+    && uv pip install --python /app/.venv/bin/python --no-cache "google-cloud-storage>=2.18.0,<3.0.0" \
+    && pip uninstall -y uv \
+    && find /app /usr/local/lib/python3.12 -type d -name '__pycache__' -exec rm -rf {} + \
+    && mkdir -p /var/run/scout/adapters \
+    && chown -R 65532:65532 /var/run/scout/adapters
+
+
+FROM gcr.io/distroless/python3-debian12:nonroot AS runtime
+
+WORKDIR /app
+
+COPY --from=builder /usr/local/bin/python3.12 /usr/bin/python3
+COPY --from=builder /usr/local/bin/python3.12 /usr/local/bin/python3.12
+COPY --from=builder /usr/local/lib/libpython3.12* /usr/local/lib/
+COPY --from=builder /usr/local/lib/python3.12 /usr/local/lib/python3.12
+COPY --from=builder --chown=65532:65532 /var/run/scout/adapters /var/run/scout/adapters
+COPY --from=builder --chown=65532:65532 /app/.venv /app/.venv
+COPY --from=builder --chown=65532:65532 /app/src /app/src
+COPY --chown=65532:65532 config /app/config
+
+USER 65532:65532
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TMPDIR=/tmp \
+    HOME=/tmp \
+    SCOUT_ADAPTER_STAGING_DIR=/var/run/scout/adapters \
+    LD_LIBRARY_PATH=/usr/local/lib \
+    PYTHONPATH=/app/src:/app/.venv/lib/python3.12/site-packages \
+    PATH=/app/.venv/bin:/usr/bin:/bin
+
+ENTRYPOINT ["/usr/bin/python3", "-m", "context_scout.serving.adapter_sync_sidecar"]

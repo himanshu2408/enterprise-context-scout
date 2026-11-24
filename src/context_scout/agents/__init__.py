@@ -8,6 +8,20 @@ from context_scout.agents.gemini_executor import (
     GeminiImplementationExecutor,
     GitWorktreeSandbox,
 )
+from context_scout.agents.llm_backend import (
+    AdapterRouteDecision,
+    AdapterRouter,
+    GPUOverloadError,
+    GPUPriorityClass,
+    LLMBackendSPI,
+    RedisGPUQuotaManager,
+    compute_adaptive_complexity_budget,
+)
+from context_scout.agents.open_weights_vllm_executor import (
+    ModelArchitectureAdapter,
+    OpenWeightsVLLMExecutor,
+    compute_prefix_cache_salt,
+)
 from context_scout.agents.preflight_gate import (
     ContextPackValidator,
     PreFlightValidator,
@@ -22,6 +36,7 @@ from context_scout.agents.scout_workflow import (
     ModelUnavailableException,
     ScoutWorkflow,
 )
+from context_scout.agents.session_compactor import ScoutSessionManager, SessionPreflightResult
 
 __all__ = [
     "DEFAULT_FAST_MODEL_ID",
@@ -29,17 +44,29 @@ __all__ = [
     "FRONTIER_REASONING_MODEL_ID",
     "MAX_SAFE_KV_SIZE",
     "AdapterPool",
+    "AdapterRouteDecision",
+    "AdapterRouter",
     "AdapterSlot",
     "BudgetExceededError",
     "ContextPackValidator",
     "DomainRegistry",
     "FederatedScoutCoordinator",
+    "GPUOverloadError",
+    "GPUPriorityClass",
     "GeminiImplementationExecutor",
     "GitWorktreeSandbox",
+    "LLMBackendSPI",
     "LocalGemmaClient",
+    "ModelArchitectureAdapter",
     "ModelUnavailableError",
     "ModelUnavailableException",
+    "OpenWeightsVLLMExecutor",
     "PreFlightValidator",
+    "RedisGPUQuotaManager",
+    "ScoutSessionManager",
     "ScoutWorkflow",
+    "SessionPreflightResult",
+    "compute_adaptive_complexity_budget",
+    "compute_prefix_cache_salt",
     "create_insufficient_context_diagnostic",
 ]

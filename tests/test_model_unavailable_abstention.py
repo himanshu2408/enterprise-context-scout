@@ -90,7 +90,7 @@ class TestModelUnavailableAbstentionOnModelPathFailure:
         ):
             client.complete(
                 prompt="Synthesize quant strategy brief",
-                domain_id="quant_research_scout",
+                domain_id="enterprise_docs_scout",
             )
 
         err = exc_info.value
@@ -115,7 +115,7 @@ class TestModelUnavailableAbstentionOnModelPathFailure:
         ):
             output = client.complete(
                 prompt="Extract AST pointers from order_flow_imbalance.py",
-                domain_id="trading_code_scout",
+                domain_id="code_architecture_scout",
             )
             pytest.fail(f"Expected ModelUnavailableError, got fabricated output: {output}")
 
@@ -131,7 +131,7 @@ class TestModelUnavailableAbstentionOnModelPathFailure:
         ):
             client.complete(
                 prompt="Extract AST pointers from order_flow_imbalance.py",
-                domain_id="trading_code_scout",
+                domain_id="code_architecture_scout",
             )
 
         err = exc_info.value
@@ -150,7 +150,7 @@ class TestModelUnavailableAbstentionOnModelPathFailure:
         principal = PrincipalContext(
             user_id="test_user",
             role=RoleType.ENGINEER,
-            allowed_scopes=["public_eng", "repo:trading_strategies"],
+            allowed_scopes=["public_eng", "repo:code_architecture_scout"],
         )
         workflow = ScoutWorkflow(repo=repo, local_client=client)
 
@@ -162,7 +162,7 @@ class TestModelUnavailableAbstentionOnModelPathFailure:
             result = workflow.execute(
                 user_prompt="Refactor OrderFlowImbalanceAnalyzer",
                 principal=principal,
-                domain_id="trading_code_scout",
+                domain_id="code_architecture_scout",
                 trace_id="trace_test_mlx_fail_closed",
             )
 
@@ -197,7 +197,7 @@ class TestOfflineModeDeterministicAbstention:
         assert client.completion_fixture is None
 
         with pytest.raises(ModelUnavailableError) as exc_info:
-            client.complete("Synthesize quant brief", domain_id="quant_research_scout")
+            client.complete("Synthesize quant brief", domain_id="enterprise_docs_scout")
 
         assert "model unavailable" in str(exc_info.value).lower()
         assert exc_info.value.diagnostic is not None
@@ -218,7 +218,7 @@ class TestOfflineModeDeterministicAbstention:
         result = workflow.execute(
             user_prompt="Synthesize DAX Momentum strategy",
             principal=principal,
-            domain_id="quant_research_scout",
+            domain_id="enterprise_docs_scout",
         )
 
         assert isinstance(result, InsufficientContextDiagnostic)
@@ -233,7 +233,7 @@ class TestOfflineModeDeterministicAbstention:
             return '{"test_fixture_acknowledged": true}'
 
         client = LocalGemmaClient(offline_mode=True, completion_fixture=mock_fixture)
-        output = client.complete("Test prompt", domain_id="trading_code_scout")
+        output = client.complete("Test prompt", domain_id="code_architecture_scout")
         assert output == '{"test_fixture_acknowledged": true}'
 
 

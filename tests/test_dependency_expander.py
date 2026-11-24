@@ -38,7 +38,7 @@ def populated_repo(
     principal_eng: PrincipalContext,
 ) -> tuple[InMemoryRLSRepository, ASTSymbolRecord]:
     repo = InMemoryRLSRepository()
-    domain_id = "trading_code_scout"
+    domain_id = "code_architecture_scout"
     repo_name = "trading-core"
 
     # 1. Target file with focus symbol: route_order
@@ -173,7 +173,7 @@ def test_expander_attaches_uses_type_and_imports(
 ) -> None:
     repo, focus_sym = populated_repo
     result: ASTExpansionResult = expander.expand_1hop(
-        focus_sym, repo, principal_eng, "trading_code_scout"
+        focus_sym, repo, principal_eng, "code_architecture_scout"
     )
 
     assert len(result.imported_type_slices) == 2
@@ -190,7 +190,7 @@ def test_expander_enforces_max_3_direct_callers_sec03(
     populated_repo: tuple[InMemoryRLSRepository, ASTSymbolRecord],
 ) -> None:
     repo, focus_sym = populated_repo
-    domain_id = "trading_code_scout"
+    domain_id = "code_architecture_scout"
     repo_name = "trading-core"
 
     # Insert 12 callers across 5 files
@@ -256,7 +256,7 @@ def test_expander_call_site_diversity_ranking(
     populated_repo: tuple[InMemoryRLSRepository, ASTSymbolRecord],
 ) -> None:
     repo, focus_sym = populated_repo
-    domain_id = "trading_code_scout"
+    domain_id = "code_architecture_scout"
     repo_name = "trading-core"
 
     # Create callers: 5 in file A, 1 in file B, 1 in file C
@@ -329,7 +329,7 @@ def test_expander_caller_snippet_extracts_plus_minus_5_lines(
     populated_repo: tuple[InMemoryRLSRepository, ASTSymbolRecord],
 ) -> None:
     repo, focus_sym = populated_repo
-    domain_id = "trading_code_scout"
+    domain_id = "code_architecture_scout"
     repo_name = "trading-core"
 
     # Create caller with 50 lines, invocation at line 35
@@ -395,7 +395,7 @@ def test_expander_resolves_tested_by_edge_and_naming_fallback(
     populated_repo: tuple[InMemoryRLSRepository, ASTSymbolRecord],
 ) -> None:
     repo, focus_sym = populated_repo
-    domain_id = "trading_code_scout"
+    domain_id = "code_architecture_scout"
     repo_name = "trading-core"
 
     # Part A: Explicit TESTED_BY edge
@@ -459,7 +459,7 @@ def test_expander_enforces_1500_token_budget_cutoff(
     populated_repo: tuple[InMemoryRLSRepository, ASTSymbolRecord],
 ) -> None:
     repo, focus_sym = populated_repo
-    domain_id = "trading_code_scout"
+    domain_id = "code_architecture_scout"
     repo_name = "trading-core"
 
     # Insert a massive caller whose token count exceeds 1500 tokens
@@ -528,13 +528,13 @@ def test_expander_enforces_rls_scope_isolation(
     populated_repo: tuple[InMemoryRLSRepository, ASTSymbolRecord],
 ) -> None:
     repo, focus_sym = populated_repo
-    domain_id = "trading_code_scout"
+    domain_id = "code_architecture_scout"
     repo_name = "trading-core"
 
     quant_principal = PrincipalContext(
         user_id="quant_dev",
-        role=RoleType.QUANT_RESEARCHER,
-        allowed_scopes=["quant_restricted"],
+        role=RoleType.DOMAIN_RESEARCHER,
+        allowed_scopes=["docs_restricted"],
     )
 
     # Insert a proprietary quant caller with only quant_restricted scope
@@ -549,7 +549,7 @@ def test_expander_enforces_rls_scope_isolation(
             git_commit_sha="sha",
             git_blob_sha="blob",
             language="python",
-            allowed_scopes=["quant_restricted"],
+            allowed_scopes=["docs_restricted"],
             raw_content="def secret_alpha(): route_order(None)\n",
             line_count=1,
         ),
@@ -564,7 +564,7 @@ def test_expander_enforces_rls_scope_isolation(
         end_line=1,
         signature_skeleton="def secret_alpha():",
         contextual_summary="Proprietary secret",
-        allowed_scopes=["quant_restricted"],
+        allowed_scopes=["docs_restricted"],
         embedding=[0.0] * 768,
     )
     repo.insert_ast_symbol(quant_principal, quant_sym)
@@ -577,7 +577,7 @@ def test_expander_enforces_rls_scope_isolation(
             target_qualified_name=focus_sym.qualified_name,
             target_symbol_id=focus_sym.symbol_id,
             edge_kind="CALLS",
-            allowed_scopes=["quant_restricted"],
+            allowed_scopes=["docs_restricted"],
         ),
     )
 

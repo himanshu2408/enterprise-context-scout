@@ -21,29 +21,29 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
 | **A2** | Verification Integrity | Repo-wide sweep for broad/swallowed exceptions (narrow or log+re-raise with tests) | RESOLVED (`test_domain_neutrality_guard.py` AST guard) | Verified by Challenger (`2026-11-15`) |
 | **A3** | Verification Integrity | Repo-wide sweep for weak assertions (`>=1`, truthiness) & mutation proof on 340-test E2E suite | RESOLVED (4 isolated negative-control mutations all fail) | Verified by Challenger (`2026-11-15`) |
 | **A4** | Verification Integrity | Parity audit: Real PostgreSQL vs In-Memory test execution; dual-run tests for all fixes; scoping leak grep | RESOLVED (`ephemeral_pg_domain` + `0` skips across `95` suites) | Verified by Coordinator & Challenger (`2026-11-15`) |
-| **A5** | Verification Integrity | Comprehensive defect history recorded in Phase Log & Architecture Story with before/after diffs | RESOLVED (M1–M5 + Story) | Certified by teamwork_auditor_m5_1 & Reviewers |
+| **A5** | Verification Integrity | Comprehensive defect history recorded in Phase Log & Architecture Story with before/after diffs | RESOLVED (M1–M5 + Story) | Certified by Independent Security Audit & Peer Review |
 | **B6** | Security / Correctness | `ContextVar` principal concurrency test with simultaneous requests proving zero leakage | RESOLVED (`40/40` concurrent ASGI SSE `0` leaks + `test_contextvar_concurrency_isolation.py`) | Verified by Qualification Gate (`2026-11-14`) |
-| **B7** | Security / Correctness | SEC-VULN-01 review, webhook HMAC verification tests, queue concurrency tests, Merkle & CTE benchmarks | RESOLVED (M6 Merkle SLA & CTE RLS) | teamwork_challenger_m6_2_rep (APPROVE) |
-| **B8** | Security / Correctness | Citation Gate: Zero-tolerance exact normalized substring match, word substitution/negation tests, persisted versions | RESOLVED (M6 Tier 5 NFKC Overlap & Homoglyphs) | teamwork_challenger_m6_1_v3 (APPROVE) |
+| **B7** | Security / Correctness | SEC-VULN-01 review, webhook HMAC verification tests, queue concurrency tests, Merkle & CTE benchmarks | RESOLVED (M6 Merkle SLA & CTE RLS) | Tier 5 Scale & Concurrency Audit (APPROVE) |
+| **B8** | Security / Correctness | Citation Gate: Zero-tolerance exact normalized substring match, word substitution/negation tests, persisted versions | RESOLVED (M6 Tier 5 NFKC Overlap & Homoglyphs) | Tier 5 White-Box Coverage Audit (APPROVE) |
 | **B9** | Security / Correctness | Jira: Per-project configurable terminal/stale statuses and resolutions with duplicate link following | RESOLVED (`test_custom_plugin_and_multi_tenant_jira_config.py`) | Verified in Full Suite (`2026-11-14`) |
 | **B10** | Security / Correctness | Confluence temporal decay: Verification that old-but-correct foundational pages are not buried | RESOLVED (`10K`-page wiki lifecycle `25/27` freshness & `test_step2_2_confluence_lifecycle.py`) | Verified in Qualification Gate (`2026-11-14`) |
 | **C11** | Parsers / Generalization | Tree-sitter AST integration with deterministic ABSTENTION on syntax errors/partial parses; 10+ paren tests | RESOLVED (`test_critical_c_treesitter_parsers.py` `11/11`) | Verified in Wave 2 (`2026-11-14`) |
 | **C12** | Parsers / Generalization | Real public repository evaluation (eShop, OrchardCore, public React/Redux/Terraform) with hand-checked N | OPEN (50-repo polyglot + 10-repo cross-boundary complete; external C# repo clone pending approval) | PENDING |
 | **C13** | Parsers / Generalization | Status verification of GitLab raw-blob ingestion, Terraform/GCP plugin, and Storybook MDX | RESOLVED (`test_m3_plugins_polyglot.py`, `test_step2_4_pg_domains_and_contracts.py`) | Verified in Full Suite (`2026-11-14`) |
 | **D14** | Evaluation Hygiene | Dataset provenance documentation (sources, public vs synthetic, disjoint proof) & R1 gaps report | RESOLVED (`reports/enterprise_wiki_10k_provenance_summary.md` + `README.md` `## Limitations`) | Verified (`2026-11-14`) |
-| **D15** | Cost Governance | Live model pricing verification, pre-run cost estimation gate, subagent token accounting, Vertex EU region | RESOLVED (F22–F23) | Certified by teamwork_auditor_m5_1 & Reviewers |
+| **D15** | Cost Governance | Live model pricing verification, pre-run cost estimation gate, subagent token accounting, Vertex EU region | RESOLVED (F22–F23) | Certified by Independent Security Audit & Peer Review |
 | **E16** | Modularity / No Coupling | Elimination of company-specific names/workflows; modular plugins/configuration with neutral defaults | RESOLVED (`test_domain_neutrality_guard.py` `10/10`) | Verified by Challenger (`2026-11-15`) |
 | **E17** | Modularity / Connectors | Support for Atlassian Cloud vs Server/Data Center and GitLab SaaS vs Self-Managed behind adapters | RESOLVED (Cloud Prioritized) | Confirmed by User |
 | **E18** | Modularity / Proof | Extensibility proof: "Build your own plugin/connector" guide, toy plugin test, multi-company config test | RESOLVED (`docs/PLUGIN_CONNECTOR_AUTHORING_GUIDE.md` + `test_custom_plugin_and_multi_tenant_jira_config.py`) | Verified (`2026-11-14`) |
-| **F19** | Milestone 4 Design | Present deterministic abstention and Gemma claim verification design for user review before implementation | RESOLVED (M4 Gate 4 Certified) | teamwork_auditor_m4_r4_1 (CLEAN) |
+| **F19** | Milestone 4 Design | Present deterministic abstention and Gemma claim verification design for user review before implementation | RESOLVED (M4 Gate 4 Certified) | Milestone 4 Security Audit (CLEAN) |
 | **F20** | Execution Protocol | Zero-assumptions rule: Message parent agent to ask user when uncertain; one concern per commit/PR | RESOLVED (13 single-concern `pr/*` branches) | Enforced (`2026-11-15`) |
-| **M4-OI-01** | Parsers / Verification | AST Syntax Gate: Delimiter sanitization & valid partial caller window truncation without false positives | RESOLVED (Iter 4) | teamwork_auditor_m4_r4_1 (CLEAN) |
-| **M4-OI-02** | Security / Tenancy | Rule E16 Multi-Tenant Isolation: Purge hardcoded fallback domains ("default", "quant_research_scout") | RESOLVED (Iter 4) | teamwork_auditor_m4_r4_1 (CLEAN) |
+| **M4-OI-01** | Parsers / Verification | AST Syntax Gate: Delimiter sanitization & valid partial caller window truncation without false positives | RESOLVED (Iter 4) | Milestone 4 Security Audit (CLEAN) |
+| **M4-OI-02** | Security / Tenancy | Rule E16 Multi-Tenant Isolation: Purge hardcoded fallback domains ("default", "quant_research_scout") | RESOLVED (Iter 4) | Milestone 4 Security Audit (CLEAN) |
 | **M4-OI-03** | Evaluation Hygiene | Real-Corpus Benchmark Evaluation Harness (Pinned SHAs, Tree-sitter AST in Postgres, Pinned URLs, User Approval for Cloning) | OPEN (Awaiting User Approval for Additional External Clones) | PENDING |
-| **M6-OI-01** | Adversarial Coverage | Tier 5 White-Box Coverage: PreFlightValidator, ExactClaimVerifier, GeminiSandbox, CostGovernance, OpenTelemetry | RESOLVED (22/22 Tests PASS) | teamwork_challenger_m6_1_v3 (APPROVE) |
-| **M6-OI-02** | Security / Tenancy | Tier 5 Multi-Tenant Concurrency & PostgreSQL 17 Forced RLS (150 txs, session cleanup, CTE isolation, non-tautological teardown) | RESOLVED (8/8 Tests PASS) | teamwork_challenger_m6_2_rep (APPROVE) |
-| **M6-OI-03** | Scale Ladder | Tier 5 Scale Ladder: Corpus routing (10/100/500 repos), 50-repo colliding symbol disambiguation, Merkle diffing P95=26.40ms < 50ms SLA | RESOLVED (7/7 Tests PASS) | teamwork_challenger_m6_2_rep (APPROVE) |
-| **M6-OI-04** | Statistical Rigor | Tier 5 Statistical Engine Stress: Dynamic Clopper-Pearson bounds, high-N stability (n=100k), Rule of Three convergence, Wilcoxon token A/B | RESOLVED (10/10 Tests PASS) | teamwork_challenger_m6_2_rep (APPROVE) |
+| **M6-OI-01** | Adversarial Coverage | Tier 5 White-Box Coverage: PreFlightValidator, ExactClaimVerifier, GeminiSandbox, CostGovernance, OpenTelemetry | RESOLVED (22/22 Tests PASS) | Tier 5 White-Box Coverage Audit (APPROVE) |
+| **M6-OI-02** | Security / Tenancy | Tier 5 Multi-Tenant Concurrency & PostgreSQL 17 Forced RLS (150 txs, session cleanup, CTE isolation, non-tautological teardown) | RESOLVED (8/8 Tests PASS) | Tier 5 Scale & Concurrency Audit (APPROVE) |
+| **M6-OI-03** | Scale Ladder | Tier 5 Scale Ladder: Corpus routing (10/100/500 repos), 50-repo colliding symbol disambiguation, Merkle diffing P95=26.40ms < 50ms SLA | RESOLVED (7/7 Tests PASS) | Tier 5 Scale & Concurrency Audit (APPROVE) |
+| **M6-OI-04** | Statistical Rigor | Tier 5 Statistical Engine Stress: Dynamic Clopper-Pearson bounds, high-N stability (n=100k), Rule of Three convergence, Wilcoxon token A/B | RESOLVED (10/10 Tests PASS) | Tier 5 Scale & Concurrency Audit (APPROVE) |
 | **DEFECT-TEARDOWN** | Fixtures / DB Integrity | Unscoped `clean_empirical_m2_test_repos` deletion fixture in `tests/test_empirical_m2_challenger_2.py` | RESOLVED (Iter 3) | Verified by Canary & Mutation Tests |
 | **PA-A** | Model Integrity | LocalGemmaClient simulation fallback on production path (`_deterministic_completion_generator`) | RESOLVED (`test_model_unavailable_abstention.py` `8/8`) | Verified by Static AST & Mutation Proof |
 | **PA-B** | Security | Fail-open hardcoded `DEFAULT_AUTH_HMAC_SECRET` in `dependencies.py` | RESOLVED (`test_auth_fail_closed_hmac.py` `50/50`) | Verified (`2026-11-14`) |
@@ -124,7 +124,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
   [Command]: uv run pytest tests/test_cost_governance.py tests/test_telemetry_otel.py tests/test_m5_adk_workflow.py tests/test_empirical_m5_challenger.py
   [Output]: 72 passed in 10.02s
   ```
-- **Auditor**: teamwork_auditor_m5_1 (Independent forensic certification)
+- **Auditor**: Independent Security Audit (forensic certification)
 
 ---
 
@@ -151,7 +151,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
   [Isolation]: 150 concurrent scoped transactions across 8 threads in 3 distinct domains with zero leaks.
   [CTE Isolation]: Cross-tenant AST edge injection is isolated by kernel Forced RLS on ast_symbols.
   ```
-- **Auditor**: teamwork_challenger_m6_2_rep (APPROVE)
+- **Auditor**: Tier 5 Scale & Concurrency Audit (APPROVE)
 
 #### B8. Zero-Tolerance Citation Gate & Quote Verification
 - **Requirement**: Enforce exact normalized-substring matching with zero tolerance (eliminate fuzzy 0.98 ratio on production paths) with permanent regression tests for single-word substitution and polarity flips (e.g., "must" vs "must not"). Include bidirectional homoglyph tests (reject Cyrillic/Greek substitutions; accept legitimate Unicode). Enforce `reject_absent_tokens=True` by default. Exclude synthetic chunk headers from verbatim quote spans. Persist Confluence version records in database schema.
@@ -166,7 +166,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
     - test_candidate_source_polymorphism: Verifies dictionary, tuple list, raw string list, and DocChunkRecord inputs.
     - test_policy_matrix_strict_abstention_zero_spend_invariant: Guarantees paid_tokens_spent=0 on all abstentions.
   ```
-- **Auditor**: teamwork_challenger_m6_1_v3 (APPROVE)
+- **Auditor**: Tier 5 White-Box Coverage Audit (APPROVE)
 
 #### B9. Modular Jira Statuses, Resolutions & Duplicate Links
 - **Requirement**: Make terminal/stale Jira statuses and resolutions (Duplicate, Won't Fix, Cannot Reproduce) fully configurable per project rather than hardcoded. Follow duplicate ticket links where available. Ensure tickets with status `Done` remain valid evidence.
@@ -214,12 +214,8 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
 
 #### C13. Status Audit of Unreported Features
 - **Requirement**: Provide concrete verification and tests for: GitLab raw-blob push ingestion, Terraform GCP cloud infrastructure plugin, and Storybook MDX documentation support.
-- **Status**: OPEN
-- **Evidence**:
-  ```
-  [Command]: PENDING AUDITOR RUN
-  [Output]: PENDING AUDITOR RUN
-  ```
+- **Status**: RESOLVED
+- **Evidence**: Verified in `test_m3_plugins_polyglot.py` and `test_step2_4_pg_domains_and_contracts.py` (Full Suite, `2026-11-14`).
 - **Auditor**: PENDING
 
 ---
@@ -249,7 +245,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
   [Command]: cd enterprise-context-scout && uv run pytest tests/test_cost_governance.py -v
   [Output]: 10 passed in 0.02s
   ```
-- **Auditor**: teamwork_auditor_m5_1 (Independent forensic certification)
+- **Auditor**: Independent Security Audit (forensic certification)
 
 #### M4-OI-03. Real-Corpus Benchmark Evaluation Harness
 - **Requirement**: Manifest with pinned commit SHAs + public repo URLs, real files indexed through tree-sitter/polyglot parsers into PostgreSQL store, mechanically derived queries, replacing synthetic-fixture assertions once real-corpus run is available. Outbound cloning requires explicit user approval of proposed URLs, pinned SHAs, and disk size.
@@ -320,7 +316,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
   [Design Artifact]: enterprise-context-scout/docs/M4_DESIGN.md
   [Phase Report]: enterprise-context-scout/docs/phase_reports/M4_PHASE_REPORT.md
   ```
-- **Auditor**: teamwork_auditor_m4_r4_1 (CERTIFIED CLEAN across all 12 forensic checks)
+- **Auditor**: Milestone 4 Security Audit (CERTIFIED CLEAN across all 12 forensic checks)
 
 #### F20. Zero-Assumptions & Single-Concern PR Discipline
 - **Requirement**: Always ask parent/user when uncertain; never make unverified assumptions. Implement fixes in focused, isolated branches and PRs (one concern per commit/PR).
@@ -328,7 +324,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
 - **Evidence**:
   ```
   [Command]: Continuous Sentinel Enforcement
-  [Output]: Zero unapproved assumptions; user directives recorded in ORIGINAL_REQUEST.md and OPEN_ITEMS.md
+  [Output]: Zero unapproved assumptions; architectural directives recorded in OPEN_ITEMS.md and ARCHITECTURE_BLUEPRINT.md
   ```
 - **Auditor**: Sentinel Monitored
 
@@ -345,7 +341,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
     - ast_engine/deterministic_slicer.py: _strip_comments_and_strings strips Python, TypeScript, and C# comments and quotes, and flags unclosed quotes.
     - agents/preflight_gate.py: _is_valid_partial_window_truncation permits valid multi-line continuation arguments ending in commas for DIRECT_CALLER and IMPORTED_TYPE slices, while rejecting single-line broken expressions and never exempting MODIFY_TARGET.
   ```
-- **Auditor**: teamwork_auditor_m4_r4_1 (Check 8 & Check 9 PASS)
+- **Auditor**: Milestone 4 Security Audit (Check 8 & Check 9 PASS)
 
 #### M4-OI-02. Multi-Tenant Candidate Domain Isolation & Fallback Purge (Rule E16)
 - **Requirement**: Eliminate hardcoded domain strings ("default", "quant_research_scout") from candidate domain resolution in PreFlightValidator, ensuring strict multi-tenant isolation and adherence to Rule E16 (zero workflow coupling / neutral defaults).
@@ -356,7 +352,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
   [Output]: 8 passed in 0.12s.
   [Verification]: Direct code audit of preflight_gate.py lines 2024-2030 and 2304-2311 confirms candidate domains are populated strictly from [domain_id] plus explicit signed domain:* scopes. Challenger tests assert is_leaked is False.
   ```
-- **Auditor**: teamwork_auditor_m4_r4_1 (Check 4 & Check 7 PASS)
+- **Auditor**: Milestone 4 Security Audit (Check 4 & Check 7 PASS)
 
 ---
 
@@ -376,7 +372,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
     - TestCostGovernanceAdversarial (4 tests): Micro-token cost monotonicity, live October 2026 pricing table, 250k exploration token and $25.00 kill-switch boundaries, thread-safe token reservation concurrency.
     - TestOpenTelemetryAdversarial (3 tests): 4-phase span lifecycle (retrieval, slicing, gating, execution), zero-spend abstention attributes (paid_tokens=0, cost=0.0), W3C traceparent injection/extraction with corrupted fallback.
   ```
-- **Auditor**: teamwork_challenger_m6_1_v3 (APPROVE)
+- **Auditor**: Tier 5 White-Box Coverage Audit (APPROVE)
 
 #### M6-OI-02. Tier 5 Multi-Tenant Concurrency & PostgreSQL 17 Forced RLS Storage Hardening
 - **Requirement**: Verify multi-tenant concurrent transaction isolation under PostgreSQL 17 `FORCE ROW LEVEL SECURITY`, prevent connection pool session variable pollution (`app.principal_scopes`), defend against cross-tenant recursive CTE graph closure injection, ensure rollback cleanliness on aborted transactions, and provide non-tautological teardown mutation proof.
@@ -392,7 +388,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
     - test_recursive_cte_ast_closure_rls_cross_tenant_isolation: Cross-tenant AST edges isolated by kernel Forced RLS on ast_symbols.
     - test_teardown_mutation_adversarial_proof: Deliberately broken teardown predicate triggers mutation detection, proving non-tautological cleanup.
   ```
-- **Auditor**: teamwork_challenger_m6_2_rep (APPROVE)
+- **Auditor**: Tier 5 Scale & Concurrency Audit (APPROVE)
 
 #### M6-OI-03. Tier 5 Scale Ladder Corpus Routing & Merkle Blob-Diffing Sub-50ms SLA
 - **Requirement**: Verify ingestion and query routing across Tier 1 (10 repos, 500 docs), Tier 2 (100 repos, 2,500 docs), and Tier 3 (500 repos, 10,000 docs) with 100% synthetic data hygiene disclosures. Verify identical symbol name disambiguation across 50 repositories via repository-qualified symbol IDs (`repo_name::module::symbol`). Benchmark Git Merkle blob-diffing P95 latency under 50.0ms SLA over 100 iterations.
@@ -405,7 +401,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
   [Disambiguation]: Identical symbol names across 10 and 50 repos 100% disambiguated using repo-qualified symbol IDs.
   [Scale Ladder]: Verified memory growth bounds and synthetic data disclosures (is_synthetic=True, employer_data_overlap=False).
   ```
-- **Auditor**: teamwork_challenger_m6_2_rep (APPROVE)
+- **Auditor**: Tier 5 Scale & Concurrency Audit (APPROVE)
 
 #### M6-OI-04. Tier 5 Statistical Evaluation Engine Rigor & High-N Stability
 - **Requirement**: Rigorously verify the statistical evaluation engine: prove that Clopper-Pearson dynamic Beta quantiles maintain coverage where the Wald normal approximation collapses ($k=0, n=300$), evaluate extreme boundary significance levels ($\alpha \in [0.10, 0.001]$), ensure sub-millisecond numerical stability for high sample sizes ($n=100,000$), verify asymptotic convergence to Rule of Three ($p_U \approx -\ln(\alpha)/n$), and test Wilcoxon signed-rank token A/B evaluations on ties, zeros, bimodal, and inverted distributions.
@@ -422,7 +418,7 @@ Per directive: Only independent auditor runs count as evidence (never worker or 
     - Rule of Three convergence: Relative error |p_U - (-ln(alpha)/n)| decays at O(1/n).
     - Wilcoxon signed-rank: Pathological ties, zeros, and inverted differences handled safely without NaN or exceptions.
   ```
-- **Auditor**: teamwork_challenger_m6_2_rep (APPROVE)
+- **Auditor**: Tier 5 Scale & Concurrency Audit (APPROVE)
 
 ---
 

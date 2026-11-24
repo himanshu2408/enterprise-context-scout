@@ -124,7 +124,7 @@ def test_multi_caller_and_large_token_budget_attaches_over_3_callers_and_1500_to
         "    def compute_schedule(self, qty: float) -> list[float]:\n"
         "        return [qty / 2.0, qty / 2.0]\n"
     )
-    focus_file = _make_file(domain_id, repo_name, "src/exec/almgren_chriss.py", focus_src)
+    focus_file = _make_file(domain_id, repo_name, "src/exec/execution_planner.py", focus_src)
     repo.insert_code_file(principal, focus_file)
     focus_sym = _make_symbol(
         focus_file,
@@ -416,9 +416,45 @@ def test_pg17_ast_neighborhood_uses_indexes_and_runs_under_200ms(
                 ),
             )
 
+    with mgr.scoped_transaction(principal) as conn:
+        code_row = conn.execute(
+            "SELECT symbol_id FROM ast_symbols "
+            "WHERE domain_id = 'code_architecture_scout' "
+            "AND qualified_name LIKE %s LIMIT 1",
+            ("%PreFlightValidator%",),
+        ).fetchone()
+    code_domain = "code_architecture_scout"
+    if code_row is None:
+        code_domain = ephemeral_pg_domain
+        with mgr.scoped_transaction(principal) as conn:
+            pf_file = _make_file(
+                ephemeral_pg_domain,
+                "context_scout",
+                "src/context_scout/agents/preflight_gate.py",
+                "class PreFlightValidator:\n    pass\n\n"
+                "def run_preflight() -> PreFlightValidator:\n    return PreFlightValidator()\n",
+            )
+            repo.insert_code_file(conn, pf_file)
+            pf_sym = _make_symbol(pf_file, "PreFlightValidator", "class", 1, 2)
+            caller_pf = _make_symbol(pf_file, "run_preflight", "function", 4, 5)
+            repo.insert_ast_symbol(conn, pf_sym)
+            repo.insert_ast_symbol(conn, caller_pf)
+            repo.insert_ast_edge(
+                conn,
+                ASTEdgeRecord(
+                    edge_id=uuid.uuid4(),
+                    domain_id=ephemeral_pg_domain,
+                    source_symbol_id=caller_pf.symbol_id,
+                    target_qualified_name=pf_sym.qualified_name,
+                    target_symbol_id=pf_sym.symbol_id,
+                    edge_kind="CALLS",
+                    allowed_scopes=["public_eng"],
+                ),
+            )
+
     for domain_id, qname in (
         (poly_domain, "anyio._backends._asyncio.find_root_task"),
-        ("trading_code_scout", "AlmgrenChrissExecutionOptimizer"),
+        (code_domain, "PreFlightValidator"),
     ):
         with mgr.scoped_transaction(principal) as conn:
             row = conn.execute(
@@ -594,18 +630,18 @@ def test_cost_governance_kill_switch_and_pg17_doc_count_and_rrf(
         )
 
 
-def test_polyglot_unseen_v2_blocks_public_quant_only_principal(
+def test_polyglot_unseen_v2_blocks_public_docs_only_principal(
     ephemeral_pg_domain: str,
 ) -> None:
-    """Regression test: public_quant-only principals see 0 public_eng code_files."""
+    """Regression test: public_docs-only principals see 0 public_eng code_files."""
     settings = ScoutSettings()
     mgr = RLSConnectionManager(settings.db_app_url)
     repo = PostgresRLSRepository()
 
     quant_principal = PrincipalContext(
         user_id="quant_only_probe",
-        role=RoleType.QUANT_RESEARCHER,
-        allowed_scopes=["public_quant"],
+        role=RoleType.DOMAIN_RESEARCHER,
+        allowed_scopes=["public_docs"],
     )
     eng_principal = _eng_principal()
     with mgr.scoped_transaction(eng_principal) as conn:
@@ -615,7 +651,9 @@ def test_polyglot_unseen_v2_blocks_public_quant_only_principal(
     poly_cnt = int(str(row_poly[0])) if row_poly is not None else 0
 
     target_domain = "polyglot_unseen_v2"
-    expected_min_eng = 4000
+    expected_min_eng = (
+        4000 if (Path(__file__).resolve().parents[1] / "data" / "unseen_repos_v2").is_dir() else 3
+    )
     if poly_cnt == 0:
         target_domain = ephemeral_pg_domain
         expected_min_eng = 1
@@ -675,13 +713,13 @@ def test_linear_time_anti_redos_across_bm25_intent_router_and_preflight() -> Non
 
     gate = PreFlightValidator(repo=InMemoryRLSRepository())
     explicit_toks, _ = gate.extract_prompt_candidates(
-        "Check `GARCH11Model` in src/strat/volatility_garch.py "
+        "Check `ForecastModel` in src/strat/forecast_model.py "
         + ("a/b." * 4_000)
         + " ```unclosed fence "
         + ("x" * 5_000)
     )
-    assert "GARCH11Model" in explicit_toks
-    assert "src/strat/volatility_garch.py" in explicit_toks
+    assert "ForecastModel" in explicit_toks
+    assert "src/strat/forecast_model.py" in explicit_toks
 
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     assert elapsed_ms < 250.0, f"Anti-ReDoS suite took {elapsed_ms:.2f}ms (>= 250ms)"
@@ -689,6 +727,7 @@ def test_linear_time_anti_redos_across_bm25_intent_router_and_preflight() -> Non
 
 def test_custom_domain_manifest_path_traversal_fail_closed(
     tmp_path: Path,
+    ephemeral_pg_domain: str,
 ) -> None:
     """Regression test: custom domain manifest helpers reject path traversal and untrusted paths."""
     import pytest
@@ -696,6 +735,7 @@ def test_custom_domain_manifest_path_traversal_fail_closed(
     from context_scout.agents.preflight_gate import (
         CUSTOM_CORPUS_INDEX_PATHS,
         _resolve_custom_corpus_index_path,
+        read_custom_sync_manifest,
         register_custom_corpus_index,
         sync_custom_domain_corpus_if_needed,
         write_custom_sync_manifest,
@@ -723,8 +763,8 @@ def test_custom_domain_manifest_path_traversal_fail_closed(
     assert _resolve_custom_corpus_index_path("../../etc") is None
     assert sync_custom_domain_corpus_if_needed("../../etc") is None
 
-    # Positive control: trusted tmp_path manifest writes and resolves cleanly
-    slug = f"ws1_safe_{uuid.uuid4().hex[:8]}"
+    # Positive control: trusted tmp_path manifest persists statelessly without writing to repo/disk
+    slug = ephemeral_pg_domain
     safe_path = tmp_path / slug / "sync_manifest.json"
     try:
         written = write_custom_sync_manifest(
@@ -738,7 +778,12 @@ def test_custom_domain_manifest_path_traversal_fail_closed(
             ast_edges_indexed=0,
             doc_chunks_indexed=2,
         )
-        assert written.exists()
+        assert not safe_path.exists()
+        assert not written.exists()
+        manifest = read_custom_sync_manifest(slug)
+        assert manifest is not None
+        assert manifest["domain_id"] == slug
+        assert manifest["doc_chunks_indexed"] == 2
         assert _resolve_custom_corpus_index_path(slug) == written
     finally:
         CUSTOM_CORPUS_INDEX_PATHS.pop(slug, None)

@@ -411,7 +411,7 @@ def test_f09_live_postgres_cross_repo_reconciler() -> None:
                     primary_truth_source, freshness_half_life_days, config_json
                 )
                 VALUES (%s, 'Eval F09 Reconciler', 'none', 'code', 180, '{"f09_test": true}'::jsonb)
-                ON CONFLICT (domain_id) DO NOTHING;
+                ON CONFLICT (tenant_id, domain_id) DO NOTHING;
                 """,
                 (domain_id,),
             )
@@ -547,7 +547,7 @@ def test_f09_cleanup_canary_isolation_and_mutation_proof() -> None:
                         primary_truth_source, freshness_half_life_days, config_json
                     )
                     VALUES (%s, %s, 'none', 'code', 30, '{}')
-                    ON CONFLICT (domain_id) DO NOTHING;
+                    ON CONFLICT (tenant_id, domain_id) DO NOTHING;
                     """,
                     (dom, f"Canary Test {dom}"),
                 )

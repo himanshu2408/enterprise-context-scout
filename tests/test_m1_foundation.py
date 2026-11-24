@@ -5,10 +5,17 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from examples.quant_dogfood.contracts import (
+    FrictionVerdict,
+    QuantStrategyBrief,
+)
+from examples.quant_dogfood.contracts import (
+    MarketRegime as QuantMarketRegime,
+)
 from pydantic import ValidationError
 
 from context_scout.agents.domain_registry import AdapterPool, DomainRegistry
-from context_scout.config import ScoutSettings, validate_google_model_id
+from context_scout.config import ModelGovernancePolicy, ScoutSettings, validate_model_id
 from context_scout.db.repositories import (
     ASTEdgeRecord,
     ASTSymbolRecord,
@@ -19,11 +26,9 @@ from context_scout.db.repositories import (
 from context_scout.schemas.contracts import (
     CodeSlicePointer,
     DocCitationSpan,
-    FrictionVerdict,
-    MarketRegime,
+    DocumentScope,
     ModificationIntent,
     PrincipalContext,
-    QuantStrategyBrief,
     RoleType,
     compute_normalized_rrf,
 )
@@ -32,33 +37,56 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_google_only_model_policy_enforcement() -> None:
-    """Rule 2: Only Oct 2026 Google models are allowed; non-Google & stale models fail."""
-    assert validate_google_model_id("google/gemma-4-26B-A4B-it") == "google/gemma-4-26B-A4B-it"
-    assert validate_google_model_id("google/gemma-4-E4B-it") == "google/gemma-4-E4B-it"
-    assert validate_google_model_id("google/embeddinggemma-2") == "google/embeddinggemma-2"
-    assert validate_google_model_id("gemini-3.8-flash") == "gemini-3.8-flash"
-    assert validate_google_model_id("gemini-4-argon") == "gemini-4-argon"
+    """Default Gemma stack + approved BYO open-weights pass; retired & unapproved fail."""
+    policy = ModelGovernancePolicy.default()
+    assert policy.allow_external_cloud_egress is False
+    assert policy.require_safetensors_only is True
+    assert policy.trust_remote_code is False
 
+    # Default local Gemma 4 / EmbeddingGemma / ShieldGemma & approved cloud handoff IDs
+    assert validate_model_id("google/gemma-4-26B-A4B-it") == "google/gemma-4-26B-A4B-it"
+    assert validate_model_id("google/gemma-4-E4B-it") == "google/gemma-4-E4B-it"
+    assert validate_model_id("google/embeddinggemma-2") == "google/embeddinggemma-2"
+    assert validate_model_id("google/shieldgemma-2-2b-it") == "google/shieldgemma-2-2b-it"
+    assert validate_model_id("gemini-3.8-flash") == "gemini-3.8-flash"
+    assert validate_model_id("gemini-4-argon") == "gemini-4-argon"
+
+    # Approved BYO open-weights families from config/model_registry.yaml
+    for approved_byo in [
+        "Qwen/Qwen3-Coder-30B-A3B",
+        "mistralai/Devstral-Small-2505",
+        "deepseek-ai/DeepSeek-V3",
+        "meta-llama/Llama-4-Scout-17B-16E",
+        "microsoft/Phi-4",
+        "ibm-granite/granite-3.3-8b-instruct",
+        "BAAI/bge-m3",
+    ]:
+        assert policy.validate_local_model_id(approved_byo) == approved_byo
+
+    # Retired and unapproved models must fail closed
     for prohibited in [
         "gpt-4o",
         "claude-3-5-sonnet",
-        "Qwen/Qwen3-Coder-30B-A3B",
+        "meta-llama/Llama-3-8b",
+        "gemini-2.5-flash",
+        "codegemma",
         "text-embedding-004",
         "google/gemma-2-9b-it",
         "google/gemma-3-12b-it",
         "gemini-ultra",
     ]:
         with pytest.raises(ValueError):
-            validate_google_model_id(prohibited)
+            validate_model_id(prohibited)
 
     settings = ScoutSettings()
     assert settings.primary_model_id == "google/gemma-4-26B-A4B-it"
     assert settings.frontier_model_id == "gemini-3.8-flash"
+    assert settings.allow_external_cloud_egress is False
     assert settings.local_max_kv_tokens == 32_768
 
 
 def test_blk01_normalized_rrf_score_range_and_threshold() -> None:
-    """BLK-01: Normalized RRF scales rank #1 across 3 modalities to 1.0 (passing >=0.55 gate)."""
+    """Normalized RRF scales rank #1 across 3 modalities to 1.0 (passing >=0.55 gate)."""
     top_score = compute_normalized_rrf([1, 1, 1], num_modalities=3, k=60)
     assert top_score == 1.0
     assert top_score >= 0.55
@@ -85,7 +113,7 @@ def test_fin01_market_regime_quant_scepticism_gate() -> None:
     # 1. India NSE equity delivery with only 8 bps (< 15 bps floor) -> forced warning
     under_cost_nse = QuantStrategyBrief(
         strategy_name="NSE Opening Range Momentum",
-        target_markets=[MarketRegime.INDIA_NSE_BSE],
+        target_markets=[QuantMarketRegime.INDIA_NSE_BSE],
         is_intraday_futures=False,
         mathematical_signal_latex=r"S_t = \frac{P_t - P_{open}}{\sigma_{20}}",
         entry_exit_rules=["Buy when S_t > 1.5", "Exit at 15:15 IST"],
@@ -111,7 +139,7 @@ def test_fin01_market_regime_quant_scepticism_gate() -> None:
     # 3. Germany Xetra with 6 bps (< 10 bps floor) -> forced warning
     under_cost_xetra = QuantStrategyBrief(
         strategy_name="DAX Closing Auction Imbalance",
-        target_markets=[MarketRegime.GERMANY_XETRA_DAX],
+        target_markets=[QuantMarketRegime.GERMANY_XETRA_DAX],
         mathematical_signal_latex=r"I_t = \frac{V_{bid} - V_{ask}}{V_{bid} + V_{ask}}",
         entry_exit_rules=["Enter 5m before Xetra closing auction"],
         sample_period_years="2019-2025",
@@ -131,17 +159,19 @@ def test_domain_registry_and_adapter_pool_isolation() -> None:
 
     registry = DomainRegistry(REPO_ROOT / "domains")
     manifests = registry.load_all()
-    assert {"trading_code_scout", "quant_research_scout"}.issubset(set(manifests.keys()))
+    assert {"code_architecture_scout", "enterprise_docs_scout"}.issubset(set(manifests.keys()))
 
-    code_slot = registry.adapter_pool.get_slot("trading_code_scout")
-    quant_slot = registry.adapter_pool.get_slot("quant_research_scout")
+    code_slot = registry.adapter_pool.get_slot("code_architecture_scout")
+    quant_slot = registry.adapter_pool.get_slot("enterprise_docs_scout")
     assert code_slot.adapter_id == "gemma4_26b_code_scout"
-    assert quant_slot.adapter_id == "gemma4_26b_quant_research"
+    assert quant_slot.adapter_id == "gemma4_26b_enterprise_docs"
     assert code_slot.max_kv_tokens == 32_768
 
-    assert registry.is_mcp_tool_allowed("trading_code_scout", "code_repo_mcp:search_ast_symbols")
+    assert registry.is_mcp_tool_allowed(
+        "code_architecture_scout", "code_repo_mcp:search_ast_symbols"
+    )
     assert not registry.is_mcp_tool_allowed(
-        "trading_code_scout", "quant_corpus_mcp:search_papers_hybrid"
+        "code_architecture_scout", "doc_corpus_mcp:search_hybrid_rrf"
     )
 
 
@@ -159,13 +189,13 @@ def test_sql_schema_enforces_rls_on_all_tables_including_ast_edges() -> None:
 
 
 def test_rls_zero_leakage_and_hybrid_rrf_retrieval() -> None:
-    """Verifies product_manager cannot leak quant_restricted files, symbols, edges, or docs."""
+    """Verifies product_manager cannot leak docs_restricted files, symbols, edges, or docs."""
     repo = InMemoryRLSRepository()
 
     quant_principal = PrincipalContext(
         user_id="usr_quant_1",
-        role=RoleType.QUANT_RESEARCHER,
-        allowed_scopes=["public_eng", "quant_restricted"],
+        role=RoleType.DOMAIN_RESEARCHER,
+        allowed_scopes=["public_eng", "docs_restricted"],
     )
     pm_principal = PrincipalContext(
         user_id="usr_pm_1",
@@ -182,7 +212,7 @@ def test_rls_zero_leakage_and_hybrid_rrf_retrieval() -> None:
         quant_principal,
         CodeFileRecord(
             file_id=pub_file_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             repo_name="trading-core",
             file_path="src/execution/order_router.py",
             git_commit_sha="a1b2c3d4",
@@ -197,13 +227,13 @@ def test_rls_zero_leakage_and_hybrid_rrf_retrieval() -> None:
         quant_principal,
         CodeFileRecord(
             file_id=sec_file_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             repo_name="trading-core",
             file_path="src/alpha/proprietary_stat_arb.py",
             git_commit_sha="a1b2c3d4",
             git_blob_sha="99887766",
             language="python",
-            allowed_scopes=["quant_restricted"],
+            allowed_scopes=["docs_restricted"],
             raw_content="def compute_secret_alpha_weights(): pass\n",
             line_count=1,
         ),
@@ -217,7 +247,7 @@ def test_rls_zero_leakage_and_hybrid_rrf_retrieval() -> None:
         ASTSymbolRecord(
             symbol_id=pub_sym_id,
             file_id=pub_file_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             qualified_name="trading.execution.order_router.route_order",
             symbol_kind="function",
             start_line=1,
@@ -233,14 +263,14 @@ def test_rls_zero_leakage_and_hybrid_rrf_retrieval() -> None:
         ASTSymbolRecord(
             symbol_id=sec_sym_id,
             file_id=sec_file_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             qualified_name="trading.alpha.proprietary_stat_arb.compute_secret_alpha_weights",
             symbol_kind="function",
             start_line=1,
             end_line=1,
             signature_skeleton="def compute_secret_alpha_weights() -> dict[str, float]:",
             contextual_summary="Proprietary intraday stat-arb signal weights.",
-            allowed_scopes=["quant_restricted"],
+            allowed_scopes=["docs_restricted"],
             embedding=emb_secret,
         ),
     )
@@ -250,12 +280,12 @@ def test_rls_zero_leakage_and_hybrid_rrf_retrieval() -> None:
         quant_principal,
         ASTEdgeRecord(
             edge_id=uuid4(),
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             source_symbol_id=sec_sym_id,
             target_qualified_name="trading.alpha.secret_kelly.HiddenKellyMatrix",
             target_symbol_id=None,
             edge_kind="USES_TYPE",
-            allowed_scopes=["quant_restricted"],
+            allowed_scopes=["docs_restricted"],
         ),
     )
 
@@ -264,42 +294,42 @@ def test_rls_zero_leakage_and_hybrid_rrf_retrieval() -> None:
         quant_principal,
         DocChunkRecord(
             chunk_id=uuid4(),
-            domain_id="quant_research_scout",
+            domain_id="enterprise_docs_scout",
             doc_id="internal:alpha-memo-01",
             doc_title="Proprietary NSE Intraday Alpha Weights",
             source_uri="internal://alpha-memo-01",
-            market_scope=MarketRegime.INDIA_NSE_BSE,
+            market_scope=DocumentScope.GLOBAL_MULTI,
             published_date=date(2026, 9, 1),
             authority_weight=1.0,
             section_heading="1. Confidential Signal Weights",
             contextual_header="[Context: Restricted internal quant note]",
             verbatim_content="Proprietary weight vector w = [0.42, -0.31, 0.19]",
             metadata_json={"restricted": True},
-            allowed_scopes=["quant_restricted"],
+            allowed_scopes=["docs_restricted"],
             embedding=emb_secret,
         ),
     )
 
     # Product manager must see ONLY public_eng files, 0 restricted edges, and 0 restricted docs
-    pm_files = repo.list_visible_code_files(pm_principal, "trading_code_scout")
+    pm_files = repo.list_visible_code_files(pm_principal, "code_architecture_scout")
     assert [f.file_path for f in pm_files] == ["src/execution/order_router.py"]
-    assert repo.list_visible_ast_edges(pm_principal, "trading_code_scout") == []
-    assert repo.list_visible_doc_chunks(pm_principal, "quant_research_scout") == []
+    assert repo.list_visible_ast_edges(pm_principal, "code_architecture_scout") == []
+    assert repo.list_visible_doc_chunks(pm_principal, "enterprise_docs_scout") == []
 
     # Even if PM searches directly for "compute_secret_alpha_weights", 0 restricted hits leak
     pm_hits = repo.search_symbols_hybrid_rrf(
         principal=pm_principal,
-        domain_id="trading_code_scout",
+        domain_id="code_architecture_scout",
         query_text="compute_secret_alpha_weights",
         query_embedding=emb_secret,
     )
     assert len(pm_hits) == 1
     assert "secret" not in pm_hits[0].qualified_name_or_title
 
-    # Quant researcher with quant_restricted scope gets the restricted symbol at Rank #1 (RRF=1.0)
+    # Quant researcher with docs_restricted scope gets the restricted symbol at Rank #1 (RRF=1.0)
     quant_hits = repo.search_symbols_hybrid_rrf(
         principal=quant_principal,
-        domain_id="trading_code_scout",
+        domain_id="code_architecture_scout",
         query_text="compute_secret_alpha_weights",
         query_embedding=emb_secret,
     )

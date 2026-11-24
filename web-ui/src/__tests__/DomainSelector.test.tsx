@@ -39,18 +39,18 @@ describe("DomainSelector", () => {
     render(
       <DomainSelector
         domains={[...TEST_DOMAINS, unseenWithNulls]}
-        selectedDomain="trading_code_scout"
+        selectedDomain="code_architecture_scout"
         onSelectDomain={onSelect}
       />
     );
 
     expect(screen.getByTestId("domain-card-federated_all")).toBeInTheDocument();
     expect(
-      screen.getByTestId("domain-card-trading_code_scout")
+      screen.getByTestId("domain-card-code_architecture_scout")
     ).toHaveClass("domain-row-active");
 
-    fireEvent.click(screen.getByTestId("domain-card-quant_research_scout"));
-    expect(onSelect).toHaveBeenCalledWith("quant_research_scout");
+    fireEvent.click(screen.getByTestId("domain-card-enterprise_docs_scout"));
+    expect(onSelect).toHaveBeenCalledWith("enterprise_docs_scout");
 
     fireEvent.click(
       screen.getByTestId("toggle-adapter-metrics-polyglot_unseen_v2")
@@ -64,22 +64,22 @@ describe("DomainSelector", () => {
     render(
       <DomainSelector
         domains={TEST_DOMAINS}
-        selectedDomain="quant_research_scout"
+        selectedDomain="enterprise_docs_scout"
         onSelectDomain={vi.fn()}
       />
     );
 
     expect(
-      screen.getByTestId("domain-card-quant_research_scout")
+      screen.getByTestId("domain-card-enterprise_docs_scout")
     ).toHaveClass("domain-row-active");
     expect(
-      screen.getByTestId("domain-card-trading_code_scout")
+      screen.getByTestId("domain-card-code_architecture_scout")
     ).not.toHaveClass("domain-row-active");
 
     fireEvent.click(
-      screen.getByTestId("toggle-adapter-metrics-trading_code_scout")
+      screen.getByTestId("toggle-adapter-metrics-code_architecture_scout")
     );
-    const metricsBox = screen.getByTestId("adapter-metrics-trading_code_scout");
+    const metricsBox = screen.getByTestId("adapter-metrics-code_architecture_scout");
     expect(metricsBox).toHaveTextContent("r=8, α=16");
     expect(metricsBox).toHaveTextContent("2 docs · 14 files");
     expect(metricsBox).toHaveTextContent("0.7200");
@@ -90,18 +90,18 @@ describe("DomainSelector", () => {
     render(
       <DomainSelector
         domains={TEST_DOMAINS}
-        selectedDomain="trading_code_scout"
+        selectedDomain="code_architecture_scout"
         onSelectDomain={onSelect}
       />
     );
 
-    const quantCard = screen.getByTestId("domain-card-quant_research_scout");
-    fireEvent.keyDown(quantCard, { key: "Enter" });
-    expect(onSelect).toHaveBeenCalledWith("quant_research_scout");
+    const docsCard = screen.getByTestId("domain-card-enterprise_docs_scout");
+    fireEvent.keyDown(docsCard, { key: "Enter" });
+    expect(onSelect).toHaveBeenCalledWith("enterprise_docs_scout");
 
-    const codeCard = screen.getByTestId("domain-card-trading_code_scout");
+    const codeCard = screen.getByTestId("domain-card-code_architecture_scout");
     fireEvent.keyDown(codeCard, { key: " " });
-    expect(onSelect).toHaveBeenCalledWith("trading_code_scout");
+    expect(onSelect).toHaveBeenCalledWith("code_architecture_scout");
   });
 
   it("filters standalone domains by sourceFilter and shows empty hint when none match", () => {
@@ -115,10 +115,10 @@ describe("DomainSelector", () => {
     );
 
     expect(
-      screen.getByTestId("domain-card-trading_code_scout")
+      screen.getByTestId("domain-card-code_architecture_scout")
     ).toBeInTheDocument();
     expect(
-      screen.queryByTestId("domain-card-quant_research_scout")
+      screen.queryByTestId("domain-card-enterprise_docs_scout")
     ).not.toBeInTheDocument();
 
     rerender(
@@ -156,7 +156,7 @@ describe("DomainSelector", () => {
     render(
       <DomainSelector
         domains={[]}
-        selectedDomain="trading_code_scout"
+        selectedDomain="code_architecture_scout"
         onSelectDomain={vi.fn()}
         error="HTTP 503 Service Unavailable"
         onRetry={onRetry}
@@ -167,7 +167,7 @@ describe("DomainSelector", () => {
       "HTTP 503 Service Unavailable"
     );
     expect(
-      screen.queryByTestId("domain-card-trading_code_scout")
+      screen.queryByTestId("domain-card-code_architecture_scout")
     ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId("domains-retry-btn"));

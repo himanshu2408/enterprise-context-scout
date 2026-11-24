@@ -149,14 +149,14 @@ const SECURITY_GUARDRAIL_TRIGGERED = "SECURITY_GUARDRAIL_TRIGGERED";
     if (request.trace_id !== undefined) {
       requestBody.trace_id = request.trace_id;
     }
-    if (
-      request.normalized_rrf_score !== undefined &&
-      request.normalized_rrf_score !== null
-    ) {
-      requestBody.normalized_rrf_score = request.normalized_rrf_score;
-    }
     if (request.max_bounce_backs !== undefined) {
       requestBody.max_bounce_backs = request.max_bounce_backs;
+    }
+    if (request.session_id !== undefined) {
+      requestBody.session_id = request.session_id;
+    }
+    if (request.branch_id !== undefined) {
+      requestBody.branch_id = request.branch_id;
     }
 
     let response: Response;

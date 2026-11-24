@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import re
@@ -51,6 +52,8 @@ _IGNORED_HOOKS = frozenset(
 _RE_COMPONENT_NAME = re.compile(r"^[A-Z][A-Za-z0-9_]*$")
 _RE_HOOK_NAME = re.compile(r"^use[A-Z][A-Za-z0-9_]*$")
 _RE_SELECTOR_NAME = re.compile(r"^select[A-Z][A-Za-z0-9_]*$")
+
+_REACT_EMAIL_TAGS = frozenset({"Html", "Body", "Container", "Section", "Button", "Link", "Preview"})
 
 
 def _collapse_ws(text: str) -> str:
@@ -303,6 +306,26 @@ class ReactReduxPlugin:
             self.last_parse_diagnostics = ParseDiagnostics(parser_backend="tree-sitter-typescript")
             return [], []
 
+        was_gc = gc.isenabled()
+        gc.disable()
+        try:
+            return self._extract_ast_impl(
+                code=code,
+                file_path=file_path,
+                repo_name=repo_name,
+                module_prefix=module_prefix,
+            )
+        finally:
+            if was_gc:
+                gc.enable()
+
+    def _extract_ast_impl(
+        self,
+        code: str,
+        file_path: str = "",
+        repo_name: str = "",
+        module_prefix: str = "",
+    ) -> tuple[list[ParsedSymbol], list[ParsedEdge]]:
         lower = file_path.lower()
         parser = self._ts_parser if lower.endswith((".ts", ".js")) else self._tsx_parser
         code_bytes = code.encode("utf-8")
@@ -333,6 +356,8 @@ class ReactReduxPlugin:
         seen_edges: set[tuple[str, str, str]] = set()
         seen_symbols: dict[str, int] = {}
         scope_stack: list[tuple[str, str]] = []
+        react_email_sources: dict[str, str] = {}
+        has_react_email_import = False
 
         def add_edge(src: str, tgt: str, kind: str) -> None:
             if not src or not tgt:
@@ -664,12 +689,36 @@ class ReactReduxPlugin:
                     if sel_name:
                         add_edge(caller_qn, sel_name, "SELECTS")
 
+            elif callee_leaf == "t" and scope_stack and args is not None:
+                first_arg = next((c for c in args.children if c.is_named), None)
+                if first_arg is not None and first_arg.type == "string":
+                    i18n_key = _unquote_ts(_node_text(first_arg, code_bytes))
+                    if i18n_key:
+                        attach_note(caller_qn, f"@i18n_key {i18n_key}")
+                        add_edge(caller_qn, i18n_key, "USES_TYPE")
+
+            elif callee_leaf == "formatMessage" and scope_stack and args is not None:
+                first_arg = next((c for c in args.children if c.is_named), None)
+                if first_arg is not None and first_arg.type == "object":
+                    id_nd = _find_object_property_value(first_arg, "id", code_bytes)
+                    if id_nd is not None and id_nd.type == "string":
+                        i18n_key = _unquote_ts(_node_text(id_nd, code_bytes))
+                        if i18n_key:
+                            attach_note(caller_qn, f"@i18n_key {i18n_key}")
+                            add_edge(caller_qn, i18n_key, "USES_TYPE")
+
             elif (
                 _RE_HOOK_NAME.match(callee_leaf)
                 and callee_leaf not in _IGNORED_HOOKS
                 and callee_leaf != caller_name
                 and scope_stack
             ):
+                if callee_leaf == "useTranslation" and args is not None:
+                    first_arg = next((c for c in args.children if c.is_named), None)
+                    if first_arg is not None and first_arg.type == "string":
+                        ns = _unquote_ts(_node_text(first_arg, code_bytes))
+                        if ns:
+                            attach_note(caller_qn, f"@i18n_ns {ns}")
                 add_edge(caller_qn, callee_leaf, "CALLS")
             elif (
                 scope_stack
@@ -829,7 +878,93 @@ class ReactReduxPlugin:
             sig = _collapse_ws(_node_text(node, code_bytes))[:200]
             add_symbol(name=tname, qn=qn, kind=kind, node=node, sig=sig, doc=doc)
 
+        def handle_import_statement(node: Node) -> None:
+            nonlocal has_react_email_import
+            src_node = node.child_by_field_name("source")
+            if src_node is None:
+                return
+            src_str = _unquote_ts(_node_text(src_node, code_bytes))
+            if not (
+                src_str == "react-email"
+                or src_str == "@react-email/components"
+                or src_str.startswith("@react-email/")
+            ):
+                return
+            has_react_email_import = True
+            for clause in node.children:
+                if clause.type == "import_clause":
+                    for cnode in clause.children:
+                        if cnode.type == "identifier":
+                            cname = _node_text(cnode, code_bytes)
+                            react_email_sources[cname] = src_str
+                        elif cnode.type == "named_imports":
+                            for spec in cnode.children:
+                                if spec.type == "import_specifier":
+                                    alias = spec.child_by_field_name("alias")
+                                    name_nd = spec.child_by_field_name("name")
+                                    picked = alias or name_nd
+                                    if picked is not None:
+                                        react_email_sources[_node_text(picked, code_bytes)] = (
+                                            src_str
+                                        )
+
+        def handle_jsx_tag(node: Node) -> None:
+            tag_nd = node.child_by_field_name("name")
+            if tag_nd is None:
+                tag_nd = next(
+                    (c for c in node.children if c.type in {"identifier", "member_expression"}),
+                    None,
+                )
+            if tag_nd is None:
+                return
+            tag_name = _node_text(tag_nd, code_bytes)
+            caller_qn = scope_stack[-1][1] if scope_stack else prefix
+
+            if tag_name == "Trans" and scope_stack:
+                for attr in node.children:
+                    if attr.type != "jsx_attribute":
+                        continue
+                    attr_name_nd = next(
+                        (c for c in attr.children if c.type == "property_identifier"), None
+                    )
+                    if attr_name_nd is None or _node_text(attr_name_nd, code_bytes) != "i18nKey":
+                        continue
+                    val_nd = next(
+                        (c for c in attr.children if c.type in {"string", "jsx_expression"}),
+                        None,
+                    )
+                    if val_nd is not None:
+                        if val_nd.type == "jsx_expression":
+                            str_nd = next((c for c in val_nd.children if c.type == "string"), None)
+                            val_nd = str_nd if str_nd is not None else val_nd
+                        if val_nd.type == "string":
+                            i18n_key = _unquote_ts(_node_text(val_nd, code_bytes))
+                            if i18n_key:
+                                attach_note(caller_qn, f"@i18n_key {i18n_key}")
+                                add_edge(caller_qn, i18n_key, "USES_TYPE")
+
+            if has_react_email_import and tag_name in _REACT_EMAIL_TAGS:
+                email_qn = f"{caller_qn}.email.{tag_name}"
+                add_symbol(
+                    name=tag_name,
+                    qn=email_qn,
+                    kind="component",
+                    node=node,
+                    sig=f"<{tag_name}>",
+                    bare_name=tag_name,
+                )
+                add_edge(caller_qn, tag_name, "USES_TYPE")
+                email_pkg = react_email_sources.get(tag_name, "@react-email/components")
+                add_edge(caller_qn, email_pkg, "IMPORTS")
+
         def visit(node: Node) -> None:
+            if node.type == "comment":
+                return
+            if node.type == "import_statement":
+                handle_import_statement(node)
+                return
+            if node.type in {"jsx_opening_element", "jsx_self_closing_element"}:
+                handle_jsx_tag(node)
             if node.type in {"interface_declaration", "type_alias_declaration"}:
                 handle_interface_or_type(node)
                 return

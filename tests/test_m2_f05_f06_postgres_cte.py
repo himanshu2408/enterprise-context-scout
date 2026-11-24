@@ -316,7 +316,7 @@ def test_f05_f06_live_postgres_catalog_and_recursive_cte() -> None:
                     primary_truth_source, freshness_half_life_days, config_json
                 )
                 VALUES (%s, 'Eval F05/F06 CTE', 'none', 'code', 180, '{"m2_cte_test": true}'::jsonb)
-                ON CONFLICT (domain_id) DO NOTHING;
+                ON CONFLICT (tenant_id, domain_id) DO NOTHING;
                 """,
                 (domain_id,),
             )
@@ -489,7 +489,7 @@ def test_f05_f06_cleanup_canary_isolation_and_mutation_proof() -> None:
                         primary_truth_source, freshness_half_life_days, config_json
                     )
                     VALUES (%s, %s, 'none', 'code', 30, '{}')
-                    ON CONFLICT (domain_id) DO NOTHING;
+                    ON CONFLICT (tenant_id, domain_id) DO NOTHING;
                     """,
                     (dom, f"Canary F05/F06 {dom}"),
                 )

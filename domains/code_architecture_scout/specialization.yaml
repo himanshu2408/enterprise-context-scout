@@ -1,0 +1,19 @@
+domain_id: code_architecture_scout
+display_name: Code Architecture & Implementation Scout
+archetype: pointer_localization
+base_model_id: google/gemma-4-26B-A4B-it
+training_scope_ceiling:
+  - public
+  - public_eng
+  - repo:code_architecture_scout
+  - domain:code_architecture_scout
+lora_policy:
+  enabled: true
+  use_rslora: true
+  use_dora: false
+  rank: 16
+  lora_alpha: 32
+  loraplus_lr_ratio: 8.0
+  neftune_noise_alpha: 5.0
+  general_replay_ratio: 0.15
+  assistant_only_loss: true

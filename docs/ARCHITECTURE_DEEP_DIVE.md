@@ -20,8 +20,7 @@ flowchart TD
     Bounce --> S3
     S4 -->|"Fail after retries / below floor"| Abstain["InsufficientContextDiagnostic ($0 paid tokens)"]
     S4 -->|"Pass"| Ready["SSE context_pack_ready (ImplementationContextPack)"]
-    Ready -->|"Optional Implementation Handoff"| S5["Stage 5: 1-Shot Gemini 3.8 Flash / 4 Argon"]
-    S5 --> WT["GitWorktreeSandbox (ruff + pytest + HITL Confirmation)"]
+    Ready -->|"Optional Implementation Handoff (Zero Host RCE)"| S5["Stage 5: IDE / MCP Export or Opt-In Keyless Vertex AI Handoff (HITL Confirmation)"]
 ```
 
 ### 1.1 Stage-by-Stage Execution & `StageExecutionTrace` Telemetry
@@ -47,9 +46,9 @@ Every query emits structured `StageExecutionTrace` and `StageConfidence` objects
      - **Check 4 (Verbatim Quote Faithfulness):** Every `DocCitationSpan.verbatim_quote` must match the source chunk with `>= 0.98` NFKC + whitespace-normalized token overlap.
      - **Freshness & Scepticism Checks:** Rejects superseded Confluence pages, terminal Jira resolutions (`Won't Fix`, `Duplicate`, etc.), and quant strategies violating statutory friction floors.
    - **Bounce-Back & Abstention:** On failure, bounces structured remediation feedback back to Stage 3 (`max_bounce_backs = 1` local retry turn at `$0`). If still insufficient or ungrounded, emits `InsufficientContextDiagnostic(paid_tokens_spent=0)` and `final_decision="abstain_zero_paid"`.
-5. **Optional Stage 5 — Single-Shot Paid Execution & `GitWorktreeSandbox` (`src/context_scout/agents/gemini_executor.py`):**
-   - Triggered only on explicit user action (`POST /api/v1/handoff/preview` -> `POST /api/v1/handoff/apply`, or CLI `--handoff-apply`).
-   - Sends the verified `ImplementationContextPack` (adaptive `2K–18K` tokens) in 1 shot to `gemini-3.8-flash` (or `gemini-4-argon`), applies patches (`SEARCH/REPLACE` or unified diff) inside an isolated `GitWorktreeSandbox` (`scout-exec-<uuid>`), runs `ruff check` + `pytest`, and pauses at `require_confirmation=True` before merging.
+5. **Optional Stage 5 — Single-Shot Export & Opt-In Cloud Handoff (`src/context_scout/agents/gemini_executor.py`):**
+   - Triggered only on explicit user action (`POST /api/v1/handoff/preview` -> `POST /api/v1/handoff/apply`, requiring atomic single-consume tenant+user confirmation token and `confirmed=True`).
+   - Enforces `OWASP ASI05` zero host code execution: `custom_patch` is blocked (`HTTP 400`), and host-side `pytest` invocation or arbitrary host repository patching is strictly prohibited. Optional cloud handoff requires explicit `allow_external_cloud_egress=true` and keyless Vertex AI ADC (`vertexai=True`).
 
 ### 1.2 Confidence Calibration (`StageConfidence`)
 
@@ -61,7 +60,7 @@ Each stage computes a `StageConfidence` (`confidence_score` in `[0.0, 1.0]`, `co
 
 ---
 
-## 2. Code Engine (`trading_code_scout`, `polyglot_unseen_v2`)
+## 2. Code Engine (`code_architecture_scout`, `polyglot_unseen_v2`)
 
 ```mermaid
 flowchart LR
@@ -88,7 +87,7 @@ flowchart LR
 
 ---
 
-## 3. Document Engine (`data_engineering_scout`, `quant_research_scout`)
+## 3. Document Engine (`data_engineering_scout`, `enterprise_docs_scout`)
 
 - **Lossless Multi-Format Parsing (`src/context_scout/ingestion/doc_parser.py`):**
   - `LatexDocParser`: Resolves `\input`/`\include`/`\subfile` includes and keeps display/inline math (`equation`, `align`, `gather`, `multline`, `$$...$$`) and `table`/`tabular` floats intact as atomic chunks while tracking `\section`/`\subsection` breadcrumbs.
@@ -98,7 +97,7 @@ flowchart LR
 - **3-Way Hybrid RRF (`src/context_scout/db/repositories.py`, `bm25.py`):** Fuses 768-dim `google/embeddinggemma-2` cosine similarity (`embedding <=> %s::vector`), PostgreSQL `tsvector` BM25 (`websearch_to_tsquery` + `ts_rank_cd`), and `pg_trgm` (`word_similarity`) weighted by `authority_weight`, `market_scope`, and `doc_title`, normalized to `[0.0, 1.0]` (`k = 60`).
 - **Calibrated Relevance Filtering:** `CALIBRATED_RELEVANCE_FLOOR = 0.34` filters weak cosine/BM25 noise before Stage 3 synthesis; license headers and boilerplate chunks (`is_license_or_stub_text`) are rejected deterministically.
 - **Confluence Version Supersession & `ConflictDetector` (`src/context_scout/agents/conflict_detector.py`):** Enforces monotonic `version_number` supersession (older versions marked `is_stale=True` with `superseded_by` links) and flags contradictions between current code/AST implementations and stale RFCs or deprecated wiki pages.
-- **Market-Regime Quant Scepticism Gate (`src/context_scout/ingestion/scepticism_gate.py`):** Flags `QuantStrategyBrief` outputs whose transaction cost assumptions fall below statutory market floors (`>= 15.0 bps` `IN_NSE` delivery, `>= 5.0 bps` `IN_NSE` intraday/futures, `>= 10.0 bps` `DE_XETRA`, `>= 5.0 bps` `US_EQUITY`), net Sharpe `<= 0.50`, or max drawdown `> 30.0%`.
+- **Domain-Specific Validators (Isolated Extensions):** Custom domain validation gates (for example, the finance/quant friction gate isolated under `examples/quant_dogfood/ingestion/scepticism_gate.py`) plug in through `DomainPlugin` without coupling into core `src/`.
 
 ---
 
@@ -112,8 +111,8 @@ flowchart LR
 - **Metal Race Prevention (`src/context_scout/retrieval/embedder.py`):** `SCOUT_EMBEDDING_DEVICE=cpu` pins PyTorch `google/embeddinggemma-2` (768-d) to CPU when running alongside MLX Metal inference so concurrent Metal command buffers never contend.
 - **`AdapterPool` & `lora_enabled` Policy (`src/context_scout/agents/domain_registry.py`):**
   - Pins rank-16 QLoRA adapters (`~9.97 MB`, 54 tensors, MoE `router.proj` gates frozen) in memory for `0.018 ms` pointer switching.
-  - **Code pointer domains** (`trading_code_scout`, `polyglot_unseen_v2`) set `lora_enabled: true` to enforce compact `CodeSlicePointer` JSON emission.
-  - **Prose research domains** (`data_engineering_scout`, `quant_research_scout`) set `lora_enabled: false` to run base `Gemma-4-26B-A4B-it` over full retrieved `verbatim_content` chunks without adapter JSON-looping.
+  - **Code pointer domains** (`code_architecture_scout`, `polyglot_unseen_v2`) set `lora_enabled: true` (with `use_rslora=True`, `training_scope_ceiling` subset routing under `OWASP ASI06`) to enforce compact `CodeSlicePointer` JSON emission.
+  - **Prose / documentation domains** (`data_engineering_scout`, `enterprise_docs_scout`) run base `Gemma-4-26B-A4B-it` or approved BYO open-weights models over full retrieved `verbatim_content` chunks.
 
 ---
 

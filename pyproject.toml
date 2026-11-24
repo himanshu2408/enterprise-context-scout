@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "enterprise-context-scout"
-version = "0.1.0"
+version = "1.0.0"
 description = "Enterprise Dual-Engine Context Scout & Multi-Domain Knowledge Platform (Gemma 4 MoE, Google ADK 2.12, MCP 2.3, PostgreSQL 17 RLS + pgvector)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,6 +20,11 @@ dependencies = [
     "tree-sitter-typescript>=0.23.0,<0.25.0",
     "tree-sitter-c-sharp>=0.23.0,<0.25.0",
     "tree-sitter-hcl>=1.2.0,<2.0.0",
+    "tree-sitter-language-pack>=0.13.0,<1.0.0",
+    "tree-sitter-yaml>=0.7.0,<1.0.0",
+    "tree-sitter-embedded-template>=0.23.0,<1.0.0",
+    "jinja2>=3.1.0,<4.0.0",
+    "protobuf>=5.0.0,<8.0.0",
     "pypdf>=5.0.0,<7.0.0",
     "sentence-transformers>=6.1.0,<7.0.0",
     "torch>=2.0.0,<3.0.0",
@@ -37,12 +42,63 @@ dependencies = [
     "mlx-lm>=0.21.0,<1.0.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "fastapi>=0.115.0,<1.0.0",
     "uvicorn[standard]>=0.32.0,<1.0.0",
+    "openai>=1.60.0,<3.0.0",
+    "alembic>=1.14.0,<2.0.0",
+    "boto3>=1.35.0,<2.0.0",
 ]
 
 [project.scripts]
 context-scout = "context_scout.cli:main"
 
 [project.optional-dependencies]
+api = [
+    "fastapi>=0.115.0,<1.0.0",
+    "uvicorn[standard]>=0.32.0,<1.0.0",
+    "openai>=1.60.0,<3.0.0",
+    "httpx>=0.28.0,<1.0.0",
+    "google-adk>=2.12.0,<3.0.0",
+    "google-genai>=2.31.0,<3.0.0",
+    "mcp>=2.3.0,<3.0.0",
+    "opentelemetry-api>=1.30.0,<2.0.0",
+    "opentelemetry-sdk>=1.30.0,<2.0.0",
+    "opentelemetry-semantic-conventions>=0.47b0,<1.0.0",
+    "alembic>=1.14.0,<2.0.0",
+    "boto3>=1.35.0,<2.0.0",
+]
+worker = [
+    "tree-sitter>=0.24.0,<0.27.0",
+    "tree-sitter-python>=0.23.0,<0.26.0",
+    "tree-sitter-typescript>=0.23.0,<0.25.0",
+    "tree-sitter-c-sharp>=0.23.0,<0.25.0",
+    "tree-sitter-hcl>=1.2.0,<2.0.0",
+    "tree-sitter-language-pack>=0.13.0,<1.0.0",
+    "tree-sitter-yaml>=0.7.0,<1.0.0",
+    "tree-sitter-embedded-template>=0.23.0,<1.0.0",
+    "jinja2>=3.1.0,<4.0.0",
+    "protobuf>=5.0.0,<8.0.0",
+    "pypdf>=5.0.0,<7.0.0",
+    "sentence-transformers>=6.1.0,<7.0.0",
+    "torch>=2.0.0,<3.0.0",
+    "huggingface-hub>=2.3.0,<3.0.0",
+    "alembic>=1.14.0,<2.0.0",
+    "boto3>=1.35.0,<2.0.0",
+]
+local-mlx = [
+    "mlx>=0.22.0,<1.0.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-lm>=0.21.0,<1.0.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+gpu-train = [
+    "torch>=2.0.0,<3.0.0",
+    "safetensors>=0.4.5,<1.0.0",
+    "transformers>=4.48.0,<6.0.0",
+    "huggingface-hub>=2.3.0,<3.0.0",
+    "scipy>=1.14.0,<2.0.0",
+    "peft>=0.14.0,<1.0.0",
+    "trl>=0.15.0,<1.0.0",
+    "datasets>=5.2.0,<6.0.0",
+    "fsspec>=2026.6.0,<2027.0.0",
+    "accelerate>=1.2.0,<2.0.0",
+]
 dev = [
     "pytest>=8.3.0,<10.0.0",
     "pytest-asyncio>=0.24.0,<1.0.0",
@@ -50,6 +106,11 @@ dev = [
     "mypy>=1.13.0,<2.0.0",
     "types-PyYAML>=6.0.12,<7.0.0",
     "httpx>=0.28.0,<1.0.0",
+    "testcontainers[postgres]>=4.9.0,<5.0.0",
+    "openai>=1.60.0,<3.0.0",
+    "scipy>=1.14.0,<2.0.0",
+    "squawk-cli>=2.0.0,<3.0.0",
+    "schemathesis>=4.33.0,<5.0.0",
 ]
 
 [dependency-groups]
@@ -60,11 +121,15 @@ dev = [
     "mypy>=1.13.0,<2.0.0",
     "types-PyYAML>=6.0.12,<7.0.0",
     "httpx>=0.28.0,<1.0.0",
+    "testcontainers[postgres]>=4.9.0,<5.0.0",
+    "openai>=1.60.0,<3.0.0",
     "trustme>=1.2.1,<2.0.0",
     "chardet>=5.2.0,<8.0.0",
     "trio>=0.27.0,<1.0.0",
     "zstandard>=0.23.0,<1.0.0",
     "brotli>=1.1.0,<2.0.0",
+    "squawk-cli>=2.0.0,<3.0.0",
+    "schemathesis>=4.33.0,<5.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -94,12 +159,39 @@ module = [
     "tree_sitter_typescript",
     "tree_sitter_c_sharp",
     "tree_sitter_hcl",
+    "tree_sitter_language_pack",
+    "tree_sitter_yaml",
+    "tree_sitter_embedded_template",
     "scipy",
     "scipy.optimize",
     "mlx",
     "mlx.*",
     "mlx_lm",
     "mlx_lm.*",
+    "testcontainers",
+    "testcontainers.*",
+    "safetensors",
+    "safetensors.*",
+    "transformers",
+    "transformers.*",
+    "alembic",
+    "alembic.*",
+    "sqlalchemy",
+    "sqlalchemy.*",
+    "boto3",
+    "botocore.*",
+    "docling",
+    "docling.*",
+    "peft",
+    "peft.*",
+    "trl",
+    "trl.*",
+    "datasets",
+    "datasets.*",
+    "accelerate",
+    "accelerate.*",
+    "sentence_transformers",
+    "sentence_transformers.*",
 ]
 ignore_missing_imports = true
 

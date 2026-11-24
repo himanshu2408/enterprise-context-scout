@@ -3,7 +3,7 @@
 Verifies the 4 deterministic quality checks:
 1. Internal symbol resolution via AST indexing and 1-hop auto-closure.
 2. Prompt identifier partitioning (VAL-01, reference vs novel symbols).
-3. Normalized RRF threshold (BLK-01, >=0.55 or cross-encoder >=0.60).
+3. Normalized RRF threshold (>=0.55 or cross-encoder >=0.60).
 4. Verbatim citation verification (VAL-02, >=0.98 overlap with NFKC normalization).
 5. Detailed $0 bounce-back feedback generation and InsufficientContextDiagnostic terminal exit.
 """
@@ -28,11 +28,11 @@ from context_scout.db.repositories import (
 )
 from context_scout.schemas.contracts import (
     DocCitationSpan,
+    DocumentScope,
     GateAbstentionResult,
     GatePassResult,
     ImplementationContextPack,
     InsufficientContextDiagnostic,
-    MarketRegime,
     ModificationIntent,
     PreFlightValidationReport,
     PrincipalContext,
@@ -40,7 +40,7 @@ from context_scout.schemas.contracts import (
     VerbatimCodeSlice,
 )
 
-DOMAIN_ID: Final[str] = "trading_code_scout"
+DOMAIN_ID: Final[str] = "code_architecture_scout"
 REPO_NAME: Final[str] = "trading-execution"
 
 
@@ -49,7 +49,7 @@ def principal() -> PrincipalContext:
     return PrincipalContext(
         user_id="lead_quant_dev",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "repo:trading_strategies", "corpus:quant_papers"],
+        allowed_scopes=["public_eng", "repo:code_architecture_scout", "corpus:enterprise_docs"],
     )
 
 
@@ -85,7 +85,7 @@ def test_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             file_id=file1_id,
             domain_id=DOMAIN_ID,
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             git_commit_sha="commit_ofi_123",
             git_blob_sha="blob_ofi_456",
             language="python",
@@ -102,7 +102,7 @@ def test_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             symbol_id=sym1_id,
             file_id=file1_id,
             domain_id=DOMAIN_ID,
-            qualified_name="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            qualified_name="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
             symbol_kind="class",
             start_line=3,
             end_line=8,
@@ -127,7 +127,7 @@ def test_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             file_id=file2_id,
             domain_id=DOMAIN_ID,
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/models.py",
+            file_path="src/service_core/models.py",
             git_commit_sha="commit_models_123",
             git_blob_sha="blob_models_456",
             language="python",
@@ -144,7 +144,7 @@ def test_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             symbol_id=sym2_id,
             file_id=file2_id,
             domain_id=DOMAIN_ID,
-            qualified_name="trading_strategies.models.OrderBookSnapshot",
+            qualified_name="service_core.models.OrderBookSnapshot",
             symbol_kind="class",
             start_line=1,
             end_line=4,
@@ -162,7 +162,7 @@ def test_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
             edge_id=uuid.uuid4(),
             domain_id=DOMAIN_ID,
             source_symbol_id=sym1_id,
-            target_qualified_name="trading_strategies.models.OrderBookSnapshot",
+            target_qualified_name="service_core.models.OrderBookSnapshot",
             target_symbol_id=sym2_id,
             edge_kind="USES_TYPE",
             allowed_scopes=["public_eng"],
@@ -180,17 +180,17 @@ def test_repo(principal: PrincipalContext) -> InMemoryRLSRepository:
         DocChunkRecord(
             chunk_id=chunk_id,
             domain_id=DOMAIN_ID,
-            doc_id="paper_ofi_xetra_2026",
+            doc_id="doc_ofi_eu_2026",
             doc_title="High-Frequency Order Flow Imbalance in European Equities",
             source_uri="arxiv:2603.99999",
-            market_scope=MarketRegime.GERMANY_XETRA_DAX,
+            market_scope=DocumentScope.REGIONAL_EU,
             published_date=None,
             authority_weight=1.0,
             section_heading="Empirical Findings",
             contextual_header="Empirical analysis of OFI on Xetra",
             verbatim_content=chunk_text,
             metadata_json={"pages": [4, 5]},
-            allowed_scopes=["corpus:quant_papers"],
+            allowed_scopes=["corpus:enterprise_docs"],
             embedding=[0.3] * 768,
         ),
     )
@@ -228,10 +228,10 @@ class TestPreFlightValidator:
         file_rec = test_repo._files[next(iter(test_repo._files.keys()))]
         target_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             start_line=3,
             end_line=8,
-            qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            qualified_symbol="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
             selection_reason="Target class to modify",
             modification_intent=ModificationIntent.MODIFY_TARGET,
             git_commit_sha="commit_ofi_123",
@@ -271,7 +271,7 @@ class TestPreFlightValidator:
                 edge_id=uuid.uuid4(),
                 domain_id=DOMAIN_ID,
                 source_symbol_id=focus_sym_id,
-                target_qualified_name="trading_strategies.internal_secret.SecretPricingEngine",
+                target_qualified_name="service_core.internal_secret.SecretPricingEngine",
                 target_symbol_id=uuid.uuid4(),  # Does not exist in _symbols
                 edge_kind="USES_TYPE",
                 allowed_scopes=["public_eng"],
@@ -288,10 +288,10 @@ class TestPreFlightValidator:
         file_rec = test_repo._files[next(iter(test_repo._files.keys()))]
         target_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             start_line=3,
             end_line=8,
-            qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            qualified_symbol="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
             selection_reason="Target class to modify",
             modification_intent=ModificationIntent.MODIFY_TARGET,
             git_commit_sha="commit_ofi_123",
@@ -328,10 +328,10 @@ class TestPreFlightValidator:
         file_rec = test_repo._files[next(iter(test_repo._files.keys()))]
         target_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             start_line=3,
             end_line=8,
-            qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            qualified_symbol="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
             selection_reason="Target class to modify",
             modification_intent=ModificationIntent.MODIFY_TARGET,
             git_commit_sha="commit_ofi_123",
@@ -342,11 +342,11 @@ class TestPreFlightValidator:
 
         # Prompt mentions:
         # - Existing reference symbol: OrderFlowImbalanceAnalyzer (in pack)
-        # - Existing reference file: src/trading_strategies/order_flow_imbalance.py (in pack)
+        # - Existing reference file: src/service_core/order_flow_imbalance.py (in pack)
         # - Novel target symbols to create: AdaptiveDriftRouter, calc_spread_floor (NOT in repo)
         prompt = (
             "Refactor `OrderFlowImbalanceAnalyzer` in "
-            "`src/trading_strategies/order_flow_imbalance.py` "
+            "`src/service_core/order_flow_imbalance.py` "
             "to add new class `AdaptiveDriftRouter` and helper method `calc_spread_floor`."
         )
 
@@ -380,10 +380,10 @@ class TestPreFlightValidator:
         file2_rec = next(f for f in test_repo._files.values() if "models.py" in f.file_path)
         model_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/models.py",
+            file_path="src/service_core/models.py",
             start_line=1,
             end_line=4,
-            qualified_symbol="trading_strategies.models.OrderBookSnapshot",
+            qualified_symbol="service_core.models.OrderBookSnapshot",
             selection_reason="Model slice",
             modification_intent=ModificationIntent.REFERENCE_ONLY,
             git_commit_sha="commit_models_123",
@@ -410,7 +410,7 @@ class TestPreFlightValidator:
         principal: PrincipalContext,
         slicer: DeterministicSlicer,
     ) -> None:
-        """Check 3: BLK-01 enforces Normalized RRF >= 0.55 (or cross-encoder >= 0.60)."""
+        """Check 3 enforces Normalized RRF >= 0.55 (or cross-encoder >= 0.60)."""
         validator = PreFlightValidator(
             repo=test_repo,
             slicer=slicer,
@@ -421,10 +421,10 @@ class TestPreFlightValidator:
         file_rec = test_repo._files[next(iter(test_repo._files.keys()))]
         target_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             start_line=3,
             end_line=8,
-            qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            qualified_symbol="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
             selection_reason="Target class",
             modification_intent=ModificationIntent.MODIFY_TARGET,
             git_commit_sha="commit_ofi_123",
@@ -441,7 +441,7 @@ class TestPreFlightValidator:
         )
         assert report_low.passed is False
         assert report_low.normalized_rrf_score == 0.48
-        assert "Check 3 (Normalized RRF Score, BLK-01)" in (report_low.bounce_back_feedback or "")
+        assert "Check 3 (Normalized RRF Score)" in (report_low.bounce_back_feedback or "")
 
         # 2. At or above 0.65 threshold -> Passes
         report_pass = validator.validate(
@@ -479,10 +479,10 @@ class TestPreFlightValidator:
 
         target_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             start_line=3,
             end_line=8,
-            qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            qualified_symbol="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
             selection_reason="Target class",
             modification_intent=ModificationIntent.MODIFY_TARGET,
             git_commit_sha="commit_ofi_123",
@@ -549,10 +549,10 @@ class TestPreFlightValidator:
         file_rec = next(iter(test_repo._files.values()))
         target_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             start_line=3,
             end_line=8,
-            qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            qualified_symbol="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
             selection_reason="Target class",
             modification_intent=ModificationIntent.MODIFY_TARGET,
             git_commit_sha="commit_ofi_123",
@@ -595,16 +595,14 @@ class TestPreFlightValidator:
             trace_id="trace_gate_test_001",
             domain_id=DOMAIN_ID,
             report=report,
-            partial_candidate_files=["src/trading_strategies/order_flow_imbalance.py"],
+            partial_candidate_files=["src/service_core/order_flow_imbalance.py"],
         )
 
         assert diagnostic.trace_id == "trace_gate_test_001"
         assert diagnostic.domain_id == DOMAIN_ID
         assert diagnostic.paid_tokens_spent == 0
         assert "OrderFlowImbalanceAnalyzer" in diagnostic.missing_symbols
-        assert diagnostic.partial_candidate_files == [
-            "src/trading_strategies/order_flow_imbalance.py"
-        ]
+        assert diagnostic.partial_candidate_files == ["src/service_core/order_flow_imbalance.py"]
 
     def test_full_pack_integration(
         self,
@@ -623,10 +621,10 @@ class TestPreFlightValidator:
 
         target_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             start_line=3,
             end_line=8,
-            qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            qualified_symbol="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
             selection_reason="Target class",
             modification_intent=ModificationIntent.MODIFY_TARGET,
             git_commit_sha="commit_ofi_123",
@@ -679,10 +677,10 @@ class TestPreFlightValidator:
         )
         malformed_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             start_line=1,
             end_line=2,
-            qualified_symbol="trading_strategies.broken.BrokenSyntax",
+            qualified_symbol="service_core.broken.BrokenSyntax",
             selection_reason="Broken slice",
             modification_intent=ModificationIntent.MODIFY_TARGET,
             git_commit_sha="commit_ofi_123",
@@ -718,10 +716,10 @@ class TestPreFlightValidator:
         file_rec = next(iter(test_repo._files.values()))
         unanchored_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             start_line=3,
             end_line=8,
-            qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            qualified_symbol="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
             selection_reason="Target class",
             modification_intent=ModificationIntent.MODIFY_TARGET,
             git_commit_sha="placeholder_sha",
@@ -759,10 +757,10 @@ class TestPreFlightValidator:
         file_rec = next(iter(test_repo._files.values()))
         target_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             start_line=3,
             end_line=8,
-            qualified_symbol="trading_strategies.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
+            qualified_symbol="service_core.order_flow_imbalance.OrderFlowImbalanceAnalyzer",
             selection_reason="Target class",
             modification_intent=ModificationIntent.MODIFY_TARGET,
             git_commit_sha="commit_ofi_123",
@@ -812,10 +810,10 @@ class TestPreFlightValidator:
         )
         bad_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             start_line=1,
             end_line=2,
-            qualified_symbol=f"trading_strategies.test.{intent.value}",
+            qualified_symbol=f"service_core.test.{intent.value}",
             selection_reason="Partial slice with unclosed delimiter",
             modification_intent=intent,
             git_commit_sha="commit_ofi_123",
@@ -864,10 +862,10 @@ class TestPreFlightValidator:
         # whole-module TS parser, but is balanced and must pass Check 1 partial window exemption.
         balanced_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/types.ts",
+            file_path="src/service_core/types.ts",
             start_line=5,
             end_line=7,
-            qualified_symbol=f"trading_strategies.types.{intent.value}",
+            qualified_symbol=f"service_core.types.{intent.value}",
             selection_reason="Balanced partial window",
             modification_intent=intent,
             git_commit_sha="commit_ofi_123",
@@ -897,10 +895,10 @@ class TestPreFlightValidator:
         )
         deep_slice = VerbatimCodeSlice(
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_flow_imbalance.py",
+            file_path="src/service_core/order_flow_imbalance.py",
             start_line=1,
             end_line=2,
-            qualified_symbol="trading_strategies.deep.DeepCaller",
+            qualified_symbol="service_core.deep.DeepCaller",
             selection_reason="Deep nesting caller",
             modification_intent=ModificationIntent.DIRECT_CALLER,
             git_commit_sha="commit_ofi_123",

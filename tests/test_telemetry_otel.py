@@ -76,7 +76,7 @@ from context_scout.telemetry import (
     reset_tracer,
 )
 
-DOMAIN_ID: Final[str] = "trading_code_scout"
+DOMAIN_ID: Final[str] = "code_architecture_scout"
 REPO_NAME: Final[str] = "trading-engine"
 
 
@@ -93,7 +93,7 @@ def principal() -> PrincipalContext:
     return PrincipalContext(
         user_id="test_trader_1",
         role=RoleType.ENGINEER,
-        allowed_scopes=["public_eng", "repo:trading_strategies"],
+        allowed_scopes=["public_eng", "repo:code_architecture_scout"],
         max_session_paid_tokens=16_000,
     )
 
@@ -102,7 +102,7 @@ def principal() -> PrincipalContext:
 def sample_pack() -> ImplementationContextPack:
     slice_item = VerbatimCodeSlice(
         repo_name=REPO_NAME,
-        file_path="src/trading_strategies/order_manager.py",
+        file_path="src/service_core/order_manager.py",
         start_line=1,
         end_line=5,
         qualified_symbol="OrderManager.submit_order",
@@ -132,7 +132,7 @@ def sample_pack() -> ImplementationContextPack:
         architectural_execution_plan=["Step 1", "Step 2"],
         code_slices=[slice_item],
         supporting_doc_citations=[],
-        quant_strategy_spec=None,
+        domain_knowledge_brief=None,
         preflight_report=report,
         local_tokens_consumed=450,
         pack_token_count=180,
@@ -311,7 +311,7 @@ def test_end_to_end_scout_workflow_span_capture(principal: PrincipalContext) -> 
             file_id=file_id,
             domain_id=DOMAIN_ID,
             repo_name=REPO_NAME,
-            file_path="src/trading_strategies/order_manager.py",
+            file_path="src/service_core/order_manager.py",
             git_commit_sha="commit_12345",
             git_blob_sha="blob_1234567",
             language="python",
@@ -389,7 +389,7 @@ def test_end_to_end_gemini_executor_span_capture(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_root = Path(tmpdir)
-        target = repo_root / "src/trading_strategies/order_manager.py"
+        target = repo_root / "src/service_core/order_manager.py"
         target.parent.mkdir(parents=True)
         target.write_text(
             "class OrderManager:\n"
@@ -442,16 +442,20 @@ def test_four_pipeline_phase_span_wrappers() -> None:
 
     # 1. Retrieval Phase
     with tracer.trace_retrieval(
-        domain_id="trading_code_scout", query="OrderFlowImbalance"
+        domain_id="code_architecture_scout", query="OrderFlowImbalance"
     ) as r_ctx:
         r_ctx.record_retrieval(doc_chunks_count=5, ast_symbols_count=12, query="OrderFlowImbalance")
 
     # 2. Slicing Phase
-    with tracer.trace_slicing(domain_id="trading_code_scout", file_path="src/order.py") as s_ctx:
+    with tracer.trace_slicing(
+        domain_id="code_architecture_scout", file_path="src/order.py"
+    ) as s_ctx:
         s_ctx.record_slicing(file_path="src/order.py", lines_sliced=45, syntax_valid=True)
 
     # 3. Gating Phase
-    with tracer.trace_gating(domain_id="trading_code_scout", prompt="Refactor signal") as g_ctx:
+    with tracer.trace_gating(
+        domain_id="code_architecture_scout", prompt="Refactor signal"
+    ) as g_ctx:
         mock_report = MagicMock()
         mock_report.passed = True
         mock_report.normalized_rrf_score = 0.88
@@ -461,7 +465,7 @@ def test_four_pipeline_phase_span_wrappers() -> None:
 
     # 4. Execution Phase
     with tracer.trace_execution(
-        domain_id="trading_code_scout", model_id="gemini-3.8-flash"
+        domain_id="code_architecture_scout", model_id="gemini-3.8-flash"
     ) as e_ctx:
         mock_result = MagicMock(
             success=True, token_count=512, verification_passed=True, patch_applied=True
@@ -491,7 +495,7 @@ def test_abstention_zero_spend_invariant_in_span_context() -> None:
 
     diagnostic = InsufficientContextDiagnostic(
         trace_id="trace_abstain_01",
-        domain_id="trading_code_scout",
+        domain_id="code_architecture_scout",
         reason="Check 2 Closure failed: missing symbol OrderFlowImbalanceAnalyzer",
         failure_check="check_2_closure",
         paid_tokens_spent=0,
@@ -499,7 +503,7 @@ def test_abstention_zero_spend_invariant_in_span_context() -> None:
 
     with tracer.trace_workflow(
         span_name="scout.workflow.test_abstain",
-        domain_id="trading_code_scout",
+        domain_id="code_architecture_scout",
         trace_id="trace_abstain_01",
     ) as wf_ctx:
         wf_ctx.record_pack(diagnostic)
@@ -523,7 +527,7 @@ def test_structured_json_span_exporter() -> None:
     """Verifies StructuredJsonSpanExporter outputs valid single-line JSON records."""
     tracer = get_tracer()
 
-    with tracer.trace_retrieval(domain_id="trading_code_scout", query="test") as ctx:
+    with tracer.trace_retrieval(domain_id="code_architecture_scout", query="test") as ctx:
         ctx.record_retrieval(doc_chunks_count=2, ast_symbols_count=4)
 
     logs = tracer.get_json_logs()
@@ -576,7 +580,7 @@ def test_standardized_and_legacy_attribute_dual_emission() -> None:
     mock_report.citations_verified_100_pct = True
     mock_report.auto_attached_ast_slices_count = 5
 
-    with tracer.trace_gating(domain_id="trading_code_scout") as g_ctx:
+    with tracer.trace_gating(domain_id="code_architecture_scout") as g_ctx:
         g_ctx.record_report(mock_report)
 
     spans = tracer.find_spans_by_name("scout.preflight_gate")

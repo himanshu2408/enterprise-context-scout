@@ -38,7 +38,7 @@ def sample_code_file() -> CodeFileRecord:
     )
     return CodeFileRecord(
         file_id=uuid.uuid4(),
-        domain_id="trading_code_scout",
+        domain_id="code_architecture_scout",
         repo_name="trading-core",
         file_path="src/execution/spread.py",
         git_commit_sha="a1b2c3d4e5f67890",
@@ -242,4 +242,3 @@ def test_doc_citation_handles_english_apostrophes_and_still_rejects_unclosed_quo
         bad_res = slicer.verify_doc_citation(bad_citation, chunk_content)
         assert bad_res.is_valid is False
         assert bad_res.error_code == SlicerErrorCode.TRUNCATED_QUOTE
-

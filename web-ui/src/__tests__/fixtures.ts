@@ -1,7 +1,9 @@
 import { vi } from "vitest";
 import {
+  AdminPurgeResponse,
   AuthSessionResponse,
   BackendDomainDetail,
+  BranchOverlayOption,
   ContextPack,
   DocCitation,
   DomainInfo,
@@ -13,7 +15,9 @@ import {
   PrincipalContext,
   ROIMetricsResponse,
   ScoutQueryResponse,
+  ScoutSessionSummary,
   ScoutTokenSavingsBreakdown,
+  SideEffectMatrixItem,
   SSEStageEvent,
   StageExecutionTrace,
   WorkspaceConfigResponse,
@@ -22,7 +26,7 @@ import {
 export const TEST_ENGINEER_PRINCIPAL: PrincipalContext = {
   user_id: "test_engineer_01",
   role: "engineer",
-  allowed_scopes: ["public_eng", "public_quant"],
+  allowed_scopes: ["public_eng", "public_docs"],
   max_session_paid_tokens: 8000,
 };
 
@@ -31,15 +35,15 @@ export const TEST_HEALTH_RESPONSE: HealthResponse = {
   database_connected: true,
   database_status: "PostgreSQL 17.11 RLS Enforced",
   registered_domains: [
-    "trading_code_scout",
-    "quant_research_scout",
+    "code_architecture_scout",
+    "enterprise_docs_scout",
     "polyglot_unseen_v2",
   ],
   adapter_pool_status: {
-    trading_code_scout: {
-      domain_id: "trading_code_scout",
+    code_architecture_scout: {
+      domain_id: "code_architecture_scout",
       is_valid: true,
-      adapter_path: "adapters/trading_code_scout",
+      adapter_path: "adapters/code_architecture_scout",
       safetensors_bytes: 18432000,
       r: 8,
       lora_alpha: 16,
@@ -48,10 +52,10 @@ export const TEST_HEALTH_RESPONSE: HealthResponse = {
       error_message: null,
       hot_swap_latency_ms: 0.02,
     },
-    quant_research_scout: {
-      domain_id: "quant_research_scout",
+    enterprise_docs_scout: {
+      domain_id: "enterprise_docs_scout",
       is_valid: true,
-      adapter_path: "adapters/quant_research_scout",
+      adapter_path: "adapters/enterprise_docs_scout",
       safetensors_bytes: 18432000,
       r: 8,
       lora_alpha: 16,
@@ -74,13 +78,13 @@ export const TEST_HEALTH_RESPONSE: HealthResponse = {
 
 export const TEST_BACKEND_DOMAINS: BackendDomainDetail[] = [
   {
-    domain_id: "trading_code_scout",
-    display_name: "Trading Codebase & Execution AST",
-    description: "AST-aware Python execution & slippage contracts.",
+    domain_id: "code_architecture_scout",
+    display_name: "Code Architecture & AST",
+    description: "AST-aware Python slicing & token budget contracts.",
     modalities: ["code"],
     sample_queries: [
-      "Inspect AlmgrenChrissExecutionOptimizer and VolatilityForecastResult contracts for slippage calculation.",
-      "Find direct callers of compute_trajectory in execution.",
+      "Inspect DeterministicSlicer and TokenBudgetResult contracts for context packing.",
+      "Find direct callers of compute_slice_bounds in slicer.",
     ],
     lora_enabled: true,
     default_scopes: ["public_eng"],
@@ -89,41 +93,41 @@ export const TEST_BACKEND_DOMAINS: BackendDomainDetail[] = [
     code_files_count: 14,
     ast_symbols_count: 3443,
     manifest: {
-      domain_id: "trading_code_scout",
-      display_name: "Trading Codebase & Execution AST",
+      domain_id: "code_architecture_scout",
+      display_name: "Code Architecture & AST",
       base_model_id: "mlx-community/gemma-4-26b-a4b-it-4bit",
-      lora_adapter_id: "trading_code_scout_v1",
-      lora_adapter_path: "adapters/trading_code_scout",
+      lora_adapter_id: "code_architecture_scout_v1",
+      lora_adapter_path: "adapters/code_architecture_scout",
       authority_rules: { primary_truth_source: "code" },
       output_contract: "ImplementationContextPack",
     },
-    adapter_verification: TEST_HEALTH_RESPONSE.adapter_pool_status.trading_code_scout,
+    adapter_verification: TEST_HEALTH_RESPONSE.adapter_pool_status.code_architecture_scout,
     training_metrics: { final_loss: 0.72 },
   },
   {
-    domain_id: "quant_research_scout",
-    display_name: "Quantitative Research & Market Papers",
-    description: "Order book dynamics, Hawkes processes, and friction studies.",
+    domain_id: "enterprise_docs_scout",
+    display_name: "Enterprise Architecture Docs & ADRs",
+    description: "System architecture, RLS policies, and design specifications.",
     modalities: ["document"],
     sample_queries: [
-      "What does the multivariate Hawkes process order book volume research say about branching kernel stability?",
+      "What does the RLS policy ADR say about tenant isolation and fail-closed defaults?",
     ],
     lora_enabled: false,
-    default_scopes: ["public_quant"],
+    default_scopes: ["public_docs"],
     doc_chunks_count: 14188,
     documents_count: 42,
     code_files_count: 0,
     ast_symbols_count: 0,
     manifest: {
-      domain_id: "quant_research_scout",
-      display_name: "Quantitative Research & Market Papers",
+      domain_id: "enterprise_docs_scout",
+      display_name: "Enterprise Architecture Docs & ADRs",
       base_model_id: "mlx-community/gemma-4-26b-a4b-it-4bit",
-      lora_adapter_id: "quant_research_scout_v1",
-      lora_adapter_path: "adapters/quant_research_scout",
+      lora_adapter_id: "enterprise_docs_scout_v1",
+      lora_adapter_path: "adapters/enterprise_docs_scout",
       authority_rules: { primary_truth_source: "document" },
-      output_contract: "QuantStrategyBrief",
+      output_contract: "DomainKnowledgeBrief",
     },
-    adapter_verification: TEST_HEALTH_RESPONSE.adapter_pool_status.quant_research_scout,
+    adapter_verification: TEST_HEALTH_RESPONSE.adapter_pool_status.enterprise_docs_scout,
     training_metrics: { final_loss: 0.68 },
   },
   {
@@ -208,25 +212,25 @@ export const TEST_STAGE_TRACES: StageExecutionTrace[] = [
     elapsed_ms: 12,
     summary: "Principal engineer authorized; 2 facets decomposed.",
     principal_id: "test_engineer_01",
-    principal_scopes: ["public_eng", "public_quant"],
+    principal_scopes: ["public_eng", "public_docs"],
     guardrail_verdict: "SAFE",
     query_type: "code_architecture",
-    core_subject: "AlmgrenChrissExecutionOptimizer",
-    required_facets: ["slippage calculation", "VolatilityForecastResult"],
-    target_domains: ["trading_code_scout"],
+    core_subject: "DeterministicSlicer",
+    required_facets: ["slice bounds", "TokenBudgetResult"],
+    target_domains: ["code_architecture_scout"],
   },
   {
     stage: 2,
     stage_name: "Multi-Domain Hybrid Retrieval & AST Closure",
     status: "completed",
     elapsed_ms: 48,
-    summary: "Selected trading_code_scout (2 accepted hits, 1 AST hop).",
+    summary: "Selected code_architecture_scout (2 accepted hits, 1 AST hop).",
     ast_one_hop_count: 1,
     ast_two_hop_count: 0,
     domain_probes: [
       {
-        domain_id: "trading_code_scout",
-        display_name: "Trading Codebase & Execution AST",
+        domain_id: "code_architecture_scout",
+        display_name: "Code Architecture & AST",
         authorized: true,
         probed_hits: 4,
         accepted_hits: 2,
@@ -238,8 +242,8 @@ export const TEST_STAGE_TRACES: StageExecutionTrace[] = [
         top_hits: [
           {
             item_id: "hit_opt_1",
-            domain_id: "trading_code_scout",
-            title: "execution/optimizer.py",
+            domain_id: "code_architecture_scout",
+            title: "slicer/bounds.py",
             modality: "code",
             cosine_similarity: 0.89,
             bm25_score: 0.84,
@@ -256,9 +260,9 @@ export const TEST_STAGE_TRACES: StageExecutionTrace[] = [
     stage_name: "Local Gemma-4 Synthesis & Facet Grounding",
     status: "completed",
     elapsed_ms: 140,
-    summary: "Synthesized 2 chunks via trading_code_scout_v1 QLoRA.",
+    summary: "Synthesized 2 chunks via code_architecture_scout_v1 QLoRA.",
     model_id: "mlx-community/gemma-4-26b-a4b-it-4bit",
-    adapter_mode: "QLoRA (trading_code_scout_v1)",
+    adapter_mode: "QLoRA (code_architecture_scout_v1)",
     chunks_fed: 2,
     local_tokens_read: 42000,
     sufficiency_verdict: "sufficient",
@@ -300,10 +304,10 @@ export const TEST_WORKSPACE_CONFIG: WorkspaceConfigResponse = {
     description: "Dynamically probes all authorized DomainPacks in PostgreSQL 17.",
   },
   role_presets: [
-    { role: "engineer", label: "Engineer", default_scopes: ["public_eng", "public_quant"] },
-    { role: "quant_researcher", label: "Quant Researcher", default_scopes: ["public_quant"] },
-    { role: "product_manager", label: "Product Manager", default_scopes: ["public_eng", "public_quant"] },
-    { role: "compliance_officer", label: "Compliance Officer", default_scopes: ["public_eng", "public_quant"] },
+    { role: "engineer", label: "Engineer", default_scopes: ["public_eng", "public_docs"] },
+    { role: "domain_researcher", label: "Domain Researcher", default_scopes: ["public_docs"] },
+    { role: "product_manager", label: "Product Manager", default_scopes: ["public_eng", "public_docs"] },
+    { role: "compliance_officer", label: "Compliance Officer", default_scopes: ["public_eng", "public_docs"] },
   ],
   pipeline_stages: TEST_PIPELINE_STAGES,
   source_filters: ["all", "code", "wiki", "jira"],
@@ -316,12 +320,12 @@ export const TEST_WORKSPACE_CONFIG: WorkspaceConfigResponse = {
 
 export const TEST_DOMAINS: DomainInfo[] = [
   {
-    domain_id: "trading_code_scout",
-    display_name: "Trading Codebase & Execution AST",
-    description: "AST-aware Python execution & slippage contracts.",
+    domain_id: "code_architecture_scout",
+    display_name: "Code Architecture & AST",
+    description: "AST-aware Python slicing & token budget contracts.",
     modalities: ["code"],
     sample_queries: [
-      "Inspect AlmgrenChrissExecutionOptimizer and VolatilityForecastResult contracts for slippage calculation.",
+      "Inspect DeterministicSlicer and TokenBudgetResult contracts for context packing.",
     ],
     lora_enabled: true,
     default_scopes: ["public_eng"],
@@ -330,8 +334,8 @@ export const TEST_DOMAINS: DomainInfo[] = [
     code_files_count: 14,
     ast_symbols_count: 3443,
     base_model_id: "mlx-community/gemma-4-26b-a4b-it-4bit",
-    lora_adapter_id: "trading_code_scout_v1",
-    lora_adapter_path: "adapters/trading_code_scout",
+    lora_adapter_id: "code_architecture_scout_v1",
+    lora_adapter_path: "adapters/code_architecture_scout",
     primary_truth_source: "code",
     output_contract: "ImplementationContextPack",
     qlora_rank: 8,
@@ -342,24 +346,24 @@ export const TEST_DOMAINS: DomainInfo[] = [
     verified: true,
   },
   {
-    domain_id: "quant_research_scout",
-    display_name: "Quantitative Research & Market Papers",
-    description: "Order book dynamics, Hawkes processes, and friction studies.",
+    domain_id: "enterprise_docs_scout",
+    display_name: "Enterprise Architecture Docs & ADRs",
+    description: "System architecture, RLS policies, and design specifications.",
     modalities: ["document"],
     sample_queries: [
-      "What does the multivariate Hawkes process order book volume research say about branching kernel stability?",
+      "What does the RLS policy ADR say about tenant isolation and fail-closed defaults?",
     ],
     lora_enabled: false,
-    default_scopes: ["public_quant"],
+    default_scopes: ["public_docs"],
     doc_chunks_count: 14188,
     documents_count: 42,
     code_files_count: 0,
     ast_symbols_count: 0,
     base_model_id: "mlx-community/gemma-4-26b-a4b-it-4bit",
-    lora_adapter_id: "quant_research_scout_v1",
-    lora_adapter_path: "adapters/quant_research_scout",
+    lora_adapter_id: "enterprise_docs_scout_v1",
+    lora_adapter_path: "adapters/enterprise_docs_scout",
     primary_truth_source: "document",
-    output_contract: "QuantStrategyBrief",
+    output_contract: "DomainKnowledgeBrief",
     qlora_rank: 8,
     qlora_alpha: 16,
     hot_swap_latency_ms: 0.02,
@@ -396,13 +400,13 @@ export const TEST_ROI_METRICS: ROIMetricsResponse = {
 };
 
 export const TEST_DOC_CITATION: DocCitation = {
-  chunk_id: "chunk_hawkes_01",
-  doc_id: "doc_hawkes_orderbook",
+  chunk_id: "chunk_rls_01",
+  doc_id: "doc_pg_rls_architecture",
   version: "v1.0",
-  doc_title: "The role of volume in order book dynamics: a multivariate Hawkes process analysis",
-  source_uri: "https://arxiv.org/abs/example-hawkes",
-  section_heading: "3.2 Excitation Kernel Stability",
-  verbatim_quote: "The spectral radius of the branching matrix remains strictly below 1.0 under stationary volume regimes.",
+  doc_title: "PostgreSQL 17 Forced Row-Level Security and Connection Pool Isolation",
+  source_uri: "https://wiki.internal.example/pages/pg17-rls",
+  section_heading: "3.2 Transaction-Scoped GUC Binding",
+  verbatim_quote: "Every pooled query executes inside an explicit transaction setting app.tenant_id via set_config(..., true).",
   source_type: "confluence_wiki",
   published_date: "2026-10-01",
 };
@@ -437,67 +441,66 @@ export const TEST_JIRA_CITATION: DocCitation = {
 
 export const TEST_CODE_PACK: ContextPack = {
   trace_id: "tr_test_code_001",
-  domain_id: "trading_code_scout",
-  user_task: "Inspect AlmgrenChrissExecutionOptimizer liquidation schedule and 1-hop caller contracts.",
+  domain_id: "code_architecture_scout",
+  user_task: "Inspect DeterministicSlicer slice bounds and 1-hop caller contracts.",
   architectural_execution_plan: [
-    "Review AlmgrenChrissExecutionOptimizer.compute_trajectory in execution/optimizer.py lines 14-48.",
-    "Preserve risk aversion validation and VolatilityForecastResult caller contract.",
+    "Review DeterministicSlicer.compute_slice_bounds in slicer/bounds.py lines 14-32.",
+    "Preserve token budget validation and TokenBudgetResult caller contract.",
   ],
   doc_vs_code_conflicts_detected: [],
   code_slices: [
     {
-      repo_name: "quant-exec-core",
-      file_path: "execution/optimizer.py",
+      repo_name: "context-core",
+      file_path: "slicer/bounds.py",
       start_line: 14,
       end_line: 32,
-      qualified_symbol: "AlmgrenChrissExecutionOptimizer.compute_trajectory",
-      selection_reason: "Core optimal execution trajectory calculation with risk aversion check.",
+      qualified_symbol: "DeterministicSlicer.compute_slice_bounds",
+      selection_reason: "Core deterministic slice bounds calculation with positive budget check.",
       modification_intent: "modify_target",
       git_commit_sha: "abc1234def5678",
       git_blob_sha: "blob987654",
       verbatim_code_with_lines:
-        "14: class AlmgrenChrissExecutionOptimizer:\n" +
-        "15:     def compute_trajectory(self, shares: float, volatility: float) -> list[float]:\n" +
-        "16:         if shares <= 0:\n" +
-        "17:             raise ValueError('shares must be positive')\n" +
-        "18:         return [shares * 0.5, shares * 0.5]",
+        "14: class DeterministicSlicer:\n" +
+        "15:     def compute_slice_bounds(self, max_tokens: int, lines: int) -> tuple[int, int]:\n" +
+        "16:         if max_tokens <= 0:\n" +
+        "17:             raise ValueError('max_tokens must be positive')\n" +
+        "18:         return (1, lines)",
       auto_expanded_by_ast: false,
     },
     {
-      repo_name: "quant-exec-core",
-      file_path: "execution/volatility.py",
+      repo_name: "context-core",
+      file_path: "slicer/budget.py",
       start_line: 5,
       end_line: 14,
-      qualified_symbol: "VolatilityForecastResult",
-      selection_reason: "1-hop AST dependency supplying volatility estimate.",
+      qualified_symbol: "TokenBudgetResult",
+      selection_reason: "1-hop AST dependency supplying token budget estimate.",
       modification_intent: "imported_type",
       git_commit_sha: "abc1234def5678",
       git_blob_sha: "blob444333",
       verbatim_code_with_lines:
         "5: @dataclass(frozen=True)\n" +
-        "6: class VolatilityForecastResult:\n" +
-        "7:     sigma_annualized: float\n" +
-        "8:     horizon_minutes: int",
+        "6: class TokenBudgetResult:\n" +
+        "7:     max_tokens: int\n" +
+        "8:     reserved_tokens: int",
       auto_expanded_by_ast: true,
     },
   ],
   supporting_doc_citations: [TEST_DOC_CITATION],
-  quant_strategy_spec: null,
   domain_knowledge_brief: {
-    brief_title: "Almgren-Chriss Optimal Execution Schedule & Risk Bounds",
-    domain_id: "trading_code_scout",
+    brief_title: "Deterministic Slicer & Token Budget Bounds",
+    domain_id: "code_architecture_scout",
     executive_summary:
-      "AlmgrenChrissExecutionOptimizer splits parent orders using VolatilityForecastResult and enforces positive share guards before scheduling child slices.",
-    formal_expression_or_rule: "x_j = X * sinh(kappa * (T - t_j)) / sinh(kappa * T)",
+      "DeterministicSlicer computes AST-aligned slice bounds using TokenBudgetResult and enforces positive token guards before packing.",
+    formal_expression_or_rule: "effective_tokens = max_tokens - reserved_tokens",
     core_findings_and_rules: [
-      "Execution optimizer consumes VolatilityForecastResult.sigma_annualized directly.",
-      "AST 1-hop dependency closure attached execution/volatility.py automatically.",
+      "Slicer consumes TokenBudgetResult.max_tokens directly.",
+      "AST 1-hop dependency closure attached slicer/budget.py automatically.",
     ],
     domain_constraints_and_caveats: [
-      "Rejects non-positive share quantities fail-closed before frontier handoff.",
+      "Rejects non-positive token budgets fail-closed before frontier handoff.",
     ],
     known_risks_and_failure_modes: [
-      "Temporary impact assumption degrades under flash illiquidity spikes.",
+      "Oversized single-function AST nodes require explicit line-range splitting.",
     ],
     structured_metadata: {
       ast_closure_slices: 1,
@@ -519,40 +522,43 @@ export const TEST_CODE_PACK: ContextPack = {
   pack_token_count: 3800,
 };
 
-export const TEST_QUANT_PACK: ContextPack = {
+export const TEST_DOCS_PACK: ContextPack = {
   ...TEST_CODE_PACK,
-  trace_id: "tr_test_quant_002",
-  domain_id: "quant_research_scout",
-  user_task: "Explain Hawkes process excitation kernel stability and slippage friction assumptions.",
+  trace_id: "tr_test_docs_002",
+  domain_id: "enterprise_docs_scout",
+  user_task: "Explain PostgreSQL 17 FORCE RLS tenant isolation and fail-closed defaults.",
   doc_vs_code_conflicts_detected: [
-    "Code uses static 2-bps impact whereas Hawkes kernel research recommends regime-scaled impact.",
+    "Legacy script bypasses RLS whereas ADR-2026-11 requires FORCE ROW LEVEL SECURITY on all tables.",
   ],
   code_slices: [],
-  quant_strategy_spec: {
-    strategy_name: "Multivariate Hawkes Order-Book Imbalance",
-    target_markets: ["DE_XETRA", "US_EQUITY"],
-    is_intraday_futures: true,
-    mathematical_signal_latex: "\\lambda_t = \\mu + \\int_0^t \\alpha e^{-\\beta (t - s)} dN_s",
-    entry_exit_rules: [
-      "Enter when buy-side intensity exceeds sell-side intensity by 2.5x baseline.",
-      "Flatten inventory if branching spectral radius approaches 0.95.",
+  domain_knowledge_brief: {
+    brief_title: "PostgreSQL 17 FORCE RLS & Tenant Isolation",
+    domain_id: "enterprise_docs_scout",
+    executive_summary:
+      "All PostgreSQL 17 tables enforce tenant_id UUID NOT NULL with ENABLE and FORCE ROW LEVEL SECURITY under NOBYPASSRLS.",
+    formal_expression_or_rule: "current_setting('app.tenant_id', true)::uuid = tenant_id",
+    core_findings_and_rules: [
+      "Runtime routes must never use db_admin_url.",
+      "Missing or unset tenant_id fails closed with zero rows returned.",
     ],
-    sample_period_years: "2018-2024",
-    reported_sharpe_ratio: 1.42,
-    reported_max_drawdown_pct: 6.4,
-    transaction_cost_bps_assumed: 1.5,
-    friction_verdict: "UNVERIFIED_FRICTION_WARNING",
-    market_specific_caveats: [
-      "Queue priority modeling ignores hidden iceberg replenishment.",
+    domain_constraints_and_caveats: [
+      "Connection poolers must reset session variables between requests.",
     ],
-    known_failure_regimes: ["Opening auction imbalances", "Central bank announcement windows"],
+    known_risks_and_failure_modes: [
+      "Table owners bypass RLS unless FORCE ROW LEVEL SECURITY is enabled.",
+    ],
+    structured_metadata: {
+      pg_version: "17.11",
+      rls_enforced: true,
+    },
     verified_citations: [TEST_DOC_CITATION],
+    sufficiency_verdict: "sufficient",
   },
 };
 
 export const TEST_DIAGNOSTIC: InsufficientContextDiagnostic = {
   trace_id: "tr_test_abstain_003",
-  domain_id: "trading_code_scout",
+  domain_id: "code_architecture_scout",
   reason: "No verified symbols or documents matched query within caller RBAC scopes.",
   is_abstention: true,
   missing_symbols: ["NonExistentProprietaryEngine"],
@@ -575,7 +581,6 @@ export const TEST_SCOUT_QUERY_RESPONSE: ScoutQueryResponse = {
   diagnostic: null,
   citations: TEST_CODE_PACK.supporting_doc_citations,
   preflight_report: TEST_CODE_PACK.preflight_report,
-  quant_strategy_spec: TEST_CODE_PACK.quant_strategy_spec,
   token_savings: TEST_TOKEN_SAVINGS,
   trace_attributes: { execution_mode: "chat_qa" },
 };
@@ -583,12 +588,12 @@ export const TEST_SCOUT_QUERY_RESPONSE: ScoutQueryResponse = {
 export const TEST_HANDOFF_PREVIEW: HandoffPreviewResponse = {
   confirmation_token: "confirm_tok_test_001",
   patch_diff:
-    "--- a/execution/optimizer.py\n" +
-    "+++ b/execution/optimizer.py\n" +
+    "--- a/slicer/bounds.py\n" +
+    "+++ b/slicer/bounds.py\n" +
     "@@ -16,2 +16,3 @@\n" +
-    "+        if volatility <= 0:\n" +
-    "+            raise ValueError('volatility must be positive')\n",
-  target_files: ["execution/optimizer.py"],
+    "+        if lines <= 0:\n" +
+    "+            raise ValueError('lines must be positive')\n",
+  target_files: ["slicer/bounds.py"],
   model_id: "gemini-4-argon",
   local_tokens_consumed: 42000,
   pack_token_count: 3800,
@@ -606,12 +611,88 @@ export const TEST_HANDOFF_PREVIEW: HandoffPreviewResponse = {
 export const TEST_HANDOFF_APPLY: HandoffApplyResponse = {
   success: true,
   confirmed: true,
-  target_files: ["execution/optimizer.py"],
+  target_files: ["slicer/bounds.py"],
   lint_passed: true,
   tests_passed: true,
   verification_passed: true,
   details: "Applied patch in sandbox worktree and passed ruff + pytest.",
 };
+
+export const TEST_ADMIN_PURGE_RESPONSE: AdminPurgeResponse = {
+  domain_id: "code_architecture_scout",
+  tenant_id: "tenant_001",
+  pg17_deleted: { doc_chunks: 4, code_chunks: 1 },
+  zoekt_deleted: 1,
+  object_store_deleted: ["s3://bucket/slicer/bounds.py"],
+  permission_cache_invalidated: true,
+  residue_found: 0,
+  elapsed_seconds: 0.14,
+  sla_seconds: 60,
+  sla_met: true,
+  warnings: [],
+};
+
+export const TEST_SESSIONS: ScoutSessionSummary[] = [
+  {
+    session_id: "sess_01",
+    title: "DeterministicSlicer bounds & RLS trace",
+    domain_id: "code_architecture_scout",
+    turn_count: 3,
+    compacted_tokens: 1850,
+    updated_at: "2026-11-19T09:45:00Z",
+    has_commit_drift: true,
+    commit_drift_details: ["slicer/bounds.py modified at commit 9f3c21a"],
+  },
+  {
+    session_id: "sess_02",
+    title: "ADR-004 PostgreSQL 17 FORCE RLS",
+    domain_id: "enterprise_docs_scout",
+    turn_count: 2,
+    compacted_tokens: 920,
+    updated_at: "2026-11-19T08:15:00Z",
+    has_commit_drift: false,
+  },
+];
+
+export const TEST_BRANCHES: BranchOverlayOption[] = [
+  {
+    branch_id: "main",
+    label: "main (HEAD)",
+    kind: "head",
+    commit_sha: "abc1234",
+  },
+  {
+    branch_id: "mr-412",
+    label: "MR !412 (overlay: 3 files)",
+    kind: "mr_overlay",
+    commit_sha: "def5678",
+    mr_iid: "412",
+    overlay_files_count: 3,
+  },
+];
+
+export const TEST_SIDE_EFFECTS: SideEffectMatrixItem[] = [
+  {
+    side_effect_id: "se_01",
+    effect_type: "DB_WRITE",
+    qualified_symbol: "TenantAuditRepo.record_purge",
+    file_path: "src/db/audit_repo.py",
+    line_range: "L42-L68",
+    target_resource: "pg17:audit_events",
+    spec_status: "VERIFIED",
+    verification_note: "Matches ADR-004 FORCE RLS write policy.",
+  },
+  {
+    side_effect_id: "se_02",
+    effect_type: "HTTP_EGRESS",
+    qualified_symbol: "WebhookDispatcher.emit_alert",
+    file_path: "src/webhooks/dispatcher.py",
+    line_range: "L19-L44",
+    target_resource: "https://internal-siem.corp.local/events",
+    spec_status: "SPEC_DRIFT_WARNING",
+    verification_note: "Undocumented egress header X-Trace-Signature not in ADR-011.",
+  },
+];
 
 export function buildTestSession(
   principal: PrincipalContext = TEST_ENGINEER_PRINCIPAL
@@ -642,6 +723,9 @@ export function createMockSseStream(
 export interface MockApiOverrides {
   authStatus?: number;
   authDetail?: string;
+  mePrincipal?: PrincipalContext;
+  meStatus?: number;
+  runtimeMode?: string;
   healthStatus?: number;
   healthResponse?: HealthResponse;
   domainsStatus?: number;
@@ -662,6 +746,9 @@ export interface MockApiOverrides {
   previewStatus?: number;
   applyResponse?: HandoffApplyResponse;
   applyStatus?: number;
+  purgeStatus?: number;
+  purgeDetail?: string;
+  purgeResponse?: AdminPurgeResponse;
 }
 
 export function installMockApiFetch(overrides: MockApiOverrides = {}) {
@@ -702,6 +789,20 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
         });
       }
 
+      if (url.endsWith("/api/v1/auth/me")) {
+        const status = overrides.meStatus ?? overrides.authStatus ?? 200;
+        if (status >= 400) {
+          return new Response(
+            JSON.stringify({ detail: overrides.authDetail ?? "Unauthorized" }),
+            { status, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response(
+          JSON.stringify(overrides.mePrincipal ?? TEST_ENGINEER_PRINCIPAL),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
       if (url.endsWith("/api/v1/health")) {
         const status = overrides.healthStatus ?? 200;
         if (status >= 400) {
@@ -727,9 +828,19 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
         }
         const baseCfg =
           overrides.workspaceConfigResponse ?? TEST_WORKSPACE_CONFIG;
-        const cfg: WorkspaceConfigResponse = overrides.domainsDetail
+        const cfgWithDomains: WorkspaceConfigResponse = overrides.domainsDetail
           ? { ...baseCfg, domains: overrides.domainsDetail }
           : baseCfg;
+        const cfg: WorkspaceConfigResponse = overrides.runtimeMode
+          ? {
+              ...cfgWithDomains,
+              runtime_mode: overrides.runtimeMode,
+              hardware_profile: {
+                ...cfgWithDomains.hardware_profile,
+                runtime_mode: overrides.runtimeMode,
+              },
+            }
+          : cfgWithDomains;
         return new Response(JSON.stringify(cfg), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -839,7 +950,6 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
             data: {
               status: "ready",
               pack: TEST_CODE_PACK,
-              quant_strategy_spec: null,
               token_savings: TEST_TOKEN_SAVINGS,
               timestamp: "2026-11-14T10:00:04Z",
             },
@@ -875,6 +985,34 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
         }
         return new Response(
           JSON.stringify(overrides.applyResponse ?? TEST_HANDOFF_APPLY),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      if (url.endsWith("/api/v1/admin/purge")) {
+        const status = overrides.purgeStatus ?? 200;
+        if (status >= 400) {
+          return new Response(
+            JSON.stringify({ detail: overrides.purgeDetail ?? "Purge forbidden" }),
+            { status, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        let parsed: Record<string, unknown> = {};
+        if (typeof init?.body === "string" && init.body.trim()) {
+          try {
+            parsed = JSON.parse(init.body) as Record<string, unknown>;
+          } catch {
+            parsed = {};
+          }
+        }
+        if (parsed.file_path && !String(parsed.repo_name ?? "").trim()) {
+          return new Response(
+            JSON.stringify({ detail: "file_path purge requires repo_name" }),
+            { status: 400, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response(
+          JSON.stringify(overrides.purgeResponse ?? TEST_ADMIN_PURGE_RESPONSE),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
       }

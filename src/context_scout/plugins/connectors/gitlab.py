@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import urllib.parse
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 from pydantic import BaseModel
 
 from context_scout.ast_engine.extractor import ASTExtractor
+from context_scout.ast_engine.side_effect_extractor import SideEffectExtractor
 from context_scout.db.repositories import PostgresRLSRepository
 from context_scout.db.schema import (
     ASTSymbolRecord,
@@ -22,11 +26,13 @@ from context_scout.ingestion.git_merkle_indexer import compute_git_blob_sha
 from context_scout.plugins.base import SourceConnectorPlugin, SyncResult
 from context_scout.plugins.registry import PluginRegistry
 from context_scout.queue.task_queue import QueueTask
+from context_scout.schemas.contracts import DEFAULT_TENANT_ID
 from context_scout.security.permission_mirror import (
     GitLabRole,
     PermissionMirror,
     sanitize_scope_identifier,
 )
+from context_scout.security.pre_index_scrubber import PreIndexScrubber
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +56,12 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
         base_url: str = "https://gitlab.example.com",
         private_token: str | None = None,
         client: httpx.Client | None = None,
+        scrubber: PreIndexScrubber | None = None,
+        side_effect_extractor: SideEffectExtractor | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        self.scrubber = scrubber or PreIndexScrubber()
+        self.side_effect_extractor = side_effect_extractor or SideEffectExtractor()
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -73,10 +83,148 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
     def source_type(self) -> str:
         return "gitlab"
 
-    def mirror_permissions(self, container_key: str) -> list[str]:
-        """Maps GitLab project path to RLS allowed_scopes."""
-        clean_path = sanitize_scope_identifier(container_key)
-        return PermissionMirror.map_gitlab_role_to_scopes(clean_path, GitLabRole.REPORTER)
+    @staticmethod
+    def _extract_read_code_flag(payload: Mapping[str, Any]) -> bool | None:
+        """Extracts GitLab 18.7+ :read_code flag from member or role payloads."""
+        candidates: list[Any] = [payload.get("read_code")]
+        for nested_key in ("member_role", "permissions", "custom_role"):
+            nested = payload.get(nested_key)
+            if isinstance(nested, Mapping):
+                candidates.append(nested.get("read_code"))
+
+        if any(val is False for val in candidates):
+            return False
+        if any(val is True for val in candidates):
+            return True
+        return None
+
+    def resolve_project_member_scopes(
+        self,
+        project_path: str,
+        *,
+        access_level: int | GitLabRole,
+        read_code: bool | None = None,
+        repository_access_level: str = "enabled",
+        shared_with_groups: Sequence[Mapping[str, Any]] = (),
+    ) -> list[str]:
+        """Resolves RLS scopes for a GitLab project member under GitLab 18.7+ :read_code."""
+        clean_path = sanitize_scope_identifier(project_path)
+        if repository_access_level.strip().lower() == "disabled" or read_code is False:
+            return []
+
+        level = int(access_level)
+        if level <= GitLabRole.MINIMAL_ACCESS:
+            return []
+
+        scopes: list[str] = []
+        if level == GitLabRole.GUEST:
+            if read_code is True:
+                scopes.append(f"repo:{clean_path}:read")
+        elif level >= GitLabRole.REPORTER:
+            role = (
+                access_level
+                if isinstance(access_level, GitLabRole)
+                else GitLabRole(max(r.value for r in GitLabRole if r.value <= level))
+            )
+            scopes.extend(PermissionMirror.map_gitlab_role_to_scopes(clean_path, role))
+
+        for group in shared_with_groups:
+            group_repo_access = str(group.get("repository_access_level", "enabled")).strip().lower()
+            group_read_code = self._extract_read_code_flag(group)
+            if group_repo_access == "disabled" or group_read_code is False:
+                continue
+
+            raw_level = (
+                group["group_access_level"]
+                if "group_access_level" in group
+                else group.get("access_level", 0)
+            )
+            try:
+                group_level = int(raw_level)
+            except (TypeError, ValueError):
+                continue
+
+            if group_level >= GitLabRole.REPORTER or (
+                group_level == GitLabRole.GUEST and group_read_code is True
+            ):
+                raw_group_path = str(
+                    group.get("group_full_path")
+                    or group.get("full_path")
+                    or group.get("group_path")
+                    or group.get("path")
+                    or group.get("group_name")
+                    or ""
+                )
+                if raw_group_path.strip():
+                    clean_group = sanitize_scope_identifier(raw_group_path)
+                    scopes.append(f"gitlab:group:{clean_group}:read")
+
+        return list(dict.fromkeys(scopes))
+
+    def fetch_member_read_code_permission(
+        self,
+        project_id_or_path: str | int,
+        user_id: int | str,
+    ) -> bool:
+        """Queries GitLab 18.7+ member endpoint and fails closed on denied/missing :read_code."""
+        encoded_id = (
+            urllib.parse.quote(project_id_or_path, safe="")
+            if isinstance(project_id_or_path, str) and "/" in project_id_or_path
+            else str(project_id_or_path)
+        )
+        encoded_user = urllib.parse.quote(str(user_id), safe="")
+        try:
+            resp = self.client.get(f"/api/v4/projects/{encoded_id}/members/all/{encoded_user}")
+        except httpx.HTTPError:
+            return False
+
+        if resp.status_code != 200:
+            return False
+
+        try:
+            data: Any = resp.json()
+        except ValueError:
+            return False
+
+        if not isinstance(data, Mapping):
+            return False
+
+        raw_level = data.get("access_level")
+        if raw_level is None or isinstance(raw_level, bool):
+            return False
+        try:
+            level = int(raw_level)
+        except (TypeError, ValueError):
+            return False
+
+        read_code = self._extract_read_code_flag(data)
+        if read_code is False:
+            return False
+        if level == GitLabRole.GUEST:
+            return read_code is True
+        return level >= GitLabRole.REPORTER
+
+    def mirror_permissions(
+        self,
+        container_key: str,
+        *,
+        role: GitLabRole = GitLabRole.REPORTER,
+        read_code: bool | None = None,
+        repository_access_level: str = "enabled",
+        shared_group_paths: Sequence[str] = (),
+    ) -> list[str]:
+        """Maps GitLab project path to RLS allowed_scopes with GitLab 18.7+ :read_code."""
+        shared_groups = [
+            {"group_full_path": group_path, "group_access_level": GitLabRole.REPORTER}
+            for group_path in shared_group_paths
+        ]
+        return self.resolve_project_member_scopes(
+            container_key,
+            access_level=role,
+            read_code=read_code,
+            repository_access_level=repository_access_level,
+            shared_with_groups=shared_groups,
+        )
 
     def fetch_item(self, item_id: str, version: str | None = None) -> dict[str, Any] | None:
         """Fetches project metadata by project ID or URL-encoded path."""
@@ -117,8 +265,6 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
 
     def fetch_raw_blob(self, project_id_or_path: str | int, file_path: str, ref_sha: str) -> bytes:
         """Fetches raw blob bytes directly from GitLab."""
-        import urllib.parse
-
         url_path = urllib.parse.quote(file_path, safe="")
         endpoint = f"/api/v4/projects/{project_id_or_path}/repository/files/{url_path}/raw"
         params = {"ref": ref_sha}
@@ -149,6 +295,31 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
         before_sha = payload.get("before") or payload.get("before_sha")
         after_sha = payload.get("after") or payload.get("after_sha")
 
+        repo_access_level = str(project_info.get("repository_access_level", "enabled"))
+        read_code_flag = project_info.get("read_code")
+        if repo_access_level.strip().lower() == "disabled" or read_code_flag is False:
+            logger.warning(
+                "GitLab push webhook failed closed for %s "
+                "(repository_access_level=%s, read_code=%s)",
+                clean_path,
+                repo_access_level,
+                read_code_flag,
+            )
+            return SyncResult(
+                source_type="gitlab",
+                items_scanned=0,
+                items_indexed=0,
+                items_updated=0,
+                items_deleted=0,
+                stale_items_flagged=0,
+                cursor_or_checkpoint=after_sha or "",
+                duration_ms=0.0,
+                errors=[
+                    f"Repository '{clean_path}' failed closed: "
+                    f"repository_access_level={repo_access_level!r}, read_code={read_code_flag!r}"
+                ],
+            )
+
         if not before_sha or not after_sha or not project_id:
             logger.warning("Incomplete GitLab push webhook payload for task %s", task.task_id)
             return SyncResult(
@@ -163,7 +334,33 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
                 errors=["Incomplete push webhook payload: missing before/after SHA or project ID"],
             )
 
-        allowed_scopes = self.mirror_permissions(clean_path)
+        shared_groups = project_info.get("shared_with_groups", ())
+        allowed_scopes = self.resolve_project_member_scopes(
+            clean_path,
+            access_level=GitLabRole.REPORTER,
+            read_code=read_code_flag if isinstance(read_code_flag, bool) else None,
+            repository_access_level=repo_access_level,
+            shared_with_groups=shared_groups if isinstance(shared_groups, Sequence) else (),
+        )
+        if not allowed_scopes:
+            return SyncResult(
+                source_type="gitlab",
+                items_scanned=0,
+                items_indexed=0,
+                items_updated=0,
+                items_deleted=0,
+                stale_items_flagged=0,
+                cursor_or_checkpoint=after_sha or "",
+                duration_ms=0.0,
+                errors=[f"Repository '{clean_path}' resolved zero allowed_scopes (fail-closed)"],
+            )
+        raw_principal_tid = getattr(principal, "tenant_id", None) if principal is not None else None
+        raw_task_tid = getattr(task, "tenant_id", DEFAULT_TENANT_ID)
+        effective_tenant_id: UUID = (
+            raw_principal_tid
+            if isinstance(raw_principal_tid, UUID)
+            else (raw_task_tid if isinstance(raw_task_tid, UUID) else DEFAULT_TENANT_ID)
+        )
         is_postgres = hasattr(repository, "upsert_repository") and conn is not None
 
         # 2. Upsert Repository Record
@@ -179,15 +376,24 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
             metadata_json={"project_id": project_id, "last_push_ref": ref},
             is_active=True,
             updated_at=datetime.now(UTC),
+            tenant_id=effective_tenant_id,
         )
         if is_postgres:
             upsert_fn = getattr(repository, "upsert_repository", None)
             if callable(upsert_fn):
                 upsert_fn(conn, repo_rec)
+            if hasattr(repository, "get_repository"):
+                existing_repo = repository.get_repository(conn, domain_id, clean_path)
+                if existing_repo is not None:
+                    repo_rec = dataclasses.replace(repo_rec, repo_id=existing_repo.repo_id)
         elif hasattr(repository, "_repos"):
             # Purge existing record to prevent duplicate repository records
             for old_id, r in list(repository._repos.items()):
-                if r.domain_id == domain_id and r.repo_name in (clean_path, project_path):
+                if (
+                    r.tenant_id == effective_tenant_id
+                    and r.domain_id == domain_id
+                    and r.repo_name in (clean_path, project_path)
+                ):
                     repository._repos.pop(old_id, None)
             repository._repos[repo_rec.repo_id] = repo_rec
 
@@ -209,6 +415,7 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
                         )
                     ),
                     indexed_at=datetime.now(UTC),
+                    tenant_id=effective_tenant_id,
                 )
                 if is_postgres:
                     repository.insert_repo_commit(conn, c_rec)
@@ -305,11 +512,22 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
                             ]
                             for sid in sym_del_ids:
                                 repository._symbols.pop(sid, None)
+                        if hasattr(repository, "_side_effects"):
+                            se_del_ids = [
+                                se_id
+                                for se_id, se in repository._side_effects.items()
+                                if se.file_id == fid
+                            ]
+                            for se_id in se_del_ids:
+                                repository._side_effects.pop(se_id, None)
                 items_deleted += 1
             else:
                 raw_bytes = self.fetch_raw_blob(project_id, file_path, after_sha)
                 blob_sha = compute_git_blob_sha(raw_bytes)
                 raw_content = raw_bytes.decode("utf-8", errors="replace")
+                scrubbed_content = self.scrubber.scrub_text(
+                    raw_content, source_name=f"{project_path}:{file_path}"
+                ).scrubbed_text
 
                 lang_plugin = PluginRegistry.get_plugin_for_file(file_path)
                 lang = (
@@ -333,9 +551,10 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
                     git_blob_sha=blob_sha,
                     language=lang,
                     allowed_scopes=allowed_scopes,
-                    raw_content=raw_content,
-                    line_count=len(raw_content.splitlines()),
+                    raw_content=scrubbed_content,
+                    line_count=len(scrubbed_content.splitlines()),
                     repo_id=repo_rec.repo_id,
+                    tenant_id=effective_tenant_id,
                 )
 
                 # Clean up existing record & symbols before re-inserting modified file
@@ -385,33 +604,70 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
                     elif hasattr(repository, "_files"):
                         repository._files[file_rec.file_id] = file_rec
 
+                created_sym_records: list[ASTSymbolRecord] = []
                 if lang != "text":
-                    try:
-                        symbols, _edges = extractor.parse_source(
-                            raw_content, lang, file_path=file_path
+                    from context_scout.retrieval.embedder import get_embedding_provider
+
+                    symbols, _edges = extractor.parse_source(
+                        scrubbed_content, lang, file_path=file_path
+                    )
+                    if symbols:
+                        embedder = get_embedding_provider()
+                        sym_texts = [
+                            f"{project_path}::{sym.name} {sym.signature or sym.name}".strip()
+                            for sym in symbols
+                        ]
+                        sym_embeddings = embedder.embed_batch(sym_texts, is_query=False)
+                    else:
+                        sym_embeddings = []
+                    for sym, sym_vec in zip(symbols, sym_embeddings, strict=True):
+                        sym_rec = ASTSymbolRecord(
+                            symbol_id=uuid4(),
+                            file_id=file_rec.file_id,
+                            domain_id=domain_id,
+                            qualified_name=f"{project_path}::{sym.name}",
+                            symbol_kind=sym.symbol_kind,
+                            start_line=sym.start_line,
+                            end_line=sym.end_line,
+                            signature_skeleton=sym.signature or sym.name,
+                            contextual_summary="",
+                            allowed_scopes=allowed_scopes,
+                            embedding=sym_vec,
+                            repo_id=repo_rec.repo_id,
+                            tenant_id=effective_tenant_id,
                         )
-                        for sym in symbols:
-                            sym_rec = ASTSymbolRecord(
-                                symbol_id=uuid4(),
-                                file_id=file_rec.file_id,
-                                domain_id=domain_id,
-                                qualified_name=f"{project_path}::{sym.name}",
-                                symbol_kind=sym.symbol_kind,
-                                start_line=sym.start_line,
-                                end_line=sym.end_line,
-                                signature_skeleton=sym.signature or sym.name,
-                                contextual_summary="",
-                                allowed_scopes=allowed_scopes,
-                                embedding=[0.0] * 768,
-                            )
-                            if is_postgres and hasattr(repository, "insert_ast_symbol"):
-                                repository.insert_ast_symbol(conn, sym_rec)
-                            elif hasattr(repository, "insert_ast_symbol") and principal is not None:
-                                repository.insert_ast_symbol(principal, sym_rec)
-                            elif hasattr(repository, "_symbols"):
-                                repository._symbols[sym_rec.symbol_id] = sym_rec
-                    except Exception as err:
-                        logger.debug("AST extraction skipped for %s: %s", file_path, err)
+                        created_sym_records.append(sym_rec)
+                        if is_postgres and hasattr(repository, "insert_ast_symbol"):
+                            repository.insert_ast_symbol(conn, sym_rec)
+                        elif hasattr(repository, "insert_ast_symbol") and principal is not None:
+                            repository.insert_ast_symbol(principal, sym_rec)
+                        elif hasattr(repository, "_symbols"):
+                            repository._symbols[sym_rec.symbol_id] = sym_rec
+
+                side_effects = self.side_effect_extractor.extract_from_code_file(
+                    file_rec, created_sym_records
+                )
+                if side_effects:
+                    if is_postgres and hasattr(repository, "upsert_side_effects_batch"):
+                        repository.delete_side_effects_for_file(
+                            conn, domain_id, project_path, file_path
+                        )
+                        repository.upsert_side_effects_batch(conn, side_effects)
+                    elif hasattr(repository, "upsert_side_effects_batch") and principal is not None:
+                        repository.delete_side_effects_for_file(
+                            principal, domain_id, project_path, file_path
+                        )
+                        repository.upsert_side_effects_batch(principal, side_effects)
+                    elif hasattr(repository, "_side_effects"):
+                        for old_se_id, old_se in list(repository._side_effects.items()):
+                            if (
+                                old_se.domain_id == domain_id
+                                and old_se.repo_name in (project_path, clean_path)
+                                and old_se.file_path == file_path
+                            ):
+                                repository._side_effects.pop(old_se_id, None)
+                        for se in side_effects:
+                            repository._side_effects[se.side_effect_id] = se
 
                 items_indexed += 1
 
@@ -472,6 +728,7 @@ class GitLabConnectorPlugin(SourceConnectorPlugin):
                 error_message=None,
                 scheduled_at=task.scheduled_at,
                 created_at=task.created_at,
+                tenant_id=task.tenant_id,
             )
             return self.process_push_webhook(fake_push_task, repository, conn, principal)
 

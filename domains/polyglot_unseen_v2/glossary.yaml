@@ -1,0 +1,5 @@
+domain_id: polyglot_unseen_v2
+terms:
+  AST_1Hop_Closure: Deterministic one-hop dependency and caller expansion via Tree-sitter / SCIP edges.
+  CodeSlicePointer: Verbatim line-bounded pointer anchored to git_commit_sha and git_blob_sha.
+  Lifespan: ASGI startup and shutdown lifecycle protocol in Starlette and FastAPI applications.

@@ -26,7 +26,6 @@ import {
   InsufficientContextDiagnostic,
   PipelineStageSpec,
   PrincipalContext,
-  QuantStrategyBrief,
   ScoutTokenSavingsBreakdown,
   SourceFilterType,
   SSEBounceBackData,
@@ -42,15 +41,17 @@ export interface ScoutConsoleProps {
   pipelineStages?: PipelineStageSpec[];
   sourceFilter?: SourceFilterType;
   scopeResetVersion?: number;
+  activeSessionId?: string;
+  selectedBranchId?: string;
   onSelectDomain?: (domainId: string) => void;
   onContextPackReady: (
     pack: ContextPack | null,
     tokenSavings: ScoutTokenSavingsBreakdown | null,
-    quantSpec: QuantStrategyBrief | null,
     diagnostic?: InsufficientContextDiagnostic | null,
     stageTraces?: StageExecutionTrace[]
   ) => void;
   onClearContextPack?: () => void;
+  onQueryStart?: () => void;
   onQueryComplete?: () => void;
 }
 
@@ -150,9 +151,12 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
   pipelineStages,
   sourceFilter = "all",
   scopeResetVersion = 0,
+  activeSessionId,
+  selectedBranchId,
   onSelectDomain,
   onContextPackReady,
   onClearContextPack,
+  onQueryStart,
   onQueryComplete,
 }) => {
   const samplePills = useMemo<DynamicSamplePill[]>(() => {
@@ -485,9 +489,6 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
       onContextPackReady(
         evt.data.pack,
         evt.data.token_savings,
-        evt.data.quant_strategy_spec ??
-          evt.data.pack?.quant_strategy_spec ??
-          null,
         null,
         finalTraces
       );
@@ -532,7 +533,7 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
           )
         );
         onClearContextPack?.();
-        onContextPackReady(null, null, null, null);
+        onContextPackReady(null, null, null);
         return;
       }
 
@@ -593,7 +594,7 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
           })
         );
         onClearContextPack?.();
-        onContextPackReady(null, null, null, diag, diag.stage_traces);
+        onContextPackReady(null, null, diag, diag.stage_traces);
         onQueryComplete?.();
         return;
       }
@@ -625,6 +626,7 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
 
     runStartMsRef.current = performance.now();
     setIsRunning(true);
+    onQueryStart?.();
     const freshStages = buildInitialStages(pipelineStages);
     resetRunState(
       freshStages.map((st, idx) =>
@@ -643,6 +645,8 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
       domain_id: selectedDomain,
       query: trimmedQuery,
       source_filter: sourceFilter,
+      ...(activeSessionId ? { session_id: activeSessionId } : {}),
+      ...(selectedBranchId ? { branch_id: selectedBranchId } : {}),
     };
 
     if (mode === "stream") {
@@ -728,7 +732,6 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
         onContextPackReady(
           res.context_pack,
           res.token_savings,
-          res.quant_strategy_spec,
           null,
           finalTraces
         );
@@ -758,7 +761,6 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
         onContextPackReady(
           null,
           res.token_savings,
-          null,
           res.diagnostic,
           finalTraces
         );
@@ -793,7 +795,7 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
           )
         );
         onClearContextPack?.();
-        onContextPackReady(null, null, null, null);
+        onContextPackReady(null, null, null);
         return;
       }
 
@@ -846,8 +848,16 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
       <div className="console-top-row">
         <div className="console-title-group">
           <h2 className="section-heading">Ask Enterprise Context Scout</h2>
-          <span className="domain-context-pill">
-            Target: <code>{selectedDomain}</code>
+          <span
+            className={`domain-context-pill ${
+              selectedDomain === "federated_all"
+                ? "domain-context-pill-federated"
+                : "domain-context-pill-pinned"
+            }`}
+            data-testid="console-domain-target-pill"
+          >
+            {selectedDomain === "federated_all" ? "Auto-Route:" : "Pinned Domain:"}{" "}
+            <code>{selectedDomain}</code>
           </span>
           {sourceFilter !== "all" && (
             <span
@@ -912,6 +922,7 @@ export const ScoutConsole: React.FC<ScoutConsoleProps> = ({
         <textarea
           id="scout-query-input"
           name="scout_query"
+          aria-label="Scout engineering query"
           className="query-textarea"
           rows={3}
           value={query}

@@ -39,9 +39,9 @@ from context_scout.plugins.domains.data_engineering import (
 from context_scout.plugins.registry import PluginRegistry
 from context_scout.schemas.contracts import (
     DocCitationSpan,
+    DocumentScope,
     DomainKnowledgeBrief,
     ImplementationContextPack,
-    MarketRegime,
     PrincipalContext,
     RoleType,
     build_domain_knowledge_brief_prompt,
@@ -146,7 +146,7 @@ def test_markdown_chunker_preserves_fenced_sql_and_code_blocks_atomically() -> N
         doc_id="doc_fence_1",
         doc_title="Temporal MERGE Pattern",
         source_uri="urn:test:merge.md",
-        market_scope=MarketRegime.GLOBAL_MULTI,
+        market_scope=DocumentScope.GLOBAL_MULTI,
         markdown_content=prose_prefix + "\n\n" + sql_block + prose_suffix,
         min_chunk_tokens=150,
         max_chunk_tokens=300,
@@ -370,6 +370,14 @@ def test_multi_chunk_build_and_sync_deletes_stale_chunks(
 
     with (
         patch("context_scout.agents.preflight_gate.RLSConnectionManager", _FakeRLSManager),
+        patch(
+            "context_scout.agents.preflight_gate.get_ingestion_pool",
+            lambda *a, **kw: _FakeRLSManager(),
+        ),
+        patch(
+            "context_scout.agents.preflight_gate.get_query_pool",
+            lambda *a, **kw: _FakeRLSManager(),
+        ),
         patch("context_scout.agents.preflight_gate.persist_custom_domain_to_pg", _fake_persist),
     ):
         res1 = sync_custom_domain_corpus_if_needed(domain_id="eval_de_sync_tmp")
@@ -419,7 +427,29 @@ def test_cli_distill_custom_domain_handles_multi_chunk_and_unreadable_file(
         doc_chunks_arg = kwargs.get("doc_chunks") or []
         return 0, 0, 0, len(doc_chunks_arg) if isinstance(doc_chunks_arg, list) else 0
 
-    with patch("context_scout.cli.persist_custom_domain_to_pg", side_effect=_fake_cli_persist):
+    class _DummyCursor:
+        def fetchone(self) -> None:
+            return None
+
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return []
+
+    @contextmanager
+    def _fake_tx(*_a: object, **_kw: object):  # type: ignore[no-untyped-def]
+        class _DummyConn:
+            def execute(self, *_args: object, **_kwargs: object) -> _DummyCursor:
+                return _DummyCursor()
+
+        yield _DummyConn()
+
+    class _FakePool:
+        scoped_transaction = staticmethod(_fake_tx)
+
+    with (
+        patch("context_scout.cli.persist_custom_domain_to_pg", side_effect=_fake_cli_persist),
+        patch("context_scout.agents.preflight_gate.get_ingestion_pool", return_value=_FakePool()),
+        patch("context_scout.agents.preflight_gate.get_query_pool", return_value=_FakePool()),
+    ):
         report = cmd_distill_custom_domain(
             domain_id="eval_de_distill_tmp",
             source_dir=corpus_dir,
@@ -586,7 +616,6 @@ def test_scout_workflow_synthesizes_domain_knowledge_brief_on_data_engineering_s
     )
 
     assert isinstance(pack, ImplementationContextPack)
-    assert pack.quant_strategy_spec is None
     assert pack.domain_knowledge_brief is not None
     assert pack.domain_knowledge_brief.verified_citations
     assert pack.preflight_report.passed is True

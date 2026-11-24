@@ -59,7 +59,7 @@ from context_scout.evals.unseen_ab_benchmark import (
 )
 from context_scout.evals.unseen_repo_dataset import (
     FROZEN_CODE_ADAPTER_SHA256,
-    FROZEN_QUANT_ADAPTER_SHA256,
+    FROZEN_DOC_ADAPTER_SHA256,
     UnseenRepoBugTask,
     build_unseen_repo_suite,
     verify_frozen_adapter_integrity,
@@ -128,7 +128,7 @@ class TestGeminiExecutorPromptHydrationRegression:
         )
         pack = ImplementationContextPack(
             trace_id="trace_test_slice_prompt",
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             user_task="Fix short help abbreviation",
             code_slices=[slice_1],
             supporting_doc_citations=[],
@@ -196,7 +196,7 @@ class TestUnseenRepoASTAndPreFlightGeneralization:
             principal,
             CodeFileRecord(
                 file_id=f_id,
-                domain_id="trading_code_scout",
+                domain_id="code_architecture_scout",
                 repo_name="httpx",
                 file_path="httpx/_models.py",
                 git_commit_sha="a" * 40,
@@ -212,7 +212,7 @@ class TestUnseenRepoASTAndPreFlightGeneralization:
         focus_sym = ASTSymbolRecord(
             symbol_id=focus_id,
             file_id=f_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             qualified_name="httpx._decoders.ZStandardDecoder",
             symbol_kind="class",
             start_line=1,
@@ -225,7 +225,7 @@ class TestUnseenRepoASTAndPreFlightGeneralization:
         huge_sym = ASTSymbolRecord(
             symbol_id=target_id,
             file_id=f_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             qualified_name="httpx._models.HugeResponse",
             symbol_kind="class",
             start_line=1,
@@ -241,7 +241,7 @@ class TestUnseenRepoASTAndPreFlightGeneralization:
             principal,
             ASTEdgeRecord(
                 edge_id=uuid.uuid4(),
-                domain_id="trading_code_scout",
+                domain_id="code_architecture_scout",
                 source_symbol_id=focus_id,
                 target_qualified_name=".._models.HugeResponse",
                 target_symbol_id=None,
@@ -255,7 +255,7 @@ class TestUnseenRepoASTAndPreFlightGeneralization:
             focus_symbol=focus_sym,
             repo=repo,
             principal=principal,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
         )
         assert len(res.imported_type_slices) == 1
         assert res.imported_type_slices[0].qualified_symbol == "httpx._models.HugeResponse"
@@ -276,7 +276,7 @@ class TestUnseenRepoASTAndPreFlightGeneralization:
             principal,
             CodeFileRecord(
                 file_id=f_id,
-                domain_id="trading_code_scout",
+                domain_id="code_architecture_scout",
                 repo_name="click",
                 file_path="src/click/utils.py",
                 git_commit_sha="a" * 40,
@@ -290,7 +290,7 @@ class TestUnseenRepoASTAndPreFlightGeneralization:
         sym_close = ASTSymbolRecord(
             symbol_id=uuid.uuid4(),
             file_id=f_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             qualified_name="click.utils._LazyFile.close",
             symbol_kind="method",
             start_line=1,
@@ -303,7 +303,7 @@ class TestUnseenRepoASTAndPreFlightGeneralization:
         sym_target = ASTSymbolRecord(
             symbol_id=uuid.uuid4(),
             file_id=f_id,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             qualified_name="click.utils._make_default_short_help",
             symbol_kind="function",
             start_line=3,
@@ -320,7 +320,7 @@ class TestUnseenRepoASTAndPreFlightGeneralization:
             repo=repo,
             slicer=DeterministicSlicer(),
             principal=principal,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
         )
         slices = [
             VerbatimCodeSlice(
@@ -341,7 +341,7 @@ class TestUnseenRepoASTAndPreFlightGeneralization:
         missing, _novel = validator.partition_prompt_identifiers(
             user_prompt="Fix `_make_default_short_help` to close the issue.",
             visible_symbols=[sym_close, sym_target],
-            visible_files=repo.list_visible_code_files(principal, "trading_code_scout"),
+            visible_files=repo.list_visible_code_files(principal, "code_architecture_scout"),
             code_slices=slices,
         )
         assert "close" not in missing
@@ -380,11 +380,11 @@ class TestUnseenRepoASTAndPreFlightGeneralization:
             repo_dir=repo_dir,
             repo=repo,
             principal=principal,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             repo_name="mini_httpx",
             allowed_scopes=["public_eng"],
         )
-        files = repo.list_visible_code_files(principal, "trading_code_scout")
+        files = repo.list_visible_code_files(principal, "code_architecture_scout")
         assert len(files) == 2
         for f in files:
             assert "\x00" not in f.raw_content
@@ -414,11 +414,11 @@ class TestUnseenRepoBenchmarkSuiteAndStats:
             res = verify_frozen_adapter_integrity(Path("."))
             assert res["verified"] is True
             assert res["code_adapter_sha256"] == FROZEN_CODE_ADAPTER_SHA256
-            assert res["quant_adapter_sha256"] == FROZEN_QUANT_ADAPTER_SHA256
+            assert res["doc_adapter_sha256"] == FROZEN_DOC_ADAPTER_SHA256
 
         # Tamper check on temporary copy
-        code_dir = tmp_path / "domains/trading_code_scout/adapters/gemma4_26b_code_scout"
-        quant_dir = tmp_path / "domains/quant_research_scout/adapters/gemma4_26b_quant_research"
+        code_dir = tmp_path / "domains/code_architecture_scout/adapters/gemma4_26b_code_scout"
+        quant_dir = tmp_path / "domains/enterprise_docs_scout/adapters/gemma4_26b_enterprise_docs"
         code_dir.mkdir(parents=True)
         quant_dir.mkdir(parents=True)
         (code_dir / "adapters.safetensors").write_bytes(b"tampered")
@@ -667,15 +667,15 @@ class TestWorktreePatchVerificationAndEnterpriseHardening:
 
         token = create_signed_principal_token(
             user_id="alice_sec",
-            role=RoleType.QUANT_RESEARCHER,
-            allowed_scopes=["public_quant", "quant_restricted"],
+            role=RoleType.DOMAIN_RESEARCHER,
+            allowed_scopes=["public_docs", "docs_restricted"],
             secret_key=strong_secret,
             ttl_seconds=300,
         )
         principal = verify_signed_principal_token(token, secret_key=strong_secret)
         assert principal.user_id == "alice_sec"
-        assert principal.role == RoleType.QUANT_RESEARCHER
-        assert "quant_restricted" in principal.allowed_scopes
+        assert principal.role == RoleType.DOMAIN_RESEARCHER
+        assert "docs_restricted" in principal.allowed_scopes
 
         # Tampered signature must raise HTTP 401
         with pytest.raises(HTTPException) as exc_info:
@@ -706,7 +706,7 @@ class TestWorktreePatchVerificationAndEnterpriseHardening:
             get_principal_context(
                 x_principal_user_id="spoofed_admin",
                 x_principal_role="compliance_officer",
-                x_principal_scopes="quant_restricted",
+                x_principal_scopes="docs_restricted",
                 authorization=None,
             )
         assert exc_unsigned.value.status_code == 401
@@ -714,7 +714,7 @@ class TestWorktreePatchVerificationAndEnterpriseHardening:
         # Valid Bearer token succeeds under SCOUT_REQUIRE_SIGNED_AUTH=true
         authed = get_principal_context(authorization=f"Bearer {token}")
         assert authed.user_id == "alice_sec"
-        assert authed.role == RoleType.QUANT_RESEARCHER
+        assert authed.role == RoleType.DOMAIN_RESEARCHER
 
     def test_bounded_ast_symbol_search_and_commit_isolated_merkle_indexing(
         self, tmp_path: Path
@@ -767,7 +767,7 @@ class TestWorktreePatchVerificationAndEnterpriseHardening:
             repo_dir=repo_dir,
             repo=mem_repo,
             principal=principal,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             repo_name="iso_repo",
             ref=sha1,
             isolate_by_commit=True,
@@ -776,27 +776,27 @@ class TestWorktreePatchVerificationAndEnterpriseHardening:
             repo_dir=repo_dir,
             repo=mem_repo,
             principal=principal,
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             repo_name="iso_repo",
             ref=sha2,
             isolate_by_commit=True,
         )
 
         # Both commit snapshots coexist without overwriting each other
-        all_files = mem_repo.list_visible_code_files(principal, "trading_code_scout")
+        all_files = mem_repo.list_visible_code_files(principal, "code_architecture_scout")
         repo_names = {f.repo_name for f in all_files}
         assert f"iso_repo@{sha1[:12]}" in repo_names
         assert f"iso_repo@{sha2[:12]}" in repo_names
 
         bound = BoundGraphRepository(mem_repo)
         alpha_hits = bound.search_visible_ast_symbols(
-            principal, "trading_code_scout", "compute_alpha", limit=5
+            principal, "code_architecture_scout", "compute_alpha", limit=5
         )
         assert len(alpha_hits) == 1
         assert "compute_alpha" in alpha_hits[0].qualified_name
 
         fetched_files = bound.get_code_files_by_ids(
-            principal, "trading_code_scout", [alpha_hits[0].file_id]
+            principal, "code_architecture_scout", [alpha_hits[0].file_id]
         )
         assert len(fetched_files) == 1
         assert fetched_files[0].repo_name == f"iso_repo@{sha1[:12]}"

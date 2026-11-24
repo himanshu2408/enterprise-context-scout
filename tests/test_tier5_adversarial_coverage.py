@@ -98,7 +98,7 @@ from context_scout.telemetry.cost_governance import (
     SessionBudgetTracker,
 )
 
-DOMAIN_ID: Final[str] = "trading_code_scout"
+DOMAIN_ID: Final[str] = "code_architecture_scout"
 REPO_NAME: Final[str] = "trading-execution"
 
 
@@ -959,7 +959,10 @@ class TestCostGovernanceAdversarial:
         # Exactly 10 reservations must succeed and 15 must fail
         assert successes == 10
         assert failures == 15
-        assert tracker._principal_consumption[principal.user_id]["total_tokens"] == 10_000
+        assert (
+            tracker.get_consumption(principal.user_id, principal.tenant_id)["total_tokens"]
+            == 10_000
+        )
 
 
 # =============================================================================

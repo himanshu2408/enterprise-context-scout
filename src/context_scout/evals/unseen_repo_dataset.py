@@ -19,10 +19,10 @@ from typing import Any, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 FROZEN_CODE_ADAPTER_SHA256: Final[str] = (
-    "261f1e4a9902cd2621b6db3ef631e2813380d68dfca9d8da800fefc8378b09e6"
+    "eca9cab3e3495ecb583b5ea19cddcba4e2ac571b60317ef09abd6372192aefc3"
 )
-FROZEN_QUANT_ADAPTER_SHA256: Final[str] = (
-    "ec5428a8f5cfe6604dc5ecb7e9e5aec04fed92fa18dfb60176773d61fbc469e8"
+FROZEN_DOC_ADAPTER_SHA256: Final[str] = (
+    "eca9cab3e3495ecb583b5ea19cddcba4e2ac571b60317ef09abd6372192aefc3"
 )
 
 
@@ -52,7 +52,7 @@ class UnseenRepoBenchmarkSuite(BaseModel):
 
     suite_version: str = "1.0.0"
     frozen_code_adapter_sha256: str = FROZEN_CODE_ADAPTER_SHA256
-    frozen_quant_adapter_sha256: str = FROZEN_QUANT_ADAPTER_SHA256
+    frozen_doc_adapter_sha256: str = FROZEN_DOC_ADAPTER_SHA256
     tasks: tuple[UnseenRepoBugTask, ...]
 
     @property
@@ -83,26 +83,26 @@ def verify_frozen_adapter_integrity(repo_root: Path = Path(".")) -> dict[str, An
     code_domain_id = code_spec["domain_id"]
     research_domain_id = research_spec["domain_id"]
     code_adapter = repo_root / code_spec["adapter_rel_path"] / "adapters.safetensors"
-    quant_adapter = repo_root / research_spec["adapter_rel_path"] / "adapters.safetensors"
-    if not code_adapter.exists() or not quant_adapter.exists():
+    doc_adapter = repo_root / research_spec["adapter_rel_path"] / "adapters.safetensors"
+    if not code_adapter.exists() or not doc_adapter.exists():
         raise FileNotFoundError("Frozen QLoRA adapter safetensors not found under domains/.")
 
     code_sha = hashlib.sha256(code_adapter.read_bytes()).hexdigest()
-    quant_sha = hashlib.sha256(quant_adapter.read_bytes()).hexdigest()
+    doc_sha = hashlib.sha256(doc_adapter.read_bytes()).hexdigest()
     if code_sha != FROZEN_CODE_ADAPTER_SHA256:
         raise ValueError(
             f"Frozen adapter SHA-256 mismatch for {code_domain_id}: "
             f"{code_sha} != {FROZEN_CODE_ADAPTER_SHA256}"
         )
-    if quant_sha != FROZEN_QUANT_ADAPTER_SHA256:
+    if doc_sha != FROZEN_DOC_ADAPTER_SHA256:
         raise ValueError(
             f"Frozen adapter SHA-256 mismatch for {research_domain_id}: "
-            f"{quant_sha} != {FROZEN_QUANT_ADAPTER_SHA256}"
+            f"{doc_sha} != {FROZEN_DOC_ADAPTER_SHA256}"
         )
     return {
         "verified": True,
         "code_adapter_sha256": code_sha,
-        "quant_adapter_sha256": quant_sha,
+        "doc_adapter_sha256": doc_sha,
         code_domain_id: True,
         research_domain_id: True,
     }

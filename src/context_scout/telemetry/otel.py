@@ -18,6 +18,7 @@ import logging
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any, ClassVar, Final
+from uuid import UUID
 
 import opentelemetry.context as otel_context
 import opentelemetry.trace as trace
@@ -163,6 +164,18 @@ class StructuredJsonSpanExporter(SpanExporter):
             end_ms = (span.end_time or 0) / 1_000_000.0
             duration_ms = max(0.0, round(end_ms - start_ms, 3))
 
+            from context_scout.security.betrvg_privacy import BetrVGPrivacyGuard
+
+            raw_attrs = dict(span.attributes or {})
+            raw_tid = raw_attrs.get("scout.tenant_id")
+            parsed_tid: UUID | None = None
+            if raw_tid is not None:
+                try:
+                    parsed_tid = UUID(str(raw_tid))
+                except ValueError:
+                    parsed_tid = None
+            guard = BetrVGPrivacyGuard()
+            sanitized_attrs = guard.sanitize_telemetry_attributes(raw_attrs, tenant_id=parsed_tid)
             entry: dict[str, Any] = {
                 "trace_id": trace_id_hex,
                 "span_id": span_id_hex,
@@ -171,7 +184,7 @@ class StructuredJsonSpanExporter(SpanExporter):
                 "status": span.status.status_code.name,
                 "status_description": span.status.description,
                 "duration_ms": duration_ms,
-                "attributes": dict(span.attributes or {}),
+                "attributes": sanitized_attrs,
             }
             self._exported_logs.append(entry)
 
@@ -269,7 +282,12 @@ class RetrievalSpanContext(BaseScoutSpanContext):
         self.span.set_attribute("scout.retrieval.doc_chunks_count", doc_chunks_count)
         self.span.set_attribute("scout.retrieval.ast_symbols_count", ast_symbols_count)
         if query:
-            self.span.set_attribute("scout.retrieval.query_snippet", query[:100])
+            from context_scout.security.betrvg_privacy import is_betrvg_enabled
+
+            self.span.set_attribute(
+                "scout.retrieval.query_snippet",
+                "[REDACTED_BETRVG]" if is_betrvg_enabled() else query[:100],
+            )
         self.span.set_status(trace.StatusCode.OK)
 
 
@@ -516,7 +534,12 @@ class ScoutTelemetryTracer:
                 span.set_attribute(ATTR_SCOUT_TRACE_ID, str(trace_id))
                 span.set_attribute(ATTR_TRACE_ID, str(trace_id))
             if query:
-                span.set_attribute("scout.retrieval.query", query[:200])
+                from context_scout.security.betrvg_privacy import is_betrvg_enabled
+
+                span.set_attribute(
+                    "scout.retrieval.query",
+                    "[REDACTED_BETRVG]" if is_betrvg_enabled() else query[:200],
+                )
             span.set_attribute(GEN_AI_OPERATION_NAME, "retrieval")
             try:
                 yield ctx
@@ -562,7 +585,12 @@ class ScoutTelemetryTracer:
                 span.set_attribute(ATTR_SCOUT_DOMAIN_ID, domain_id)
                 span.set_attribute(ATTR_DOMAIN_ID, domain_id)
             if prompt:
-                span.set_attribute("scout.gating.prompt_snippet", prompt[:100])
+                from context_scout.security.betrvg_privacy import is_betrvg_enabled
+
+                span.set_attribute(
+                    "scout.gating.prompt_snippet",
+                    "[REDACTED_BETRVG]" if is_betrvg_enabled() else prompt[:100],
+                )
             span.set_attribute(GEN_AI_OPERATION_NAME, "preflight_gate")
             try:
                 yield ctx
@@ -604,8 +632,13 @@ class ScoutTelemetryTracer:
                     span.set_attribute(ATTR_TRACE_ID, str(pack.trace_id))
             if principal is not None:
                 if hasattr(principal, "user_id"):
-                    span.set_attribute(ATTR_SCOUT_PRINCIPAL_ID, str(principal.user_id))
-                    span.set_attribute(ATTR_PRINCIPAL_ID, str(principal.user_id))
+                    from context_scout.schemas.contracts import DEFAULT_TENANT_ID
+                    from context_scout.security.betrvg_privacy import pseudonymize_actor_if_enabled
+
+                    p_tid = getattr(principal, "tenant_id", DEFAULT_TENANT_ID)
+                    safe_uid = pseudonymize_actor_if_enabled(str(principal.user_id), p_tid)
+                    span.set_attribute(ATTR_SCOUT_PRINCIPAL_ID, safe_uid)
+                    span.set_attribute(ATTR_PRINCIPAL_ID, safe_uid)
                 if hasattr(principal, "role"):
                     role_val = (
                         principal.role.value

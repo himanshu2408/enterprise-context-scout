@@ -57,7 +57,7 @@ authority_rules:
   require_transaction_cost_check: false # true only for quant backtest domains
   freshness_half_life_days: 180
 
-# Output schema contract: "ImplementationContextPack" | "DomainKnowledgeBrief" | "QuantStrategyBrief"
+# Output schema contract: "ImplementationContextPack" | "DomainKnowledgeBrief" | custom JSON schema contract
 output_contract: "ImplementationContextPack"
 
 # Optional source directory for CLI sync / benchmark-domain
@@ -135,11 +135,10 @@ uv run context-scout train \
 # 3b. Or build / dispatch a GCP Vertex AI Hugging Face PEFT job (NVIDIA L4 / A100)
 uv run python -m context_scout.tuning.train_vertex_peft --dry-run
 
-# 4. Query locally ($0) or hand off to Gemini 3.8 Flash in an isolated GitWorktreeSandbox
+# 4. Query locally ($0) via mlx-lm or governed BYO vLLM endpoint (zero host code execution)
 uv run context-scout query \
   --domain-id platform_infra_scout \
-  --prompt "Localize the Terraform VPC peering module and check CIDR validation" \
-  --handoff-apply
+  --prompt "Localize the Terraform VPC peering module and check CIDR validation"
 
 # 5. Run the multi-tier domain readiness benchmark
 uv run context-scout benchmark-domain \

@@ -74,6 +74,11 @@ from context_scout.telemetry.otel import (
     inject_trace_context,
     reset_tracer,
 )
+from context_scout.telemetry.prometheus_metrics import (
+    ScoutPrometheusRegistry,
+    get_prometheus_registry,
+    reset_prometheus_registry,
+)
 
 __all__ = [
     "ATTR_AUTO_ATTACHED_AST_COUNT",
@@ -137,13 +142,16 @@ __all__ = [
     "PaidComputeCostEstimator",
     "PreflightSpanContext",
     "RetrievalSpanContext",
+    "ScoutPrometheusRegistry",
     "ScoutTelemetryTracer",
     "SessionBudgetTracker",
     "SlicingSpanContext",
     "StructuredJsonSpanExporter",
     "WorkflowSpanContext",
     "extract_trace_context",
+    "get_prometheus_registry",
     "get_tracer",
     "inject_trace_context",
+    "reset_prometheus_registry",
     "reset_tracer",
 ]

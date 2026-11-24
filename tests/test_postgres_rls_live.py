@@ -39,7 +39,32 @@ def test_live_postgres_version_and_extensions(settings: ScoutSettings) -> None:
 
 
 def test_live_forced_row_level_security_catalog(settings: ScoutSettings) -> None:
-    """Verifies ENABLE ROW LEVEL SECURITY and FORCE ROW LEVEL SECURITY in pg_class."""
+    """Verifies ENABLE + FORCE RLS, tenant_id NOT NULL on all 14 tables, and NOBYPASSRLS role."""
+    expected_tables = {
+        "domain_packs",
+        "domain_sync_manifests",
+        "embedding_spaces",
+        "connector_sync_watermarks",
+        "repositories",
+        "repo_commits",
+        "ref_snapshots",
+        "overlay_file_deltas",
+        "side_effects",
+        "code_files",
+        "ast_symbols",
+        "ast_edges",
+        "doc_chunks",
+        "confluence_pages",
+        "jira_issues",
+        "execution_telemetry",
+        "indexing_queue",
+        "indexing_dead_letter",
+        "scout_sessions",
+        "model_artifacts",
+        "audit_events",
+        "scim_users",
+        "scim_groups",
+    }
     mgr = RLSConnectionManager(settings.db_app_url)
     principal = PrincipalContext(
         user_id="test_runner",
@@ -50,17 +75,40 @@ def test_live_forced_row_level_security_catalog(settings: ScoutSettings) -> None
     with mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn:
         rows = conn.execute(
             """
-            SELECT relname, relrowsecurity, relforcerowsecurity
-            FROM pg_class
-            WHERE relname IN ('code_files', 'ast_symbols', 'ast_edges', 'doc_chunks')
-            ORDER BY relname;
+            SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,
+                   COALESCE(a.attnotnull, FALSE) AS has_tenant_nn
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_attribute a
+              ON a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped
+            WHERE n.nspname = 'public'
+              AND c.relkind IN ('r', 'p')
+              AND c.relname <> 'alembic_version'
+            ORDER BY c.relname;
             """
         ).fetchall()
 
-        assert len(rows) == 4, f"Expected 4 tenant tables, got {len(rows)}"
-        for relname, relrowsecurity, relforcerowsecurity in rows:
+        found_tables = {str(r[0]) for r in rows}
+        assert found_tables == expected_tables, (
+            f"Mismatch in public tables: expected={sorted(expected_tables)}, "
+            f"got={sorted(found_tables)}"
+        )
+        for relname, relrowsecurity, relforcerowsecurity, has_tenant_nn in rows:
             assert relrowsecurity is True, f"Table {relname} does not have ENABLE RLS"
             assert relforcerowsecurity is True, f"Table {relname} does not have FORCE RLS"
+            assert has_tenant_nn is True, f"Table {relname} lacks tenant_id NOT NULL"
+
+        role_row = conn.execute(
+            """
+            SELECT rolsuper, rolbypassrls, rolinherit, rolcreatedb, rolcreaterole
+            FROM pg_roles
+            WHERE rolname = 'scout_app_user';
+            """
+        ).fetchone()
+        assert role_row is not None
+        assert role_row == (False, False, False, False, False), (
+            f"Unexpected scout_app_user privileges: {role_row}"
+        )
 
 
 def test_live_rls_isolation_between_principals(
@@ -70,11 +118,11 @@ def test_live_rls_isolation_between_principals(
     """Verifies that scout_app_user cannot read rows across tenant/scope boundaries."""
     mgr = RLSConnectionManager(settings.db_app_url)
 
-    # 1. Insert restricted code file using quant_restricted principal
+    # 1. Insert restricted code file using docs_restricted principal
     quant_principal = PrincipalContext(
         user_id="quant_dev_1",
-        role=RoleType.QUANT_RESEARCHER,
-        allowed_scopes=["quant_restricted"],
+        role=RoleType.DOMAIN_RESEARCHER,
+        allowed_scopes=["docs_restricted"],
     )
     file_id = uuid.uuid4()
 
@@ -90,7 +138,7 @@ def test_live_rls_isolation_between_principals(
                     'commit123', 'blob456', 'python',
                     %s, 'def proprietary_alpha(): return 42\n', 1);
             """,
-            (file_id, ephemeral_pg_domain, ["quant_restricted"]),
+            (file_id, ephemeral_pg_domain, ["docs_restricted"]),
         )
 
     # 2. Product Manager with only public_eng scope must see ZERO rows
@@ -104,7 +152,7 @@ def test_live_rls_isolation_between_principals(
             "SELECT file_id, file_path FROM code_files WHERE file_id = %s;",
             (file_id,),
         ).fetchall()
-        assert len(pm_results) == 0, "RLS Security Violation: PM saw quant_restricted file!"
+        assert len(pm_results) == 0, "RLS Security Violation: PM saw docs_restricted file!"
 
     # 3. Quant principal MUST see the row
     with mgr.scoped_transaction(quant_principal, enable_hnsw_iterative_scan=False) as conn:
@@ -125,7 +173,7 @@ def test_live_pgvector_cosine_distance_query(
 
     principal = PrincipalContext(
         user_id="quant_dev_2",
-        role=RoleType.QUANT_RESEARCHER,
+        role=RoleType.DOMAIN_RESEARCHER,
         allowed_scopes=["public_eng"],
     )
 

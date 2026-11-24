@@ -21,8 +21,8 @@ from context_scout.db.repositories import DocChunkRecord
 from context_scout.ingestion.doc_parser import DocumentChunk
 from context_scout.schemas.contracts import (
     DocCitationSpan,
+    DocumentScope,
     DomainKnowledgeBrief,
-    MarketRegime,
     build_domain_knowledge_brief_prompt,
     parse_domain_knowledge_brief_json,
 )
@@ -609,8 +609,8 @@ class DataEngineeringDomainPlugin:
 
     def get_default_scopes(self) -> list[str]:
         return [
+            "public",
             "public_eng",
-            "public_quant",
             f"domain:{DOMAIN_ID_DATA_ENG}",
         ]
 
@@ -618,8 +618,8 @@ class DataEngineeringDomainPlugin:
         return [
             {
                 "domain_id": DOMAIN_ID_DATA_ENG,
-                "train_jsonl": f"data/tuning/{DOMAIN_ID_DATA_ENG}/train.jsonl",
-                "valid_jsonl": f"data/tuning/{DOMAIN_ID_DATA_ENG}/valid.jsonl",
+                "train_jsonl": f"domains/{DOMAIN_ID_DATA_ENG}/tuning/train.jsonl",
+                "valid_jsonl": f"domains/{DOMAIN_ID_DATA_ENG}/tuning/valid.jsonl",
                 "adapter_rel_path": (
                     f"domains/{DOMAIN_ID_DATA_ENG}/adapters/gemma4_26b_data_engineering"
                 ),
@@ -652,9 +652,9 @@ class DataEngineeringDomainPlugin:
         }
         return scope_map.get(market_scope, "Data Engineering Systems Architecture")
 
-    def infer_market_scopes(self, prompt: str) -> list[MarketRegime]:
+    def infer_market_scopes(self, prompt: str) -> list[DocumentScope]:
         _ = prompt
-        return [MarketRegime.GLOBAL_MULTI]
+        return [DocumentScope.GLOBAL_MULTI]
 
     def expand_query_plan(self, plan: Any) -> Any:
         """Expands recognized Data Engineering acronyms (e.g. ACID) into component facets."""
@@ -668,19 +668,12 @@ class DataEngineeringDomainPlugin:
         expanded_facets = [
             FacetSpec(
                 facet_id=f"facet_{idx}",
-                facet_query=enriched_query,
-                key_terms=[
-                    term.lower(),
-                    *[
-                        w
-                        for w in enriched_query.lower().split()
-                        if w != term.lower() and len(w) >= 3
-                    ][:3],
-                ],
+                facet_query=f"{plan.acronym.upper()} {term}",
+                key_terms=[term.lower()],
                 expected_source_kind="docs",
                 is_acronym_component=True,
             )
-            for idx, (letter, term, enriched_query) in enumerate(components, start=1)
+            for idx, (_letter, term, _enriched_query) in enumerate(components, start=1)
         ]
         return QueryPlan(
             original_query=plan.original_query,

@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "context-scout.fullname" . }}-worker
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "context-scout.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "context-scout.serviceAccountName" (list . "worker") }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ printf "%s:%s" .Values.worker.image.repository .Values.worker.image.tag | quote }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          {{- with .Values.worker.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.worker.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "context-scout.fullname" . }}-config
+          env:
+            - name: TMPDIR
+              value: "/tmp"
+            - name: HOME
+              value: "/tmp"
+            - name: HF_HOME
+              value: "/tmp/hf_cache"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: HF_HUB_DISABLE_TELEMETRY
+              value: "1"
+            - name: SCOUT_DB_APP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | quote }}
+                  key: {{ .Values.secrets.dbAppUrlKey | quote }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+        {{- if .Values.cloudSqlAuthProxy.enabled }}
+        {{- include "context-scout.cloudSqlAuthProxyContainer" . | nindent 8 }}
+        {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

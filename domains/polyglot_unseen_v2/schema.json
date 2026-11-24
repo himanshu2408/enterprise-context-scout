@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ImplementationContextPack",
+  "type": "object",
+  "required": [
+    "trace_id",
+    "domain_id",
+    "user_task",
+    "architectural_execution_plan",
+    "code_slices",
+    "preflight_report"
+  ],
+  "properties": {
+    "trace_id": { "type": "string", "minLength": 1 },
+    "domain_id": { "type": "string", "const": "polyglot_unseen_v2" },
+    "user_task": { "type": "string", "minLength": 1 },
+    "architectural_execution_plan": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "code_slices": { "type": "array" },
+    "supporting_doc_citations": { "type": "array" },
+    "preflight_report": { "type": "object" }
+  }
+}

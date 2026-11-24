@@ -1,0 +1,149 @@
+# Enterprise Context Scout — Model Governance Registry
+# Aligns with ARCHITECTURE_BLUEPRINT.md and docs/SECURITY_AND_GOVERNANCE.md.
+
+schema_version: "1.0"
+
+governance:
+  allow_external_cloud_egress: false
+  require_safetensors_only: true
+  trust_remote_code: false
+  allowed_spdx_licenses:
+    - "Apache-2.0"
+    - "MIT"
+    - "BSD-3-Clause"
+    - "BSD-2-Clause"
+    - "CC-BY-4.0"
+    - "ISC"
+    - "gemma"
+    - "llama4"
+    - "qwen"
+    - "deepseek"
+  default_chat_model: "google/gemma-4-26B-A4B-it"
+  default_mlx_chat_model: "mlx-community/gemma-4-26b-a4b-it-4bit"
+  default_embedding_model: "google/embeddinggemma-2"
+  default_guardrail_model: "google/shieldgemma-2-2b-it"
+
+# Local & self-hosted open-weights models ($0 API cost)
+local_defaults:
+  chat:
+    - id: "google/gemma-4-26B-A4B-it"
+      family: "gemma-4"
+      runtime: ["vllm", "sglang", "transformers"]
+      tier: "default"
+    - id: "mlx-community/gemma-4-26b-a4b-it-4bit"
+      family: "gemma-4"
+      runtime: ["mlx-lm"]
+      tier: "default"
+    - id: "google/gemma-4-E4B-it"
+      family: "gemma-4"
+      runtime: ["vllm", "sglang", "transformers"]
+      tier: "edge"
+    - id: "mlx-community/gemma-4-e4b-it-4bit"
+      family: "gemma-4"
+      runtime: ["mlx-lm"]
+      tier: "edge"
+    - id: "google/gemma-4-12B-it"
+      family: "gemma-4"
+      runtime: ["vllm", "sglang", "transformers"]
+      tier: "standard"
+    - id: "google/gemma-4-31B-it"
+      family: "gemma-4"
+      runtime: ["vllm", "sglang", "transformers"]
+      tier: "high"
+  embeddings:
+    - id: "google/embeddinggemma-2"
+      family: "embeddinggemma-2"
+      dimensions: 768
+      matryoshka: true
+      runtime: ["vllm", "tei", "sentence-transformers"]
+  guardrails:
+    - id: "google/shieldgemma-2-2b-it"
+      family: "shieldgemma-2"
+      runtime: ["vllm", "transformers"]
+
+# Enterprise BYO self-hosted open-weights families ($0 API cost)
+byo_open_weights:
+  chat_and_code:
+    - family: "Qwen3"
+      patterns: ["Qwen/Qwen3-*", "mlx-community/Qwen3-*"]
+      runtime: ["vllm", "sglang", "mlx-lm"]
+    - family: "Qwen3-Coder"
+      patterns: ["Qwen/Qwen3-Coder-*", "mlx-community/Qwen3-Coder-*"]
+      runtime: ["vllm", "sglang", "mlx-lm"]
+    - family: "Devstral"
+      patterns: ["mistralai/Devstral-*"]
+      runtime: ["vllm", "sglang"]
+    - family: "Mistral"
+      patterns: ["mistralai/Mistral-*"]
+      runtime: ["vllm", "sglang"]
+    - family: "DeepSeek-V3"
+      patterns: ["deepseek-ai/DeepSeek-V3*"]
+      runtime: ["vllm", "sglang"]
+    - family: "DeepSeek-R1"
+      patterns: ["deepseek-ai/DeepSeek-R1*"]
+      runtime: ["vllm", "sglang"]
+    - family: "Llama-4"
+      patterns: ["meta-llama/Llama-4-*"]
+      runtime: ["vllm", "sglang"]
+    - family: "Phi-4"
+      patterns: ["microsoft/Phi-4*", "microsoft/phi-4*"]
+      runtime: ["vllm", "sglang", "transformers"]
+    - family: "Nemotron-H"
+      patterns: ["nvidia/Nemotron-H-*"]
+      runtime: ["vllm", "sglang"]
+    - family: "IBM Granite-3.3"
+      patterns: ["ibm-granite/granite-3.3-*"]
+      runtime: ["vllm", "sglang"]
+  embeddings:
+    - family: "Qwen3-Embedding"
+      patterns: ["Qwen/Qwen3-Embedding-*"]
+      runtime: ["vllm", "tei", "sentence-transformers"]
+    - family: "BAAI/bge-m3"
+      patterns: ["BAAI/bge-m3"]
+      dimensions: 1024
+      runtime: ["tei", "sentence-transformers"]
+  rerankers:
+    - family: "BAAI/bge-reranker-v2-m3"
+      patterns: ["BAAI/bge-reranker-v2-m3"]
+      runtime: ["tei", "sentence-transformers"]
+    - family: "Qwen3-Reranker"
+      patterns: ["Qwen/Qwen3-Reranker-*"]
+      runtime: ["vllm", "tei", "sentence-transformers"]
+  guardrails:
+    - family: "Prompt-Guard-2"
+      patterns: ["meta-llama/Llama-Prompt-Guard-2-*", "Prompt-Guard-2*"]
+      runtime: ["vllm", "transformers"]
+    - family: "Qwen3Guard"
+      patterns: ["Qwen/Qwen3Guard-*", "Qwen3Guard*"]
+      runtime: ["vllm", "transformers"]
+    - family: "Granite-Guardian"
+      patterns: ["ibm-granite/granite-guardian-*", "IBM/Granite-Guardian-*", "Granite-Guardian-*"]
+      runtime: ["vllm", "transformers"]
+
+# Optional cloud handoff models (blocked unless allow_external_cloud_egress: true)
+cloud_handoff:
+  enabled_by_default: false
+  models:
+    - id: "gemini-3.8-flash"
+      provider: "google"
+    - id: "gemini-4-argon"
+      provider: "google"
+    - id: "claude-sonnet-5.5"
+      provider: "anthropic"
+    - id: "claude-opus-5.5"
+      provider: "anthropic"
+    - id: "gpt-5.6-sol"
+      provider: "openai"
+    - id: "gpt-6-astra"
+      provider: "openai"
+
+# Retired / deprecated models — always blocked
+blocked_models:
+  patterns:
+    - "gemini-2.5-*"
+    - "codegemma*"
+    - "text-embedding-004"
+    - "gemma-1-*"
+    - "gemma-2-*"
+    - "gemma-3-*"
+    - "gemini-ultra*"

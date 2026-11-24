@@ -10,6 +10,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Annotated, Any
 
+import psycopg.errors
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
@@ -43,6 +44,7 @@ from context_scout.api.schemas import (
 )
 from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
 from context_scout.schemas.contracts import (
+    DEFAULT_TENANT_ID,
     ExecutionMode,
     ExecutionTelemetryRecord,
     ImplementationContextPack,
@@ -51,8 +53,11 @@ from context_scout.schemas.contracts import (
     StageConfidence,
     StageExecutionTrace,
 )
-from context_scout.security.guardrails import ShieldGemmaGuardrail
+from context_scout.security.audit_chain import get_audit_chain_service
+from context_scout.security.betrvg_privacy import pseudonymize_actor_if_enabled
+from context_scout.security.guardrails import get_guardrail_provider
 from context_scout.telemetry import ScoutTelemetryTracer
+from context_scout.telemetry.prometheus_metrics import get_prometheus_registry
 
 logger = logging.getLogger(__name__)
 
@@ -177,10 +182,12 @@ def _record_live_scout_telemetry(
     passed_first_try = not bool(
         pack.preflight_report and pack.preflight_report.bounce_back_feedback
     )
+    safe_principal_id = pseudonymize_actor_if_enabled(principal.user_id, principal.tenant_id)
     record = ExecutionTelemetryRecord(
         trace_id=uuid.uuid5(uuid.NAMESPACE_OID, pack.trace_id),
+        tenant_id=principal.tenant_id,
         domain_id=target_domain,
-        principal_id=principal.user_id,
+        principal_id=safe_principal_id,
         principal_role=principal.role.value,
         execution_mode=ExecutionMode.CHAT_QA,
         local_tokens_read=savings.local_tokens_explored,
@@ -192,10 +199,15 @@ def _record_live_scout_telemetry(
         missing_context_requests=[],
         latency_ms=max(0, latency_ms),
     )
+    persist_pg_in_test = (
+        not os.environ.get("PYTEST_CURRENT_TEST")
+        or principal.tenant_id != DEFAULT_TENANT_ID
+        or os.environ.get("SCOUT_FORCE_PG_TELEMETRY_IN_TESTS", "").strip() == "1"
+    )
     try:
         if isinstance(repo, InMemoryRLSRepository):
             repo.record_execution_telemetry(record)
-        elif hasattr(repo, "connection_manager") and not os.environ.get("PYTEST_CURRENT_TEST"):
+        elif hasattr(repo, "connection_manager") and persist_pg_in_test:
             with repo.connection_manager.scoped_transaction(principal) as conn:
                 PostgresRLSRepository().record_execution_telemetry(conn, record)
     except Exception as exc:
@@ -204,6 +216,62 @@ def _record_live_scout_telemetry(
             pack.trace_id,
             type(exc).__name__,
             exc,
+        )
+
+
+def _record_scout_metrics_and_audit(
+    *,
+    principal: PrincipalContext,
+    domain_id: str,
+    result: ImplementationContextPack | InsufficientContextDiagnostic,
+    endpoint: str,
+) -> None:
+    prom = get_prometheus_registry()
+    if isinstance(result, ImplementationContextPack):
+        rrf = float(result.preflight_report.normalized_rrf_score)
+        cit_fail = not bool(result.preflight_report.citations_verified_100_pct)
+        zero_hit = len(result.code_slices) == 0 and len(result.supporting_doc_citations) == 0
+        prom.record_query_outcome(
+            tenant_id=principal.tenant_id,
+            domain_id=result.domain_id,
+            outcome="success",
+            rrf_score=rrf,
+            zero_hit=zero_hit,
+            citation_failure=cit_fail,
+        )
+        get_audit_chain_service().record_event(
+            principal=principal,
+            domain_id=result.domain_id,
+            event_type="scout.query",
+            severity="INFO",
+            resource_uri=endpoint,
+            outcome="success",
+            payload={
+                "trace_id": result.trace_id,
+                "rrf_score": rrf,
+                "pack_token_count": result.pack_token_count,
+            },
+        )
+    else:
+        prom.record_query_outcome(
+            tenant_id=principal.tenant_id,
+            domain_id=domain_id,
+            outcome="abstain",
+            rrf_score=0.0,
+            zero_hit=True,
+            reason_code=str(result.failure_check or "insufficient_context"),
+        )
+        get_audit_chain_service().record_event(
+            principal=principal,
+            domain_id=domain_id,
+            event_type="scout.query",
+            severity="INFO",
+            resource_uri=endpoint,
+            outcome="abstain",
+            payload={
+                "trace_id": result.trace_id,
+                "failure_check": result.failure_check or "insufficient_context",
+            },
         )
 
 
@@ -220,11 +288,26 @@ def query_scout(
     active_trace_id = request.trace_id or f"trace_{uuid.uuid4().hex[:12]}"
     t0 = time.perf_counter()
 
-    # Step 1: ShieldGemma 2 prompt-injection screening
-    guardrail = ShieldGemmaGuardrail()
+    # Step 1: Configured guardrail prompt-injection screening
+    guardrail = get_guardrail_provider()
     decision = guardrail.evaluate(request.query, principal=principal)
     if not decision.passed:
         logger.warning("Scout query rejected by guardrail: %s", decision.rationale)
+        get_prometheus_registry().record_query_outcome(
+            tenant_id=principal.tenant_id,
+            domain_id=request.domain_id,
+            outcome="blocked",
+            reason_code="prompt_injection",
+        )
+        get_audit_chain_service().record_event(
+            principal=principal,
+            domain_id=request.domain_id,
+            event_type="scout.guardrail.block",
+            severity="WARNING",
+            resource_uri="/api/v1/scout/query",
+            outcome="deny",
+            payload={"trace_id": active_trace_id},
+        )
         raise HTTPException(
             status_code=403,
             detail=f"Prompt injection detected: {decision.rationale}",
@@ -248,37 +331,52 @@ def query_scout(
         model_id="gemma-4-moe",
         system="gemma",
     ) as span:
-        if request.domain_id == "federated_all":
-            coordinator = FederatedScoutCoordinator(
-                registry=registry,
-                repo=repo,
-                local_client=local_client,
-                federated_domain_id=request.domain_id,
+        if request.normalized_rrf_score is not None:
+            logger.debug(
+                "Stripping client-supplied normalized_rrf_score=%s on /scout/query (trace=%s)",
+                request.normalized_rrf_score,
+                active_trace_id,
             )
-            result = coordinator.run(
-                user_prompt=request.query,
-                principal=principal,
-                trace_id=active_trace_id,
-                normalized_rrf_score=request.normalized_rrf_score,
-                doc_chunks=None,
-                max_bounce_backs=request.max_bounce_backs,
-                source_filter=request.source_filter,
-            )
-        else:
-            workflow = ScoutWorkflow(
-                registry=registry,
-                repo=repo,
-                local_client=local_client,
-            )
-            result = workflow.run(
-                user_prompt=request.query,
-                principal=principal,
-                domain_id=request.domain_id,
-                trace_id=active_trace_id,
-                normalized_rrf_score=request.normalized_rrf_score,
-                max_bounce_backs=request.max_bounce_backs,
-                source_filter=request.source_filter,
-            )
+        try:
+            if request.domain_id == "federated_all":
+                coordinator = FederatedScoutCoordinator(
+                    registry=registry,
+                    repo=repo,
+                    local_client=local_client,
+                    federated_domain_id=request.domain_id,
+                )
+                result = coordinator.run(
+                    user_prompt=request.query,
+                    principal=principal,
+                    trace_id=active_trace_id,
+                    normalized_rrf_score=None,
+                    doc_chunks=None,
+                    max_bounce_backs=request.max_bounce_backs,
+                    source_filter=request.source_filter,
+                    session_id=request.session_id,
+                    branch_id=request.branch_id or request.snapshot_id,
+                    graph_mode=request.graph_mode,
+                )
+            else:
+                workflow = ScoutWorkflow(
+                    registry=registry,
+                    repo=repo,
+                    local_client=local_client,
+                )
+                result = workflow.run(
+                    user_prompt=request.query,
+                    principal=principal,
+                    domain_id=request.domain_id,
+                    trace_id=active_trace_id,
+                    normalized_rrf_score=None,
+                    max_bounce_backs=request.max_bounce_backs,
+                    source_filter=request.source_filter,
+                    session_id=request.session_id,
+                    branch_id=request.branch_id or request.snapshot_id,
+                    graph_mode=request.graph_mode,
+                )
+        except (ValueError, psycopg.errors.DataError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
 
         span.record_pack(result)
         latency_ms = int((time.perf_counter() - t0) * 1000)
@@ -286,11 +384,18 @@ def query_scout(
         if isinstance(result, ImplementationContextPack):
             savings = _build_token_savings(result)
             _record_live_scout_telemetry(repo, registry, principal, result, latency_ms)
+            _record_scout_metrics_and_audit(
+                principal=principal,
+                domain_id=request.domain_id,
+                result=result,
+                endpoint="/api/v1/scout/query",
+            )
 
+            safe_pid = pseudonymize_actor_if_enabled(principal.user_id, principal.tenant_id)
             trace_attrs: dict[str, Any] = {
                 "gen_ai.system": "gemma",
                 "gen_ai.request.model": "gemma-4-26B-A4B-it",
-                "context_scout.principal_id": principal.user_id,
+                "context_scout.principal_id": safe_pid,
                 "context_scout.principal_role": principal.role.value,
                 "context_scout.domain_id": result.domain_id,
                 "context_scout.tokens_saved": savings.tokens_saved,
@@ -306,12 +411,17 @@ def query_scout(
                 diagnostic=None,
                 citations=result.supporting_doc_citations,
                 preflight_report=result.preflight_report,
-                quant_strategy_spec=result.quant_strategy_spec,
                 token_savings=savings,
                 stage_traces=list(result.stage_traces),
                 trace_attributes=trace_attrs,
             )
 
+        _record_scout_metrics_and_audit(
+            principal=principal,
+            domain_id=request.domain_id,
+            result=result,
+            endpoint="/api/v1/scout/query",
+        )
         diagnostic_savings = ScoutTokenSavingsBreakdown(
             local_tokens_explored=result.paid_tokens_spent,
             pack_tokens_sent=0,
@@ -329,7 +439,6 @@ def query_scout(
             diagnostic=result,
             citations=[],
             preflight_report=None,
-            quant_strategy_spec=None,
             token_savings=diagnostic_savings,
             stage_traces=list(result.stage_traces),
             trace_attributes={
@@ -339,7 +448,30 @@ def query_scout(
         )
 
 
-@router.post("/scout/stream")
+@router.post(
+    "/scout/stream",
+    responses={
+        200: {
+            "description": "Server-Sent Events stream of scout workflow stage transitions",
+            "content": {
+                "text/event-stream": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "event": {"type": "string"},
+                            "data": {
+                                "type": "string",
+                                "contentMediaType": "application/json",
+                                "contentSchema": {"type": "object"},
+                            },
+                        },
+                        "required": ["event", "data"],
+                    }
+                }
+            },
+        }
+    },
+)
 async def stream_scout(
     request: ScoutStreamRequest,
     principal: Annotated[PrincipalContext, Depends(get_principal_context)],
@@ -353,10 +485,25 @@ async def stream_scout(
         active_trace_id = request.trace_id or f"trace_{uuid.uuid4().hex[:12]}"
         t0 = time.perf_counter()
 
-        # Step 1: Guardrail prompt-injection evaluation
-        guardrail = ShieldGemmaGuardrail()
+        # Step 1: Configured guardrail prompt-injection evaluation
+        guardrail = get_guardrail_provider()
         decision = guardrail.evaluate(request.query, principal=principal)
         if not decision.passed:
+            get_prometheus_registry().record_query_outcome(
+                tenant_id=principal.tenant_id,
+                domain_id=request.domain_id,
+                outcome="blocked",
+                reason_code="prompt_injection",
+            )
+            get_audit_chain_service().record_event(
+                principal=principal,
+                domain_id=request.domain_id,
+                event_type="scout.guardrail.block",
+                severity="WARNING",
+                resource_uri="/api/v1/scout/stream",
+                outcome="deny",
+                payload={"trace_id": active_trace_id},
+            )
             s1_diag = InsufficientContextDiagnostic(
                 trace_id=active_trace_id,
                 domain_id=request.domain_id,
@@ -412,6 +559,13 @@ async def stream_scout(
 
         async def run_worker() -> ImplementationContextPack | InsufficientContextDiagnostic:
             try:
+                if request.normalized_rrf_score is not None:
+                    logger.debug(
+                        "Stripping client-supplied normalized_rrf_score=%s on /scout/stream "
+                        "(trace=%s)",
+                        request.normalized_rrf_score,
+                        active_trace_id,
+                    )
                 if is_federated:
                     coordinator = FederatedScoutCoordinator(
                         registry=registry,
@@ -424,11 +578,14 @@ async def stream_scout(
                         user_prompt=request.query,
                         principal=principal,
                         trace_id=active_trace_id,
-                        normalized_rrf_score=request.normalized_rrf_score,
+                        normalized_rrf_score=None,
                         doc_chunks=None,
                         max_bounce_backs=request.max_bounce_backs,
                         on_stage_event=push_stage_event,
                         source_filter=request.source_filter,
+                        session_id=request.session_id,
+                        branch_id=request.branch_id or request.snapshot_id,
+                        graph_mode=request.graph_mode,
                     )
                 workflow = ScoutWorkflow(
                     registry=registry,
@@ -441,10 +598,13 @@ async def stream_scout(
                     principal=principal,
                     domain_id=request.domain_id,
                     trace_id=active_trace_id,
-                    normalized_rrf_score=request.normalized_rrf_score,
+                    normalized_rrf_score=None,
                     max_bounce_backs=request.max_bounce_backs,
                     on_stage_event=push_stage_event,
                     source_filter=request.source_filter,
+                    session_id=request.session_id,
+                    branch_id=request.branch_id or request.snapshot_id,
+                    graph_mode=request.graph_mode,
                 )
             finally:
                 loop.call_soon_threadsafe(event_queue.put_nowait, None)
@@ -701,16 +861,27 @@ async def stream_scout(
 
             savings = _build_token_savings(result)
             _record_live_scout_telemetry(repo, registry, principal, result, latency_ms)
+            _record_scout_metrics_and_audit(
+                principal=principal,
+                domain_id=request.domain_id,
+                result=result,
+                endpoint="/api/v1/scout/stream",
+            )
 
             ready_event = SSEContextPackReadyEvent(
                 status="ready",
                 pack=result,
-                quant_strategy_spec=result.quant_strategy_spec,
                 token_savings=savings,
                 stage_traces=list(result.stage_traces),
             )
             yield f"event: context_pack_ready\ndata: {ready_event.model_dump_json()}\n\n"
         else:
+            _record_scout_metrics_and_audit(
+                principal=principal,
+                domain_id=request.domain_id,
+                result=result,
+                endpoint="/api/v1/scout/stream",
+            )
             if 4 not in failed_stages and 4 not in completed_stages:
                 s4_fail = SSEStageEvent(
                     stage=4,

@@ -18,8 +18,8 @@ from context_scout.db.repositories import (
 from context_scout.db.session import RLSConnectionManager
 from context_scout.ingestion.git_merkle_indexer import (
     GitMerkleIndexer,
-    generate_deterministic_embedding,
 )
+from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import PrincipalContext, RoleType
 
 
@@ -50,7 +50,7 @@ def _seed_session_domain_pack(conn: psycopg.Connection[Any], domain_id: str) -> 
             primary_truth_source, freshness_half_life_days, config_json
         )
         VALUES (%s, %s, 'none', 'code', 180, '{"m2_test": true}'::jsonb)
-        ON CONFLICT (domain_id) DO NOTHING;
+        ON CONFLICT (tenant_id, domain_id) DO NOTHING;
         """,
         (domain_id, f"Eval M2 Live ({domain_id})"),
     )
@@ -157,8 +157,8 @@ def test_live_postgres_ast_rls_isolation_between_principals(
 
     quant_principal = PrincipalContext(
         user_id="quant_lead_m2",
-        role=RoleType.QUANT_RESEARCHER,
-        allowed_scopes=["quant_restricted"],
+        role=RoleType.DOMAIN_RESEARCHER,
+        allowed_scopes=["docs_restricted"],
     )
     eng_principal = PrincipalContext(
         user_id="eng_viewer_m2",
@@ -186,7 +186,7 @@ def test_live_postgres_ast_rls_isolation_between_principals(
                     git_commit_sha="commit_sec",
                     git_blob_sha="blob_sec",
                     language="python",
-                    allowed_scopes=["quant_restricted"],
+                    allowed_scopes=["docs_restricted"],
                     raw_content="def compute_alpha(): return 42\n",
                     line_count=1,
                 ),
@@ -203,8 +203,10 @@ def test_live_postgres_ast_rls_isolation_between_principals(
                     end_line=1,
                     signature_skeleton="def compute_alpha() -> int:",
                     contextual_summary="Proprietary alpha signal generator",
-                    allowed_scopes=["quant_restricted"],
-                    embedding=generate_deterministic_embedding("compute_alpha proprietary alpha"),
+                    allowed_scopes=["docs_restricted"],
+                    embedding=get_embedding_provider().embed_text(
+                        "compute_alpha proprietary alpha", is_query=False
+                    ),
                 ),
             )
             repo.insert_ast_edge(
@@ -216,7 +218,7 @@ def test_live_postgres_ast_rls_isolation_between_principals(
                     target_qualified_name="alpha.models.SignalWeights",
                     target_symbol_id=None,
                     edge_kind="USES_TYPE",
-                    allowed_scopes=["quant_restricted"],
+                    allowed_scopes=["docs_restricted"],
                 ),
             )
 

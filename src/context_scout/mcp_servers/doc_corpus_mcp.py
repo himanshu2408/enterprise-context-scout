@@ -8,10 +8,13 @@ RRF retrieval, VAL-02 NFKC verbatim quote verification, and hard payload caps (<
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from mcp.server._otel import OpenTelemetryMiddleware
 from mcp.server.mcpserver import Context, MCPServer
+from starlette.types import ASGIApp
 
 from context_scout.agents.domain_registry import DomainRegistry
 from context_scout.agents.preflight_gate import (
@@ -21,7 +24,11 @@ from context_scout.agents.preflight_gate import (
 from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
 from context_scout.config import ScoutSettings
 from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
-from context_scout.mcp_servers.common import MAX_PAYLOAD_ITEMS, bound_payload_dict
+from context_scout.mcp_servers.common import (
+    MAX_PAYLOAD_ITEMS,
+    bound_payload_dict,
+    create_stateless_mcp_http_app,
+)
 from context_scout.schemas.contracts import DocCitationSpan
 from context_scout.security.rbac import (
     DomainAuthorizationGate,
@@ -41,15 +48,31 @@ def create_doc_corpus_mcp_server(
     registry = DomainRegistry(resolved_domains_dir)
     registry.load_all()
     auth_gate = DomainAuthorizationGate(registry)
-    is_pg_repo = (
-        repo is None
-        or isinstance(repo, PostgresRLSRepository)
-        or hasattr(repo, "connection_manager")
+    effective_repo = repo
+    if effective_repo is None:
+        try:
+            from context_scout.db.session import RLSConnectionManager, get_query_pool
+            from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
+            from context_scout.schemas.contracts import PrincipalContext, RoleType
+
+            probe_mgr = RLSConnectionManager(st.db_app_url, use_pool=False, connect_timeout_s=1)
+            probe = PrincipalContext(
+                user_id="doc_mcp_probe",
+                role=RoleType.ENGINEER,
+                allowed_scopes=["public"],
+            )
+            with probe_mgr.scoped_transaction(probe, enable_hnsw_iterative_scan=False) as conn:
+                conn.execute("SELECT 1;")
+            effective_repo = PostgresScoutGraphAdapter(get_query_pool(), st)
+        except Exception:
+            effective_repo = InMemoryRLSRepository()
+    is_pg_repo = isinstance(effective_repo, PostgresRLSRepository) or hasattr(
+        effective_repo, "connection_manager"
     )
-    bound_repo = BoundGraphRepository(repo or InMemoryRLSRepository())
+    bound_repo = BoundGraphRepository(effective_repo)
     slicer = DeterministicSlicer()
 
-    server = MCPServer("doc_corpus_mcp")
+    server = MCPServer("doc_corpus_mcp", middleware=[OpenTelemetryMiddleware()])
 
     @server.tool(
         name="search_hybrid_rrf",
@@ -69,33 +92,46 @@ def create_doc_corpus_mcp_server(
         principal = get_current_principal()
         auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:search_hybrid_rrf", principal)
         if is_pg_repo:
-            sync_custom_domain_corpus_if_needed(
-                domain_id, index_path=resolved_domains_dir / domain_id / "sync_manifest.json"
-            )
+            sync_custom_domain_corpus_if_needed(domain_id, require_manifest=True)
 
         clamped_k = min(max(1, top_k), MAX_PAYLOAD_ITEMS)
-        visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
-        q_tokens = {tok.lower() for tok in query.split() if len(tok) >= 3}
-        scored: list[tuple[int, Any]] = []
-        for c in visible_chunks:
-            hay = f"{c.doc_title} {c.section_heading} {c.verbatim_content}".lower()
-            score = sum(1 for tok in q_tokens if tok in hay)
-            scored.append((score, c))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        chunks = [c for _s, c in scored[:clamped_k]]
-        hits = [
-            {
-                "chunk_id": str(c.chunk_id),
-                "doc_id": c.doc_id,
-                "doc_title": c.doc_title,
-                "source_uri": c.source_uri,
-                "section_heading": c.section_heading,
-                "contextual_header": c.contextual_header,
-                "verbatim_content": c.verbatim_content,
-                "authority_weight": c.authority_weight,
-            }
-            for c in chunks[:clamped_k]
-        ]
+        if hasattr(bound_repo, "search_hybrid_rrf_doc_chunks"):
+            chunks, cal_hits = bound_repo.search_hybrid_rrf_doc_chunks(
+                principal,
+                domain_id,
+                query,
+                top_k=clamped_k,
+            )
+        else:
+            chunks, cal_hits = bound_repo.search_visible_doc_chunks_calibrated(
+                principal,
+                domain_id,
+                query,
+                limit=clamped_k,
+            )
+        hit_by_id = {str(h.item_id): h for h in cal_hits}
+        hits = []
+        for c in chunks[:clamped_k]:
+            cal_h = hit_by_id.get(str(c.chunk_id))
+            hits.append(
+                {
+                    "chunk_id": str(c.chunk_id),
+                    "doc_id": c.doc_id,
+                    "doc_title": c.doc_title,
+                    "source_uri": c.source_uri,
+                    "section_heading": c.section_heading,
+                    "contextual_header": c.contextual_header,
+                    "verbatim_content": c.verbatim_content,
+                    "authority_weight": c.authority_weight,
+                    "source_type": c.source_type,
+                    "metadata_json": c.metadata_json,
+                    "rrf_score": cal_h.normalized_rrf_score if cal_h is not None else 0.0,
+                    "calibrated_score": cal_h.calibrated_score if cal_h is not None else 0.0,
+                    "trigram_rank": cal_h.trigram_rank if cal_h is not None else None,
+                    "bm25_rank": cal_h.bm25_rank if cal_h is not None else None,
+                    "vector_rank": cal_h.vector_rank if cal_h is not None else None,
+                }
+            )
         return bound_payload_dict(
             {
                 "domain_id": domain_id,
@@ -129,15 +165,19 @@ def create_doc_corpus_mcp_server(
         principal = get_current_principal()
         auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:verify_citation_quote", principal)
         if is_pg_repo:
-            sync_custom_domain_corpus_if_needed(
-                domain_id, index_path=resolved_domains_dir / domain_id / "sync_manifest.json"
-            )
+            sync_custom_domain_corpus_if_needed(domain_id, require_manifest=True)
 
-        visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
-        target_chunk = next(
-            (c for c in visible_chunks if str(c.chunk_id) == chunk_id or c.doc_id == chunk_id),
-            None,
-        )
+        target_chunk = None
+        if hasattr(bound_repo, "get_doc_chunks_by_ids"):
+            direct = bound_repo.get_doc_chunks_by_ids(principal, domain_id, [chunk_id])
+            if direct:
+                target_chunk = direct[0]
+        if target_chunk is None:
+            visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
+            target_chunk = next(
+                (c for c in visible_chunks if str(c.chunk_id) == chunk_id or c.doc_id == chunk_id),
+                None,
+            )
         if target_chunk is None:
             return bound_payload_dict(
                 {
@@ -189,9 +229,7 @@ def create_doc_corpus_mcp_server(
         principal = get_current_principal()
         auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:get_document_section", principal)
         if is_pg_repo:
-            sync_custom_domain_corpus_if_needed(
-                domain_id, index_path=resolved_domains_dir / domain_id / "sync_manifest.json"
-            )
+            sync_custom_domain_corpus_if_needed(domain_id, require_manifest=True)
 
         visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
         matching = [
@@ -229,4 +267,46 @@ def create_doc_corpus_mcp_server(
             }
         )
 
+    orig_call_tool = server.call_tool
+
+    async def secure_call_tool(
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        context: Context[Any, Any] | None = None,
+    ) -> Any:
+        if arguments:
+            validate_tool_call_arguments(arguments)
+        return await orig_call_tool(
+            name, arguments=arguments if arguments is not None else {}, context=context
+        )
+
+    server.call_tool = secure_call_tool  # type: ignore[method-assign]
+
     return server
+
+
+def create_doc_corpus_mcp_http_app(
+    domains_dir: Path | None = None,
+    repo: Any = None,
+    settings: ScoutSettings | None = None,
+    *,
+    streamable_http_path: str = "/mcp",
+    allowed_hosts: Sequence[str] | None = None,
+    require_auth: bool = True,
+) -> ASGIApp:
+    """Builds a stateless MCP 2026-07-28 Streamable HTTP ASGI app for doc_corpus_mcp."""
+    server = create_doc_corpus_mcp_server(
+        domains_dir=domains_dir,
+        repo=repo,
+        settings=settings,
+    )
+    return create_stateless_mcp_http_app(
+        server,
+        streamable_http_path=streamable_http_path,
+        json_response=True,
+        allowed_hosts=allowed_hosts,
+        require_auth=require_auth,
+    )
+
+
+__all__ = ["create_doc_corpus_mcp_http_app", "create_doc_corpus_mcp_server"]

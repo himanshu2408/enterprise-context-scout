@@ -25,10 +25,13 @@ from context_scout.schemas.contracts import (
     VerbatimCodeSlice,
 )
 from context_scout.security.permission_mirror import (
+    MAX_ACL_CACHE_TTL_SECONDS,
     CachedPermissionMirrorService,
     ConfluencePermission,
     ConfluenceSpaceMembership,
     EnterpriseIdentityProfile,
+    GitHubPermission,
+    GitHubRepoMembership,
     GitLabProjectMembership,
     GitLabRole,
     JiraPermission,
@@ -272,7 +275,7 @@ def test_context_pack_provenance_validation() -> None:
 
     pack = ImplementationContextPack(
         trace_id="tr_1",
-        domain_id="trading_code_scout",
+        domain_id="code_architecture_scout",
         user_task="Implement feature",
         architectural_execution_plan=["Step 1"],
         code_slices=[valid_slice],
@@ -304,7 +307,7 @@ def test_context_pack_provenance_validation() -> None:
     with pytest.raises(ValidationError, match="incomplete provenance"):
         ImplementationContextPack(
             trace_id="tr_2",
-            domain_id="trading_code_scout",
+            domain_id="code_architecture_scout",
             user_task="Task",
             architectural_execution_plan=["Step 1"],
             code_slices=[invalid_slice],
@@ -316,3 +319,88 @@ def test_context_pack_provenance_validation() -> None:
             local_tokens_consumed=10,
             pack_token_count=20,
         )
+
+
+def test_gitlab_18_7_read_code_and_repository_access_level() -> None:
+    """M1-05: GitLab 18.7+ :read_code grants Guest read only when explicitly True."""
+    repo = "org/custom-role-repo"
+    assert PermissionMirror.map_gitlab_role_to_scopes(repo, GitLabRole.GUEST, read_code=True) == [
+        "repo:org/custom-role-repo:read"
+    ]
+    assert (
+        PermissionMirror.map_gitlab_role_to_scopes(repo, GitLabRole.DEVELOPER, read_code=False)
+        == []
+    )
+    assert (
+        PermissionMirror.map_gitlab_role_to_scopes(
+            repo, GitLabRole.OWNER, repository_access_level="disabled"
+        )
+        == []
+    )
+
+
+def test_github_app_and_transitive_confluence_jira_helpers() -> None:
+    """M1-05: Verifies GitHub App, Confluence ancestor, and Jira issue/comment ACLs."""
+    profile = EnterpriseIdentityProfile(
+        user_id="bob",
+        github_memberships=[
+            GitHubRepoMembership(
+                repo_full_name="acme/core",
+                permission=GitHubPermission.PUSH,
+                team_slugs=["platform-eng"],
+                installation_id=42,
+            ),
+            GitHubRepoMembership(
+                repo_full_name="acme/blocked",
+                permission=GitHubPermission.ADMIN,
+                read_contents=False,
+            ),
+        ],
+    )
+    scopes = PermissionMirror.resolve_allowed_scopes(profile)
+    assert "repo:acme/core:read" in scopes
+    assert "repo:acme/core:write" in scopes
+    assert "github:team:platform-eng:read" in scopes
+    assert not any("acme/blocked" in s for s in scopes)
+
+    # Confluence ancestor VIEW_RESTRICTED fails closed when an ancestor excludes user
+    assert (
+        PermissionMirror.intersect_confluence_ancestor_scopes(
+            "ENG",
+            user_principals=["bob", "group:eng"],
+            ancestor_restrictions=[["group:eng"], ["group:exec"]],
+        )
+        == []
+    )
+    assert PermissionMirror.intersect_confluence_ancestor_scopes(
+        "ENG",
+        user_principals=["bob", "group:eng"],
+        ancestor_restrictions=[["group:eng"], []],
+        page_restrictions=["bob"],
+    ) == ["confluence:space:ENG:read"]
+
+    # Jira Issue Security Level + Comment visibility
+    assert (
+        PermissionMirror.resolve_jira_issue_scopes(
+            "SEC",
+            [JiraPermission.BROWSE],
+            user_security_levels=["internal"],
+            issue_security_level="restricted",
+        )
+        == []
+    )
+    assert PermissionMirror.resolve_jira_comment_scopes(
+        "SEC",
+        [JiraPermission.BROWSE],
+        user_roles=["Developers"],
+        comment_visibility_type="role",
+        comment_visibility_value="Developers",
+        user_security_levels=["restricted"],
+        issue_security_level="restricted",
+    ) == ["jira:project:SEC:read", "jira:security_level:restricted:read"]
+
+
+def test_cache_ttl_clamped_to_60s() -> None:
+    """M1-05: Cache TTL > 60s is clamped to MAX_ACL_CACHE_TTL_SECONDS."""
+    svc = CachedPermissionMirrorService(ttl_seconds=300)
+    assert svc.ttl_seconds == MAX_ACL_CACHE_TTL_SECONDS == 60

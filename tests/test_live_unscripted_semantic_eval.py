@@ -1,8 +1,8 @@
 """Unscripted multi-domain semantic & $0 abstention evaluation suite.
 
 Runs against live PostgreSQL 17 and FastAPI TestClient across all 4 domains
-(`data_engineering_scout`, `polyglot_unseen_v2`, `quant_research_scout`,
-`trading_code_scout`), `federated_all` cross-domain routing, and `$0`
+(`data_engineering_scout`, `polyglot_unseen_v2`, `enterprise_docs_scout`,
+`code_architecture_scout`), `federated_all` cross-domain routing, and `$0`
 out-of-corpus abstention traps.
 
 - When `CONTEXT_SCOUT_USE_LIVE_MLX=1` is set: verifies full live `Gemma-4`
@@ -63,40 +63,40 @@ _ANSWERABLE_CASES: list[tuple[str, str, str, tuple[str, ...]]] = [
         ("polyglot_unseen_v2",),
     ),
     (
-        "quant_nse_momentum",
-        "quant_research_scout",
-        "What cross-sectional momentum factor signals and rebalancing rules apply to NSE equities?",
-        ("quant_research_scout",),
+        "docs_force_rls",
+        "enterprise_docs_scout",
+        "How does PostgreSQL 17 enforce FORCE ROW LEVEL SECURITY and SET LOCAL tenant isolation?",
+        ("enterprise_docs_scout",),
     ),
     (
-        "quant_xetra_statarb",
-        "quant_research_scout",
-        "How does XETRA statistical arbitrage model spread cointegration and mean reversion?",
-        ("quant_research_scout",),
-    ),
-    (
-        "code_pairs_hedge",
-        "trading_code_scout",
-        "How is the pairs trading dynamic hedge ratio estimated and updated in code?",
-        ("trading_code_scout",),
-    ),
-    (
-        "code_almgren_chriss",
-        "trading_code_scout",
+        "docs_preflight_gate",
+        "enterprise_docs_scout",
         (
-            "How does optimal execution schedule slicing minimize market impact "
-            "in Almgren-Chriss liquidation?"
+            "How do the 6 deterministic checks in the Pre-Flight Sufficiency Gate "
+            "prevent hallucinations?"
         ),
-        ("trading_code_scout",),
+        ("enterprise_docs_scout",),
+    ),
+    (
+        "code_rls_session",
+        "code_architecture_scout",
+        "How does RLSConnectionManager enforce SET LOCAL tenant_id and NOBYPASSRLS in session.py?",
+        ("code_architecture_scout",),
+    ),
+    (
+        "code_adapter_router",
+        "code_architecture_scout",
+        "How does AdapterRouter enforce training_scope_ceiling and fail closed to base weights?",
+        ("code_architecture_scout",),
     ),
     (
         "fed_cross_domain",
         "federated_all",
         (
-            "How should an Apache Iceberg feature lakehouse feed a XETRA "
-            "statistical arbitrage backtest?"
+            "How does RLSConnectionManager enforce PostgreSQL 17 FORCE ROW LEVEL SECURITY "
+            "and SET LOCAL tenant isolation?"
         ),
-        ("data_engineering_scout", "quant_research_scout", "federated_all"),
+        ("code_architecture_scout", "enterprise_docs_scout", "federated_all"),
     ),
 ]
 
@@ -108,7 +108,7 @@ _ABSTENTION_CASES: list[tuple[str, str, str]] = [
     ),
     (
         "abstain_sourdough",
-        "quant_research_scout",
+        "enterprise_docs_scout",
         "What hydration percentage and oven steam schedule makes the best sourdough boule?",
     ),
     (
@@ -140,7 +140,7 @@ def api_client() -> Generator[tuple[TestClient, dict[str, str]], None, None]:
                         "role": "engineer",
                         "allowed_scopes": [
                             "public_eng",
-                            "public_quant",
+                            "public_docs",
                             "public_de",
                             "public_polyglot",
                         ],
@@ -187,9 +187,7 @@ def test_unscripted_answerable_multidomain(
         # Offline CI mode exercises live PG17 retrieval & routing without LLM synthesis.
         preflight = data.get("preflight_report") or {}
         traces = (
-            data.get("stage_traces")
-            or (data.get("diagnostic") or {}).get("stage_traces")
-            or []
+            data.get("stage_traces") or (data.get("diagnostic") or {}).get("stage_traces") or []
         )
         stage2: dict[str, Any] = next(
             (st for st in traces if st.get("stage") == 2),

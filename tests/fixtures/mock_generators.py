@@ -17,16 +17,15 @@ from typing import Any
 
 import pytest
 
+from context_scout.agents.llm_backend import GPUPriorityClass
 from context_scout.agents.scout_workflow import LocalGemmaClient
 from context_scout.db.schema import ASTSymbolRecord
 from context_scout.schemas.contracts import (
     CodeSlicePointer,
     DocCitationSpan,
-    FrictionVerdict,
-    MarketRegime,
+    DomainKnowledgeBrief,
     ModificationIntent,
     PrincipalContext,
-    QuantStrategyBrief,
     RoleType,
 )
 
@@ -42,28 +41,24 @@ def simulate_untuned_base_model_completion(prompt: str) -> str:
         if (tail_score % 6) == 0:
             return '{\n  "error": "Incomplete schema response",\n  "partial_data": [1, 2, 3]\n}'
 
-        if "QuantStrategyBrief" in prompt or "quant" in prompt.lower():
+        if "DomainKnowledgeBrief" in prompt or "domain_id" in prompt.lower():
             base_brief = {
-                "strategy_name": "In-Context Quant Signal",
-                "target_markets": ["US_EQUITY"],
-                "is_intraday_futures": False,
-                "mathematical_signal_latex": "\\Delta S_t / S_t",
-                "entry_exit_rules": ["Enter when signal > 2 sigma"],
-                "sample_period_years": "2020-2024",
-                "reported_sharpe_ratio": 1.5,
-                "reported_max_drawdown_pct": 8.0,
-                "transaction_cost_bps_assumed": 10.0,
-                "friction_verdict": "REALISTIC_FRICTION",
-                "market_specific_caveats": ["High turnover regime sensitivity"],
-                "known_failure_regimes": ["Low volatility chop"],
+                "brief_title": "In-Context Domain Synthesis",
+                "domain_id": "enterprise_docs_scout",
+                "executive_summary": "Grounded synthesis of enterprise architecture documentation.",
+                "formal_expression_or_rule": "E[Y | X] = f_theta(DomainContext)",
+                "core_findings_and_rules": ["Follow documented service boundary invariants"],
+                "domain_constraints_and_caveats": ["Verify regional compliance constraints"],
+                "known_risks_and_failure_modes": ["Stale index cache during rapid rollouts"],
+                "structured_metadata": {"scope": "GLOBAL_MULTI", "confidence": 0.9},
                 "verified_citations": [
                     {
                         "chunk_id": "chunk_in_context_01",
-                        "doc_id": "arxiv:general_finance",
-                        "doc_title": "General Quantitative Finance Principles",
-                        "source_uri": "https://arxiv.org/abs/general_finance",
+                        "doc_id": "doc:enterprise_arch_01",
+                        "doc_title": "Enterprise Architecture Principles",
+                        "source_uri": "https://docs.internal/arch/principles",
                         "section_heading": "Introduction",
-                        "verbatim_quote": "Momentum signals show persistence across regimes.",
+                        "verbatim_quote": "Service boundaries must enforce explicit contracts.",
                     }
                 ],
             }
@@ -125,9 +120,9 @@ def deterministic_completion_generator(
 
     is_custom_code_domain = (
         domain_id is not None
-        and domain_id != "quant_research_scout"
+        and domain_id != "enterprise_docs_scout"
         and (
-            domain_id == "trading_code_scout"
+            domain_id == "code_architecture_scout"
             or "Retrieved AST Candidate:" in prompt
             or "code" in domain_id
         )
@@ -180,13 +175,13 @@ def deterministic_completion_generator(
                 role=RoleType.ENGINEER,
                 allowed_scopes=[
                     "public_eng",
-                    "repo:trading_strategies",
-                    "corpus:quant_papers",
-                    "quant_restricted",
+                    "repo:code_architecture_scout",
+                    "corpus:enterprise_docs",
+                    "docs_restricted",
                 ],
             )
-            syms = adapter.list_visible_ast_symbols(principal, "trading_code_scout")
-            files = adapter.list_visible_code_files(principal, "trading_code_scout")
+            syms = adapter.list_visible_ast_symbols(principal, "code_architecture_scout")
+            files = adapter.list_visible_code_files(principal, "code_architecture_scout")
             file_by_id = {f.file_id: f for f in files}
 
             for sym_name in clean_syms:
@@ -287,11 +282,6 @@ def deterministic_completion_generator(
             section_heading = retrieved_match.group(5).strip()
             verbatim_quote = retrieved_match.group(6).strip().strip('"')
 
-            target_regimes = (
-                [MarketRegime.GERMANY_XETRA_DAX]
-                if any(k in prompt.lower() for k in ("xetra", "dax", "de_xetra"))
-                else [MarketRegime.US_NYSE_NASDAQ]
-            )
             rag_cit = DocCitationSpan(
                 chunk_id=chunk_id,
                 doc_id=doc_id,
@@ -300,49 +290,38 @@ def deterministic_completion_generator(
                 section_heading=section_heading,
                 verbatim_quote=verbatim_quote,
             )
-            rag_brief = QuantStrategyBrief(
-                strategy_name=f"{doc_title} Synthesis",
-                target_markets=target_regimes,
-                mathematical_signal_latex=r"E[Y \mid X] = f_{\theta}(\text{DomainContext})",
-                entry_exit_rules=[f"Grounded in verified citation from {doc_title}"],
-                sample_period_years="2020-2026",
-                reported_sharpe_ratio=2.0,
-                reported_max_drawdown_pct=5.0,
-                transaction_cost_bps_assumed=12.0,
-                friction_verdict=FrictionVerdict.REALISTIC_FRICTION,
-                market_specific_caveats=["Empirical evaluation required"],
-                known_failure_regimes=["High volatility announcement windows"],
+            rag_brief = DomainKnowledgeBrief(
+                brief_title=f"{doc_title} Synthesis",
+                domain_id=domain_id,
+                executive_summary=f"Grounded synthesis from {doc_title}.",
+                formal_expression_or_rule=r"E[Y \mid X] = f_{\theta}(\text{DomainContext})",
+                core_findings_and_rules=[f"Grounded in verified citation from {doc_title}"],
+                domain_constraints_and_caveats=["Empirical evaluation required"],
+                known_risks_and_failure_modes=["High load or stale index windows"],
+                structured_metadata={"scope": "GLOBAL_MULTI"},
                 verified_citations=[rag_cit],
             )
             return rag_brief.model_dump_json(indent=2)
 
         titles = re.findall(r"`([^`]+)`", prompt)
-        paper_title = titles[0] if titles else "Synthesized Quantitative Signal"
-        target_regimes = (
-            [MarketRegime.GERMANY_XETRA_DAX]
-            if any(k in prompt.lower() for k in ("xetra", "dax", "de_xetra"))
-            else [MarketRegime.US_NYSE_NASDAQ]
-        )
+        doc_title = titles[0] if titles else "Synthesized Enterprise Brief"
         rag_cit = DocCitationSpan(
             chunk_id="chunk_test_fixture_01",
-            doc_id="arxiv:test_quant_paper",
-            doc_title=paper_title,
-            source_uri="https://arxiv.org/abs/test",
+            doc_id="doc:test_enterprise_doc",
+            doc_title=doc_title,
+            source_uri="https://docs.internal/test",
             section_heading="Methodology",
-            verbatim_quote="Verified empirical citation quote for strategy synthesis.",
+            verbatim_quote="Verified empirical citation quote for domain synthesis.",
         )
-        rag_brief = QuantStrategyBrief(
-            strategy_name=f"{paper_title} Strategy",
-            target_markets=target_regimes,
-            mathematical_signal_latex=r"E[Y \mid X] = f_{\theta}(\text{DomainContext})",
-            entry_exit_rules=[f"Grounded in verified citation from {paper_title}"],
-            sample_period_years="2020-2026",
-            reported_sharpe_ratio=2.0,
-            reported_max_drawdown_pct=5.0,
-            transaction_cost_bps_assumed=12.0,
-            friction_verdict=FrictionVerdict.REALISTIC_FRICTION,
-            market_specific_caveats=["Empirical evaluation required"],
-            known_failure_regimes=["High volatility announcement windows"],
+        rag_brief = DomainKnowledgeBrief(
+            brief_title=f"{doc_title} Brief",
+            domain_id=domain_id,
+            executive_summary=f"Grounded synthesis from {doc_title}.",
+            formal_expression_or_rule=r"E[Y \mid X] = f_{\theta}(\text{DomainContext})",
+            core_findings_and_rules=[f"Grounded in verified citation from {doc_title}"],
+            domain_constraints_and_caveats=["Empirical evaluation required"],
+            known_risks_and_failure_modes=["High load or stale index windows"],
+            structured_metadata={"scope": "GLOBAL_MULTI"},
             verified_citations=[rag_cit],
         )
         return rag_brief.model_dump_json(indent=2)
@@ -375,7 +354,11 @@ class MockLocalGemmaClient(LocalGemmaClient):
         domain_id: str | None = None,
         system_instruction: str | None = None,
         max_tokens: int = 1024,
+        *,
+        principal: PrincipalContext | None = None,
+        priority: GPUPriorityClass = GPUPriorityClass.P0,
     ) -> str:
+        del principal, priority
         if domain_id is None:
             return simulate_untuned_base_model_completion(prompt)
         return self.generator_callable(

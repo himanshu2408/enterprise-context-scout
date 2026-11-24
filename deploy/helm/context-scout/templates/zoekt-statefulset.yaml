@@ -1,0 +1,82 @@
+{{- if .Values.zoekt.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "context-scout.fullname" . }}-zoekt
+  labels:
+    {{- include "context-scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: zoekt
+spec:
+  serviceName: {{ include "context-scout.fullname" . }}-zoekt
+  replicas: {{ .Values.zoekt.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "context-scout.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: zoekt
+  template:
+    metadata:
+      labels:
+        {{- include "context-scout.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: zoekt
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: zoekt
+          image: {{ printf "%s:%s" .Values.zoekt.image.repository .Values.zoekt.image.tag | quote }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args:
+            - "-index"
+            - "/data/zoekt"
+            - "-listen"
+            - {{ printf ":%d" (int .Values.zoekt.port) | quote }}
+          ports:
+            - name: http
+              containerPort: {{ int .Values.zoekt.port }}
+              protocol: TCP
+          env:
+            - name: TMPDIR
+              value: "/tmp"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.zoekt.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: zoekt-data
+              mountPath: /data/zoekt
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: zoekt-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- if .Values.zoekt.storage.storageClassName }}
+        storageClassName: {{ .Values.zoekt.storage.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.zoekt.storage.size | quote }}
+{{- end }}

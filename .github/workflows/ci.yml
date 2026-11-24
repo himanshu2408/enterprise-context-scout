@@ -29,7 +29,6 @@ jobs:
           --health-retries 10
     env:
       SCOUT_DB_ADMIN_URL: postgresql://postgres:postgres_ci_password@127.0.0.1:5432/context_scout
-      SCOUT_DB_APP_URL: postgresql://scout_app_user:scout_local_dev_pw@127.0.0.1:5432/context_scout
       SCOUT_AUTH_HMAC_SECRET: scout-github-actions-ci-hmac-secret-32-chars!!
     steps:
       - name: Checkout repository
@@ -41,14 +40,21 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python dependencies
-        run: uv sync --extra dev
+        run: uv sync --extra api --extra worker --extra gpu-train --extra dev
 
-      - name: Bootstrap PostgreSQL 17 Schema & Forced RLS
+      - name: Bootstrap PostgreSQL 17 Schema via Alembic & Audit Forced RLS
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
-          PGPASSWORD=postgres_ci_password psql -h 127.0.0.1 -U postgres -d context_scout -f sql/001_init_schema.sql
-          PGPASSWORD=postgres_ci_password psql -h 127.0.0.1 -U postgres -d context_scout -f sql/002_production_enterprise_schema.sql
-          uv run python -m context_scout.mcp_servers.seed_code_corpus
+          APP_PW="$(openssl rand -hex 24)"
+          echo "::add-mask::${APP_PW}"
+          APP_URL="postgresql://scout_app_user:${APP_PW}@127.0.0.1:5432/context_scout"
+          echo "SCOUT_DB_APP_PASSWORD=${APP_PW}" >> "$GITHUB_ENV"
+          echo "SCOUT_DB_APP_URL=${APP_URL}" >> "$GITHUB_ENV"
+          export SCOUT_DB_APP_PASSWORD="$APP_PW"
+          export SCOUT_DB_APP_URL="$APP_URL"
+          uv run context-scout db upgrade
+          uv run python -m context_scout.db.migrations_runner --lint-squawk
+          uv run python .agents/skills/rls-pgtap-audit/scripts/check_rls_catalog.py
 
       - name: Run Ruff Linter
         run: uv run ruff check src tests
@@ -56,34 +62,12 @@ jobs:
       - name: Run Mypy Strict Typechecker
         run: uv run mypy --strict src tests
 
-      - name: Materialize gitignored QLoRA safetensors on ephemeral CI runner
-        run: |
-          uv run python -c "
-          from pathlib import Path
-          from context_scout.tuning.train_mlx_lora import LocalQLoRATrainer
-          trainer = LocalQLoRATrainer()
-          slots = [
-              ('trading_code_scout', 'adapters/gemma4_26b_code_scout', 'trading_code_scout'),
-              ('quant_research_scout', 'adapters/gemma4_26b_quant_research', 'quant_research_scout'),
-              ('polyglot_unseen_v2', 'adapters/gemma4_26b_polyglot_unseen_v2', 'polyglot_unseen_v2'),
-              ('data_engineering_scout', 'adapters/gemma4_26b_data_engineering', 'quant_research_scout'),
-          ]
-          for d_id, rel, tune_id in slots:
-              out = Path('domains') / d_id / rel
-              if not (out / 'adapters.safetensors').exists():
-                  cfg_bak = (out / 'adapter_config.json').read_text() if (out / 'adapter_config.json').exists() else None
-                  met_bak = (out / 'training_metrics.json').read_text() if (out / 'training_metrics.json').exists() else None
-                  trainer.train(Path('data/tuning') / tune_id / 'train.jsonl', Path('data/tuning') / tune_id / 'valid.jsonl', out, domain_id=d_id, num_steps=4)
-                  if cfg_bak is not None:
-                      (out / 'adapter_config.json').write_text(cfg_bak)
-                  if met_bak is not None:
-                      (out / 'training_metrics.json').write_text(met_bak)
-          "
-
       - name: Run Backend Test Suite & Evaluation Gate (PG17 + In-Memory CI Mode)
         run: |
-          uv run pytest -q -k "not test_real_hf_model_snapshots_and_mlx_gpu_adapters and not TestTeacherDistillerPipeline and not TestLivePostgresCorpus and not TestPostgresDatabaseVerification and not test_postgres_doc_chunks_persisted_and_3way_rrf_retrieval and not test_postgres_scepticism_gate_against_persisted_corpus and not test_empirical_live_rls_isolation_doc_chunks and not test_empirical_live_corpus_scepticism_gate_integration and not test_live_postgresql_17_corpus_counts and not test_cli_runner_postgres_flag and not test_live_search_quant_papers_hybrid_rrf and not test_live_extract_paper_equations_and_tables and not test_live_verify_market_friction_assumptions_verdicts and not test_live_compare_cross_market_regimes and not test_quant_corpus_legacy_tool_aliases and not test_live_postgres_federated_scout_coordinator_seeded_corpus and not TestRejectionSamplingAdversarialProbe and not test_real_cached_paper_corpus_latex_and_pdf_lossless_parsing and not test_adversarial_pdf_parser_on_real_academic_corpus_pdfs and not test_multi_repo_e2e_comprehensive and not test_unseen_repo_three_previously_missed_tasks_now_hit_top5_symbol_recall and not test_real_paper_harvest_live and not test_live_stack_e2e_smoke and not test_live_unscripted_semantic_eval"
-          uv run python -m context_scout.evals.runner --in-memory
+          uv run pytest -q
+          uv run python -m context_scout.evals.runner --in-memory \
+            --output-json /tmp/m6_eval_report.json \
+            --output-md /tmp/m6_eval_report.md
 
   frontend-verify:
     name: Frontend Strict TypeScript, ESLint, Vitest & Build

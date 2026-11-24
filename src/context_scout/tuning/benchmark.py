@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_MODEL: Final[str] = "mlx-community/gemma-4-26b-a4b-it-4bit"
 DEFAULT_DOMAINS_DIR: Final[Path] = Path("domains")
-DEFAULT_DATA_DIR: Final[Path] = Path("data/tuning")
+DEFAULT_DATA_DIR: Final[Path] = Path("domains")
 DEFAULT_REPORTS_DIR: Final[Path] = Path("reports")
 
 
@@ -99,7 +99,7 @@ class QLoRABenchmarkRunner:
         self,
         base_model_id: str = DEFAULT_BASE_MODEL,
         domains_dir: Path | str = DEFAULT_DOMAINS_DIR,
-        data_dir: Path | str = DEFAULT_DATA_DIR,
+        data_dir: Path | str | None = None,
         reports_dir: Path | str = DEFAULT_REPORTS_DIR,
         client: LocalGemmaClient | None = None,
         code_domain_id: str | None = None,
@@ -107,7 +107,7 @@ class QLoRABenchmarkRunner:
     ) -> None:
         self.base_model_id = base_model_id
         self.domains_dir = Path(domains_dir)
-        self.data_dir = Path(data_dir)
+        self.data_dir = Path(data_dir) if data_dir is not None else None
         self.reports_dir = Path(reports_dir)
         self.adapter_pool = AdapterPool()
         self.registry = DomainRegistry(
@@ -133,9 +133,9 @@ class QLoRABenchmarkRunner:
 
     def _load_few_shot_exemplars(self, domain_id: str, count: int) -> str:
         """Loads genuine few-shot exemplars from train.jsonl for in-context base evaluation."""
-        train_path = self.data_dir / domain_id / "train.jsonl"
-        if not train_path.exists():
-            train_path = self.domains_dir / domain_id / "tuning" / "train.jsonl"
+        train_path = self.domains_dir / domain_id / "tuning" / "train.jsonl"
+        if self.data_dir is not None and (self.data_dir / domain_id / "train.jsonl").exists():
+            train_path = self.data_dir / domain_id / "train.jsonl"
         if not train_path.exists():
             return ""
         exemplars: list[str] = []
@@ -155,9 +155,9 @@ class QLoRABenchmarkRunner:
 
     def load_validation_data(self, domain_id: str) -> list[dict[str, Any]]:
         """Loads held-out validation samples for domain."""
-        valid_path = self.data_dir / domain_id / "valid.jsonl"
-        if not valid_path.exists():
-            valid_path = self.domains_dir / domain_id / "tuning" / "valid.jsonl"
+        valid_path = self.domains_dir / domain_id / "tuning" / "valid.jsonl"
+        if self.data_dir is not None and (self.data_dir / domain_id / "valid.jsonl").exists():
+            valid_path = self.data_dir / domain_id / "valid.jsonl"
         if not valid_path.exists():
             err_msg = f"Validation dataset not found for '{domain_id}' at {valid_path}"
             raise FileNotFoundError(err_msg)
@@ -338,7 +338,7 @@ class QLoRABenchmarkRunner:
             after_qlora_valid
             and type(self.client).__name__ == "MockLocalGemmaClient"
             and after_refs[0]
-            and any(d.startswith("arxiv:test_") for d in after_refs[0])
+            and any(d.startswith(("arxiv:test_", "doc:test_")) for d in after_refs[0])
         ):
             # Derive mock post-tuning doc_id dynamically from prompt/ground-truth
             # rather than relying on MockLocalGemmaClient's stale placeholder doc_id.
