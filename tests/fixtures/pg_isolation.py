@@ -796,6 +796,10 @@ def ensure_pg17_schema_and_seed_corpora(
         def _row_count(row: tuple[object, ...] | None) -> int:
             return int(str(row[0])) if row and row[0] is not None else 0
 
+        # Pre-warm the embedding model outside any open DB transaction so cold
+        # HuggingFace downloads in CI never trigger PG17 idle_in_transaction_session_timeout.
+        _embed_fixture_text("bootstrap warmup")
+
         with mgr.scoped_transaction(seed_principal, enable_hnsw_iterative_scan=False) as conn:
             code_arch_row = conn.execute(
                 "SELECT count(*) FROM code_files WHERE domain_id = 'code_architecture_scout'"
