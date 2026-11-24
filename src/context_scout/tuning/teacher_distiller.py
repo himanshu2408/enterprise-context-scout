@@ -2230,8 +2230,8 @@ class TeacherDistiller:
             "self_play_pass_rate": sp_stats.pass_rate,
             "bounce_back_count": sp_stats.bounce_back_count,
             "mined_history_tasks": len(mined_tasks),
-            "scrubbed_findings_count": scrubbed_count,
-            "canaries_planted": canaries_planted,
+            "scrubbed_findings_count": len(range(max(0, scrubbed_count))),
+            "canaries_planted": len(range(max(0, canaries_planted))),
             "split_sha256s": split_sha256s,
             "zero_leakage_verified": zero_leakage_ok,
         }

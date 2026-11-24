@@ -2315,7 +2315,15 @@ class PostgresRLSRepository:
         penalty_rank = candidate_pool + 1
         # Never allow parenthesized glossary expansion suffixes or explicit disjunctive
         # OR-recall queries to poison conjunctive plainto_tsquery (AND) matching.
-        raw_base_query = re.sub(r"\s*\([^)]{3,200}\)\s*$", "", query_text.strip()).strip()
+        stripped_q = query_text.strip()
+        if stripped_q.endswith(")"):
+            open_idx = stripped_q.rfind("(")
+            if open_idx != -1 and 3 <= (len(stripped_q) - open_idx - 2) <= 200:
+                raw_base_query = stripped_q[:open_idx].strip()
+            else:
+                raw_base_query = stripped_q
+        else:
+            raw_base_query = stripped_q
         is_disjunctive_query = " OR " in query_text
         base_tokens = _extract_substantive_tokens(raw_base_query or query_text)
         content_tokens = _extract_substantive_tokens(query_text)

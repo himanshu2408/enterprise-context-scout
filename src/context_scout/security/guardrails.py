@@ -42,9 +42,9 @@ _BASE64_WRAPPED_BLOCK_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:[A-Za-z0-9+/=_-]{12,}[ \t]*\r?\n[ \t]*){1,}[A-Za-z0-9+/=_-]{2,}"
 )
 _CHAT_TEMPLATE_DELIMITER_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?:<\s*/?\s*(?:start_of_turn|end_of_turn)\s*>|<turn\|\s*>|"
+    r"(?:<\s*(?:/\s*)?(?:start_of_turn|end_of_turn)\s*>|<turn\|\s*>|"
     r"<\|(?:im_start|im_end|system|user|assistant|developer|start_of_role|end_of_role|end_of_text)\|\s*>|"
-    r"<<\s*/?\s*SYS\s*>>|\[\s*/?\s*INST\s*\])",
+    r"<<\s*(?:/\s*)?SYS\s*>>|\[\s*(?:/\s*)?INST\s*\])",
     re.IGNORECASE,
 )
 _HOMOGLYPH_FOLD_MAP: Final[dict[int, str]] = str.maketrans(
@@ -260,7 +260,7 @@ def resolve_guardrail_model_spec(model_id: str) -> GuardrailModelSpec:
 
 _SCRIPT_OPEN_RE: Final[re.Pattern[str]] = re.compile(r"<script\b", re.IGNORECASE)
 _SCRIPT_CLOSE_RE: Final[re.Pattern[str]] = re.compile(
-    r"</script(?:\s+[^<>]*|\s*/[^<>]*)?>",
+    r"</script(?:\s[^<>]*|/[^<>]*)?>",
     re.IGNORECASE,
 )
 _COMMENT_CLOSER_RE: Final[re.Pattern[str]] = re.compile(r"--!?>")

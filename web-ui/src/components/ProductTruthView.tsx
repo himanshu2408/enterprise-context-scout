@@ -188,7 +188,7 @@ function buildMarkdownExport(
 
   for (const row of rows) {
     lines.push(
-      `| ${row.effect_type} | \`${row.qualified_symbol}\` (${row.file_path}:${row.line_range}) | ${row.target_resource} | ${row.spec_status} | ${row.verification_note.replace(/\|/g, "\\|")} |`
+      `| ${row.effect_type} | \`${row.qualified_symbol}\` (${row.file_path}:${row.line_range}) | ${row.target_resource} | ${row.spec_status} | ${row.verification_note.replace(/\\/g, "\\\\").replace(/\|/g, "\\|")} |`
     );
   }
 

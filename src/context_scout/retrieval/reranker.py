@@ -34,9 +34,34 @@ DEFAULT_QWEN3_RERANKER_INSTRUCTION: Final[str] = (
 )
 
 _TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_]{2,}")
-_CAMEL_SPLIT_RE: Final[re.Pattern[str]] = re.compile(
-    r"[A-Z]+(?=[A-Z][a-z0-9]|[^A-Za-z0-9]|$)|[A-Z]?[a-z0-9]+"
-)
+
+
+def _split_camel_case(segment: str) -> list[str]:
+    """Splits a CamelCase / acronym identifier segment into subwords in O(n)."""
+    parts: list[str] = []
+    n = len(segment)
+    i = 0
+    while i < n:
+        ch = segment[i]
+        if not ch.isalnum():
+            i += 1
+            continue
+        start = i
+        if ch.isupper():
+            i += 1
+            if i < n and segment[i].isupper():
+                while i < n and segment[i].isupper():
+                    i += 1
+                if i < n and (segment[i].islower() or segment[i].isdigit()):
+                    i -= 1
+            else:
+                while i < n and (segment[i].islower() or segment[i].isdigit()):
+                    i += 1
+        else:
+            while i < n and (segment[i].islower() or segment[i].isdigit()):
+                i += 1
+        parts.append(segment[start:i])
+    return parts
 _STOPWORDS: Final[frozenset[str]] = frozenset(
     {
         "the",
@@ -156,7 +181,7 @@ def _tokenize_terms(text: str) -> list[str]:
         if "_" in raw_tok or any(ch.isupper() for ch in raw_tok[1:]):
             for seg in raw_tok.split("_"):
                 if len(seg) >= 2:
-                    for sub in _CAMEL_SPLIT_RE.findall(seg):
+                    for sub in _split_camel_case(seg):
                         sub_low = sub.lower()
                         if len(sub_low) >= 2 and sub_low not in _STOPWORDS and sub_low != low:
                             tokens.append(sub_low)

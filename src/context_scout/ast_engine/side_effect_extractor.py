@@ -133,7 +133,7 @@ _TEMPLATE_ARG_RE: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 _CRON_EXPR_RE: Final[re.Pattern[str]] = re.compile(
-    r"""['"]([0-9*/,-]+\s+[0-9*/,-]+\s+[0-9*/,-]+\s+[0-9*/,-]+\s+[0-9*/,-A-Za-z?]+)['"]"""
+    r"""['"]([0-9*/,-]+\s+[0-9*/,-]+\s+[0-9*/,-]+\s+[0-9*/,-]+\s+[0-9*/,A-Za-z?-]+)['"]"""
 )
 
 _CATEGORY_TO_SEVERITY: Final[dict[EffectCategory, SideEffectSeverity]] = {

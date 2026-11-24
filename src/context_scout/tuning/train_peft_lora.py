@@ -1174,9 +1174,11 @@ class PEFTRsLoRATrainer:
         output_dir: Path,
     ) -> tuple[nn.Module, float, float, float, float, float | None, float | None, float | None]:
         """Executes ``trl.SFTTrainer`` + ``trl.DPOTrainer`` when TRL & PEFT are installed."""
+        import trl
         from datasets import Dataset
         from peft import LoraConfig, get_peft_model
-        from trl import DPOConfig, DPOTrainer, SFTConfig, SFTTrainer
+
+        trl_mod: Any = trl
 
         lora_cfg = LoraConfig(
             r=self.config.r,
@@ -1203,7 +1205,7 @@ class PEFTRsLoRATrainer:
             loraplus_lr_ratio=self.config.loraplus_lr_ratio,
         )
 
-        sft_cfg = SFTConfig(
+        sft_cfg = trl_mod.SFTConfig(
             output_dir=str(output_dir / "trl_sft_ckpt"),
             max_steps=self.config.sft_steps,
             learning_rate=self.config.learning_rate,
@@ -1216,7 +1218,7 @@ class PEFTRsLoRATrainer:
             report_to=[],
             seed=self.config.seed,
         )
-        sft_trainer = SFTTrainer(
+        sft_trainer = trl_mod.SFTTrainer(
             model=peft_model,
             args=sft_cfg,
             train_dataset=train_ds,
@@ -1246,7 +1248,7 @@ class PEFTRsLoRATrainer:
                     for r in dpo_records
                 ]
             )
-            dpo_cfg = DPOConfig(
+            dpo_cfg = trl_mod.DPOConfig(
                 output_dir=str(output_dir / "trl_dpo_ckpt"),
                 beta=self.config.dpo_beta,
                 max_steps=self.config.dpo_steps,
@@ -1257,7 +1259,7 @@ class PEFTRsLoRATrainer:
                 report_to=[],
                 seed=self.config.seed,
             )
-            dpo_trainer = DPOTrainer(
+            dpo_trainer = trl_mod.DPOTrainer(
                 model=peft_model,
                 args=dpo_cfg,
                 train_dataset=dpo_ds,

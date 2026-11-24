@@ -458,7 +458,11 @@ class _StdlibRESP2Client:
     def _connect(self) -> None:
         raw_sock = socket.create_connection((self._host, self._port), timeout=self._timeout)
         if self._use_tls:
-            ctx = self._ssl_context or ssl.create_default_context()
+            if self._ssl_context is not None:
+                ctx = self._ssl_context
+            else:
+                ctx = ssl.create_default_context()
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             raw_sock = ctx.wrap_socket(raw_sock, server_hostname=self._host)
         self._sock = raw_sock
         self._reader = raw_sock.makefile("rb")

@@ -78,7 +78,7 @@ def test_default_initialization_vertex_eu_residency() -> None:
     assert client._api_client.project == "enterprise-scout-prod"
     assert client._api_client.location == "europe-west3"
     base_url = client._api_client._http_options.base_url
-    assert "https://europe-west3-aiplatform.googleapis.com/" in base_url
+    assert base_url.startswith("https://europe-west3-aiplatform.googleapis.com/")
 
 
 @pytest.mark.parametrize(
