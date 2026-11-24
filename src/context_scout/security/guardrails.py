@@ -126,6 +126,8 @@ _HOMOGLYPH_FOLD_MAP: Final[dict[int, str]] = str.maketrans(
 
 def _fold_homoglyphs(text: str) -> str:
     """Normalizes NFKC fullwidth forms and folds Cyrillic/Greek lookalikes for detection."""
+    if text.isascii():
+        return text
     return unicodedata.normalize("NFKC", text).translate(_HOMOGLYPH_FOLD_MAP)
 
 
@@ -812,6 +814,8 @@ def _strip_tokens_linear(
 
 def _has_adversarial_html_comment_linear(folded: str) -> bool:
     """Detects adversarial directives inside closed/reconstituted HTML comments in O(n) time."""
+    if "!" not in folded or "--" not in folded or ">" not in folded:
+        return False
     if (
         "<!--" not in folded or ("-->" not in folded and "--!>" not in folded)
     ) and "<script" not in folded.lower():
@@ -1301,6 +1305,8 @@ class PromptInjectionSanitizer:
     @classmethod
     def strip_invisible_unicode(cls, text: str) -> str:
         """Removes zero-width characters, bidirectional overrides, and control characters."""
+        if text.isascii():
+            return cls.CONTROL_CHAR_PATTERN.sub("", text)
         cleaned = cls.INVISIBLE_UNICODE_PATTERN.sub("", text)
         cleaned = cls.BIDI_OVERRIDE_PATTERN.sub("", cleaned)
         return cls.CONTROL_CHAR_PATTERN.sub("", cleaned)
