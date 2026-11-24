@@ -1677,7 +1677,7 @@ _MARKDOWN_IMG_URL_RE: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 _HTML_IMG_EXFIL_RE: Final[re.Pattern[str]] = re.compile(
-    r"""<img\b[^>]{0,512}\bsrc\s*=\s*['"]?\s*((?:https?:)?//[^\s'"<>]+)""",
+    r"""<img\b[^>]{0,512}\bsrc\s*=\s*(?:['"]\s*)?((?:https?:)?//[^\s'"<>]+)""",
     re.IGNORECASE,
 )
 _EXFIL_PARAM_RE: Final[re.Pattern[str]] = re.compile(
