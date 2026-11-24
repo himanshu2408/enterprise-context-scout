@@ -362,6 +362,12 @@ def _strip_tokens_linear(
     check_adversarial_comments: bool = False,
 ) -> tuple[str, bool]:
     """Single-pass O(n) opener-stack + bounded seam rollback token stripper."""
+    if strip_scripts and ">" not in text:
+        strip_scripts = False
+    if strip_comments and not strip_scripts and "-->" not in text and "--!>" not in text:
+        strip_comments = False
+    if strip_chat_delimiters and ">" not in text and "]" not in text:
+        strip_chat_delimiters = False
     if (
         not strip_comments
         and not strip_scripts

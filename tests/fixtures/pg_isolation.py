@@ -404,6 +404,24 @@ def _seed_enterprise_docs_scout(
     ]
     extra_specs: list[tuple[str, str, str, str, str, str]] = [
         (
+            "doc-preflight-sufficiency-gate",
+            "Pre-Flight Sufficiency Gate: 6 Deterministic Checks Preventing Hallucinations",
+            "urn:enterprise_docs_scout:doc-preflight-sufficiency-gate",
+            "GLOBAL",
+            "6 Deterministic Pre-Flight Checks",
+            (
+                "The Pre-Flight Sufficiency Gate prevents hallucinations and wastes $0 in "
+                "frontier tokens by enforcing 6 deterministic checks before any synthesis or "
+                "handoff: (1) Tree-sitter syntax verification (0 syntax errors), "
+                "(2) 100% AST symbol closure (0 unresolved references), "
+                "(3) calibrated RRF hybrid retrieval score threshold (>= 0.65), "
+                "(4) strict RBAC/RLS scope containment (0 unauthorized items), "
+                "(5) 100% verbatim provenance anchoring to indexed file paths and line ranges, "
+                "and (6) citation freshness and non-staleness verification. If any check fails, "
+                "the gate abstains deterministically with paid_tokens_spent=0."
+            ),
+        ),
+        (
             "doc-vwap-mean-reversion",
             "Intraday VWAP Mean Reversion Entry and Exit Rules",
             "urn:enterprise_docs_scout:doc-vwap-mean-reversion",
