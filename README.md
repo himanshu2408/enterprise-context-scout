@@ -185,3 +185,10 @@ Full empirical evidence, 95% Wilson confidence intervals, environment disclosure
 | **[`docs/PLUGIN_CONNECTOR_AUTHORING_GUIDE.md`](docs/PLUGIN_CONNECTOR_AUTHORING_GUIDE.md)** | Implementing custom `LanguagePlugin`, `DomainPlugin`, and `SourceConnectorPlugin` extensions |
 | **[`TEST_INFRA.md`](TEST_INFRA.md)** | Dual-track E2E test architecture, statistical evaluation bounds (Clopper-Pearson / Wilson), and verification gates |
 | **[`docs/BENCHMARKS_AND_ENGINEERING_LOG.md`](docs/BENCHMARKS_AND_ENGINEERING_LOG.md)** | Historical A/B benchmark ledger, confidence intervals, and engineering progression log |
+
+---
+
+## License
+
+Copyright 2026 Himanshu Singh. Licensed under the [Apache License, Version 2.0](LICENSE) (see [`NOTICE`](NOTICE)).
+
