@@ -12,7 +12,7 @@ import sys
 import time
 import weakref
 from collections import OrderedDict, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 from pathlib import Path
@@ -335,6 +335,9 @@ class GitMerkleIndexer:
     def _batch_prepopulate_symbol_embeddings(
         self,
         items: Sequence[tuple[str, list[ParsedSymbol]]],
+        *,
+        heartbeat_fn: Callable[[], object] | None = None,
+        chunk_size: int = 128,
     ) -> None:
         """Pre-populates `_SYMBOL_EMBEDDING_CACHE` for uncached (blob_sha, symbol) pairs."""
         pending_keys: list[tuple[str, str]] = []
@@ -360,18 +363,24 @@ class GitMerkleIndexer:
             from context_scout.retrieval.embedder import get_embedding_provider
 
             active_embedder = get_embedding_provider()
-        batch_vecs = active_embedder.embed_batch(pending_texts, is_query=False)
-        if len(batch_vecs) != len(pending_keys):
-            raise RuntimeError(
-                f"Embedder returned {len(batch_vecs)} vectors for {len(pending_keys)} symbols."
-            )
-        for cache_key, vec in zip(pending_keys, batch_vecs, strict=True):
-            _lru_set(
-                _SYMBOL_EMBEDDING_CACHE,
-                cache_key,
-                [float(x) for x in vec],
-                _SYMBOL_EMBEDDING_CACHE_MAX_ENTRIES,
-            )
+        step = max(1, chunk_size)
+        for offset in range(0, len(pending_texts), step):
+            if heartbeat_fn is not None:
+                heartbeat_fn()
+            slice_keys = pending_keys[offset : offset + step]
+            slice_texts = pending_texts[offset : offset + step]
+            batch_vecs = active_embedder.embed_batch(slice_texts, is_query=False)
+            if len(batch_vecs) != len(slice_keys):
+                raise RuntimeError(
+                    f"Embedder returned {len(batch_vecs)} vectors for {len(slice_keys)} symbols."
+                )
+            for cache_key, vec in zip(slice_keys, batch_vecs, strict=True):
+                _lru_set(
+                    _SYMBOL_EMBEDDING_CACHE,
+                    cache_key,
+                    [float(x) for x in vec],
+                    _SYMBOL_EMBEDDING_CACHE_MAX_ENTRIES,
+                )
 
     def get_git_tree(
         self,
@@ -1120,6 +1129,8 @@ class GitMerkleIndexer:
             global_symbol_map[s_qual] = s_id
             short_name_map[s_qual.split(".")[-1]].append(s_id)
 
+        pre_parsed_pg: dict[str, tuple[str, str | None, list[ParsedSymbol], list[ParsedEdge]]] = {}
+        batch_emb_items_pg: list[tuple[str, list[ParsedSymbol]]] = []
         for file_path in to_index:
             blob_sha = current_tree[file_path]
             raw_content = self._read_blob_or_disk(
@@ -1127,8 +1138,25 @@ class GitMerkleIndexer:
             )
             if raw_content is None:
                 continue
-
             lang = self._detect_language(file_path)
+            if lang:
+                symbols, edges = self.extractor.parse_source(raw_content, lang, file_path=file_path)
+                batch_emb_items_pg.append((blob_sha, symbols))
+            else:
+                symbols, edges = [], []
+            pre_parsed_pg[file_path] = (raw_content, lang, symbols, edges)
+
+        self._batch_prepopulate_symbol_embeddings(
+            batch_emb_items_pg,
+            heartbeat_fn=lambda: conn.execute("SELECT 1;"),
+        )
+
+        for file_path in to_index:
+            parsed_entry_pg = pre_parsed_pg.get(file_path)
+            if parsed_entry_pg is None:
+                continue
+            blob_sha = current_tree[file_path]
+            raw_content, lang, symbols, edges = parsed_entry_pg
             lines = raw_content.splitlines()
             file_id = uuid4()
             cls_res = self._classify_path(attr_matcher, file_path)
@@ -1154,7 +1182,6 @@ class GitMerkleIndexer:
             if not lang:
                 continue
 
-            symbols, edges = self.extractor.parse_source(raw_content, lang, file_path=file_path)
             file_symbol_map: dict[str, UUID] = {}
             symbol_embeddings = self._compute_symbol_embeddings(symbols, blob_sha=blob_sha)
 

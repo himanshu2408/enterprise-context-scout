@@ -53,6 +53,9 @@ def _collect_gc_before_benchmark(request: pytest.FixtureRequest) -> None:
     if (
         request.node.get_closest_marker("benchmark") is not None
         or "latency" in name
+        or "performance" in name
+        or "redos" in name
+        or "asi01" in name
         or "polyglot" in name
         or "merkle" in name
     ):

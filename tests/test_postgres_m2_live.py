@@ -15,7 +15,7 @@ from context_scout.db.repositories import (
     CodeFileRecord,
     PostgresRLSRepository,
 )
-from context_scout.db.session import RLSConnectionManager
+from context_scout.db.session import PoolRole, RLSConnectionManager
 from context_scout.ingestion.git_merkle_indexer import (
     GitMerkleIndexer,
 )
@@ -79,7 +79,7 @@ def test_live_postgres_merkle_sync_cold_and_warm_cache_hit(
     settings: ScoutSettings, indexer: GitMerkleIndexer
 ) -> None:
     """Verifies sync_postgres cold index populates DB and second run executes in <50ms."""
-    mgr = RLSConnectionManager(settings.db_app_url)
+    mgr = RLSConnectionManager(settings.db_app_url, pool_role=PoolRole.INGESTION)
     repo = PostgresRLSRepository()
     domain_id = f"{M2_LIVE_SESSION_DOMAIN_PREFIX}sync_{uuid4().hex[:8]}"
     repo_name = f"eval-m2-live-sync-{uuid4().hex[:8]}"
