@@ -80,6 +80,40 @@ def test_apache_2_0_license_and_notice_alignment_across_manifests() -> None:
     assert "Apache License, Version 2.0" in readme_text
 
 
+def test_ci_pytest_shard_partition_completeness_and_balance() -> None:
+    """Verifies scripts/ci_pytest_shard.py partitions 100% of test modules with zero gaps."""
+    expected_files = sorted(
+        {p.relative_to(REPO_ROOT).as_posix() for p in (REPO_ROOT / "tests").rglob("test_*.py")}
+    )
+    shard_script = REPO_ROOT / "scripts" / "ci_pytest_shard.py"
+    assert shard_script.is_file()
+
+    collected: list[str] = []
+    for shard_idx in range(1, 7):
+        res = subprocess.run(
+            [
+                shutil.which("uv") or "uv",
+                "run",
+                "python",
+                str(shard_script),
+                "--shard",
+                str(shard_idx),
+                "--total-shards",
+                "6",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        shard_files = res.stdout.strip().split()
+        assert len(shard_files) >= 1
+        collected.extend(shard_files)
+
+    assert len(collected) == len(set(collected)), "Duplicate test file across shards"
+    assert sorted(collected) == expected_files
+
+
 def test_unhydratable_pointer_abstains_cleanly_without_placeholder_sha() -> None:
     """ScoutWorkflow skips unhydratable pointers instead of fabricating placeholder_sha slices."""
     repo = InMemoryRLSRepository()

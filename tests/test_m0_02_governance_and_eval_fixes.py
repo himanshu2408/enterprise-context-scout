@@ -379,6 +379,7 @@ def test_runner_markdown_report_uses_dynamic_configured_models() -> None:
         allow_external_cloud_egress=True,
     )
     harness = EvaluationHarness(settings=custom_settings, force_in_memory=True)
+    harness.tracer.clear_spans()
     metrics = {
         "zero_touch_sufficiency_rate": MetricResult(
             metric_id="zero_touch_sufficiency_rate",
