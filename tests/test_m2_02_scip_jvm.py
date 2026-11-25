@@ -279,7 +279,10 @@ def test_scip_100kb_linear_performance() -> None:
     raw = build_scip_index_bytes(documents=docs)
     assert len(raw) >= 100_000
 
+    import gc
+
     ingestor = SCIPIngestor()
+    gc.collect()
     t0 = time.perf_counter()
     syms, _ = ingestor.ingest_bytes(raw, file_path="large.scip")
     elapsed_ms = (time.perf_counter() - t0) * 1000.0

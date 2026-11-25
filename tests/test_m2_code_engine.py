@@ -394,3 +394,55 @@ def test_merkle_indexer_bounded_lru_caches_evict_oldest_entries() -> None:
     assert list(lru.keys()) == ["k1", "k3"]
     assert gmi._lru_get(lru, "k2") is None
     assert gmi._lru_get(lru, "k3") == 3
+
+
+def test_batch_prepopulate_symbol_embeddings_chunks_and_invokes_heartbeat() -> None:
+    """Regression: _batch_prepopulate_symbol_embeddings chunks batches & fires tx heartbeat."""
+    import context_scout.ingestion.git_merkle_indexer as gmi
+    from context_scout.ast_engine.models import ParsedSymbol
+
+    class _FakeEmbedder:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def embed_batch(self, texts: list[str], is_query: bool = False) -> list[list[float]]:
+            _ = is_query
+            self.batch_sizes.append(len(texts))
+            return [[0.25] * 8 for _ in texts]
+
+    fake_emb = _FakeEmbedder()
+    idx = GitMerkleIndexer(embedder=fake_emb)
+    blob_sha = "f" * 40
+    syms = [
+        ParsedSymbol(
+            name=f"fn_{i}",
+            qualified_name=f"pkg.mod.fn_{i}",
+            symbol_kind="function",
+            start_line=i + 1,
+            end_line=i + 2,
+            start_byte=0,
+            end_byte=16,
+            signature=f"def fn_{i}() -> None",
+            signature_skeleton=f"def fn_{i}() -> None:",
+            docstring="",
+            contextual_summary=f"Function {i}",
+        )
+        for i in range(5)
+    ]
+    heartbeats = 0
+
+    def _hb() -> None:
+        nonlocal heartbeats
+        heartbeats += 1
+
+    try:
+        idx._batch_prepopulate_symbol_embeddings(
+            [(blob_sha, syms)],
+            heartbeat_fn=_hb,
+            chunk_size=2,
+        )
+        assert fake_emb.batch_sizes == [2, 2, 1]
+        assert heartbeats == 3
+    finally:
+        for s in syms:
+            gmi._SYMBOL_EMBEDDING_CACHE.pop((blob_sha, s.qualified_name), None)

@@ -60,6 +60,60 @@ def test_version_alignment_is_1_0_0_across_all_manifests() -> None:
     assert str(chart["appVersion"]) == "1.0.0"
 
 
+def test_apache_2_0_license_and_notice_alignment_across_manifests() -> None:
+    """Verifies root LICENSE, NOTICE, pyproject.toml, web-ui/package.json, and README align."""
+    license_text = (REPO_ROOT / "LICENSE").read_text(encoding="utf-8")
+    assert "Apache License" in license_text
+    assert "Version 2.0, January 2004" in license_text
+
+    notice_text = (REPO_ROOT / "NOTICE").read_text(encoding="utf-8")
+    assert "Copyright 2026 Himanshu Singh" in notice_text
+    assert "Apache License, Version 2.0" in notice_text
+
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["project"]["license"]["text"] == "Apache-2.0"
+
+    webui_pkg = json.loads((REPO_ROOT / "web-ui" / "package.json").read_text(encoding="utf-8"))
+    assert webui_pkg["license"] == "Apache-2.0"
+
+    readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "Apache License, Version 2.0" in readme_text
+
+
+def test_ci_pytest_shard_partition_completeness_and_balance() -> None:
+    """Verifies scripts/ci_pytest_shard.py partitions 100% of test modules with zero gaps."""
+    expected_files = sorted(
+        {p.relative_to(REPO_ROOT).as_posix() for p in (REPO_ROOT / "tests").rglob("test_*.py")}
+    )
+    shard_script = REPO_ROOT / "scripts" / "ci_pytest_shard.py"
+    assert shard_script.is_file()
+
+    collected: list[str] = []
+    for shard_idx in range(1, 7):
+        res = subprocess.run(
+            [
+                shutil.which("uv") or "uv",
+                "run",
+                "python",
+                str(shard_script),
+                "--shard",
+                str(shard_idx),
+                "--total-shards",
+                "6",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        shard_files = res.stdout.strip().split()
+        assert len(shard_files) >= 1
+        collected.extend(shard_files)
+
+    assert len(collected) == len(set(collected)), "Duplicate test file across shards"
+    assert sorted(collected) == expected_files
+
+
 def test_unhydratable_pointer_abstains_cleanly_without_placeholder_sha() -> None:
     """ScoutWorkflow skips unhydratable pointers instead of fabricating placeholder_sha slices."""
     repo = InMemoryRLSRepository()
