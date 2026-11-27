@@ -108,32 +108,26 @@ def _generate_rsa_2048_keypair(kid: str) -> tuple[rsa.RSAPrivateKey, dict[str, A
 
 
 def _cleanup_pg_tenants(tenant_ids: list[uuid.UUID], *, domain_ids: Sequence[str] = ()) -> None:
+    from tests.fixtures.pg_isolation import cleanup_pg_tenants_and_eval_domains
+
     if not tenant_ids and not domain_ids:
         return
     settings = ScoutSettings()
-    with psycopg.connect(settings.db_admin_url, autocommit=True) as conn:
-        for tid in tenant_ids:
-            for tbl in (
-                "audit_events",
-                "scim_users",
-                "scim_groups",
-                "execution_telemetry",
-                "scout_sessions",
-                "indexing_dead_letter",
-                "indexing_queue",
-                "overlay_file_deltas",
-                "ref_snapshots",
-                "code_files",
-                "doc_chunks",
-                "repositories",
-                "domain_packs",
-            ):
-                conn.execute(f"DELETE FROM {tbl} WHERE tenant_id = %s;", (tid,))
-        for dom_id in domain_ids:
+    eval_domains = [d for d in domain_ids if d.startswith("eval_")]
+    other_domains = [d for d in domain_ids if not d.startswith("eval_")]
+    with psycopg.connect(settings.db_admin_url) as conn:
+        cleanup_pg_tenants_and_eval_domains(
+            conn,
+            tenant_ids=tuple(tenant_ids),
+            domain_ids=tuple(eval_domains),
+        )
+        for dom_id in other_domains:
             conn.execute(
                 "DELETE FROM domain_packs WHERE domain_id = %s AND tenant_id != %s;",
                 (dom_id, DEFAULT_TENANT_ID),
             )
+        if other_domains:
+            conn.commit()
 
 
 @pytest.fixture(autouse=True)
@@ -487,6 +481,7 @@ def test_multi_provider_oidc_jwks_kid_rotation_and_dev_session_gate(
 # =============================================================================
 
 
+@pytest.mark.postgres
 def test_scim_routes_pg17_force_rls_nested_groups_and_deprovisioning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -657,6 +652,7 @@ def test_scim_routes_pg17_force_rls_nested_groups_and_deprovisioning(
 # =============================================================================
 
 
+@pytest.mark.postgres
 def test_audit_chain_pg17_worm_tamper_gcp_logging_and_siem_webhook(
     tmp_path: Path,
 ) -> None:
@@ -1022,6 +1018,7 @@ def test_prometheus_metrics_auth_drift_alert_and_low_cardinality(
 # =============================================================================
 
 
+@pytest.mark.postgres
 def test_hardened_webhooks_admin_purge_and_openapi_schema_fuzzing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1041,7 +1038,12 @@ def test_hardened_webhooks_admin_purge_and_openapi_schema_fuzzing(
     ):
         monkeypatch.delenv(env_key, raising=False)
 
+    prev_db_app_url = os.environ.get("SCOUT_DB_APP_URL")
     monkeypatch.setenv("SCOUT_ENVIRONMENT", "production")
+    monkeypatch.setenv(
+        "SCOUT_DB_APP_URL",
+        "postgresql://scout_app_user:ProdStrongPass99!@127.0.0.1:54329/context_scout",
+    )
     monkeypatch.setenv("SCOUT_ALLOW_UNSIGNED_DEV_WEBHOOKS", "true")
     for vendor in ("gitlab", "github", "confluence", "jira"):
         res_503 = client.post(f"/api/v1/webhooks/{vendor}", json={"domain_id": "core"})
@@ -1076,6 +1078,12 @@ def test_hardened_webhooks_admin_purge_and_openapi_schema_fuzzing(
         )
         assert ok_res.status_code in {200, 202}
         assert ok_res.json()["status"] == "queued"
+
+    monkeypatch.setenv("SCOUT_ENVIRONMENT", "development")
+    if prev_db_app_url is None:
+        monkeypatch.delenv("SCOUT_DB_APP_URL", raising=False)
+    else:
+        monkeypatch.setenv("SCOUT_DB_APP_URL", prev_db_app_url)
 
     # Webhook stats/DLQ RBAC + tenant RLS
     assert client.get("/api/v1/webhooks/stats").status_code == 401
@@ -1224,6 +1232,11 @@ def test_hardened_webhooks_admin_purge_and_openapi_schema_fuzzing(
         # 3. OpenAPI schema fuzzing across all FastAPI paths & methods: zero 500s, zero auth bypass
         monkeypatch.setenv("SCOUT_SCIM_BEARER_TOKEN", "fuzz-scim-secret")
         spec = app.openapi()
+        monkeypatch.setenv("SCOUT_ENVIRONMENT", "production")
+        monkeypatch.setenv(
+            "SCOUT_DB_APP_URL",
+            "postgresql://scout_app_user:ProdStrongPass99!@127.0.0.1:54329/context_scout",
+        )
         public_paths = {"/api/v1/health"}
         for raw_path, path_item in sorted(spec["paths"].items()):
             fuzzed_path = (
@@ -1269,6 +1282,7 @@ def test_hardened_webhooks_admin_purge_and_openapi_schema_fuzzing(
 # =============================================================================
 
 
+@pytest.mark.postgres
 async def test_stateless_mcp_2026_07_28_sep_compliance_traceparent_and_cow_mr_tools() -> None:
     """Verifies SEP-2243, SEP-2575, SEP-2663, zero identity args, & live PG17 CoW MR tools."""
     settings = ScoutSettings()
@@ -1774,6 +1788,7 @@ def test_otel_middleware_ignores_spoofed_unauthenticated_principal_header() -> N
     assert os.environ.get("PYTEST_CURRENT_TEST")
 
 
+@pytest.mark.postgres
 def test_admin_purge_fail_closed_and_selector_modes() -> None:
     """/admin/purge rejects missing repo_name (400) and supports doc_id/repo."""
     from datetime import UTC, datetime
@@ -1912,6 +1927,7 @@ def test_admin_purge_fail_closed_and_selector_modes() -> None:
         _cleanup_pg_tenants([tenant_a], domain_ids=[eph_domain])
 
 
+@pytest.mark.postgres
 def test_admin_purge_rejects_blank_and_ambiguous_selectors() -> None:
     """/admin/purge rejects blank & ambiguous selectors while preserving RBAC."""
     from datetime import UTC, datetime
@@ -2086,6 +2102,7 @@ def test_admin_purge_rejects_blank_and_ambiguous_selectors() -> None:
         _cleanup_pg_tenants([tenant_a], domain_ids=[eph_domain])
 
 
+@pytest.mark.postgres
 def test_admin_purge_cross_tenant_object_key_returns_403() -> None:
     """/admin/purge maps cross-tenant object_keys PermissionError to HTTP 403."""
     from context_scout.api.routes.admin import get_admin_purge_coordinator

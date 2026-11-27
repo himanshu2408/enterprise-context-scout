@@ -98,18 +98,24 @@ def _embed_test_text(text: str) -> list[float]:
 
 
 def _snapshot_non_eval_counts(db_admin_url: str) -> dict[str, dict[str, int]]:
+    from tests.fixtures.pg_isolation import DEFAULT_TENANT_ID
+
     snap: dict[str, dict[str, int]] = {}
     with psycopg.connect(db_admin_url) as conn:
         for tbl in ("code_files", "ast_symbols", "ast_edges", "doc_chunks"):
             rows = conn.execute(
                 f"SELECT domain_id, count(*) FROM {tbl} "
-                "WHERE domain_id NOT LIKE 'eval_%%' GROUP BY domain_id ORDER BY domain_id;"
+                "WHERE tenant_id = %s AND domain_id NOT LIKE 'eval_%%' "
+                "GROUP BY domain_id ORDER BY domain_id;",
+                (DEFAULT_TENANT_ID,),
             ).fetchall()
             snap[tbl] = {str(r[0]): int(r[1]) for r in rows}
     return snap
 
 
 def _cleanup_eval_domain(db_admin_url: str, domain_prefix: str) -> None:
+    from tests.fixtures.pg_isolation import cleanup_pg_tenants_and_eval_domains
+
     with psycopg.connect(db_admin_url) as conn:
         rows = conn.execute(
             "SELECT domain_id FROM domain_packs WHERE domain_id LIKE %s;",
@@ -117,9 +123,7 @@ def _cleanup_eval_domain(db_admin_url: str, domain_prefix: str) -> None:
         ).fetchall()
         dids = [str(r[0]) for r in rows]
         if dids:
-            for tbl in _FK_DELETE_ORDER:
-                conn.execute(f"DELETE FROM {tbl} WHERE domain_id = ANY(%s);", (dids,))
-            conn.commit()
+            cleanup_pg_tenants_and_eval_domains(conn, domain_ids=tuple(dids))
 
 
 @pytest.fixture(scope="module")
@@ -136,6 +140,7 @@ def pg17_canary() -> Generator[ScoutSettings, None, None]:
         assert before == after, f"Shared PG17 corpus mutated: before={before}, after={after}"
 
 
+@pytest.mark.postgres
 def test_step3_qualification_reports_exist_and_valid() -> None:
     """Validates generated Suite 3.1 & Suite 3.2 reports, sample sizes, and 95% Wilson CIs."""
     reports_dir = REPO_ROOT / "reports"
@@ -172,6 +177,7 @@ def test_step3_qualification_reports_exist_and_valid() -> None:
     assert poly["shared_pg17_canary_verified"] is True
 
 
+@pytest.mark.postgres
 def test_pg17_confluence_lifecycle_rbac_and_preflight_negative_control(
     pg17_canary: ScoutSettings,
 ) -> None:
@@ -428,6 +434,7 @@ def test_pg17_confluence_lifecycle_rbac_and_preflight_negative_control(
         _cleanup_eval_domain(pg17_canary.db_admin_url, domain_id)
 
 
+@pytest.mark.postgres
 def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
     pg17_canary: ScoutSettings,
 ) -> None:

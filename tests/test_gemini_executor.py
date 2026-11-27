@@ -383,6 +383,7 @@ def test_roi_and_token_savings_telemetry_calculation(
     assert retrieved.estimated_usd_saved == expected_usd_saved
 
 
+@pytest.mark.postgres
 def test_live_postgres_execution_telemetry_persistence(
     principal: PrincipalContext,
     sample_context_pack: ImplementationContextPack,

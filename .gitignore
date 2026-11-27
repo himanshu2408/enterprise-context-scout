@@ -43,6 +43,18 @@ data/unseen_repos_v2/
 data/data_engineering/
 domains/**/corpus_index.json
 domains/*/tuning/*.jsonl
+!domains/code_architecture_scout/tuning/train.jsonl
+!domains/code_architecture_scout/tuning/valid.jsonl
+!domains/code_architecture_scout/tuning/eval.jsonl
+!domains/enterprise_docs_scout/tuning/train.jsonl
+!domains/enterprise_docs_scout/tuning/valid.jsonl
+!domains/enterprise_docs_scout/tuning/eval.jsonl
+!domains/data_engineering_scout/tuning/train.jsonl
+!domains/data_engineering_scout/tuning/valid.jsonl
+!domains/data_engineering_scout/tuning/eval.jsonl
+!domains/polyglot_unseen_v2/tuning/train.jsonl
+!domains/polyglot_unseen_v2/tuning/valid.jsonl
+!domains/polyglot_unseen_v2/tuning/eval.jsonl
 models/base/
 models/adapters/**/*.safetensors
 

@@ -16,7 +16,6 @@ from testcontainers.community.postgres import PostgresContainer
 from tests.fixtures.pg_isolation import (
     cleanup_ephemeral_pg_domain,
     create_ephemeral_pg_domain,
-    ensure_ephemeral_domain_artifacts,
     ensure_pg17_schema_and_seed_corpora,
     make_ephemeral_pg_domain_id,
 )
@@ -62,20 +61,33 @@ def _collect_gc_before_benchmark(request: pytest.FixtureRequest) -> None:
         gc.collect()
 
 
+def _session_requires_pg17(session: pytest.Session) -> bool:
+    pg_fixtures = {
+        "ephemeral_pg_domain",
+        "ephemeral_pg_domain_factory",
+        "s22_pg_domain",
+        "pg17_canary",
+    }
+    for item in session.items:
+        if item.get_closest_marker("postgres") is not None:
+            return True
+        fixture_names = getattr(item, "fixturenames", ())
+        if any(name in pg_fixtures for name in fixture_names):
+            return True
+    return False
+
+
 @pytest.fixture(scope="session", autouse=True)
-def bootstrap_pg17_session() -> Generator[None, None, None]:
-    """Ensure PG17 schema + seeded corpora."""
+def bootstrap_pg17_session(request: pytest.FixtureRequest) -> Generator[None, None, None]:
+    """Ensure PG17 schema + seeded corpora only when PostgreSQL tests are collected."""
+    if not _session_requires_pg17(request.session) or _PROJECT_ROOT.name.startswith("scout_wt_"):
+        yield
+        return
+
     container: PostgresContainer | None = None
     prev_admin = os.environ.get("SCOUT_DB_ADMIN_URL")
     prev_app = os.environ.get("SCOUT_DB_APP_URL")
-    created_artifacts: list[Path] = []
-    existing_tuning_dirs = {p for p in (_PROJECT_ROOT / "domains").glob("*/tuning") if p.is_dir()}
     try:
-        if _PROJECT_ROOT.name.startswith("scout_wt_"):
-            created_artifacts = ensure_ephemeral_domain_artifacts(_PROJECT_ROOT)
-            yield
-            return
-
         settings = ScoutSettings()
         db_admin_url = settings.db_admin_url
         db_app_url = settings.db_app_url
@@ -122,19 +134,8 @@ def bootstrap_pg17_session() -> Generator[None, None, None]:
             db_app_url=db_app_url,
             repo_root=_PROJECT_ROOT,
         )
-        created_artifacts = ensure_ephemeral_domain_artifacts(_PROJECT_ROOT)
         yield
     finally:
-        for artifact_path in reversed(created_artifacts):
-            if artifact_path.exists():
-                artifact_path.unlink()
-        for tuning_dir in (_PROJECT_ROOT / "domains").glob("*/tuning"):
-            if (
-                tuning_dir.is_dir()
-                and tuning_dir not in existing_tuning_dirs
-                and not any(tuning_dir.iterdir())
-            ):
-                tuning_dir.rmdir()
         if prev_admin is None:
             os.environ.pop("SCOUT_DB_ADMIN_URL", None)
         else:

@@ -611,12 +611,16 @@ class AdapterRouter:
                     domain_id,
                     tenant_id=principal.tenant_id if principal is not None else None,  # type: ignore[arg-type]
                 )
-                if bool(res.get("is_valid", False)):
+                if bool(res.get("is_valid", False)) and bool(
+                    res.get("adapter_present", res.get("adapters_present", True))
+                ):
                     return True
             except TypeError:
                 try:
                     res = self._adapter_pool.verify_adapter(domain_id)
-                    if bool(res.get("is_valid", False)):
+                    if bool(res.get("is_valid", False)) and bool(
+                        res.get("adapter_present", res.get("adapters_present", True))
+                    ):
                         return True
                 except Exception as exc:
                     logger.debug(

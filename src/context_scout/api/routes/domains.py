@@ -29,8 +29,10 @@ def _query_rls_domain_counts(principal: PrincipalContext) -> dict[str, dict[str,
     counts: dict[str, dict[str, int]] = {}
     try:
         settings = ScoutSettings()
-        conn_mgr = RLSConnectionManager(settings.db_app_url)
-        with conn_mgr.scoped_transaction(principal) as conn:
+        with (
+            RLSConnectionManager(settings.db_app_url, use_pool=False) as conn_mgr,
+            conn_mgr.scoped_transaction(principal) as conn,
+        ):
             doc_rows = conn.execute(
                 "SELECT domain_id, COUNT(*), COUNT(DISTINCT doc_id) "
                 "FROM doc_chunks GROUP BY domain_id;"

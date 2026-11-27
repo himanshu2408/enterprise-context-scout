@@ -863,6 +863,7 @@ def test_docker_compose_enterprise_alembic_migration_and_rls_isolation(
     assert "RuntimeWarning" not in sidecar_proc.stderr
 
 
+@pytest.mark.postgres
 def test_adapter_sync_sidecar_close_respects_rls_manager_ownership(tmp_path: Path) -> None:
     """AdapterSyncSidecar.close() closes owned RLSConnectionManager but leaves shared ones."""
     from context_scout.db.repositories import InMemoryRLSRepository

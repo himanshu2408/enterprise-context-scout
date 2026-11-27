@@ -386,6 +386,7 @@ def cleanup_f08_f09_session_domain(
     conn.commit()
 
 
+@pytest.mark.postgres
 def test_f09_live_postgres_cross_repo_reconciler() -> None:
     """Verifies 2-phase cross-repo resolution query against live PostgreSQL 17."""
     settings = ScoutSettings()
@@ -529,6 +530,7 @@ def test_f09_live_postgres_cross_repo_reconciler() -> None:
             cleanup_f08_f09_session_domain(cleanup_conn, domain_id)
 
 
+@pytest.mark.postgres
 def test_f09_cleanup_canary_isolation_and_mutation_proof() -> None:
     """Canary test proving F09 cleanup refuses non-session domains and cannot touch canary rows."""
     settings = ScoutSettings()

@@ -15,15 +15,15 @@ out-of-corpus abstention traps.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Generator
-from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from context_scout.api import dependencies
 from context_scout.api.main import create_app
+
+pytestmark = pytest.mark.postgres
 
 _ANSWERABLE_CASES: list[tuple[str, str, str, tuple[str, ...]]] = [
     (
@@ -96,7 +96,7 @@ _ANSWERABLE_CASES: list[tuple[str, str, str, tuple[str, ...]]] = [
             "How does RLSConnectionManager enforce PostgreSQL 17 FORCE ROW LEVEL SECURITY "
             "and SET LOCAL tenant isolation?"
         ),
-        ("code_architecture_scout", "enterprise_docs_scout", "federated_all"),
+        ("federated_all", "code_architecture_scout", "enterprise_docs_scout"),
     ),
 ]
 
@@ -178,30 +178,10 @@ def test_unscripted_answerable_multidomain(
         f"{case_id} routed to unexpected domain {data['domain_id']!r}"
     )
 
-    if os.environ.get("CONTEXT_SCOUT_USE_LIVE_MLX") == "1":
-        assert data["passed"] is True, (
-            f"{case_id} failed live MLX synthesis: {data.get('diagnostic')}"
-        )
-        assert data["context_pack"] is not None
-    else:
-        # Offline CI mode exercises live PG17 retrieval & routing without LLM synthesis.
-        preflight = data.get("preflight_report") or {}
-        traces = (
-            data.get("stage_traces") or (data.get("diagnostic") or {}).get("stage_traces") or []
-        )
-        stage2: dict[str, Any] = next(
-            (st for st in traces if st.get("stage") == 2),
-            {},
-        )
-        has_accepted_probe = any(
-            int(p.get("accepted_hits", 0)) > 0
-            or any(c.get("accepted") is True for c in (p.get("top_hits") or []))
-            for p in (stage2.get("domain_probes") or [])
-        )
-        assert preflight.get("passed") is True or data["passed"] is True or has_accepted_probe, (
-            f"{case_id} failed PG17 retrieval/preflight: {preflight} "
-            f"| diag={data.get('diagnostic')}"
-        )
+    assert data["passed"] is True, (
+        f"{case_id} failed answerable PG17 evaluation: {data.get('diagnostic')}"
+    )
+    assert data["context_pack"] is not None
 
 
 @pytest.mark.parametrize(

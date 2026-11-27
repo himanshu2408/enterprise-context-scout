@@ -12,7 +12,11 @@ from uuid import uuid4
 import httpx
 import psycopg
 import pytest
-from tests.fixtures.pg_isolation import cleanup_ephemeral_pg_domain, create_ephemeral_pg_domain
+from tests.fixtures.pg_isolation import (
+    DEFAULT_TENANT_ID,
+    cleanup_ephemeral_pg_domain,
+    create_ephemeral_pg_domain,
+)
 
 from context_scout.agents.conflict_detector import ConflictDetector
 from context_scout.config import ScoutSettings
@@ -34,32 +38,29 @@ from context_scout.schemas.contracts import (
     compute_normalized_rrf,
 )
 
-_SHARED_BASELINE_LOCKED = {
-    "code_architecture_scout_code_files": 273,
-    "code_architecture_scout_ast_symbols": 3022,
-    "code_architecture_scout_ast_edges": 26765,
-    "enterprise_docs_scout_doc_chunks": 14318,
-}
-
 
 def _snapshot_shared_counts(conn: psycopg.Connection[Any]) -> dict[str, int]:
     queries = {
         "code_architecture_scout_code_files": (
-            "SELECT COUNT(*) FROM code_files WHERE domain_id = 'code_architecture_scout'"
+            "SELECT COUNT(*) FROM code_files "
+            "WHERE tenant_id = %s AND domain_id = 'code_architecture_scout'"
         ),
         "code_architecture_scout_ast_symbols": (
-            "SELECT COUNT(*) FROM ast_symbols WHERE domain_id = 'code_architecture_scout'"
+            "SELECT COUNT(*) FROM ast_symbols "
+            "WHERE tenant_id = %s AND domain_id = 'code_architecture_scout'"
         ),
         "code_architecture_scout_ast_edges": (
-            "SELECT COUNT(*) FROM ast_edges WHERE domain_id = 'code_architecture_scout'"
+            "SELECT COUNT(*) FROM ast_edges "
+            "WHERE tenant_id = %s AND domain_id = 'code_architecture_scout'"
         ),
         "enterprise_docs_scout_doc_chunks": (
-            "SELECT COUNT(*) FROM doc_chunks WHERE domain_id = 'enterprise_docs_scout'"
+            "SELECT COUNT(*) FROM doc_chunks "
+            "WHERE tenant_id = %s AND domain_id = 'enterprise_docs_scout'"
         ),
     }
     counts: dict[str, int] = {}
     for key, sql in queries.items():
-        row = conn.execute(sql).fetchone()
+        row = conn.execute(sql, (DEFAULT_TENANT_ID,)).fetchone()
         counts[key] = int(row[0]) if row else 0
     return counts
 
@@ -99,9 +100,6 @@ def s22_pg_domain() -> Iterator[tuple[str, ScoutSettings]]:
                 assert after[key] == before_val, (
                     f"Shared domain {key} count mutated ({before_val} -> {after[key]})!"
                 )
-            for key, expected_min in _SHARED_BASELINE_LOCKED.items():
-                if baseline[key] >= expected_min:
-                    assert after[key] >= expected_min
 
 
 def _make_doc_chunk(
@@ -266,6 +264,7 @@ def test_repositories_inmemory_persists_lifecycle_market_scopes_and_authority_rr
     assert math.isclose(hit0.normalized_rrf_score, expected_exact, rel_tol=0.0, abs_tol=1e-6)
 
 
+@pytest.mark.postgres
 def test_repositories_pg17_persists_lifecycle_columns_null_market_scope_and_authority_rrf(
     s22_pg_domain: tuple[str, ScoutSettings],
 ) -> None:
@@ -500,6 +499,7 @@ def test_confluence_noise_policy_filters_demotes_and_boosts_cleanly() -> None:
     assert math.isclose(docs_by_id["confluence:p12"].authority_weight, 1.35)
 
 
+@pytest.mark.postgres
 def test_confluence_lifecycle_pg17_supersession_same_version_tombstone_cursor_and_scope_narrowing(
     s22_pg_domain: tuple[str, ScoutSettings],
 ) -> None:

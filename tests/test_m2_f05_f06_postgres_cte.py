@@ -292,6 +292,7 @@ def cleanup_m2_f05_f06_session_domain(
     conn.commit()
 
 
+@pytest.mark.postgres
 def test_f05_f06_live_postgres_catalog_and_recursive_cte() -> None:
     """Verifies live PostgreSQL 17 execution of catalog tables and recursive CTE query."""
     settings = ScoutSettings()
@@ -469,6 +470,7 @@ def test_f05_f06_live_postgres_catalog_and_recursive_cte() -> None:
             cleanup_m2_f05_f06_session_domain(cleanup_conn, domain_id)
 
 
+@pytest.mark.postgres
 def test_f05_f06_cleanup_canary_isolation_and_mutation_proof() -> None:
     """Canary test proving F05/F06 cleanup refuses non-session domains and preserves canary rows."""
     settings = ScoutSettings()

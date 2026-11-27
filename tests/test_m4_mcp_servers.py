@@ -7,18 +7,32 @@ tool execution against 14,318 research chunks under Forced RLS.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Generator
+from datetime import date
 from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from examples.quant_dogfood.contracts import FrictionVerdict
 from examples.quant_dogfood.mcp_servers.quant_corpus_mcp import create_quant_corpus_mcp_server
-from examples.quant_dogfood.mcp_servers.seed_code_corpus import seed_trading_codebase_and_issues
+from examples.quant_dogfood.mcp_servers.seed_code_corpus import GITHUB_ISSUES_SEED
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult
+from tests.fixtures.pg_isolation import cleanup_pg_tenants_and_eval_domains
 
+from context_scout.ast_engine.extractor import ASTExtractor
 from context_scout.config import ScoutSettings
+from context_scout.db.repositories import (
+    ASTEdgeRecord,
+    ASTSymbolRecord,
+    CodeFileRecord,
+    DocChunkRecord,
+    PostgresRLSRepository,
+)
 from context_scout.db.session import RLSConnectionManager
 from context_scout.mcp_servers.code_repo_mcp import create_code_repo_mcp_server
 from context_scout.mcp_servers.common import (
@@ -26,6 +40,7 @@ from context_scout.mcp_servers.common import (
     TRUNCATION_INDICATOR,
     bound_payload_dict,
 )
+from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import (
     PrincipalContext,
     RoleType,
@@ -38,6 +53,8 @@ from context_scout.security.rbac import (
     scoped_db_session,
 )
 
+pytestmark = pytest.mark.quant_dogfood
+
 
 def _extract_tool_payload(res: object) -> dict[str, Any]:
     assert isinstance(res, CallToolResult)
@@ -47,27 +64,225 @@ def _extract_tool_payload(res: object) -> dict[str, Any]:
     return content
 
 
-@pytest.fixture(scope="module", autouse=True)
-def ensure_code_corpus_seeded() -> None:
-    """Ensures trading strategies and GitHub issues are persisted in live PostgreSQL 17."""
-    seed_trading_codebase_and_issues()
+@pytest.fixture(scope="module")
+def quant_isolated_tenant() -> Generator[UUID, None, None]:
+    """Seeds isolated tenant_id quant code + research rows in PG17 with full 23-table teardown."""
+    iso_tid = uuid4()
+    settings = ScoutSettings()
+    repo = PostgresRLSRepository()
+    extractor = ASTExtractor()
+    embedder = get_embedding_provider(dimensions=768)
+    root = Path(__file__).resolve().parents[1]
+    strategies_dir = root / "examples" / "quant_dogfood" / "trading_strategies"
+
+    with psycopg.connect(settings.db_admin_url) as admin_conn:
+        for d_id, name, adapter_id, truth in (
+            ("trading_code_scout", "Trading Codebase Scout", "gemma4_26b_code_scout", "code"),
+            (
+                "quant_research_scout",
+                "Quant Research Scout",
+                "gemma4_26b_quant_research",
+                "document",
+            ),
+        ):
+            admin_conn.execute(
+                """
+                INSERT INTO domain_packs (
+                    tenant_id, domain_id, display_name, lora_adapter_id,
+                    primary_truth_source, freshness_half_life_days, config_json
+                )
+                VALUES (%s, %s, %s, %s, %s, 90, '{}'::jsonb)
+                ON CONFLICT (tenant_id, domain_id) DO NOTHING
+                """,
+                (iso_tid, d_id, name, adapter_id, truth),
+            )
+        admin_conn.commit()
+
+    principal = PrincipalContext(
+        user_id="test_m4_iso_seeder",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng", "public_quant"],
+        tenant_id=iso_tid,
+    )
+    try:
+        with (
+            RLSConnectionManager(settings.db_app_url, use_pool=False) as mgr,
+            mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn,
+        ):
+            sym_map: dict[str, UUID] = {}
+            edges_buf: list[Any] = []
+            for py_file in sorted(strategies_dir.glob("*.py")):
+                if py_file.name == "__init__.py":
+                    continue
+                rel_path = py_file.relative_to(root).as_posix()
+                content = py_file.read_text(encoding="utf-8")
+                file_id = uuid4()
+                repo.insert_code_file(
+                    conn,
+                    CodeFileRecord(
+                        file_id=file_id,
+                        tenant_id=iso_tid,
+                        domain_id="trading_code_scout",
+                        repo_name="enterprise-context-scout",
+                        file_path=rel_path,
+                        git_commit_sha="a" * 40,
+                        git_blob_sha=hashlib.sha1(content.encode("utf-8")).hexdigest(),
+                        language="python",
+                        allowed_scopes=["public_eng"],
+                        raw_content=content,
+                        line_count=len(content.splitlines()),
+                    ),
+                )
+                symbols, edges = extractor.parse_source(content, "python", file_path=rel_path)
+                for sym in symbols:
+                    sid = uuid4()
+                    sym_map[sym.qualified_name] = sid
+                    repo.insert_ast_symbol(
+                        conn,
+                        ASTSymbolRecord(
+                            symbol_id=sid,
+                            tenant_id=iso_tid,
+                            file_id=file_id,
+                            domain_id="trading_code_scout",
+                            qualified_name=sym.qualified_name,
+                            symbol_kind=sym.symbol_kind,
+                            start_line=sym.start_line,
+                            end_line=sym.end_line,
+                            signature_skeleton=sym.signature_skeleton,
+                            contextual_summary=sym.contextual_summary,
+                            allowed_scopes=["public_eng"],
+                            embedding=embedder.embed_text(
+                                f"{sym.signature_skeleton} {sym.docstring}", is_query=False
+                            ),
+                        ),
+                    )
+                edges_buf.extend(edges)
+            for edge in edges_buf:
+                src_id = sym_map.get(edge.source_qualified_name)
+                if src_id:
+                    repo.insert_ast_edge(
+                        conn,
+                        ASTEdgeRecord(
+                            edge_id=uuid4(),
+                            tenant_id=iso_tid,
+                            domain_id="trading_code_scout",
+                            source_symbol_id=src_id,
+                            target_qualified_name=edge.target_qualified_name,
+                            target_symbol_id=sym_map.get(edge.target_qualified_name),
+                            edge_kind=edge.edge_kind,
+                            allowed_scopes=["public_eng"],
+                        ),
+                    )
+            for issue in GITHUB_ISSUES_SEED:
+                num = int(str(issue["issue_number"]))
+                title = str(issue["title"])
+                section = str(issue["section"])
+                content = str(issue["content"])
+                repo.insert_doc_chunk(
+                    conn,
+                    DocChunkRecord(
+                        chunk_id=uuid4(),
+                        tenant_id=iso_tid,
+                        domain_id="trading_code_scout",
+                        doc_id=f"gh-issue:{num}",
+                        doc_title=title,
+                        source_uri=f"https://github.com/enterprise-context-scout/issues/{num}",
+                        market_scope="GLOBAL",
+                        published_date=date(2026, 1, 15),
+                        authority_weight=1.0,
+                        section_heading=section,
+                        contextual_header=f"GitHub Issue #{num} [trading_code_scout]",
+                        verbatim_content=content,
+                        metadata_json={
+                            "issue_number": num,
+                            "state": issue["state"],
+                            "labels": issue["labels"],
+                        },
+                        allowed_scopes=["public_eng"],
+                        embedding=embedder.embed_text(
+                            f"{title} {section} {content}", is_query=False
+                        ),
+                    ),
+                )
+            quant_docs = [
+                (
+                    "arxiv:2211.07080",
+                    "Intraday Momentum and Microstructure Friction on NSE Nifty 50",
+                    "IN_NSE",
+                    "Abstract",
+                    (
+                        "Intraday momentum and order flow microstructure strategies on NSE "
+                        "Nifty 50 require >= 18 bps friction.\n\n"
+                        r"$$\alpha_t = \frac{P_t - \text{VWAP}_t}{\sigma_t}$$"
+                        "\n\n"
+                        r"\begin{equation}\text{OFI}_t = q_t^b - q_{t-1}^b\end{equation}"
+                    ),
+                ),
+                (
+                    "arxiv:2607.18001",
+                    "XETRA DAX Statistical Arbitrage and Order Book Liquidity",
+                    "DE_XETRA",
+                    "Empirical Evaluation",
+                    (
+                        "Statistical arbitrage and momentum order book liquidity models on "
+                        "Deutsche Boerse XETRA DAX clear a 12 bps transaction cost floor."
+                    ),
+                ),
+                (
+                    "arxiv:2502.07393",
+                    "US Equity Order Book Imbalance and Momentum",
+                    "US_EQUITY",
+                    "Abstract",
+                    (
+                        "Limit order book imbalance and momentum execution strategies on US "
+                        "NYSE and NASDAQ equities clear >= 5 bps execution costs."
+                    ),
+                ),
+            ]
+            for doc_id, title, mkt, sec, body in quant_docs:
+                repo.insert_doc_chunk(
+                    conn,
+                    DocChunkRecord(
+                        chunk_id=uuid4(),
+                        tenant_id=iso_tid,
+                        domain_id="quant_research_scout",
+                        doc_id=doc_id,
+                        doc_title=title,
+                        source_uri=f"https://arxiv.org/abs/{doc_id.split(':', 1)[-1]}",
+                        market_scope=mkt,
+                        published_date=date(2026, 1, 15),
+                        authority_weight=1.0,
+                        section_heading=sec,
+                        contextual_header=f"Quant Seed [{mkt}]",
+                        verbatim_content=body,
+                        metadata_json={},
+                        allowed_scopes=["public_quant"],
+                        embedding=embedder.embed_text(f"{title} {sec} {body}", is_query=False),
+                    ),
+                )
+        yield iso_tid
+    finally:
+        with psycopg.connect(settings.db_admin_url) as admin_conn:
+            cleanup_pg_tenants_and_eval_domains(admin_conn, tenant_ids=(iso_tid,))
 
 
 @pytest.fixture
-def eng_principal() -> PrincipalContext:
+def eng_principal(quant_isolated_tenant: UUID) -> PrincipalContext:
     return PrincipalContext(
         user_id="test_m4_eng_lead",
         role=RoleType.ENGINEER,
         allowed_scopes=["public_eng"],
+        tenant_id=quant_isolated_tenant,
     )
 
 
 @pytest.fixture
-def quant_principal() -> PrincipalContext:
+def quant_principal(quant_isolated_tenant: UUID) -> PrincipalContext:
     return PrincipalContext(
         user_id="test_m4_quant_lead",
         role=RoleType.DOMAIN_RESEARCHER,
         allowed_scopes=["public_quant"],
+        tenant_id=quant_isolated_tenant,
     )
 
 
@@ -230,6 +445,7 @@ def _create_quant_dogfood_code_server() -> Any:
     )
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_live_search_code_trigram(eng_principal: PrincipalContext) -> None:
     """Tests search_code_trigram queries live code_files in PostgreSQL 17 under RLS."""
@@ -246,6 +462,7 @@ async def test_live_search_code_trigram(eng_principal: PrincipalContext) -> None
         assert all("match_line" in m and "snippet" in m for m in matches)
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_live_lookup_ast_symbol(eng_principal: PrincipalContext) -> None:
     """Tests lookup_ast_symbol retrieves live symbol records from ast_symbols table."""
@@ -265,6 +482,7 @@ async def test_live_lookup_ast_symbol(eng_principal: PrincipalContext) -> None:
         assert "pairs_trading_kalman.py" in sym["file_path"]
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_live_expand_ast_1hop_closure(eng_principal: PrincipalContext) -> None:
     """Tests expand_ast_1hop_closure bounded traversal under SEC-03 token budget."""
@@ -280,6 +498,7 @@ async def test_live_expand_ast_1hop_closure(eng_principal: PrincipalContext) -> 
         assert data["direct_callers_count"] <= 3
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_live_slice_file_lines_valid_and_bounds_errors(
     eng_principal: PrincipalContext,
@@ -343,6 +562,7 @@ async def test_live_slice_file_lines_valid_and_bounds_errors(
         assert "exceeds maximum allowed 200 lines" in str(cause_cap)
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_live_search_github_issues(eng_principal: PrincipalContext) -> None:
     """Tests search_github_issues retrieves seeded issues from doc_chunks table."""
@@ -375,6 +595,7 @@ async def test_live_search_github_issues(eng_principal: PrincipalContext) -> Non
 # =============================================================================
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_live_search_quant_papers_hybrid_rrf(quant_principal: PrincipalContext) -> None:
     """Tests search_quant_papers_hybrid executes 3-way RRF over 14,318 live chunks."""
@@ -395,6 +616,7 @@ async def test_live_search_quant_papers_hybrid_rrf(quant_principal: PrincipalCon
         assert len(top_hit["verbatim_content"]) > 10
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_live_extract_paper_equations_and_tables(
     quant_principal: PrincipalContext,
@@ -402,10 +624,13 @@ async def test_live_extract_paper_equations_and_tables(
     """Tests extract_paper_equations_and_tables finds formulas and tables in live papers."""
     server = create_quant_corpus_mcp_server()
     settings = ScoutSettings()
-    conn_mgr = RLSConnectionManager(settings.db_app_url)
 
     # Find a paper id that contains mathematical notation
-    with bind_session_principal(quant_principal), scoped_db_session(conn_mgr) as conn:
+    with (
+        RLSConnectionManager(settings.db_app_url, use_pool=False) as conn_mgr,
+        bind_session_principal(quant_principal),
+        scoped_db_session(conn_mgr) as conn,
+    ):
         sample_doc = conn.execute(
             """
             SELECT doc_id FROM doc_chunks
@@ -535,6 +760,7 @@ async def test_live_compare_cross_market_regimes(quant_principal: PrincipalConte
 # =============================================================================
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_code_repo_legacy_tool_aliases(eng_principal: PrincipalContext) -> None:
     """Verifies all legacy tool aliases in code_repo_mcp execute successfully."""
@@ -556,6 +782,7 @@ async def test_code_repo_legacy_tool_aliases(eng_principal: PrincipalContext) ->
         assert "issues" in data_iss
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_quant_corpus_legacy_tool_aliases(quant_principal: PrincipalContext) -> None:
     """Verifies all legacy tool aliases in quant_corpus_mcp execute successfully."""

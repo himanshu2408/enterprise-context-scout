@@ -8,12 +8,35 @@ from collections.abc import Callable
 import psycopg
 import pytest
 from tests.fixtures.pg_isolation import (
+    ALL_RLS_TABLES_FK_DELETE_ORDER,
     cleanup_ephemeral_pg_domain,
     create_ephemeral_pg_domain,
     make_ephemeral_pg_domain_id,
 )
 
 from context_scout.config import ScoutSettings
+
+pytestmark = pytest.mark.postgres
+
+
+def test_all_rls_tables_fk_delete_order_matches_pg17_catalog() -> None:
+    """ALL_RLS_TABLES_FK_DELETE_ORDER must cover 100% of public PG17 application tables."""
+    settings = ScoutSettings()
+    with psycopg.connect(settings.db_admin_url) as conn:
+        rows = conn.execute(
+            """
+            SELECT c.relname
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relkind = 'r'
+              AND c.relname <> 'alembic_version'
+            ORDER BY c.relname
+            """
+        ).fetchall()
+    pg_tables = {str(r[0]) for r in rows}
+    assert len(ALL_RLS_TABLES_FK_DELETE_ORDER) == 23
+    assert set(ALL_RLS_TABLES_FK_DELETE_ORDER) == pg_tables
 
 
 def test_cleanup_refuses_non_ephemeral_domains() -> None:

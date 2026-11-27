@@ -206,7 +206,10 @@ def test_domains_endpoint_manifest_and_adapter_pool(client: TestClient) -> None:
         assert verification["r"] == 16
         assert verification["lora_alpha"] == 32
         assert verification["is_moe"] is True
-        assert verification["safetensors_bytes"] > 0
+        if verification.get("adapters_present"):
+            assert verification["safetensors_bytes"] > 0
+        else:
+            assert verification.get("serving_mode") == "base_open_weights"
 
         # Training metrics (if present)
         metrics = domain.get("training_metrics")
@@ -751,6 +754,7 @@ def test_handoff_apply_confirmed_true_applies_and_consumes_token(
 # =============================================================================
 
 
+@pytest.mark.postgres
 def test_telemetry_roi_metrics_and_eval_reports(client: TestClient) -> None:
     """Verifies RBAC + RLS /api/v1/telemetry/roi removes fake baselines and serves real ROI."""
     import psycopg
@@ -873,8 +877,8 @@ def test_repository_hygiene_zero_prohibited_terms() -> None:
 
 def test_auth_session_mint_and_verify_me(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies /api/v1/auth/session mints a Bearer token accepted by /auth/me and /scout/query."""
-    monkeypatch.delenv("SCOUT_ENV", raising=False)
-    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    for alias in ("SCOUT_ENVIRONMENT", "SCOUT_ENV", "ENVIRONMENT", "ENV"):
+        monkeypatch.delenv(alias, raising=False)
     raw_client = TestClient(app)
 
     res = raw_client.post(
@@ -912,11 +916,15 @@ def test_auth_session_mint_and_verify_me(monkeypatch: pytest.MonkeyPatch) -> Non
     assert bad_scopes_res.status_code == 400
 
 
+@pytest.mark.parametrize("env_var", ["SCOUT_ENVIRONMENT", "SCOUT_ENV", "ENVIRONMENT"])
 def test_auth_session_blocked_in_production_negative_control(
     monkeypatch: pytest.MonkeyPatch,
+    env_var: str,
 ) -> None:
     """Negative control: interactive persona token minting fails closed with 403 in prod."""
-    monkeypatch.setenv("SCOUT_ENV", "production")
+    for alias in ("SCOUT_ENVIRONMENT", "SCOUT_ENV", "ENVIRONMENT", "ENV"):
+        monkeypatch.delenv(alias, raising=False)
+    monkeypatch.setenv(env_var, "production")
     raw_client = TestClient(app)
 
     res = raw_client.post(
@@ -953,6 +961,7 @@ def test_handoff_preview_and_apply_restricted_to_engineer(
         assert "restricted to Engineer" in apply_res.json()["detail"]
 
 
+@pytest.mark.postgres
 def test_client_fixture_isolates_and_cleans_execution_telemetry(
     client: TestClient,
     sample_pack: ImplementationContextPack,

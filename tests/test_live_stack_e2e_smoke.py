@@ -24,6 +24,7 @@ from typing import Any, Literal
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from tests.fixtures.pg_isolation import cleanup_pg_tenants_and_eval_domains
 
 from context_scout.api import dependencies
 from context_scout.api.main import create_app
@@ -35,6 +36,7 @@ from context_scout.cli import (
 )
 from context_scout.config import ScoutSettings
 from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
+from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import AuthorityRules, DomainPackManifest
 
 _TEST_HMAC_SECRET = "scout-test-suite-hmac-secret-32-chars-long-sec04!!"
@@ -176,7 +178,6 @@ def live_stack_state() -> Generator[dict[str, Any], None, None]:
 
 
 @pytest.mark.postgres
-@pytest.mark.live
 def test_live_signed_auth_and_platform_read_apis(
     live_stack_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
@@ -243,7 +244,6 @@ def test_live_signed_auth_and_platform_read_apis(
 
 
 @pytest.mark.postgres
-@pytest.mark.live
 def test_live_grounded_code_discovery_and_scope_negative_control(
     live_stack_state: dict[str, Any],
 ) -> None:
@@ -279,7 +279,6 @@ def test_live_grounded_code_discovery_and_scope_negative_control(
 
 
 @pytest.mark.postgres
-@pytest.mark.live
 def test_live_quant_discovery_and_sse_streaming(live_stack_state: dict[str, Any]) -> None:
     """Verifies live quant research citations/brief and multi-stage SSE streaming."""
     client: TestClient = live_stack_state["client"]
@@ -335,7 +334,6 @@ def test_live_quant_discovery_and_sse_streaming(live_stack_state: dict[str, Any]
 
 
 @pytest.mark.postgres
-@pytest.mark.live
 @pytest.mark.parametrize(
     "prompt",
     [
@@ -365,7 +363,6 @@ def test_live_zero_dollar_abstention_on_unanswerable_prompts(
 
 
 @pytest.mark.postgres
-@pytest.mark.live
 def test_live_security_guardrail_and_handoff_rbac(live_stack_state: dict[str, Any]) -> None:
     """Verifies ShieldGemma injection block (403), PM apply block (403), and Engineer preview."""
     client: TestClient = live_stack_state["client"]
@@ -420,7 +417,6 @@ def test_live_security_guardrail_and_handoff_rbac(live_stack_state: dict[str, An
 
 
 @pytest.mark.postgres
-@pytest.mark.live
 def test_isolated_tmp_path_working_tree_sync_freshness(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -492,26 +488,13 @@ def test_isolated_tmp_path_working_tree_sync_freshness(
             for s in query_res["code_slices"]
         )
     finally:
-        cleanup_tables = (
-            "ast_edges",
-            "ast_symbols",
-            "code_files",
-            "repositories",
-            "confluence_pages",
-            "jira_issues",
-            "doc_chunks",
-            "indexing_queue",
-            "indexing_dead_letter",
-            "execution_telemetry",
-            "domain_packs",
-        )
         with psycopg.connect(ScoutSettings().db_admin_url) as conn:
-            for table in cleanup_tables:
-                conn.execute(f"DELETE FROM {table} WHERE domain_id = %s;", (domain_id,))
-            conn.commit()
+            cleanup_pg_tenants_and_eval_domains(conn, domain_ids=(domain_id,))
 
 
-_ZERO_VECTOR_768 = "[" + ",".join(["0.05"] * 768) + "]"
+def _embed_smoke_vector_literal(text: str) -> str:
+    vec = get_embedding_provider(dimensions=768).embed_text(text, is_query=False)
+    return "[" + ",".join(f"{v:.6f}" for v in vec) + "]"
 
 
 @contextmanager
@@ -622,7 +605,9 @@ def _ephemeral_pg_domain(
                     sym["signature_skeleton"],
                     sym["contextual_summary"],
                     sym["allowed_scopes"],
-                    _ZERO_VECTOR_768,
+                    _embed_smoke_vector_literal(
+                        f"{sym['signature_skeleton']} {sym['contextual_summary']}"
+                    ),
                 ),
             )
         for chk in doc_chunks or []:
@@ -654,7 +639,9 @@ def _ephemeral_pg_domain(
                     chk["verbatim_content"],
                     json.dumps(chk.get("metadata_json", {})),
                     chk["allowed_scopes"],
-                    _ZERO_VECTOR_768,
+                    _embed_smoke_vector_literal(
+                        f"{chk['doc_title']} {chk['section_heading']} {chk['verbatim_content']}"
+                    ),
                     chk.get("source_type", "confluence_page"),
                     chk.get("version_str", "1"),
                     bool(chk.get("is_stale", False)),
@@ -667,18 +654,12 @@ def _ephemeral_pg_domain(
     try:
         yield domain_id
     finally:
-        registry._manifests.pop(domain_id, None)
-        registry.adapter_pool._slots.pop(domain_id, None)
+        registry.unregister(domain_id)
         with psycopg.connect(settings.db_admin_url) as conn:
-            conn.execute("DELETE FROM doc_chunks WHERE domain_id = %s;", (domain_id,))
-            conn.execute("DELETE FROM ast_symbols WHERE domain_id = %s;", (domain_id,))
-            conn.execute("DELETE FROM code_files WHERE domain_id = %s;", (domain_id,))
-            conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (domain_id,))
-            conn.commit()
+            cleanup_pg_tenants_and_eval_domains(conn, domain_ids=(domain_id,))
 
 
 @pytest.mark.postgres
-@pytest.mark.live
 def test_live_engineer_runbook_adr_and_code_sse_stream(
     live_stack_state: dict[str, Any],
 ) -> None:

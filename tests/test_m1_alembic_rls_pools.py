@@ -53,6 +53,8 @@ from context_scout.storage.object_store import (
     validate_object_key,
 )
 
+pytestmark = pytest.mark.postgres
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 ALL_PG_TABLES: tuple[str, ...] = (

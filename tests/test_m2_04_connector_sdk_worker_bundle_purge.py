@@ -524,6 +524,7 @@ def test_airgap_bundle_importer_security_and_end_to_end_cli(tmp_path: Path) -> N
         )
 
 
+@pytest.mark.postgres
 def test_purge_artifact_under_60s_zero_residue_live_pg17_zoekt_object_store(
     ephemeral_pg_domain: str,
     tmp_path: Path,
@@ -701,6 +702,7 @@ def test_purger_invalidates_cached_permission_mirror_service() -> None:
     assert "other_repo_reader" not in perm_cache._cache
 
 
+@pytest.mark.postgres
 def test_purger_residue_checks_derived_wiki_overlays_snapshots_and_symbols(
     ephemeral_pg_domain: str,
 ) -> None:
@@ -948,6 +950,7 @@ def test_purger_rejects_file_path_without_repo_name_and_purges_dotted_doc_id() -
     assert file_id not in mem_repo._files
 
 
+@pytest.mark.postgres
 def test_purger_worker_and_repos_reject_blank_and_ambiguous_selectors(
     ephemeral_pg_domain: str,
 ) -> None:

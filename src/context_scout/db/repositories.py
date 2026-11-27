@@ -10,7 +10,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import Any, cast
+from typing import Any, Final, cast
 from uuid import UUID
 
 from psycopg import Connection
@@ -1825,20 +1825,7 @@ class PostgresRLSRepository:
             ).fetchall()
         return [self._row_to_jira_issue(row) for row in rows]
 
-    def traverse_1hop_neighborhood(
-        self,
-        conn: Connection[tuple[object, ...]],
-        domain_id: str,
-        focus_symbol_id: UUID | str,
-        max_direct_callers: int = 3,
-    ) -> list[ASTNeighborhoodRecord]:
-        """Executes memory-bounded recursive CTE 1-hop AST closure directly in PostgreSQL 17.
-
-        Replaces unbounded Python heap iteration with a parameterized CTE running under
-        PostgreSQL 17 Forced RLS. Returns only relevant symbols in O(k) memory.
-        """
-        focus_uuid = UUID(str(focus_symbol_id))
-        cte_sql = """
+    TRAVERSE_1HOP_NEIGHBORHOOD_CTE_SQL: Final[str] = """
         WITH
         target_sym AS (
             SELECT s.symbol_id, s.file_id, s.domain_id, s.qualified_name, s.symbol_kind,
@@ -2010,6 +1997,21 @@ class PostgresRLSRepository:
         WHERE s.domain_id = %s
         ORDER BY cn.related_symbol_id, cn.intent_role, cn.depth ASC;
         """
+
+    def traverse_1hop_neighborhood(
+        self,
+        conn: Connection[tuple[object, ...]],
+        domain_id: str,
+        focus_symbol_id: UUID | str,
+        max_direct_callers: int = 3,
+    ) -> list[ASTNeighborhoodRecord]:
+        """Executes memory-bounded recursive CTE 1-hop AST closure directly in PostgreSQL 17.
+
+        Replaces unbounded Python heap iteration with a parameterized CTE running under
+        PostgreSQL 17 Forced RLS. Returns only relevant symbols in O(k) memory.
+        """
+        focus_uuid = UUID(str(focus_symbol_id))
+        cte_sql = self.TRAVERSE_1HOP_NEIGHBORHOOD_CTE_SQL
         params = (
             domain_id,
             focus_uuid,

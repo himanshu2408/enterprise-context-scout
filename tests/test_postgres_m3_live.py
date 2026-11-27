@@ -11,6 +11,8 @@ from context_scout.db.session import RLSConnectionManager
 from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import DocumentScope, PrincipalContext, RoleType
 
+pytestmark = pytest.mark.postgres
+
 
 @pytest.fixture(scope="module")
 def settings() -> ScoutSettings:

@@ -28,6 +28,7 @@ import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from context_scout.agents.domain_registry import audit_safetensors_adapter_weights
 from context_scout.config import UNSAFE_WEIGHT_EXTENSIONS, ModelGovernancePolicy
 from context_scout.serving.adapter_sync_sidecar import (
     CosignBlobVerifier,
@@ -344,23 +345,40 @@ def _audit_domain_cartridge(
                     if cfg_rank is not None and int(cfg_rank) > 32:
                         raise SupplyChainGateError(f"Adapter rank r={cfg_rank} > 32 in {cfg_path}")
 
-        policy.validate_weights_safety(
-            [str(p) for p in weight_candidates],
-            trust_remote_code=bool(config_payload.get("trust_remote_code", False)),
-            config_payload=config_payload,
-        )
-        scan_status = _run_modelscan(adapters_root)
-
-        for st_path in sorted(adapters_root.rglob("*.safetensors")):
-            header = _validate_safetensors_header(st_path)
-            safetensors_records.append(
-                {
-                    "path": st_path.relative_to(domain_dir.parent.parent).as_posix(),
-                    "sha256": _sha256_file(st_path),
-                    "size_bytes": st_path.stat().st_size,
-                    "tensor_count": len([k for k in header if k != "__metadata__"]),
-                }
+        unsafe_candidates = [
+            p for p in weight_candidates if p.suffix.lower() in UNSAFE_WEIGHT_EXTENSIONS
+        ]
+        if unsafe_candidates:
+            policy.validate_weights_safety(
+                [str(p) for p in unsafe_candidates],
+                trust_remote_code=bool(config_payload.get("trust_remote_code", False)),
+                config_payload=config_payload,
             )
+
+        safetensors_paths = sorted(adapters_root.rglob("*.safetensors"))
+        if safetensors_paths:
+            policy.validate_weights_safety(
+                [str(p) for p in weight_candidates],
+                trust_remote_code=bool(config_payload.get("trust_remote_code", False)),
+                config_payload=config_payload,
+            )
+            scan_status = _run_modelscan(adapters_root)
+
+            for st_path in safetensors_paths:
+                header = _validate_safetensors_header(st_path)
+                weights_ok, weights_err = audit_safetensors_adapter_weights(st_path)
+                if not weights_ok:
+                    raise SupplyChainGateError(weights_err or f"Invalid adapter weights: {st_path}")
+                safetensors_records.append(
+                    {
+                        "path": st_path.relative_to(domain_dir.parent.parent).as_posix(),
+                        "sha256": _sha256_file(st_path),
+                        "size_bytes": st_path.stat().st_size,
+                        "tensor_count": len([k for k in header if k != "__metadata__"]),
+                    }
+                )
+        else:
+            scan_status = "base-open-weights-no-local-safetensors"
 
     return CartridgeAuditResult(
         domain_id=domain_id,

@@ -30,8 +30,10 @@ from context_scout.schemas.contracts import RoleType
 def clean_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensures SCOUT_REQUIRE_SIGNED_AUTH is unset by default with valid test secret."""
     monkeypatch.delenv("SCOUT_REQUIRE_SIGNED_AUTH", raising=False)
+    monkeypatch.delenv("SCOUT_ENVIRONMENT", raising=False)
     monkeypatch.delenv("SCOUT_ENV", raising=False)
     monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("ENV", raising=False)
     monkeypatch.delenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", raising=False)
     monkeypatch.setenv(
         "SCOUT_AUTH_HMAC_SECRET",
@@ -181,9 +183,12 @@ def test_valid_signed_token_accepted_and_ignores_spoofed_headers(app_client: Tes
     assert "trace_id" in data
 
 
-def test_production_hmac_secret_enforcement(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("env_var", ["SCOUT_ENVIRONMENT", "SCOUT_ENV", "ENVIRONMENT"])
+def test_production_hmac_secret_enforcement(monkeypatch: pytest.MonkeyPatch, env_var: str) -> None:
     """SEC-VULN-01: In production, weak or default HMAC secret raises RuntimeError."""
-    monkeypatch.setenv("SCOUT_ENV", "production")
+    for alias in ("SCOUT_ENVIRONMENT", "SCOUT_ENV", "ENVIRONMENT", "ENV"):
+        monkeypatch.delenv(alias, raising=False)
+    monkeypatch.setenv(env_var, "production")
     monkeypatch.delenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", raising=False)
     monkeypatch.setenv("SCOUT_AUTH_HMAC_SECRET", DEFAULT_AUTH_HMAC_SECRET)
 
@@ -204,11 +209,14 @@ def test_production_hmac_secret_enforcement(monkeypatch: pytest.MonkeyPatch) -> 
     assert resolved == strong_secret.encode("utf-8")
 
 
+@pytest.mark.parametrize("env_var", ["SCOUT_ENVIRONMENT", "SCOUT_ENV", "ENVIRONMENT"])
 def test_production_hmac_secret_dev_override_flag_strictly_forbidden_in_production(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, env_var: str
 ) -> None:
     """SEC-VULN-01: Absolute ban - dev override is forbidden in production (raises RuntimeError)."""
-    monkeypatch.setenv("SCOUT_ENV", "production")
+    for alias in ("SCOUT_ENVIRONMENT", "SCOUT_ENV", "ENVIRONMENT", "ENV"):
+        monkeypatch.delenv(alias, raising=False)
+    monkeypatch.setenv(env_var, "production")
     monkeypatch.setenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", "true")
     monkeypatch.setenv("SCOUT_AUTH_HMAC_SECRET", DEFAULT_AUTH_HMAC_SECRET)
 
@@ -243,7 +251,8 @@ def test_fail_closed_when_secret_unset_without_dev_override(
     """Critical B: When secret is unset and dev override false, resolve fails closed."""
     monkeypatch.delenv("SCOUT_AUTH_HMAC_SECRET", raising=False)
     monkeypatch.delenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", raising=False)
-    monkeypatch.delenv("SCOUT_ENV", raising=False)
+    for alias in ("SCOUT_ENVIRONMENT", "SCOUT_ENV", "ENVIRONMENT", "ENV"):
+        monkeypatch.delenv(alias, raising=False)
     with pytest.raises(RuntimeError, match="SCOUT_AUTH_HMAC_SECRET is unset or empty"):
         _resolve_auth_secret()
 
@@ -260,7 +269,8 @@ def test_fail_closed_blocks_api_token_verification(
     )
     monkeypatch.delenv("SCOUT_AUTH_HMAC_SECRET", raising=False)
     monkeypatch.delenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", raising=False)
-    monkeypatch.delenv("SCOUT_ENV", raising=False)
+    for alias in ("SCOUT_ENVIRONMENT", "SCOUT_ENV", "ENVIRONMENT", "ENV"):
+        monkeypatch.delenv(alias, raising=False)
     app = create_app()
     client = TestClient(app, raise_server_exceptions=False)
     res = client.post(
@@ -278,6 +288,7 @@ def test_allow_insecure_dev_secret_permits_default_secret_in_development(
     """Critical B: Explicit dev override permits default secret in development mode."""
     monkeypatch.delenv("SCOUT_AUTH_HMAC_SECRET", raising=False)
     monkeypatch.setenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", "true")
-    monkeypatch.delenv("SCOUT_ENV", raising=False)
+    for alias in ("SCOUT_ENVIRONMENT", "SCOUT_ENV", "ENVIRONMENT", "ENV"):
+        monkeypatch.delenv(alias, raising=False)
     resolved = _resolve_auth_secret()
     assert resolved == DEFAULT_AUTH_HMAC_SECRET.encode("utf-8")

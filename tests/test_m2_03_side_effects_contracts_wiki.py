@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import psycopg
+import pytest
 from tests.fixtures.pg_isolation import cleanup_ephemeral_pg_domain, create_ephemeral_pg_domain
 
 from context_scout.ast_engine.contract_linker import CrossBoundaryContractLinker
@@ -156,6 +157,7 @@ def pure_formatter(item_id: str) -> str:
     assert extractor.last_parse_diagnostics.abstained is True
 
 
+@pytest.mark.postgres
 def test_side_effects_live_pg17_forced_rls_isolation() -> None:
     """Verifies Tenant A / Tenant B and scope isolation on PG17 `side_effects` under FORCE RLS."""
     settings = ScoutSettings()
@@ -386,6 +388,7 @@ def test_cross_boundary_contract_linker_v2_and_acl_boundaries() -> None:
     )
 
 
+@pytest.mark.postgres
 def test_repo_wiki_builder_enclave_isolation_and_supersession(
     ephemeral_pg_domain: str,
 ) -> None:

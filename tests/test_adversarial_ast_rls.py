@@ -398,6 +398,7 @@ def test_adversarial_ast_expansion_token_budget_never_exceeds_1500() -> None:
 # =============================================================================
 
 
+@pytest.mark.postgres
 def test_adversarial_live_postgres_rls_isolation(
     settings: ScoutSettings,
     ephemeral_pg_domain: str,
@@ -594,6 +595,7 @@ def test_adversarial_live_postgres_rls_isolation(
         )
 
 
+@pytest.mark.postgres
 def test_adversarial_live_pgvector_cosine_with_relaxed_order(
     settings: ScoutSettings,
     ephemeral_pg_domain: str,
@@ -884,6 +886,7 @@ def test_adversarial_ast_boundary_clamping_at_edges() -> None:
         assert span <= 11, f"Slice span {span} > 11 (+-5 lines)"
 
 
+@pytest.mark.postgres
 def test_adversarial_postgres_rls_tamper_and_delete_resistance(
     settings: ScoutSettings,
     ephemeral_pg_domain: str,
@@ -946,6 +949,7 @@ def test_adversarial_postgres_rls_tamper_and_delete_resistance(
         assert row[1] == ["docs_restricted"], f"Scope was altered: {row[1]}"
 
 
+@pytest.mark.postgres
 def test_adversarial_postgres_empty_and_injected_scopes(settings: ScoutSettings) -> None:
     """Verifies that empty/injected scopes are rejected by Pydantic and yield 0 rows in DB."""
     mgr = RLSConnectionManager(settings.db_app_url)

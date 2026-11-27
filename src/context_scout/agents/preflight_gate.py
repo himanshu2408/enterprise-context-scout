@@ -2102,10 +2102,9 @@ class BoundGraphRepository:
         )
 
     def _has_in_memory_domain_records(self, domain_id: str) -> bool:
-        if isinstance(self._repo, InMemoryRLSRepository):
-            # InMemoryRLSRepository is an isolated dataset; never fall through to live PG17.
-            return self._conn is None
-        return False
+        # Any non-PG17 repository (InMemoryRLSRepository or test double) is isolated;
+        # never fall through to live PG17 when a method returns [].
+        return not self._use_pg17()
 
     @contextmanager
     def _pg_tx(self, principal: PrincipalContext) -> Iterator[Connection[tuple[object, ...]]]:

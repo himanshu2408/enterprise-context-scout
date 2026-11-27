@@ -330,27 +330,71 @@ def _handler_catches_broad_exception(handler: ast.ExceptHandler) -> bool:
     return False
 
 
+def _handler_logs_raises_or_returns_diagnostic(handler: ast.ExceptHandler) -> bool:
+    """Returns True if handler logs, re-raises, or records/returns structured diagnostic info."""
+    for sub in ast.walk(handler):
+        if isinstance(sub, ast.Raise):
+            return True
+        if (
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr
+            in (
+                "debug",
+                "info",
+                "warning",
+                "error",
+                "exception",
+                "critical",
+                "log",
+            )
+        ):
+            return True
+        if isinstance(sub, ast.Name) and sub.id in (
+            "failures",
+            "violations",
+            "errors",
+            "diagnostics",
+            "warnings",
+            "kill_reason",
+        ):
+            return True
+        if isinstance(sub, ast.Return) and isinstance(sub.value, (ast.Dict, ast.Tuple, ast.Call)):
+            return True
+    return False
+
+
 def find_silent_broad_except_handlers(src_root: Path) -> dict[str, list[tuple[int, str]]]:
-    """Scans all Python files under src_root for silent broad except pass/continue blocks."""
+    """Scans Python files under src_root for broad except blocks that swallow errors."""
     violations: dict[str, list[tuple[int, str]]] = {}
     for py_path in sorted(src_root.rglob("*.py")):
         rel_posix = py_path.relative_to(src_root).as_posix()
         tree = ast.parse(py_path.read_text(encoding="utf-8"), filename=str(py_path))
         file_hits: list[tuple[int, str]] = []
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.ExceptHandler)
-                and _handler_catches_broad_exception(node)
-                and len(node.body) == 1
-                and isinstance(node.body[0], (ast.Pass, ast.Continue))
+            if not isinstance(node, ast.ExceptHandler) or not _handler_catches_broad_exception(
+                node
             ):
+                continue
+            if len(node.body) == 1 and isinstance(node.body[0], (ast.Pass, ast.Continue)):
                 file_hits.append((node.lineno, type(node.body[0]).__name__))
+            elif not _handler_logs_raises_or_returns_diagnostic(node):
+                file_hits.append((node.lineno, f"Silent:{type(node.body[0]).__name__}"))
         if file_hits:
             violations[rel_posix] = sorted(file_hits)
     return violations
 
 
-NEUTRAL_SCAN_TREES: Final[tuple[str, ...]] = ("src", "sql", "evals", "web-ui/src")
+NEUTRAL_SCAN_TREES: Final[tuple[str, ...]] = (
+    "src",
+    "sql",
+    "evals",
+    "web-ui/src",
+    "tests/fixtures",
+    "scripts",
+    "config",
+    "deploy",
+)
 NEUTRAL_SCAN_SUFFIXES: Final[frozenset[str]] = frozenset(
     {".py", ".sql", ".ts", ".tsx", ".yaml", ".yml", ".json"}
 )
@@ -440,12 +484,12 @@ def test_no_silent_broad_except_handlers() -> None:
 
 
 def test_silent_broad_except_guard_mutation_proof(tmp_path: Path) -> None:
-    """Mutation proof: verifies silent except AST guard catches injected pass/continue blocks."""
+    """Mutation proof: verifies silent except AST guard catches pass/continue and swallows."""
     fake_src = tmp_path / "src" / "context_scout"
     fake_src.mkdir(parents=True)
     bad_file = fake_src / "silent_sample.py"
     bad_file.write_text(
-        "def f() -> None:\n"
+        "def f() -> int:\n"
         "    for _ in range(1):\n"
         "        try:\n"
         "            _ = 1 / 0\n"
@@ -454,12 +498,17 @@ def test_silent_broad_except_guard_mutation_proof(tmp_path: Path) -> None:
         "        try:\n"
         "            _ = 1 / 0\n"
         "        except BaseException:\n"
-        "            continue\n",
+        "            continue\n"
+        "        try:\n"
+        "            _ = 1 / 0\n"
+        "        except Exception:\n"
+        "            x = 0\n"
+        "    return 0\n",
         encoding="utf-8",
     )
 
     violations = find_silent_broad_except_handlers(fake_src)
-    assert violations == {"silent_sample.py": [(5, "Pass"), (9, "Continue")]}
+    assert violations == {"silent_sample.py": [(5, "Pass"), (9, "Continue"), (13, "Silent:Assign")]}
 
 
 def test_finance_plugin_allowlist_is_empty() -> None:

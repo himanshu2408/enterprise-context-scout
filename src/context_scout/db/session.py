@@ -197,6 +197,12 @@ class RLSConnectionManager:
             if pool is not None and not pool.closed:
                 pool.close()
 
+    def __enter__(self) -> RLSConnectionManager:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
     scoped_session = scoped_transaction
 
 

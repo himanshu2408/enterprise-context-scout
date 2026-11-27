@@ -382,6 +382,7 @@ def test_embedding_provider_spi_local_vllm_tei_and_vertex_governance() -> None:
     assert math.isclose(math.sqrt(sum(x * x for x in v_emb)), 1.0, abs_tol=1e-3)
 
 
+@pytest.mark.postgres
 def test_zero_norm_vectors_rejected_and_src_purged_of_prng_and_zeros(
     ephemeral_pg_domain: str,
 ) -> None:
@@ -624,6 +625,7 @@ def test_zero_norm_vectors_rejected_and_src_purged_of_prng_and_zeros(
                 raise
 
 
+@pytest.mark.postgres
 def test_live_pg17_halfvec_embedding_spaces_blue_green_cutover(
     ephemeral_pg_domain: str,
 ) -> None:
@@ -845,6 +847,7 @@ def test_tracked_in_memory_repos_weakref_prevents_aba_id_reuse() -> None:
     assert new_repo.list_visible_code_files(principal, "code_architecture_scout") == []
 
 
+@pytest.mark.postgres
 def test_concurrent_activate_embedding_space_serialization_and_halfvec_trigger(
     ephemeral_pg_domain: str,
 ) -> None:
