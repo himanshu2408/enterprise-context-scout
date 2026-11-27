@@ -349,3 +349,32 @@ def test_code_slice_pointer_validation() -> None:
             selection_reason="Target function",
             modification_intent=ModificationIntent.MODIFY_TARGET,
         )
+
+
+def test_rls_connection_manager_fast_connect_timeout_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verifies SCOUT_PG_CONNECT_TIMEOUT=1 bounds unreachable PG17 pool failover to <4s."""
+    import time
+
+    import psycopg_pool
+
+    from context_scout.db.session import RLSConnectionManager
+
+    monkeypatch.setenv("SCOUT_PG_CONNECT_TIMEOUT", "1")
+    principal = PrincipalContext(
+        user_id="offline_probe",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng"],
+    )
+    t0 = time.monotonic()
+    with (
+        RLSConnectionManager(
+            "postgresql://scout_app_user:pw@127.0.0.1:59999/context_scout",
+            use_pool=True,
+        ) as mgr,
+        pytest.raises(psycopg_pool.PoolTimeout),
+        mgr.scoped_transaction(principal),
+    ):
+        pass
+    assert (time.monotonic() - t0) < 4.0

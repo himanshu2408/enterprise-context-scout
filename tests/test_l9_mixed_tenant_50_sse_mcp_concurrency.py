@@ -48,7 +48,11 @@ def _snapshot_default_tenant_counts(db_admin_url: str) -> dict[str, int]:
     with psycopg.connect(db_admin_url) as conn:
         for tbl in tables:
             row = conn.execute(
-                f"SELECT COUNT(*) FROM {tbl} WHERE tenant_id = %s;",
+                f"SELECT COUNT(*) FROM {tbl} "
+                "WHERE tenant_id = %s "
+                "AND domain_id NOT LIKE 'eval_%%' "
+                "AND domain_id NOT LIKE 'ephem_%%' "
+                "AND domain_id NOT LIKE 'canary_%%';",
                 (DEFAULT_TENANT_ID,),
             ).fetchone()
             counts[tbl] = int(row[0]) if row else 0

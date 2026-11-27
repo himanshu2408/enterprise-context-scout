@@ -210,6 +210,7 @@ def test_schemathesis_unauthenticated_zero_5xx_and_zero_auth_bypass(
     case.validate_response(response, checks=_OPENAPI_CONFORMANCE_CHECKS)
 
 
+@pytest.mark.postgres
 @auth_schema.parametrize()
 @_FUZZ_SETTINGS
 def test_schemathesis_authenticated_schema_and_status_conformance(
@@ -286,6 +287,7 @@ def test_schemathesis_authenticated_schema_and_status_conformance(
         _cleanup_pg_tenants_and_users(tracked_tenants, principal_ids=tracked_users)
 
 
+@pytest.mark.postgres
 def test_schemathesis_positive_and_negative_modes_explicit(
     api_schema: Any,
 ) -> None:
@@ -511,6 +513,7 @@ def test_scim_malformed_scopes_operations_and_nul_bytes_return_400_never_500(
         _cleanup_pg_tenants_and_users({tenant_id})
 
 
+@pytest.mark.postgres
 def test_nul_bytes_across_auth_admin_scout_and_handoff_return_4xx_never_500(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import uuid
 from collections import defaultdict
@@ -877,172 +878,224 @@ def ensure_pg17_schema_and_seed_corpora(
     repo_root: Path,
 ) -> None:
     """Idempotently bootstrap PG17 schema via Alembic, domain_packs, and benchmark corpora."""
-    try:
-        from context_scout.db.migrations_runner import run_alembic_upgrade
+    advisory_lock_id = 7391042
+    with psycopg.connect(db_admin_url, autocommit=True) as lock_conn:
+        lock_conn.execute("SELECT pg_advisory_lock(%s)", (advisory_lock_id,))
+        try:
+            try:
+                from context_scout.db.migrations_runner import run_alembic_upgrade
 
-        run_alembic_upgrade(db_admin_url)
-    except ModuleNotFoundError:
-        with psycopg.connect(db_admin_url) as check_conn:
-            has_alembic = (
-                check_conn.execute("SELECT to_regclass('public.alembic_version')").fetchone()
-                or (None,)
-            )[0]
-            if has_alembic is None:
-                raise
+                run_alembic_upgrade(db_admin_url)
+            except ModuleNotFoundError:
+                with psycopg.connect(db_admin_url) as check_conn:
+                    has_alembic = (
+                        check_conn.execute(
+                            "SELECT to_regclass('public.alembic_version')"
+                        ).fetchone()
+                        or (None,)
+                    )[0]
+                    if has_alembic is None:
+                        raise
 
-    with psycopg.connect(db_admin_url) as admin_conn:
-        stale_eval_rows = admin_conn.execute(
-            "SELECT DISTINCT domain_id FROM domain_packs WHERE domain_id LIKE 'eval_%'"
-        ).fetchall()
-        for (stale_eval_id,) in stale_eval_rows:
-            cleanup_ephemeral_pg_domain(admin_conn, str(stale_eval_id))
-        for d_id, display_name, adapter_id, truth_src, half_life in _REQUIRED_DOMAIN_PACKS:
-            admin_conn.execute(
-                """
-                INSERT INTO domain_packs (
-                    tenant_id, domain_id, display_name, lora_adapter_id, primary_truth_source,
-                    freshness_half_life_days, config_json
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, '{}'::jsonb)
-                ON CONFLICT (tenant_id, domain_id) DO NOTHING
-                """,
-                (DEFAULT_TENANT_ID, d_id, display_name, adapter_id, truth_src, half_life),
+            with psycopg.connect(db_admin_url) as admin_conn:
+                if os.environ.get("SCOUT_PARALLEL_PYTEST") != "1":
+                    stale_eval_rows = admin_conn.execute(
+                        "SELECT DISTINCT domain_id FROM domain_packs "
+                        "WHERE domain_id LIKE 'eval_%%' "
+                        "AND created_at < NOW() - INTERVAL '2 hours'"
+                    ).fetchall()
+                    for (stale_eval_id,) in stale_eval_rows:
+                        cleanup_ephemeral_pg_domain(admin_conn, str(stale_eval_id))
+                for d_id, display_name, adapter_id, truth_src, half_life in _REQUIRED_DOMAIN_PACKS:
+                    admin_conn.execute(
+                        """
+                        INSERT INTO domain_packs (
+                            tenant_id, domain_id, display_name, lora_adapter_id,
+                            primary_truth_source, freshness_half_life_days, config_json
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, '{}'::jsonb)
+                        ON CONFLICT (tenant_id, domain_id) DO NOTHING
+                        """,
+                        (DEFAULT_TENANT_ID, d_id, display_name, adapter_id, truth_src, half_life),
+                    )
+                admin_conn.commit()
+
+            seed_principal = PrincipalContext(
+                user_id="pg_isolation_bootstrap",
+                role=RoleType.ENGINEER,
+                allowed_scopes=_SEED_ALL_SCOPES,
             )
-        admin_conn.commit()
 
-    # Pre-warm the neural embedding model outside any open DB transaction so cold
-    # loads never trigger PG17 idle_in_transaction_session_timeout, and seeded
-    # vectors live in the exact same neural space as live queries.
-    _embed_fixture_text("bootstrap warmup")
+            def _row_count(row: tuple[object, ...] | None) -> int:
+                return int(str(row[0])) if row and row[0] is not None else 0
 
-    seed_principal = PrincipalContext(
-        user_id="pg_isolation_bootstrap",
-        role=RoleType.ENGINEER,
-        allowed_scopes=_SEED_ALL_SCOPES,
-    )
-
-    def _row_count(row: tuple[object, ...] | None) -> int:
-        return int(str(row[0])) if row and row[0] is not None else 0
-
-    with RLSConnectionManager(db_app_url, pool_role=PoolRole.INGESTION) as mgr:
-        repo = PostgresRLSRepository()
-        with mgr.scoped_transaction(seed_principal, enable_hnsw_iterative_scan=False) as conn:
-            code_arch_row = conn.execute(
-                "SELECT count(*) FROM code_files WHERE domain_id = 'code_architecture_scout'"
-            ).fetchone()
-            if _row_count(code_arch_row) < 43:
-                _seed_code_architecture_scout(conn, repo, repo_root)
-
-            mr42_row = conn.execute(
-                "SELECT count(*) FROM ref_snapshots "
-                "WHERE domain_id = 'code_architecture_scout' AND ref_name = 'mr/42'"
-            ).fetchone()
-            if _row_count(mr42_row) == 0:
-                from context_scout.db.repositories import (
-                    OverlayFileDeltaRecord,
-                    RefSnapshotRecord,
-                )
-
-                reconciler_path = repo_root / "src/context_scout/ops/state_reconciler.py"
-                if reconciler_path.is_file():
-                    base_content = reconciler_path.read_text(encoding="utf-8", errors="ignore")
-                    overlay_addition = (
-                        "\n\n"
-                        "def verify_pitr_overlay_watermark_lag(\n"
-                        "    pg_lsn_lag_seconds: float,\n"
-                        "    max_allowed_lag_seconds: float = 30.0,\n"
-                        ") -> bool:\n"
-                        '    """MR !42 CoW overlay guard bounding PITR watermark lag."""\n'
-                        "    return 0.0 <= pg_lsn_lag_seconds <= max_allowed_lag_seconds\n"
+            with RLSConnectionManager(db_app_url, pool_role=PoolRole.INGESTION) as mgr:
+                repo = PostgresRLSRepository()
+                with mgr.scoped_transaction(
+                    seed_principal, enable_hnsw_iterative_scan=False
+                ) as check_conn:
+                    need_code_arch = (
+                        _row_count(
+                            check_conn.execute(
+                                "SELECT count(*) FROM code_files "
+                                "WHERE domain_id = 'code_architecture_scout'"
+                            ).fetchone()
+                        )
+                        < 43
                     )
-                    overlay_content = base_content.rstrip("\n") + overlay_addition
-                    base_lines = len(base_content.rstrip("\n").splitlines())
-                    mr_snapshot_id = uuid5(
-                        NAMESPACE_URL,
-                        f"{DEFAULT_TENANT_ID}:code_architecture_scout:mr_snapshot:42",
+                    need_mr42 = (
+                        _row_count(
+                            check_conn.execute(
+                                "SELECT count(*) FROM ref_snapshots "
+                                "WHERE domain_id = 'code_architecture_scout' "
+                                "AND ref_name = 'mr/42'"
+                            ).fetchone()
+                        )
+                        == 0
                     )
-                    base_sha = _git_blob_sha(base_content)
-                    head_sha = _git_blob_sha(overlay_content)
-                    repo.upsert_ref_snapshot(
-                        conn,
-                        RefSnapshotRecord(
-                            snapshot_id=mr_snapshot_id,
-                            domain_id="code_architecture_scout",
-                            repo_name="enterprise-context-scout",
-                            ref_name="mr/42",
-                            ref_kind="merge_request",
-                            base_commit_sha=base_sha,
-                            head_commit_sha=head_sha,
-                            allowed_scopes=["public_eng"],
-                            mr_iid="42",
-                            state="open",
-                            metadata_json={
-                                "title": "feat(ops): bound PITR watermark lag in StateReconciler",
-                                "seeded_by": "pg_isolation_bootstrap",
-                            },
-                            tenant_id=DEFAULT_TENANT_ID,
-                        ),
+                    need_ent_docs = (
+                        _row_count(
+                            check_conn.execute(
+                                "SELECT count(*) FROM doc_chunks "
+                                "WHERE domain_id = 'enterprise_docs_scout'"
+                            ).fetchone()
+                        )
+                        < 9
                     )
-                    repo.upsert_overlay_file_delta(
-                        conn,
-                        OverlayFileDeltaRecord(
-                            delta_id=uuid5(
+                    need_de = (
+                        _row_count(
+                            check_conn.execute(
+                                "SELECT count(*) FROM doc_chunks "
+                                "WHERE domain_id = 'data_engineering_scout' "
+                                "AND doc_id = 'de-cap-theorem'"
+                            ).fetchone()
+                        )
+                        == 0
+                    )
+                    need_poly = (
+                        _row_count(
+                            check_conn.execute(
+                                "SELECT count(*) FROM code_files "
+                                "WHERE domain_id = 'polyglot_unseen_v2' "
+                                "AND file_path = 'httpx/_transports/default.py'"
+                            ).fetchone()
+                        )
+                        == 0
+                    )
+
+                if need_code_arch or need_ent_docs or need_de or need_poly:
+                    # Pre-warm the neural embedding model outside any open DB transaction so cold
+                    # loads never trigger PG17 idle_in_transaction_session_timeout, and seeded
+                    # vectors live in the exact same neural space as live queries.
+                    _embed_fixture_text("bootstrap warmup")
+
+                with mgr.scoped_transaction(
+                    seed_principal, enable_hnsw_iterative_scan=False
+                ) as conn:
+                    if need_code_arch:
+                        _seed_code_architecture_scout(conn, repo, repo_root)
+
+                    if need_mr42:
+                        from context_scout.db.repositories import (
+                            OverlayFileDeltaRecord,
+                            RefSnapshotRecord,
+                        )
+
+                        reconciler_path = repo_root / "src/context_scout/ops/state_reconciler.py"
+                        if reconciler_path.is_file():
+                            base_content = reconciler_path.read_text(
+                                encoding="utf-8", errors="ignore"
+                            )
+                            overlay_addition = (
+                                "\n\n"
+                                "def verify_pitr_overlay_watermark_lag(\n"
+                                "    pg_lsn_lag_seconds: float,\n"
+                                "    max_allowed_lag_seconds: float = 30.0,\n"
+                                ") -> bool:\n"
+                                '    """MR !42 CoW overlay guard bounding PITR watermark lag."""\n'
+                                "    return 0.0 <= pg_lsn_lag_seconds <= max_allowed_lag_seconds\n"
+                            )
+                            overlay_content = base_content.rstrip("\n") + overlay_addition
+                            base_lines = len(base_content.rstrip("\n").splitlines())
+                            mr_snapshot_id = uuid5(
                                 NAMESPACE_URL,
-                                f"{DEFAULT_TENANT_ID}:code_architecture_scout:mr_delta:42:state_reconciler.py",
-                            ),
-                            snapshot_id=mr_snapshot_id,
-                            domain_id="code_architecture_scout",
-                            repo_name="enterprise-context-scout",
-                            file_path="src/context_scout/ops/state_reconciler.py",
-                            change_type="modified",
-                            allowed_scopes=["public_eng"],
-                            previous_file_path="src/context_scout/ops/state_reconciler.py",
-                            base_blob_sha=base_sha,
-                            overlay_blob_sha=head_sha,
-                            language="python",
-                            raw_content=overlay_content,
-                            line_count=len(overlay_content.splitlines()),
-                            symbols_json=[
-                                {
-                                    "qualified_name": (
-                                        "context_scout.ops.state_reconciler."
-                                        "verify_pitr_overlay_watermark_lag"
+                                f"{DEFAULT_TENANT_ID}:code_architecture_scout:mr_snapshot:42",
+                            )
+                            base_sha = _git_blob_sha(base_content)
+                            head_sha = _git_blob_sha(overlay_content)
+                            repo.upsert_ref_snapshot(
+                                conn,
+                                RefSnapshotRecord(
+                                    snapshot_id=mr_snapshot_id,
+                                    domain_id="code_architecture_scout",
+                                    repo_name="enterprise-context-scout",
+                                    ref_name="mr/42",
+                                    ref_kind="merge_request",
+                                    base_commit_sha=base_sha,
+                                    head_commit_sha=head_sha,
+                                    allowed_scopes=["public_eng"],
+                                    mr_iid="42",
+                                    state="open",
+                                    metadata_json={
+                                        "title": (
+                                            "feat(ops): bound PITR watermark lag in StateReconciler"
+                                        ),
+                                        "seeded_by": "pg_isolation_bootstrap",
+                                    },
+                                    tenant_id=DEFAULT_TENANT_ID,
+                                ),
+                            )
+                            repo.upsert_overlay_file_delta(
+                                conn,
+                                OverlayFileDeltaRecord(
+                                    delta_id=uuid5(
+                                        NAMESPACE_URL,
+                                        f"{DEFAULT_TENANT_ID}:code_architecture_scout:"
+                                        "mr_delta:42:state_reconciler.py",
                                     ),
-                                    "name": "verify_pitr_overlay_watermark_lag",
-                                    "symbol_kind": "function",
-                                    "start_line": base_lines + 3,
-                                    "end_line": len(overlay_content.splitlines()),
-                                }
-                            ],
-                            tenant_id=DEFAULT_TENANT_ID,
-                        ),
+                                    snapshot_id=mr_snapshot_id,
+                                    domain_id="code_architecture_scout",
+                                    repo_name="enterprise-context-scout",
+                                    file_path="src/context_scout/ops/state_reconciler.py",
+                                    change_type="modified",
+                                    allowed_scopes=["public_eng"],
+                                    previous_file_path="src/context_scout/ops/state_reconciler.py",
+                                    base_blob_sha=base_sha,
+                                    overlay_blob_sha=head_sha,
+                                    language="python",
+                                    raw_content=overlay_content,
+                                    line_count=len(overlay_content.splitlines()),
+                                    symbols_json=[
+                                        {
+                                            "qualified_name": (
+                                                "context_scout.ops.state_reconciler."
+                                                "verify_pitr_overlay_watermark_lag"
+                                            ),
+                                            "name": "verify_pitr_overlay_watermark_lag",
+                                            "symbol_kind": "function",
+                                            "start_line": base_lines + 3,
+                                            "end_line": len(overlay_content.splitlines()),
+                                        }
+                                    ],
+                                    tenant_id=DEFAULT_TENANT_ID,
+                                ),
+                            )
+
+                    if need_ent_docs:
+                        _seed_enterprise_docs_scout(conn, repo)
+                    conn.execute(
+                        """
+                        UPDATE doc_chunks
+                        SET allowed_scopes = array_remove(allowed_scopes, 'docs_restricted')
+                        WHERE domain_id = 'enterprise_docs_scout'
+                          AND allowed_scopes @> ARRAY['docs_restricted', 'public']::text[]
+                        """
                     )
 
-            ent_docs_row = conn.execute(
-                "SELECT count(*) FROM doc_chunks WHERE domain_id = 'enterprise_docs_scout'"
-            ).fetchone()
-            if _row_count(ent_docs_row) < 9:
-                _seed_enterprise_docs_scout(conn, repo)
-            conn.execute(
-                """
-                UPDATE doc_chunks
-                SET allowed_scopes = array_remove(allowed_scopes, 'docs_restricted')
-                WHERE domain_id = 'enterprise_docs_scout'
-                  AND allowed_scopes @> ARRAY['docs_restricted', 'public']::text[]
-                """
-            )
+                    if need_de:
+                        _seed_data_engineering_scout(conn, repo)
 
-            de_row = conn.execute(
-                "SELECT count(*) FROM doc_chunks "
-                "WHERE domain_id = 'data_engineering_scout' AND doc_id = 'de-cap-theorem'"
-            ).fetchone()
-            if _row_count(de_row) == 0:
-                _seed_data_engineering_scout(conn, repo)
-
-            poly_row = conn.execute(
-                "SELECT count(*) FROM code_files "
-                "WHERE domain_id = 'polyglot_unseen_v2' "
-                "AND file_path = 'httpx/_transports/default.py'"
-            ).fetchone()
-            if _row_count(poly_row) == 0:
-                _seed_polyglot_unseen_v2(conn, repo)
+                    if need_poly:
+                        _seed_polyglot_unseen_v2(conn, repo)
+        finally:
+            lock_conn.execute("SELECT pg_advisory_unlock(%s)", (advisory_lock_id,))

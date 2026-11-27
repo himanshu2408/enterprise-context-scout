@@ -132,3 +132,31 @@ def test_ephemeral_pg_domain_factory_registers_distinct_domains(
             ([tenant_a, tenant_b],),
         ).fetchall()
         assert {row[0] for row in rows} == {tenant_a, tenant_b}
+
+
+def test_parallel_bootstrap_preserves_active_eval_domain_under_advisory_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under SCOUT_PARALLEL_PYTEST=1, bootstrap never drops active eval_* domains."""
+    from tests.fixtures.pg_isolation import ensure_pg17_schema_and_seed_corpora
+
+    settings = ScoutSettings()
+    active_eval = make_ephemeral_pg_domain_id("parallel_active")
+    monkeypatch.setenv("SCOUT_PARALLEL_PYTEST", "1")
+    with psycopg.connect(settings.db_admin_url) as conn:
+        create_ephemeral_pg_domain(conn, domain_id=active_eval)
+    try:
+        ensure_pg17_schema_and_seed_corpora(
+            db_admin_url=settings.db_admin_url,
+            db_app_url=settings.db_app_url,
+            repo_root=__import__("pathlib").Path(__file__).resolve().parents[1],
+        )
+        with psycopg.connect(settings.db_admin_url) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM domain_packs WHERE domain_id = %s",
+                (active_eval,),
+            ).fetchone()
+            assert row is not None, "Active eval_* domain was deleted under SCOUT_PARALLEL_PYTEST=1"
+    finally:
+        with psycopg.connect(settings.db_admin_url) as conn:
+            cleanup_ephemeral_pg_domain(conn, active_eval)

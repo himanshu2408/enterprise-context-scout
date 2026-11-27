@@ -105,7 +105,10 @@ def _snapshot_non_eval_counts(db_admin_url: str) -> dict[str, dict[str, int]]:
         for tbl in ("code_files", "ast_symbols", "ast_edges", "doc_chunks"):
             rows = conn.execute(
                 f"SELECT domain_id, count(*) FROM {tbl} "
-                "WHERE tenant_id = %s AND domain_id NOT LIKE 'eval_%%' "
+                "WHERE tenant_id = %s "
+                "AND domain_id NOT LIKE 'eval_%%' "
+                "AND domain_id NOT LIKE 'ephem_%%' "
+                "AND domain_id NOT LIKE 'canary_%%' "
                 "GROUP BY domain_id ORDER BY domain_id;",
                 (DEFAULT_TENANT_ID,),
             ).fetchall()

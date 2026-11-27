@@ -37,7 +37,7 @@ from context_scout.cli import (
 from context_scout.config import ScoutSettings
 from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
 from context_scout.retrieval.embedder import get_embedding_provider
-from context_scout.schemas.contracts import AuthorityRules, DomainPackManifest
+from context_scout.schemas.contracts import DEFAULT_TENANT_ID, AuthorityRules, DomainPackManifest
 
 _TEST_HMAC_SECRET = "scout-test-suite-hmac-secret-32-chars-long-sec04!!"
 _CORPUS_TABLES: tuple[str, ...] = (
@@ -51,13 +51,20 @@ _CORPUS_TABLES: tuple[str, ...] = (
 
 
 def _snapshot_corpus_counts(db_admin_url: str) -> dict[str, int]:
-    """Reads exact row counts across core PG17 corpus tables for read-only canary assertions."""
+    """Reads exact row counts across shared DEFAULT_TENANT_ID non-eval corpus tables."""
     counts: dict[str, int] = {}
     with psycopg.connect(db_admin_url) as conn:
         for table_name in _CORPUS_TABLES:
             if table_name not in _CORPUS_TABLES:
                 raise ValueError(f"Unsupported table name: {table_name}")
-            row = conn.execute(f"SELECT count(*) FROM {table_name};").fetchone()
+            row = conn.execute(
+                f"SELECT count(*) FROM {table_name} "
+                "WHERE tenant_id = %s "
+                "AND domain_id NOT LIKE 'eval_%%' "
+                "AND domain_id NOT LIKE 'ephem_%%' "
+                "AND domain_id NOT LIKE 'canary_%%';",
+                (DEFAULT_TENANT_ID,),
+            ).fetchone()
             counts[table_name] = int(row[0]) if row is not None else 0
     return counts
 
