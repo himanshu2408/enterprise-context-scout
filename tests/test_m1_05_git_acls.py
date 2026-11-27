@@ -8,19 +8,27 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from context_scout.db.repositories import InMemoryRLSRepository
+from context_scout.config import ScoutSettings
+from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
+from context_scout.db.session import PoolRole, RLSConnectionManager
 from context_scout.plugins.connectors import GitHubEnterpriseConnectorPlugin, GitLabConnectorPlugin
 from context_scout.plugins.connectors.github import GitHubAppInstallationACL
 from context_scout.plugins.registry import PluginRegistry
 from context_scout.queue.task_queue import QueueTask
+from context_scout.schemas.contracts import PrincipalContext, RoleType
 from context_scout.security.permission_mirror import GitLabRole
 
 
-def _make_task(event_type: str, payload: dict[str, object]) -> QueueTask:
+def _make_task(
+    event_type: str,
+    payload: dict[str, object],
+    *,
+    domain_id: str = "default",
+) -> QueueTask:
     now = datetime.now(UTC)
     return QueueTask(
         task_id=uuid.uuid4(),
-        domain_id="default",
+        domain_id=domain_id,
         event_type=event_type,
         payload=payload,
         priority=1,
@@ -253,12 +261,22 @@ def test_github_app_acl_fail_closed_and_team_collaborator_mapping() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "backend",
+    ["memory", pytest.param("postgres", marks=pytest.mark.postgres)],
+)
 def test_github_api_endpoints_and_push_webhook_ast_embeddings(
+    backend: str,
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    expected_vec = (
+        [0.25, 0.75, 0.5, 0.1] + [0.01] * 764 if backend == "postgres" else [0.25, 0.75, 0.5, 0.1]
+    )
+
     class _FakeEmbedder:
         def embed_batch(self, texts: list[str], is_query: bool = False) -> list[list[float]]:
-            return [[0.25, 0.75, 0.5, 0.1] for _ in texts]
+            return [list(expected_vec) for _ in texts]
 
     monkeypatch.setattr(
         "context_scout.retrieval.embedder.get_embedding_provider",
@@ -311,42 +329,82 @@ def test_github_api_endpoints_and_push_webhook_ast_embeddings(
     assert plugin.fetch_collaborator_permission("acme/service", "alice") == {"permission": "write"}
     assert plugin.fetch_item("acme/service") == {"full_name": "acme/service", "private": True}
 
-    repo = InMemoryRLSRepository()
     acl = GitHubAppInstallationACL(
         installation_id=99,
         repository_selection="selected",
         repositories=["acme/service"],
         permissions={"contents": "read"},
     )
-    task = _make_task(
-        "github_push",
-        {
-            "repository": {"id": 500, "full_name": "acme/service", "default_branch": "main"},
-            "before": "sha1",
-            "after": "sha2",
-            "ref": "refs/heads/main",
-            "commits": [{"id": "sha2", "message": "feat: add compute_risk"}],
-        },
-    )
-
-    res = plugin.process_push_webhook(task, repo, installation_acl=acl)
-    assert res.source_type == "github"
-    assert res.items_indexed == 1
-    assert len(res.errors) == 0
-    assert len(repo._files) == 1
-    assert len(repo._symbols) >= 1
-    for sym in repo._symbols.values():
-        assert sym.embedding == [0.25, 0.75, 0.5, 0.1]
-        assert sym.allowed_scopes == ["repo:acme/service:read"]
-
-    # Denied installation ACL fails closed without indexing
     denied_acl = GitHubAppInstallationACL(
         installation_id=99,
         repository_selection="selected",
         repositories=["acme/other"],
         permissions={"contents": "read"},
     )
-    res_denied = plugin.process_push_webhook(task, repo, installation_acl=denied_acl)
+    payload: dict[str, object] = {
+        "repository": {"id": 500, "full_name": "acme/service", "default_branch": "main"},
+        "before": "sha1",
+        "after": "sha2",
+        "ref": "refs/heads/main",
+        "commits": [{"id": "sha2", "message": "feat: add compute_risk"}],
+    }
+
+    if backend == "memory":
+        repo = InMemoryRLSRepository()
+        task = _make_task("github_push", payload)
+        res = plugin.process_push_webhook(task, repo, installation_acl=acl)
+        assert res.source_type == "github"
+        assert res.items_indexed == 1
+        assert len(res.errors) == 0
+        assert len(repo._files) == 1
+        assert len(repo._symbols) >= 1
+        for sym in repo._symbols.values():
+            assert sym.embedding == expected_vec
+            assert sym.allowed_scopes == ["repo:acme/service:read"]
+
+        # Denied installation ACL fails closed without indexing
+        res_denied = plugin.process_push_webhook(task, repo, installation_acl=denied_acl)
+        assert res_denied.items_indexed == 0
+        assert len(res_denied.errors) == 1
+        return
+
+    domain_id = str(request.getfixturevalue("ephemeral_pg_domain"))
+    task = _make_task("github_push", payload, domain_id=domain_id)
+    settings = ScoutSettings()
+    ingest_mgr = RLSConnectionManager(settings.db_app_url, pool_role=PoolRole.INGESTION)
+    read_mgr = RLSConnectionManager(settings.db_app_url)
+    pg_repo = PostgresRLSRepository()
+    ingest_principal = PrincipalContext(
+        user_id="gh-ingest",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["system:connector_ingest"],
+    )
+    with ingest_mgr.scoped_transaction(
+        ingest_principal, enable_hnsw_iterative_scan=False
+    ) as ingest_conn:
+        res = plugin.process_push_webhook(
+            task, pg_repo, conn=ingest_conn, principal=ingest_principal, installation_acl=acl
+        )
+        assert res.source_type == "github"
+        assert res.items_indexed == 1
+        assert len(res.errors) == 0
+
+    authorized = PrincipalContext(
+        user_id="alice",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["repo:acme/service:read"],
+    )
+    unauthorized = PrincipalContext(
+        user_id="eve",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["repo:acme/other:read"],
+    )
+    with read_mgr.scoped_transaction(authorized, enable_hnsw_iterative_scan=False) as auth_conn:
+        assert "compute_risk" in " ".join(pg_repo.list_visible_ast_symbols(auth_conn, domain_id))
+    with read_mgr.scoped_transaction(unauthorized, enable_hnsw_iterative_scan=False) as unauth_conn:
+        assert pg_repo.list_visible_ast_symbols(unauth_conn, domain_id) == []
+
+    res_denied = plugin.process_push_webhook(task, pg_repo, installation_acl=denied_acl)
     assert res_denied.items_indexed == 0
     assert len(res_denied.errors) == 1
 

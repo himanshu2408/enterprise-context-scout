@@ -161,6 +161,7 @@ def test_m1_squawk_zero_violations_and_idempotent_upgrade() -> None:
         "0021_m5_audit_scim",
         "0022_m5_audit_conc_idx",
         "0023_m5_audit_force_rls",
+        "0024_m5_scim_idx_conn_rls",
     ]
 
     scan_dirs = (
@@ -837,11 +838,17 @@ def test_m1_query_vs_ingestion_pools_and_zero_runtime_admin_url() -> None:
         assert i_lock == "10s"
         assert i_idle == "5min"
 
-    runtime_paths = (
-        REPO_ROOT / "src" / "context_scout" / "api" / "routes" / "telemetry.py",
-        REPO_ROOT / "src" / "context_scout" / "tuning" / "teacher_distiller.py",
-        REPO_ROOT / "src" / "context_scout" / "agents" / "preflight_gate.py",
+    src_root = REPO_ROOT / "src" / "context_scout"
+    runtime_subdirs = ("api", "agents", "security", "plugins", "db", "tuning", "mcp_servers")
+    runtime_paths = tuple(
+        py_path
+        for subdir in runtime_subdirs
+        for py_path in sorted((src_root / subdir).rglob("*.py"))
+        if "migrations" not in py_path.parts
+        and py_path.name != "migrations_runner.py"
+        and "__pycache__" not in py_path.parts
     )
+    assert len(runtime_paths) > 10
     for py_path in runtime_paths:
         src_text = py_path.read_text(encoding="utf-8")
         tree = ast.parse(src_text)
@@ -1016,3 +1023,68 @@ def test_m1_production_db_app_url_fail_closed(monkeypatch: pytest.MonkeyPatch) -
     validate_db_app_url(valid_prod_url)
     prod_settings = ScoutSettings()
     assert prod_settings.db_app_url == valid_prod_url
+
+
+def test_m1_migrations_runner_role_escaping_and_nologin_privileges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ECS-030: Role hardening uses psycopg.sql.Literal escaping and always enforces NOBYPASSRLS."""
+    from typing import Any
+    from unittest.mock import patch
+
+    from psycopg import sql as pg_sql
+
+    from context_scout.db.migrations_runner import run_alembic_upgrade
+
+    settings = ScoutSettings()
+    special_pw = "p'w;DROP TABLE x;--\\quoted"
+    executed_queries: list[str] = []
+
+    class _FakeConn:
+        def __enter__(self) -> _FakeConn:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, query: Any, params: Any = None) -> Any:
+            del params
+            if isinstance(query, pg_sql.Composed):
+                rendered = query.as_string(None)
+                executed_queries.append(rendered)
+            else:
+                executed_queries.append(str(query))
+
+            class _Res:
+                @staticmethod
+                def fetchone() -> tuple[int]:
+                    return (1,)
+
+            return _Res()
+
+        def commit(self) -> None:
+            return None
+
+    monkeypatch.delenv("SCOUT_DB_APP_PASSWORD", raising=False)
+    monkeypatch.delenv("SCOUT_DB_APP_URL", raising=False)
+    with (
+        patch("context_scout.db.migrations_runner.psycopg.connect", return_value=_FakeConn()),
+        patch("context_scout.db.migrations_runner.command.upgrade"),
+        patch("context_scout.db.migrations_runner._reconcile_m1_halfvec_spaces"),
+    ):
+        run_alembic_upgrade(
+            admin_db_url=settings.db_admin_url,
+            app_role_password=special_pw,
+        )
+        run_alembic_upgrade(
+            admin_db_url=settings.db_admin_url,
+            app_role_password=None,
+        )
+
+    role_stmts = [q for q in executed_queries if "ALTER ROLE scout_app_user" in q]
+    assert len(role_stmts) == 2
+    assert "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT" in role_stmts[0]
+    assert "PASSWORD" in role_stmts[0]
+    assert "''" in role_stmts[0]  # single-quote escaped by psycopg.sql.Literal
+    assert "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT" in role_stmts[1]
+    assert "PASSWORD" not in role_stmts[1]

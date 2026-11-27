@@ -14,7 +14,6 @@ import yaml
 
 from context_scout.db.repositories import PostgresRLSRepository
 from context_scout.db.session import (
-    PoolRole,
     RLSConnectionManager,
     get_ingestion_pool,
     get_query_pool,
@@ -495,20 +494,13 @@ class DomainRegistry:
             if self._connection_manager is not None:
                 mgr = self._connection_manager
             else:
-                # Use a short-timeout non-pooled probe so startup/import does not block
-                # for ConnectionPool's 30s retry window when PG17 is temporarily unreachable.
-                from context_scout.config import ScoutSettings
+                from context_scout.config import ScoutSettings, get_storage_backend
+                from context_scout.db.session import get_query_pool
 
+                if get_storage_backend() == "memory":
+                    return []
                 cfg = ScoutSettings()
-                mgr = RLSConnectionManager(
-                    cfg.db_app_url,
-                    use_pool=False,
-                    pool_role=PoolRole.QUERY,
-                    statement_timeout_ms=cfg.query_statement_timeout_ms,
-                    lock_timeout_ms=cfg.query_lock_timeout_ms,
-                    idle_tx_timeout_ms=cfg.query_idle_tx_timeout_ms,
-                    connect_timeout_s=2,
-                )
+                mgr = get_query_pool(cfg)
             with mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn:
                 return pg_repo.list_domain_pack_entries(conn)
         except Exception as exc:
@@ -522,7 +514,12 @@ class DomainRegistry:
     def _load_pg_manifests(self, principal: PrincipalContext) -> list[DomainPackManifest]:
         return [manifest for manifest, _ in self._load_pg_manifest_entries(principal)]
 
-    def load_all(self, principal: PrincipalContext | None = None) -> dict[str, DomainPackManifest]:
+    def load_all(
+        self,
+        principal: PrincipalContext | None = None,
+        *,
+        include_pg: bool = True,
+    ) -> dict[str, DomainPackManifest]:
         effective_principal = self._effective_principal(principal)
         disk_manifests: dict[str, DomainPackManifest] = {}
         has_disk_dir = self._domains_dir is not None and self._domains_dir.exists()
@@ -535,14 +532,14 @@ class DomainRegistry:
                 disk_manifests[manifest.domain_id] = manifest
                 self.register(manifest, tenant_id=effective_principal.tenant_id)
 
-        pg_entries = self._load_pg_manifest_entries(effective_principal)
+        pg_entries = self._load_pg_manifest_entries(effective_principal) if include_pg else []
         for manifest, is_persistent in pg_entries:
             # Never let non-S3 legacy DB seed config override authoritative domain.yaml templates
             if manifest.domain_id in disk_manifests and not is_persistent:
                 continue
             self.register(manifest, tenant_id=effective_principal.tenant_id)
 
-        if self._domains_dir is not None and not has_disk_dir and not pg_entries:
+        if self._domains_dir is not None and not has_disk_dir and include_pg and not pg_entries:
             raise FileNotFoundError(f"Domains directory not found: {self._domains_dir}")
 
         if effective_principal.tenant_id == self._tenant_id:

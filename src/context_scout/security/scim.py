@@ -14,7 +14,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from context_scout.config import ScoutSettings
+from context_scout.config import ScoutSettings, get_storage_backend
 from context_scout.db.session import RLSConnectionManager, get_query_pool
 from context_scout.schemas.contracts import DEFAULT_TENANT_ID, PrincipalContext, RoleType
 from context_scout.security.permission_mirror import (
@@ -68,6 +68,14 @@ def _reject_nul_text(value: str, field_name: str) -> str:
             f"SCIM field '{field_name}' must not contain NUL bytes or lone UTF-16 surrogates."
         )
     return value
+
+
+def _reject_reserved_system_scopes(scopes: Sequence[str], field_name: str) -> None:
+    for scope in scopes:
+        if scope.strip().lower().startswith("system:"):
+            raise ValueError(
+                f"Reserved internal scope '{scope}' cannot be provisioned via SCIM '{field_name}'."
+            )
 
 
 def _assert_no_nul_in_obj(obj: Any, path: str = "payload", *, depth: int = 0) -> None:
@@ -238,6 +246,47 @@ def _extract_member_lists(raw_members: Any) -> tuple[list[str], list[str]]:
     return (users, groups)
 
 
+def _extract_scim_emails_json(
+    payload: Mapping[str, Any], primary_email: str
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    raw_emails = payload.get("emails")
+    if isinstance(raw_emails, list):
+        for entry in raw_emails:
+            if isinstance(entry, Mapping) and entry.get("value"):
+                val = str(entry["value"]).strip().lower()
+                if val and val not in seen:
+                    seen.add(val)
+                    obj: dict[str, Any] = {"value": val}
+                    if entry.get("primary"):
+                        obj["primary"] = True
+                    entries.append(obj)
+            elif isinstance(entry, str) and entry.strip():
+                val = entry.strip().lower()
+                if val not in seen:
+                    seen.add(val)
+                    entries.append({"value": val})
+    if primary_email:
+        norm = primary_email.strip().lower()
+        if norm and norm not in seen:
+            entries.insert(0, {"value": norm, "primary": True})
+    return entries
+
+
+def _build_members_json(
+    member_users: Sequence[str], member_groups: Sequence[str]
+) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for uid in member_users:
+        if uid.strip():
+            out.append({"value": uid.strip(), "type": "User"})
+    for gid in member_groups:
+        if gid.strip():
+            out.append({"value": gid.strip(), "type": "Group"})
+    return out
+
+
 class SCIMDirectoryService:
     """Thread-safe SCIM 2.0 user/group store backed by PG17 FORCE RLS or in-memory state."""
 
@@ -266,7 +315,7 @@ class SCIMDirectoryService:
             return
         for candidate in (user.scim_user_id, user.external_id, user.user_name, user.email):
             if candidate and candidate.strip():
-                self._permission_cache.invalidate_user(candidate.strip())
+                self._permission_cache.invalidate_user(candidate.strip(), tenant_id=user.tenant_id)
 
     def _invalidate_group_members_cache(
         self, group: SCIMGroupRecord, extra_user_ids: Sequence[str] = ()
@@ -275,7 +324,7 @@ class SCIMDirectoryService:
             return
         for uid in [*group.member_user_ids, *extra_user_ids]:
             if uid and uid.strip():
-                self._permission_cache.invalidate_user(uid.strip())
+                self._permission_cache.invalidate_user(uid.strip(), tenant_id=group.tenant_id)
         self._permission_cache.invalidate_scope_prefix(
             f"group:{_sanitize_group_scope_slug(group.display_name)}"
         )
@@ -325,6 +374,8 @@ class SCIMDirectoryService:
         custom_scopes = [
             sanitize_scope_identifier(str(s)) for s in raw_scopes_list if str(s).strip()
         ]
+        _reject_reserved_system_scopes(custom_scopes, "customScopes")
+        emails_json = _extract_scim_emails_json(payload, email)
         now = datetime.now(UTC)
 
         rec = SCIMUserRecord(
@@ -354,12 +405,12 @@ class SCIMDirectoryService:
                     """
                     INSERT INTO scim_users (
                         tenant_id, scim_user_id, domain_id, external_id, user_name,
-                        email, display_name, active, role_override, custom_scopes,
+                        email, emails_json, display_name, active, role_override, custom_scopes,
                         metadata_json, created_at, updated_at
                     )
                     VALUES (
                         %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s,
+                        %s, %s::jsonb, %s, %s, %s, %s,
                         %s::jsonb, NOW(), NOW()
                     )
                     ON CONFLICT (tenant_id, scim_user_id) DO UPDATE SET
@@ -367,6 +418,7 @@ class SCIMDirectoryService:
                         external_id = EXCLUDED.external_id,
                         user_name = EXCLUDED.user_name,
                         email = EXCLUDED.email,
+                        emails_json = EXCLUDED.emails_json,
                         display_name = EXCLUDED.display_name,
                         active = EXCLUDED.active,
                         role_override = EXCLUDED.role_override,
@@ -384,6 +436,7 @@ class SCIMDirectoryService:
                         rec.external_id,
                         rec.user_name,
                         rec.email,
+                        json.dumps(emails_json),
                         rec.display_name,
                         rec.active,
                         rec.role_override.value if rec.role_override else None,
@@ -633,6 +686,8 @@ class SCIMDirectoryService:
         mapped_scopes = [
             sanitize_scope_identifier(str(s)) for s in raw_scopes_list if str(s).strip()
         ]
+        _reject_reserved_system_scopes(mapped_scopes, "mappedScopes")
+        members_json = _build_members_json(member_users, member_groups)
         mapped_role = _extract_scim_role(payload)
         now = datetime.now(UTC)
 
@@ -662,12 +717,12 @@ class SCIMDirectoryService:
                     """
                     INSERT INTO scim_groups (
                         tenant_id, scim_group_id, domain_id, external_id, display_name,
-                        member_user_ids, member_group_ids, mapped_scopes, mapped_role,
+                        member_user_ids, member_group_ids, members_json, mapped_scopes, mapped_role,
                         metadata_json, created_at, updated_at
                     )
                     VALUES (
                         %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s,
+                        %s, %s, %s::jsonb, %s, %s,
                         %s::jsonb, NOW(), NOW()
                     )
                     ON CONFLICT (tenant_id, scim_group_id) DO UPDATE SET
@@ -676,6 +731,7 @@ class SCIMDirectoryService:
                         display_name = EXCLUDED.display_name,
                         member_user_ids = EXCLUDED.member_user_ids,
                         member_group_ids = EXCLUDED.member_group_ids,
+                        members_json = EXCLUDED.members_json,
                         mapped_scopes = EXCLUDED.mapped_scopes,
                         mapped_role = EXCLUDED.mapped_role,
                         metadata_json = EXCLUDED.metadata_json,
@@ -692,6 +748,7 @@ class SCIMDirectoryService:
                         rec.display_name,
                         rec.member_user_ids,
                         rec.member_group_ids,
+                        json.dumps(members_json),
                         rec.mapped_scopes,
                         rec.mapped_role.value if rec.mapped_role else None,
                         json.dumps(rec.metadata_json),
@@ -912,6 +969,141 @@ class SCIMDirectoryService:
     # Principal Enrichment & Transitive Nested Group Expansion
     # ------------------------------------------------------------------
 
+    def _lookup_matched_user_and_groups_pg(
+        self,
+        tenant_id: UUID,
+        raw_identifiers: Sequence[str],
+        norm_ids: set[str],
+        norm_group_refs: set[str],
+    ) -> tuple[SCIMUserRecord | None, list[SCIMGroupRecord]]:
+        assert self._conn_mgr is not None
+        principal = self._service_principal(tenant_id)
+        exact_ids = list({i.strip() for i in raw_identifiers if i and i.strip()})
+        lower_ids = sorted(norm_ids)
+        email_probes = [json.dumps([{"value": lid}]) for lid in lower_ids if "@" in lid or lid]
+
+        with self._conn_mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn:
+            matched_user: SCIMUserRecord | None = None
+            if exact_ids or lower_ids:
+                u_row = conn.execute(
+                    """
+                    SELECT tenant_id, scim_user_id, domain_id, external_id, user_name,
+                           email, display_name, active, role_override, custom_scopes,
+                           metadata_json, created_at, updated_at
+                    FROM scim_users
+                    WHERE scim_user_id = ANY(%s)
+                       OR lower(user_name) = ANY(%s)
+                       OR external_id = ANY(%s)
+                       OR lower(external_id) = ANY(%s)
+                       OR lower(email) = ANY(%s)
+                       OR emails_json @> ANY(%s::jsonb[])
+                    ORDER BY user_name ASC
+                    LIMIT 1;
+                    """,
+                    (exact_ids, lower_ids, exact_ids, lower_ids, lower_ids, email_probes),
+                ).fetchone()
+                if u_row is not None:
+                    matched_user = self._row_to_user(u_row)
+
+            if matched_user is not None and not matched_user.active:
+                return matched_user, []
+
+            eff_raw_u = set(exact_ids)
+            eff_low_u = set(lower_ids)
+            if matched_user is not None:
+                for val in (
+                    matched_user.scim_user_id,
+                    matched_user.user_name,
+                    matched_user.external_id,
+                    matched_user.email,
+                ):
+                    if val and val.strip():
+                        eff_raw_u.add(val.strip())
+                        eff_low_u.add(val.strip().lower())
+            eff_user_tokens = sorted(eff_raw_u | eff_low_u)
+            eff_user_lower = sorted(eff_low_u)
+            eff_group_lower = sorted(norm_group_refs)
+            member_user_json_probes = [
+                json.dumps([{"value": tok, "type": "User"}]) for tok in eff_user_tokens
+            ]
+
+            matched_by_id: dict[str, SCIMGroupRecord] = {}
+            frontier_tokens: set[str] = set()
+            seed_rows = conn.execute(
+                """
+                SELECT tenant_id, scim_group_id, domain_id, external_id, display_name,
+                       member_user_ids, member_group_ids, mapped_scopes, mapped_role,
+                       metadata_json, created_at, updated_at
+                FROM scim_groups
+                WHERE member_user_ids && %s
+                   OR members_json @> ANY(%s::jsonb[])
+                   OR EXISTS (
+                       SELECT 1 FROM unnest(member_user_ids) AS mu WHERE lower(mu) = ANY(%s)
+                   )
+                   OR lower(scim_group_id) = ANY(%s)
+                   OR lower(external_id) = ANY(%s)
+                   OR lower(display_name) = ANY(%s)
+                ORDER BY display_name ASC;
+                """,
+                (
+                    eff_user_tokens,
+                    member_user_json_probes,
+                    eff_user_lower,
+                    eff_group_lower,
+                    eff_group_lower,
+                    eff_group_lower,
+                ),
+            ).fetchall()
+            for r in seed_rows:
+                grp = self._row_to_group(r)
+                matched_by_id[grp.scim_group_id] = grp
+                for tok in (grp.scim_group_id, grp.external_id, grp.display_name):
+                    if tok and tok.strip():
+                        frontier_tokens.add(tok.strip())
+                        frontier_tokens.add(tok.strip().lower())
+
+            # Cycle-safe bounded parent group expansion via indexed GIN array/jsonb lookup
+            while frontier_tokens:
+                tok_list = sorted(frontier_tokens)
+                tok_lower = sorted({t.lower() for t in frontier_tokens})
+                seen_ids = list(matched_by_id.keys())
+                grp_json_probes = [
+                    json.dumps([{"value": tok, "type": "Group"}]) for tok in tok_list
+                ]
+                parent_rows = conn.execute(
+                    """
+                    SELECT tenant_id, scim_group_id, domain_id, external_id, display_name,
+                           member_user_ids, member_group_ids, mapped_scopes, mapped_role,
+                           metadata_json, created_at, updated_at
+                    FROM scim_groups
+                    WHERE NOT (scim_group_id = ANY(%s))
+                      AND (
+                          member_group_ids && %s
+                          OR members_json @> ANY(%s::jsonb[])
+                          OR EXISTS (
+                              SELECT 1 FROM unnest(member_group_ids) AS mg
+                              WHERE lower(mg) = ANY(%s)
+                          )
+                      )
+                    ORDER BY display_name ASC;
+                    """,
+                    (seen_ids, tok_list, grp_json_probes, tok_lower),
+                ).fetchall()
+                next_frontier: set[str] = set()
+                for r in parent_rows:
+                    grp = self._row_to_group(r)
+                    if grp.scim_group_id in matched_by_id:
+                        continue
+                    matched_by_id[grp.scim_group_id] = grp
+                    for tok in (grp.scim_group_id, grp.external_id, grp.display_name):
+                        if tok and tok.strip():
+                            next_frontier.add(tok.strip())
+                            next_frontier.add(tok.strip().lower())
+                frontier_tokens = next_frontier
+
+            sorted_groups = sorted(matched_by_id.values(), key=lambda g: g.display_name.lower())
+            return matched_user, sorted_groups
+
     def resolve_principal_enrichment(
         self,
         tenant_id: UUID,
@@ -922,79 +1114,90 @@ class SCIMDirectoryService:
         norm_ids = {i.strip().lower() for i in identifiers if i and i.strip()}
         norm_group_refs = {g.strip().lower() for g in idp_group_refs if g and g.strip()}
 
-        users = self.list_users(tenant_id)
-        matched_user: SCIMUserRecord | None = None
-        for user in users:
-            user_keys = {
-                user.scim_user_id.lower(),
-                user.user_name.lower(),
-                user.external_id.lower(),
-                user.email.lower(),
-            }
-            user_keys.discard("")
-            if norm_ids & user_keys:
-                matched_user = user
-                break
-
-        if matched_user is not None and not matched_user.active:
-            return SCIMPrincipalResolution(
-                found_user=True,
-                deprovisioned=True,
-                scim_user=matched_user,
+        if self._conn_mgr is not None:
+            matched_user, matched_groups = self._lookup_matched_user_and_groups_pg(
+                tenant_id, identifiers, norm_ids, norm_group_refs
             )
-
-        effective_user_keys = set(norm_ids)
-        if matched_user is not None:
-            effective_user_keys.update(
-                k
-                for k in (
-                    matched_user.scim_user_id.lower(),
-                    matched_user.user_name.lower(),
-                    matched_user.external_id.lower(),
-                    matched_user.email.lower(),
+            if matched_user is not None and not matched_user.active:
+                return SCIMPrincipalResolution(
+                    found_user=True,
+                    deprovisioned=True,
+                    scim_user=matched_user,
                 )
-                if k
-            )
+        else:
+            users = self.list_users(tenant_id)
+            matched_user = None
+            for user in users:
+                user_keys = {
+                    user.scim_user_id.lower(),
+                    user.user_name.lower(),
+                    user.external_id.lower(),
+                    user.email.lower(),
+                }
+                user_keys.discard("")
+                if norm_ids & user_keys:
+                    matched_user = user
+                    break
 
-        all_groups = self.list_groups(tenant_id)
-        matched_group_ids: set[str] = set()
-        matched_group_tokens: set[str] = set(norm_group_refs)
+            if matched_user is not None and not matched_user.active:
+                return SCIMPrincipalResolution(
+                    found_user=True,
+                    deprovisioned=True,
+                    scim_user=matched_user,
+                )
 
-        for grp in all_groups:
-            grp_keys = {
-                grp.scim_group_id.lower(),
-                grp.external_id.lower(),
-                grp.display_name.lower(),
-            }
-            grp_keys.discard("")
-            member_u_keys = {m.strip().lower() for m in grp.member_user_ids if m.strip()}
-            if (effective_user_keys & member_u_keys) or (norm_group_refs & grp_keys):
-                matched_group_ids.add(grp.scim_group_id)
-                matched_group_tokens.update(grp_keys)
-
-        # Cycle-safe transitive nested group expansion:
-        # If child group G is matched and parent group P contains G in member_group_ids, P matches.
-        changed = True
-        while changed:
-            changed = False
-            for grp in all_groups:
-                if grp.scim_group_id in matched_group_ids:
-                    continue
-                child_refs = {m.strip().lower() for m in grp.member_group_ids if m.strip()}
-                if child_refs & matched_group_tokens:
-                    matched_group_ids.add(grp.scim_group_id)
-                    matched_group_tokens.update(
-                        k
-                        for k in (
-                            grp.scim_group_id.lower(),
-                            grp.external_id.lower(),
-                            grp.display_name.lower(),
-                        )
-                        if k
+            effective_user_keys = set(norm_ids)
+            if matched_user is not None:
+                effective_user_keys.update(
+                    k
+                    for k in (
+                        matched_user.scim_user_id.lower(),
+                        matched_user.user_name.lower(),
+                        matched_user.external_id.lower(),
+                        matched_user.email.lower(),
                     )
-                    changed = True
+                    if k
+                )
 
-        matched_groups = [g for g in all_groups if g.scim_group_id in matched_group_ids]
+            all_groups = self.list_groups(tenant_id)
+            matched_group_ids: set[str] = set()
+            matched_group_tokens: set[str] = set(norm_group_refs)
+
+            for grp in all_groups:
+                grp_keys = {
+                    grp.scim_group_id.lower(),
+                    grp.external_id.lower(),
+                    grp.display_name.lower(),
+                }
+                grp_keys.discard("")
+                member_u_keys = {m.strip().lower() for m in grp.member_user_ids if m.strip()}
+                if (effective_user_keys & member_u_keys) or (norm_group_refs & grp_keys):
+                    matched_group_ids.add(grp.scim_group_id)
+                    matched_group_tokens.update(grp_keys)
+
+            # Cycle-safe transitive nested group expansion:
+            # If child group G is matched and parent group P contains G in member_group_ids.
+            changed = True
+            while changed:
+                changed = False
+                for grp in all_groups:
+                    if grp.scim_group_id in matched_group_ids:
+                        continue
+                    child_refs = {m.strip().lower() for m in grp.member_group_ids if m.strip()}
+                    if child_refs & matched_group_tokens:
+                        matched_group_ids.add(grp.scim_group_id)
+                        matched_group_tokens.update(
+                            k
+                            for k in (
+                                grp.scim_group_id.lower(),
+                                grp.external_id.lower(),
+                                grp.display_name.lower(),
+                            )
+                            if k
+                        )
+                        changed = True
+
+            matched_groups = [g for g in all_groups if g.scim_group_id in matched_group_ids]
         scopes: list[str] = []
         best_role: RoleType | None = matched_user.role_override if matched_user else None
 
@@ -1086,41 +1289,40 @@ class SCIMDirectoryService:
 
 _SCIM_LOCK = threading.Lock()
 _GLOBAL_SCIM_SERVICE: SCIMDirectoryService | None = None
+_GLOBAL_SCIM_EXPLICIT: bool = False
+_GLOBAL_SCIM_KEY: tuple[str, str] | None = None
 
 
 def get_scim_directory_service() -> SCIMDirectoryService:
-    """Returns shared SCIMDirectoryService backed by PG17 RLS when reachable, else memory."""
-    global _GLOBAL_SCIM_SERVICE
-    if _GLOBAL_SCIM_SERVICE is not None:
+    """Returns shared SCIMDirectoryService for storage_backend without silent fallback."""
+    global _GLOBAL_SCIM_SERVICE, _GLOBAL_SCIM_EXPLICIT, _GLOBAL_SCIM_KEY
+    if _GLOBAL_SCIM_EXPLICIT and _GLOBAL_SCIM_SERVICE is not None:
+        return _GLOBAL_SCIM_SERVICE
+    backend = get_storage_backend()
+    settings = ScoutSettings()
+    desired_key = (backend, settings.db_app_url if backend == "postgres" else "memory")
+    if _GLOBAL_SCIM_SERVICE is not None and desired_key == _GLOBAL_SCIM_KEY:
         return _GLOBAL_SCIM_SERVICE
     with _SCIM_LOCK:
-        if _GLOBAL_SCIM_SERVICE is not None:
+        if _GLOBAL_SCIM_EXPLICIT and _GLOBAL_SCIM_SERVICE is not None:
             return _GLOBAL_SCIM_SERVICE
-        settings = ScoutSettings()
-        try:
-            conn_mgr = get_query_pool(settings)
-            probe = PrincipalContext(
-                user_id="scim_probe",
-                role=RoleType.COMPLIANCE_OFFICER,
-                allowed_scopes=["audit:compliance"],
-            )
-            with conn_mgr.scoped_transaction(probe, enable_hnsw_iterative_scan=False) as conn:
-                conn.execute("SELECT 1 FROM scim_users LIMIT 1;")
-            _GLOBAL_SCIM_SERVICE = SCIMDirectoryService(connection_manager=conn_mgr)
-        except Exception as exc:
-            logger.debug(
-                "PG17 scim_users unavailable (%s); using in-memory SCIMDirectoryService.",
-                exc,
-            )
+        if _GLOBAL_SCIM_SERVICE is not None and desired_key == _GLOBAL_SCIM_KEY:
+            return _GLOBAL_SCIM_SERVICE
+        if backend == "memory":
             _GLOBAL_SCIM_SERVICE = SCIMDirectoryService()
+        else:
+            _GLOBAL_SCIM_SERVICE = SCIMDirectoryService(connection_manager=get_query_pool(settings))
+        _GLOBAL_SCIM_KEY = desired_key
         return _GLOBAL_SCIM_SERVICE
 
 
 def set_scim_directory_service(service: SCIMDirectoryService | None) -> None:
     """Overrides or resets the global SCIMDirectoryService instance (used in tests)."""
-    global _GLOBAL_SCIM_SERVICE
+    global _GLOBAL_SCIM_SERVICE, _GLOBAL_SCIM_EXPLICIT, _GLOBAL_SCIM_KEY
     with _SCIM_LOCK:
         _GLOBAL_SCIM_SERVICE = service
+        _GLOBAL_SCIM_EXPLICIT = service is not None
+        _GLOBAL_SCIM_KEY = None
 
 
 __all__ = [

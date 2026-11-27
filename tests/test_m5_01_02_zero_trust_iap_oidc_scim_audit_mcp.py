@@ -296,11 +296,16 @@ def test_multi_provider_oidc_jwks_kid_rotation_and_dev_session_gate(
     now = int(time.time())
     clock_now = [100.0]
     jwks_state: dict[str, Any] = {"keys": [jwk_rsa_k1]}
+    loader_calls = {"count": 0}
+
+    def _counting_jwks_loader(_url: str) -> dict[str, Any]:
+        loader_calls["count"] += 1
+        return dict(jwks_state)
 
     cache = JWKSCache(
         cache_ttl_seconds=300.0,
         min_refresh_interval_seconds=10.0,
-        jwks_loader=lambda _url: dict(jwks_state),
+        jwks_loader=_counting_jwks_loader,
         clock=lambda: clock_now[0],
     )
     scim = SCIMDirectoryService()
@@ -434,21 +439,44 @@ def test_multi_provider_oidc_jwks_kid_rotation_and_dev_session_gate(
     )
     assert entra_verifier.verify(initial_entra_jwt, tenant_id=tenant_id).role == RoleType.ENGINEER
 
-    # Publish rotated EC key oidc-ec-2 in JWKS
+    # Bogus kid probe BEFORE key rotation fails 401 and negatively caches ONLY 'attacker-bogus'
+    clock_now[0] = 102.0
+    bogus_ec, _ = _generate_ec_p256_keypair("attacker-bogus")
+    bogus_jwt = jwt.encode(
+        entra_claims, bogus_ec, algorithm="ES256", headers={"kid": "attacker-bogus"}
+    )
+    fetches_before_bogus = loader_calls["count"]
+    with pytest.raises(AuthVerificationError) as bogus_err_1:
+        entra_verifier.verify(bogus_jwt, tenant_id=tenant_id)
+    assert bogus_err_1.value.status_code == 401
+    assert loader_calls["count"] == fetches_before_bogus + 1
+
+    # Repeating bogus kid within cooldown makes ZERO upstream JWKS fetches
+    clock_now[0] = 103.0
+    with pytest.raises(AuthVerificationError) as bogus_err_2:
+        entra_verifier.verify(bogus_jwt, tenant_id=tenant_id)
+    assert bogus_err_2.value.status_code == 401
+    assert loader_calls["count"] == fetches_before_bogus + 1
+
+    # Publish rotated EC key oidc-ec-2 in JWKS; bogus kid probe MUST NOT block it (ECS-034)
     jwks_state["keys"] = [jwk_rsa_k1, jwk_ec_k2]
     rotated_jwt = jwt.encode(entra_claims, ec_k2, algorithm="ES256", headers={"kid": "oidc-ec-2"})
-
-    # Within min_refresh cooldown (clock_now == 102.0): unknown kid refresh is suppressed -> 401
-    clock_now[0] = 102.0
-    with pytest.raises(AuthVerificationError) as cooldown_err:
-        entra_verifier.verify(rotated_jwt, tenant_id=tenant_id)
-    assert cooldown_err.value.status_code == 401
-
-    # Advance monotonic clock past min_refresh -> refresh succeeds and resolves SCIM overage groups
-    clock_now[0] = 115.0
+    clock_now[0] = 103.5
     entra_p = entra_verifier.verify(rotated_jwt, tenant_id=tenant_id)
     assert entra_p.role == RoleType.ENGINEER
     assert "domain:code_architecture_scout" in entra_p.allowed_scopes
+    assert loader_calls["count"] == fetches_before_bogus + 2
+
+    # Flooding distinct bogus kids is bounded by upstream refresh token bucket
+    fetches_pre_flood = loader_calls["count"]
+    for idx in range(6):
+        flood_priv, _ = _generate_ec_p256_keypair(f"flood-{idx}")
+        flood_jwt = jwt.encode(
+            entra_claims, flood_priv, algorithm="ES256", headers={"kid": f"flood-{idx}"}
+        )
+        with pytest.raises(AuthVerificationError):
+            entra_verifier.verify(flood_jwt, tenant_id=tenant_id)
+    assert (loader_calls["count"] - fetches_pre_flood) <= 3
 
     # HS256 algorithm confusion rejected even with valid-looking payload
     hs256_confused = jwt.encode(
@@ -532,10 +560,11 @@ def test_scim_routes_pg17_force_rls_nested_groups_and_deprovisioning(
         assert u_res.status_code == 201
         alice_prof = EnterpriseIdentityProfile(
             user_id="scim-u-alice",
+            tenant_id=tenant_a,
             custom_scopes=["repo:secret"],
         )
         assert perm_cache.get_user_scopes(alice_prof) == ["repo:secret"]
-        assert "scim-u-alice" in perm_cache._cache
+        assert f"{tenant_a}:scim-u-alice" in perm_cache._cache
 
         g1_res = client.post(
             "/api/v1/scim/v2/Groups",
@@ -615,7 +644,7 @@ def test_scim_routes_pg17_force_rls_nested_groups_and_deprovisioning(
         assert deprov_res.json()["active"] is False
 
         # Permission cache entry invalidated immediately upon deprovisioning
-        assert "scim-u-alice" not in perm_cache._cache
+        assert f"{tenant_a}:scim-u-alice" not in perm_cache._cache
 
         priv_ec, jwk_ec = _generate_ec_p256_keypair("scim-oidc-k1")
         jwks_cache = JWKSCache(jwks_loader=lambda _u: {"keys": [jwk_ec]})
@@ -1028,6 +1057,7 @@ def test_hardened_webhooks_admin_purge_and_openapi_schema_fuzzing(
     tenant_b = uuid.uuid4()
     mem_queue = InMemoryTaskQueue()
     set_task_queue(mem_queue)
+    set_audit_chain_service(AuditEventChainService())
 
     # 1. Fail-closed webhooks (including production ignoring SCOUT_ALLOW_UNSIGNED_DEV_WEBHOOKS)
     for env_key in (
@@ -1084,6 +1114,7 @@ def test_hardened_webhooks_admin_purge_and_openapi_schema_fuzzing(
         monkeypatch.delenv("SCOUT_DB_APP_URL", raising=False)
     else:
         monkeypatch.setenv("SCOUT_DB_APP_URL", prev_db_app_url)
+    set_audit_chain_service(None)
 
     # Webhook stats/DLQ RBAC + tenant RLS
     assert client.get("/api/v1/webhooks/stats").status_code == 401
@@ -1233,6 +1264,7 @@ def test_hardened_webhooks_admin_purge_and_openapi_schema_fuzzing(
         monkeypatch.setenv("SCOUT_SCIM_BEARER_TOKEN", "fuzz-scim-secret")
         spec = app.openapi()
         monkeypatch.setenv("SCOUT_ENVIRONMENT", "production")
+        monkeypatch.setenv("SCOUT_STORAGE_BACKEND", "memory")
         monkeypatch.setenv(
             "SCOUT_DB_APP_URL",
             "postgresql://scout_app_user:ProdStrongPass99!@127.0.0.1:54329/context_scout",
@@ -2282,3 +2314,132 @@ def test_admin_purge_cross_tenant_object_key_returns_403() -> None:
     finally:
         app.dependency_overrides.pop(get_admin_purge_coordinator, None)
         _cleanup_pg_tenants([tenant_a, tenant_b], domain_ids=[eph_domain])
+
+
+@pytest.mark.postgres
+def test_pg17_concurrent_audit_chain_advisory_lock_12_threads() -> None:
+    """ECS-033: 12 concurrent writers serialize per-tenant via PG17 advisory lock."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    settings = ScoutSettings()
+    tenant_id = uuid.uuid4()
+    audit_svc = AuditEventChainService(connection_manager=RLSConnectionManager(settings.db_app_url))
+    principal = PrincipalContext(
+        user_id="audit_stress_officer",
+        role=RoleType.COMPLIANCE_OFFICER,
+        allowed_scopes=["audit:compliance"],
+        tenant_id=tenant_id,
+    )
+
+    def _write_event(idx: int) -> int:
+        rec = audit_svc.record_event(
+            principal=principal,
+            event_type="audit.concurrent.write",
+            severity="INFO",
+            resource_uri=f"/api/v1/test/{idx}",
+            outcome="success",
+            payload={"worker_idx": idx},
+        )
+        return rec.seq_no
+
+    try:
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            seqs = list(pool.map(_write_event, range(12)))
+        assert sorted(seqs) == list(range(1, 13))
+        report = audit_svc.verify_chain_integrity(principal)
+        assert report.valid is True
+        assert report.checked_count == 12
+    finally:
+        _cleanup_pg_tenants([tenant_id])
+
+
+def test_betrvg_recursive_dict_diagnostic_scrubbing_and_session_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ECS-035 & ECS-010: BetrVG nested diagnostic scrubbing and session principal ownership."""
+    tenant_id = uuid.uuid4()
+    guard = BetrVGPrivacyGuard(
+        enabled=True,
+        salt="betrvg-test-salt-at-least-32-bytes-long-001",
+        epoch="v2",
+    )
+    dirty_payload = {
+        "query": "show payroll salaries",
+        "nested": {
+            "prompt_snippet": "select salary",
+            "reason": "Failed for alice@corp.de query='secret compensation'",
+        },
+        "errors": ["Contact bob@corp.de when prompt=internal"],
+    }
+    cleaned = guard.scrub_dict_if_enabled(dirty_payload, tenant_id=tenant_id)
+    assert cleaned["query"] == "[REDACTED_BETRVG]"
+    assert cleaned["nested"]["prompt_snippet"] == "[REDACTED_BETRVG]"
+    assert "alice@corp.de" not in cleaned["nested"]["reason"]
+    assert "secret compensation" not in cleaned["nested"]["reason"]
+    assert "bob@corp.de" not in cleaned["errors"][0]
+    assert "betrvg_v2_" in cleaned["errors"][0]
+
+    # ECS-010: Cross-principal same-tenant session ownership enforcement
+    repo = InMemoryRLSRepository()
+    mgr = ScoutSessionManager()
+    owner = PrincipalContext(
+        user_id="session_owner_a",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng"],
+        tenant_id=tenant_id,
+    )
+    intruder = PrincipalContext(
+        user_id="session_intruder_b",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng"],
+        tenant_id=tenant_id,
+    )
+    pack = ImplementationContextPack(
+        trace_id="tr_sess_own_1",
+        domain_id="code_architecture_scout",
+        user_task="Initial owner turn",
+        architectural_execution_plan=["Plan"],
+        preflight_report=PreFlightValidationReport(
+            passed=True,
+            normalized_rrf_score=0.9,
+            citations_verified_100_pct=True,
+        ),
+        local_tokens_consumed=100,
+        pack_token_count=20,
+    )
+    saved = mgr.record_completed_turn(
+        repo,
+        owner,
+        session_id="sess_shared_id_1",
+        domain_id="code_architecture_scout",
+        user_prompt="Owner query",
+        result=pack,
+    )
+    assert saved is not None
+    with pytest.raises(PermissionError, match="belongs to principal"):
+        mgr.record_completed_turn(
+            repo,
+            intruder,
+            session_id="sess_shared_id_1",
+            domain_id="code_architecture_scout",
+            user_prompt="Hijack query",
+            result=pack,
+        )
+
+
+def test_betrvg_privacy_email_regex_is_linear_anti_redos() -> None:
+    """Proves BetrVGPrivacyGuard.scrub_text_if_enabled runs in O(n) linear time on ReDoS shapes."""
+    import time
+
+    from context_scout.security.betrvg_privacy import BetrVGPrivacyGuard
+
+    guard = BetrVGPrivacyGuard(enabled=True, salt="b" * 40)
+    for adversarial in ("%" * 100_000, "a." * 50_000 + "@"):
+        t0 = time.perf_counter()
+        out = guard.scrub_text_if_enabled(adversarial)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        assert out == adversarial
+        assert elapsed_ms < 50.0, f"BetrVG scrub exceeded O(n) bound: {elapsed_ms:.2f}ms"
+    scrubbed = guard.scrub_text_if_enabled("Contact alice.smith+ops@corp.example.com for access")
+    assert "alice.smith+ops@corp.example.com" not in scrubbed
+    assert "betrvg_" in scrubbed

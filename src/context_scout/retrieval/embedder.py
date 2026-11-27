@@ -673,6 +673,7 @@ class VertexAIEmbeddingProvider:
         location: str = "europe-west3",
         dimensions: int = EXPECTED_EMBEDDING_DIM,
         allow_non_eu_regions: bool = False,
+        allow_uk_ch_adequacy_regions: bool = False,
         settings: ScoutSettings | None = None,
         policy: ModelGovernancePolicy | None = None,
         genai_client: Any | None = None,
@@ -702,6 +703,9 @@ class VertexAIEmbeddingProvider:
         self._location = validate_vertex_location(
             location or cfg.gcp_location,
             allow_non_eu=allow_non_eu_regions or cfg.allow_non_eu_regions,
+            allow_uk_ch_adequacy_regions=(
+                allow_uk_ch_adequacy_regions or cfg.allow_uk_ch_adequacy_regions
+            ),
         )
         self._project = (project or cfg.gcp_project or "").strip() or None
         spec, resolved_dim = resolve_embedding_model_spec(
@@ -870,6 +874,7 @@ def get_embedding_provider(
             location=cfg.gcp_location,
             dimensions=resolved_dim,
             allow_non_eu_regions=cfg.allow_non_eu_regions,
+            allow_uk_ch_adequacy_regions=cfg.allow_uk_ch_adequacy_regions,
             settings=cfg,
             policy=policy,
             genai_client=genai_client,

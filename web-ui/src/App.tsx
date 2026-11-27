@@ -27,6 +27,7 @@ import {
   fetchROIMetrics,
   fetchWorkspaceConfig,
   mapDomainDetailToInfo,
+  setRuntimeAuthMode,
 } from "./api/client";
 import { ArchitectureMapViewer } from "./components/ArchitectureMapViewer";
 import { CitationInspector } from "./components/CitationInspector";
@@ -191,23 +192,38 @@ export function App(): React.ReactElement {
     useState<InsufficientContextDiagnostic | null>(null);
   const [diffModalOpen, setDiffModalOpen] = useState<boolean>(false);
   const initialScopesHydratedRef = useRef<boolean>(false);
+  const inFlightHealthRef = useRef<Promise<HealthResponse | null> | null>(null);
+  const resolvedHealthRef = useRef<HealthResponse | null>(null);
+  const hydratedProductionKeyRef = useRef<string | null>(null);
 
   const loadHealth = useCallback(async (): Promise<HealthResponse | null> => {
-    setHealthError(null);
-    try {
-      const h = await fetchHealth();
-      setHealth(h);
-      if (h.hardware_profile?.runtime_mode === "production") {
-        setIsProductionMode(true);
-      }
-      return h;
-    } catch (err: unknown) {
-      setHealth(null);
-      setHealthError(
-        err instanceof Error ? err.message : "Health endpoint unavailable"
-      );
-      return null;
+    if (inFlightHealthRef.current) {
+      return inFlightHealthRef.current;
     }
+    setHealthError(null);
+    const pending = (async (): Promise<HealthResponse | null> => {
+      try {
+        const h = await fetchHealth();
+        resolvedHealthRef.current = h;
+        setHealth(h);
+        if (h.hardware_profile?.runtime_mode === "production") {
+          setRuntimeAuthMode("production");
+          setIsProductionMode(true);
+        }
+        return h;
+      } catch (err: unknown) {
+        resolvedHealthRef.current = null;
+        setHealth(null);
+        setHealthError(
+          err instanceof Error ? err.message : "Health endpoint unavailable"
+        );
+        return null;
+      } finally {
+        inFlightHealthRef.current = null;
+      }
+    })();
+    inFlightHealthRef.current = pending;
+    return pending;
   }, []);
 
   const loadRoi = useCallback(
@@ -241,6 +257,10 @@ export function App(): React.ReactElement {
   }, [authStatus, isProductionMode, principal, loadRoi]);
 
   useEffect(() => {
+    const prodKey = `${authAttempt}:${configAttempt}:${principal.user_id}:${principal.role}:${principal.allowed_scopes.join(",")}`;
+    if (isProductionMode && hydratedProductionKeyRef.current === prodKey) {
+      return;
+    }
     let cancelled = false;
     setAuthStatus("authenticating");
     setAuthError(null);
@@ -248,28 +268,31 @@ export function App(): React.ReactElement {
     setDomainsError(null);
 
     const hydrateProductionIdentity = async (): Promise<void> => {
-      setIsProductionMode(true);
+      setRuntimeAuthMode("production");
       try {
         const me = await fetchCurrentPrincipal();
         if (cancelled) return;
-        setPrincipal((prev) => (principalsEqual(prev, me) ? prev : me));
-        setAuthStatus("ready");
+        let domainList: DomainInfo[] = [];
+        let domErrMsg: string | null = null;
         try {
-          const domainList = await fetchDomains();
-          if (cancelled) return;
-          setDomains(domainList);
-          setDomainsError(null);
+          domainList = await fetchDomains(me);
         } catch (domErr: unknown) {
-          if (cancelled) return;
-          setDomains([]);
-          setDomainsError(
+          domErrMsg =
             domErr instanceof Error
               ? domErr.message
-              : "Domains endpoint unavailable"
-          );
+              : "Domains endpoint unavailable";
         }
+        if (cancelled) return;
+        hydratedProductionKeyRef.current = `${authAttempt}:${configAttempt}:${me.user_id}:${me.role}:${me.allowed_scopes.join(",")}`;
+        setIsProductionMode(true);
+        setPrincipal((prev) => (principalsEqual(prev, me) ? prev : me));
+        setDomains(domainList);
+        setDomainsError(domErrMsg);
+        setAuthStatus("ready");
       } catch (meErr: unknown) {
         if (cancelled) return;
+        hydratedProductionKeyRef.current = prodKey;
+        setIsProductionMode(true);
         setAuthStatus("error");
         setAuthError(
           meErr instanceof Error
@@ -285,18 +308,21 @@ export function App(): React.ReactElement {
       }
     };
 
-    if (
-      isProductionMode ||
-      health?.hardware_profile?.runtime_mode === "production"
-    ) {
-      void hydrateProductionIdentity();
-      return () => {
-        cancelled = true;
-      };
-    }
+    const runAuthBootstrap = async (): Promise<void> => {
+      const currentHealth =
+        resolvedHealthRef.current ?? (await loadHealth());
+      if (cancelled) return;
 
-    void exchangeAuthSession(principal)
-      .then(async (session) => {
+      if (
+        isProductionMode ||
+        currentHealth?.hardware_profile?.runtime_mode === "production"
+      ) {
+        await hydrateProductionIdentity();
+        return;
+      }
+
+      try {
+        const session = await exchangeAuthSession(principal);
         if (cancelled) return;
 
         // Verify /api/v1/auth/me in dev mode (gracefully fall back to session.principal if 404)
@@ -319,6 +345,7 @@ export function App(): React.ReactElement {
           if (cancelled) return;
           setWorkspaceConfig(cfg);
           if (cfg.runtime_mode === "production") {
+            setRuntimeAuthMode("production");
             setIsProductionMode(true);
           }
           setDomains(cfg.domains.map(mapDomainDetailToInfo));
@@ -359,11 +386,10 @@ export function App(): React.ReactElement {
             setDomainsLoading(false);
           }
         }
-      })
-      .catch((err: unknown) => {
+      } catch (err: unknown) {
         if (cancelled) return;
         if (err instanceof ApiClientError && err.status === 403) {
-          void hydrateProductionIdentity();
+          await hydrateProductionIdentity();
           return;
         }
         setAuthStatus("error");
@@ -375,7 +401,10 @@ export function App(): React.ReactElement {
         setDomains([]);
         setDomainsError("Authentication required to load workspace domains.");
         setDomainsLoading(false);
-      });
+      }
+    };
+
+    void runAuthBootstrap();
 
     return () => {
       cancelled = true;
@@ -385,7 +414,7 @@ export function App(): React.ReactElement {
     authAttempt,
     configAttempt,
     isProductionMode,
-    health?.hardware_profile?.runtime_mode,
+    loadHealth,
   ]);
 
   const handleChangePrincipal = (next: PrincipalContext): void => {

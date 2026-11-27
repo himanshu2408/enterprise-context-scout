@@ -637,6 +637,7 @@ class GeminiImplementationExecutor:
         *,
         use_keyless_adc: bool = False,
         allow_external_cloud_egress: bool | None = None,
+        allow_uk_ch_adequacy_regions: bool = False,
         vertex_psc_endpoint: str | None = None,
         reject_static_sa_key_json: bool = True,
         adc_loader: Callable[..., tuple[Any, str | None]] | None = None,
@@ -664,6 +665,9 @@ class GeminiImplementationExecutor:
         self.allow_non_eu_regions = allow_non_eu_regions or os.environ.get(
             "SCOUT_ALLOW_NON_EU_REGIONS", ""
         ).strip().lower() in ("true", "1")
+        self.allow_uk_ch_adequacy_regions = allow_uk_ch_adequacy_regions or os.environ.get(
+            "SCOUT_ALLOW_UK_CH_ADEQUACY_REGIONS", ""
+        ).strip().lower() in ("true", "1", "yes")
 
         # Resolve GCP Project
         self.project = (
@@ -673,7 +677,7 @@ class GeminiImplementationExecutor:
             or os.environ.get("GCP_PROJECT")
         )
 
-        # Resolve and validate Vertex AI Location (EU data residency default)
+        # Resolve and validate Vertex AI Location (strict EEA data residency default)
         raw_location = (
             location
             or os.environ.get("SCOUT_GCP_LOCATION")
@@ -681,7 +685,9 @@ class GeminiImplementationExecutor:
             or "europe-west3"
         )
         self.location = validate_vertex_location(
-            raw_location, allow_non_eu=self.allow_non_eu_regions
+            raw_location,
+            allow_non_eu=self.allow_non_eu_regions,
+            allow_uk_ch_adequacy_regions=self.allow_uk_ch_adequacy_regions,
         )
 
         # Token authentication & Secret Hygiene (no raw API key requirement)
@@ -777,12 +783,14 @@ class GeminiImplementationExecutor:
         return creds, self.project
 
     def is_live_configured(self) -> bool:
-        """Determines whether live Gemini API execution is configured."""
+        """Determines whether live Gemini API execution is configured and egress-permitted."""
+        if not self.allow_external_cloud_egress:
+            return False
         if self._injected_client is not None:
             return True
         if self.vertexai:
             if self.use_keyless_adc:
-                return bool(self.allow_external_cloud_egress)
+                return True
             return bool(
                 self.project
                 or self.service_token
@@ -792,7 +800,16 @@ class GeminiImplementationExecutor:
         return bool(self.api_key)
 
     def _create_genai_client(self) -> Any:
-        """Instantiates google-genai Client configured for Vertex AI EU data residency."""
+        """Instantiates google-genai Client configured for Vertex AI EEA data residency."""
+        if not self.allow_external_cloud_egress:
+            raise PermissionError(
+                f"External cloud egress for '{self.model_id}' is blocked because "
+                "allow_external_cloud_egress=False in ModelGovernancePolicy. Paid tokens spent: 0."
+            )
+        ModelGovernancePolicy.from_registry_file(
+            allow_external_cloud_egress=True
+        ).validate_cloud_egress(self.model_id)
+
         if self._injected_client is not None:
             return self._injected_client
 
@@ -800,14 +817,6 @@ class GeminiImplementationExecutor:
 
         if self.vertexai:
             if self.use_keyless_adc:
-                if not self.allow_external_cloud_egress:
-                    raise PermissionError(
-                        f"Keyless Vertex AI handoff for '{self.model_id}' is blocked because "
-                        "allow_external_cloud_egress=False in ModelGovernancePolicy."
-                    )
-                ModelGovernancePolicy.from_registry_file(
-                    allow_external_cloud_egress=True
-                ).validate_cloud_egress(self.model_id)
                 self.resolve_keyless_adc_credentials()
 
             client_kwargs: dict[str, Any] = {

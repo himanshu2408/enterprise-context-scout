@@ -22,7 +22,7 @@ from context_scout.agents.conflict_detector import ConflictDetector
 from context_scout.config import ScoutSettings
 from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
 from context_scout.db.schema import DocChunkRecord
-from context_scout.db.session import RLSConnectionManager
+from context_scout.db.session import PoolRole, RLSConnectionManager
 from context_scout.plugins.connectors.confluence import (
     ConfluenceConnectorPlugin,
     ConfluenceNoisePolicy,
@@ -503,9 +503,15 @@ def test_confluence_noise_policy_filters_demotes_and_boosts_cleanly() -> None:
 def test_confluence_lifecycle_pg17_supersession_same_version_tombstone_cursor_and_scope_narrowing(
     s22_pg_domain: tuple[str, ScoutSettings],
 ) -> None:
-    """PG17 lifecycle: same-ver replace, supersession, cursor, RLS narrowing, tombstone."""
+    """PG17 lifecycle: replace, supersede, cursor, RLS narrowing, tombstone under scout_app_user."""
     domain_id, settings = s22_pg_domain
     mgr = RLSConnectionManager(settings.db_app_url)
+    ingest_mgr = RLSConnectionManager(settings.db_app_url, pool_role=PoolRole.INGESTION)
+    ingest_principal = PrincipalContext(
+        user_id="confluence_sync_worker",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["system:connector_ingest"],
+    )
     repo = PostgresRLSRepository()
 
     t1 = datetime(2026, 10, 1, 10, 0, tzinfo=UTC)
@@ -534,40 +540,55 @@ def test_confluence_lifecycle_pg17_supersession_same_version_tombstone_cursor_an
 
     connector = ConfluenceConnectorPlugin()
 
-    # 1. Initial sync of two pages
+    # 1. Initial sync of two pages via scout_app_user (PoolRole.INGESTION, zero db_admin_url!)
     p1_v1 = _mk_page("5001", "Checkout Runbook", 1, "<p>Timeout is 30s initial baseline.</p>", t1)
     p2_v1 = _mk_page(
         "5002", "Gateway Overview", 1, "<p>Legacy gateway architecture overview.</p>", t1
     )
-    with psycopg.connect(settings.db_admin_url) as admin_conn:
+    with ingest_mgr.scoped_transaction(
+        ingest_principal, enable_hnsw_iterative_scan=False
+    ) as ingest_conn:
         res1 = connector.sync_space_to_repository(
             domain_id=domain_id,
             space_key="ENG",
             repository=repo,
-            conn=admin_conn,
+            conn=ingest_conn,
             current_pages=[p1_v1, p2_v1],
         )
-        admin_conn.commit()
     assert res1.items_updated == 2
 
-    # 2. Same-version re-sync replaces v1 chunks atomically (no duplicates!)
+    # 2. Same-version re-sync replaces v1 chunks atomically (no duplicates!) under scout_app_user
     p1_v1_edit = _mk_page(
         "5001", "Checkout Runbook", 1, "<p>Timeout is 25s corrected baseline.</p>", t1
     )
-    with psycopg.connect(settings.db_admin_url) as admin_conn:
+    with ingest_mgr.scoped_transaction(
+        ingest_principal, enable_hnsw_iterative_scan=False
+    ) as ingest_conn:
         connector.sync_space_to_repository(
             domain_id=domain_id,
             space_key="ENG",
             repository=repo,
-            conn=admin_conn,
+            conn=ingest_conn,
             current_pages=[p1_v1_edit, p2_v1],
         )
-        admin_conn.commit()
-        count_row = admin_conn.execute(
+        count_row = ingest_conn.execute(
             "SELECT COUNT(*) FROM doc_chunks WHERE domain_id = %s AND doc_id = 'confluence:5001'",
             (domain_id,),
         ).fetchone()
-        assert count_row is not None and int(count_row[0]) == 1
+        assert count_row is not None and int(str(count_row[0])) == 1
+
+    # Cross-tenant system:connector_ingest MUST NOT see tenant A's rows
+    other_tenant_ingest = PrincipalContext(
+        user_id="confluence_sync_worker",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["system:connector_ingest"],
+        tenant_id=uuid4(),
+    )
+    with ingest_mgr.scoped_transaction(
+        other_tenant_ingest, enable_hnsw_iterative_scan=False
+    ) as cross_conn:
+        assert repo.list_confluence_pages(cross_conn, domain_id, space_key="ENG") == []
+        assert repo.list_visible_doc_chunks(cross_conn, domain_id) == []
 
     public_principal = PrincipalContext(
         user_id="public_eng",
@@ -582,19 +603,20 @@ def test_confluence_lifecycle_pg17_supersession_same_version_tombstone_cursor_an
         ]
         assert len(before_narrowing) == 1
 
-    # 3. Upgrade 5001 v1 -> v2 + narrow allowed_scopes on 5001
+    # 3. Upgrade 5001 v1 -> v2 + narrow allowed_scopes on 5001 under scout_app_user
     p1_v2 = _mk_page("5001", "Checkout Runbook", 2, "<p>Timeout is 10s strict SLA.</p>", t2)
-    with psycopg.connect(settings.db_admin_url) as admin_conn:
+    with ingest_mgr.scoped_transaction(
+        ingest_principal, enable_hnsw_iterative_scan=False
+    ) as ingest_conn:
         res2 = connector.sync_space_to_repository(
             domain_id=domain_id,
             space_key="ENG",
             repository=repo,
-            conn=admin_conn,
+            conn=ingest_conn,
             current_pages=[p1_v2, p2_v1],
             since_updated_at=t1,  # cursor skips unchanged 5002 at t1 and fetches only 5001 at t2
             page_allowed_scopes_map={"5001": ["confluence_restricted_lead"]},
         )
-        admin_conn.commit()
     assert res2.items_scanned == 1  # cursor skipped p2_v1
     assert res2.stale_items_flagged == 1  # v1 flagged stale
 
@@ -620,7 +642,7 @@ def test_confluence_lifecycle_pg17_supersession_same_version_tombstone_cursor_an
         assert len(lead_docs) == 1
         assert "10s strict SLA" in lead_docs[0].verbatim_content
 
-    # 4. Reconcile deletion of 5002 and archive status of 5001 across confluence_pages & doc_chunks
+    # 4. Reconcile deletion of 5002 and archive status of 5001 under scout_app_user
     p1_archived = _mk_page(
         "5001",
         "Checkout Runbook",
@@ -629,19 +651,20 @@ def test_confluence_lifecycle_pg17_supersession_same_version_tombstone_cursor_an
         t2 + timedelta(days=1),
         status="archived",
     )
-    with psycopg.connect(settings.db_admin_url) as admin_conn:
+    with ingest_mgr.scoped_transaction(
+        ingest_principal, enable_hnsw_iterative_scan=False
+    ) as ingest_conn:
         res3 = connector.sync_space_to_repository(
             domain_id=domain_id,
             space_key="ENG",
             repository=repo,
-            conn=admin_conn,
+            conn=ingest_conn,
             current_pages=[p1_archived],
             reconcile_deletes=True,
         )
-        admin_conn.commit()
-        active_pages = repo.list_confluence_pages(admin_conn, domain_id, space_key="ENG")
+        active_pages = repo.list_confluence_pages(ingest_conn, domain_id, space_key="ENG")
         assert active_pages == []
-        tomb_rows = admin_conn.execute(
+        tomb_rows = ingest_conn.execute(
             """
             SELECT confluence_page_id, is_deleted, status
             FROM confluence_pages

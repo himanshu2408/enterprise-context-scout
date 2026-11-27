@@ -11,10 +11,10 @@ from context_scout.api.dependencies import (
     DEFAULT_ROLE_SCOPES,
     create_signed_principal_token,
     get_principal_context,
-    is_development_environment,
     verify_signed_principal_token,
 )
 from context_scout.api.schemas import AuthSessionRequest, AuthSessionResponse
+from context_scout.config import is_dev_auth_session_allowed
 from context_scout.schemas.contracts import PrincipalContext
 from context_scout.security.audit_chain import get_audit_chain_service
 
@@ -26,8 +26,8 @@ SESSION_TTL_SECONDS = 3600
 
 @router.post("/auth/session", response_model=AuthSessionResponse)
 def create_auth_session(request: AuthSessionRequest) -> AuthSessionResponse:
-    """Mints an HMAC-SHA256 signed Bearer token strictly in development mode."""
-    if not is_development_environment():
+    """Mints an HMAC-SHA256 signed Bearer token strictly in allowlisted dev environments."""
+    if not is_dev_auth_session_allowed():
         safe_actor = request.user_id.replace("\x00", "").strip()[:128] or "anonymous"
         try:
             get_audit_chain_service().record_event(
@@ -65,6 +65,11 @@ def create_auth_session(request: AuthSessionRequest) -> AuthSessionResponse:
                 detail="allowed_scopes must contain at least one non-empty scope token.",
             )
         for scope in scopes:
+            if scope.lower().startswith("system:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Reserved internal scope '{scope}' cannot be requested externally.",
+                )
             if "," in scope or ";" in scope or any(ch.isspace() for ch in scope):
                 raise HTTPException(
                     status_code=400,

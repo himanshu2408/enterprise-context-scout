@@ -292,3 +292,291 @@ def test_allow_insecure_dev_secret_permits_default_secret_in_development(
         monkeypatch.delenv(alias, raising=False)
     resolved = _resolve_auth_secret()
     assert resolved == DEFAULT_AUTH_HMAC_SECRET.encode("utf-8")
+
+
+def test_auth_session_positive_dev_allowlist_and_api_security_headers(
+    clean_auth_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ECS-057 & ECS-060: Positive dev allowlist on /auth/session + /api/ security headers."""
+    client = TestClient(create_app())
+    payload = {"user_id": "sec_headers_user", "role": "engineer"}
+
+    for allowed_env in ("development", "dev", "local", "test"):
+        monkeypatch.setenv("SCOUT_ENVIRONMENT", allowed_env)
+        res = client.post("/api/v1/auth/session", json=payload)
+        assert res.status_code == 200, f"Expected 200 for {allowed_env}: {res.text}"
+        assert res.headers.get("x-content-type-options") == "nosniff"
+        assert res.headers.get("x-frame-options") == "DENY"
+        assert res.headers.get("cache-control") == "no-store"
+
+    for blocked_env in ("uat", "canary", "preview", "staging", "qa", "production"):
+        monkeypatch.setenv("SCOUT_ENVIRONMENT", blocked_env)
+        res = client.post("/api/v1/auth/session", json=payload)
+        assert res.status_code == 403, f"Expected 403 for {blocked_env}: {res.text}"
+        assert res.headers.get("x-content-type-options") == "nosniff"
+        assert res.headers.get("x-frame-options") == "DENY"
+        assert res.headers.get("cache-control") == "no-store"
+
+    monkeypatch.setenv("SCOUT_ENVIRONMENT", "development")
+    health = client.get("/api/v1/health")
+    assert health.status_code == 200
+    assert health.headers.get("x-content-type-options") == "nosniff"
+    assert health.headers.get("x-frame-options") == "DENY"
+    assert health.headers.get("cache-control") == "no-store"
+
+
+def test_lazy_pool_construction_fast_and_fail_closed_503_when_pg17_unreachable(
+    clean_auth_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ECS-003 & ECS-116: Zero InMemory fallback in postgres mode; <5ms lazy wiring + 503."""
+    import time
+    import uuid
+
+    from context_scout.api.dependencies import (
+        get_repository,
+        reset_shared_repository,
+    )
+    from context_scout.api.routes.webhooks import get_task_queue, set_task_queue
+    from context_scout.db.session import RLSConnectionManager
+    from context_scout.security.audit_chain import (
+        AuditEventChainService,
+        get_audit_chain_service,
+        set_audit_chain_service,
+    )
+    from context_scout.security.scim import (
+        SCIMDirectoryService,
+        get_scim_directory_service,
+        set_scim_directory_service,
+    )
+
+    dead_url = "postgresql://scout_app_user:pw@127.0.0.1:59999/context_scout"
+    monkeypatch.setenv("SCOUT_STORAGE_BACKEND", "postgres")
+    monkeypatch.setenv("SCOUT_DB_APP_URL", dead_url)
+    monkeypatch.setenv("SCOUT_PG_CONNECT_TIMEOUT", "1")
+    monkeypatch.setenv("SCOUT_PG_POOL_TIMEOUT", "1")
+    monkeypatch.setenv("SCOUT_SCIM_BEARER_TOKEN", "scim-dead-pg-token-12345")
+
+    reset_shared_repository()
+    set_audit_chain_service(None)
+    set_scim_directory_service(None)
+    set_task_queue(None)
+
+    try:
+        t0 = time.monotonic()
+        mgr = RLSConnectionManager(dead_url)
+        repo = get_repository()
+        audit_svc = get_audit_chain_service()
+        scim_svc = get_scim_directory_service()
+        queue = get_task_queue()
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        assert elapsed_ms < 250.0, f"Lazy singleton wiring took too long: {elapsed_ms:.2f}ms"
+        assert isinstance(audit_svc, AuditEventChainService)
+        assert audit_svc._conn_mgr is not None
+        assert isinstance(scim_svc, SCIMDirectoryService)
+        assert scim_svc._conn_mgr is not None
+        assert type(repo).__name__ == "PostgresScoutGraphAdapter"
+        assert type(queue).__name__ == "PostgresTaskQueue"
+
+        client = TestClient(create_app(), raise_server_exceptions=False)
+        res = client.get(
+            "/api/v1/scim/v2/Users",
+            headers={
+                "Authorization": "Bearer scim-dead-pg-token-12345",
+                "X-Scout-Tenant-Id": str(uuid.uuid4()),
+            },
+        )
+        assert res.status_code == 503
+        assert res.json()["detail"] == "Database temporarily unavailable"
+        assert res.headers.get("x-content-type-options") == "nosniff"
+        mgr.close()
+    finally:
+        reset_shared_repository()
+        set_audit_chain_service(None)
+        set_scim_directory_service(None)
+        set_task_queue(None)
+
+
+def test_redis_confirmation_token_store_and_webhook_replay_multi_pod(
+    clean_auth_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ECS-044: ConfirmationTokenStore 12-thread single-consume & webhook replay via Redis."""
+    import concurrent.futures
+    import uuid
+
+    from tests.test_m1_05_permission_mirror import _LocalRESP2TestServer
+
+    from context_scout.api.dependencies import ConfirmationTokenStore
+    from context_scout.api.routes.webhooks import (
+        _SEEN_WEBHOOK_DELIVERIES,
+        _SEEN_WEBHOOK_IDS,
+    )
+    from context_scout.schemas.contracts import (
+        ImplementationContextPack,
+        PreFlightValidationReport,
+        PrincipalContext,
+    )
+
+    server = _LocalRESP2TestServer(expected_password="redispass")
+    redis_url = f"redis://:redispass@127.0.0.1:{server.port}/0"
+    try:
+        store_pod_a = ConfirmationTokenStore(redis_url=redis_url)
+        store_pod_b = ConfirmationTokenStore(redis_url=redis_url)
+
+        tenant_a = uuid.uuid4()
+        tenant_b = uuid.uuid4()
+        owner = PrincipalContext(
+            user_id="owner_eng",
+            role=RoleType.ENGINEER,
+            allowed_scopes=["public_eng"],
+            tenant_id=tenant_a,
+        )
+        attacker = PrincipalContext(
+            user_id="attacker_eng",
+            role=RoleType.ENGINEER,
+            allowed_scopes=["public_eng"],
+            tenant_id=tenant_b,
+        )
+        pack = ImplementationContextPack(
+            trace_id="tr_redis_01",
+            domain_id="code_architecture_scout",
+            user_task="Verify Redis single-consume token",
+            architectural_execution_plan=["Step 1"],
+            preflight_report=PreFlightValidationReport(
+                passed=True,
+                normalized_rrf_score=0.9,
+                citations_verified_100_pct=True,
+            ),
+            local_tokens_consumed=100,
+            pack_token_count=20,
+        )
+
+        store_pod_a.save(
+            token="tok_multipod_1",
+            pack=pack,
+            patch_diff="diff",
+            target_files=["a.py"],
+            model_id="test-model",
+            principal=owner,
+            ttl_seconds=120,
+        )
+
+        # Cross-tenant consume raises PermissionError WITHOUT destroying owner's token
+        with pytest.raises(PermissionError):
+            store_pod_b.consume("tok_multipod_1", attacker)
+        assert store_pod_b.get("tok_multipod_1") is not None
+
+        # 12-thread concurrent single-consume race across pods: strictly 1 winner
+        outcomes: list[str] = []
+
+        def _try_consume(idx: int) -> str:
+            target = store_pod_b if idx % 2 else store_pod_a
+            try:
+                rec = target.consume("tok_multipod_1", owner)
+                return f"WIN:{rec.token}"
+            except KeyError:
+                return "MISS"
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+            outcomes = list(pool.map(_try_consume, range(12)))
+
+        assert outcomes.count("WIN:tok_multipod_1") == 1
+        assert outcomes.count("MISS") == 11
+
+        # Webhook delivery replay guard persisted in Redis across process memory clears
+        monkeypatch.setenv("SCOUT_REDIS_URL", redis_url)
+        monkeypatch.setenv("SCOUT_STORAGE_BACKEND", "memory")
+        monkeypatch.setenv("SCOUT_WEBHOOK_GITLAB_SECRET", "gitlab-secret-token-01")
+        _SEEN_WEBHOOK_DELIVERIES.clear()
+        _SEEN_WEBHOOK_IDS.clear()
+
+        client = TestClient(create_app())
+        delivery_id = f"dlv-{uuid.uuid4().hex[:8]}"
+        first = client.post(
+            "/api/v1/webhooks/gitlab",
+            headers={
+                "X-Gitlab-Token": "gitlab-secret-token-01",
+                "X-Scout-Delivery-Id": delivery_id,
+            },
+            json={"project": {"name": "code_architecture_scout"}},
+        )
+        assert first.status_code == 200
+
+        # Simulate another pod without in-memory seen set
+        _SEEN_WEBHOOK_DELIVERIES.clear()
+        _SEEN_WEBHOOK_IDS.clear()
+        replay = client.post(
+            "/api/v1/webhooks/gitlab",
+            headers={
+                "X-Gitlab-Token": "gitlab-secret-token-01",
+                "X-Scout-Delivery-Id": delivery_id,
+            },
+            json={"project": {"name": "code_architecture_scout"}},
+        )
+        assert replay.status_code == 409
+    finally:
+        server.close()
+
+
+def test_external_system_connector_ingest_scope_rejected_everywhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """External OIDC/IAP, HMAC, SCIM, and dev-session paths reject system:connector_ingest."""
+    import uuid
+
+    from fastapi import HTTPException
+
+    from context_scout.api.dependencies import (
+        create_signed_principal_token,
+        verify_signed_principal_token,
+    )
+    from context_scout.security.betrvg_privacy import BetrVGPrivacyGuard
+    from context_scout.security.oidc_iap_auth import (
+        AuthVerificationError,
+        _build_principal_from_claims,
+    )
+    from context_scout.security.scim import SCIMDirectoryService
+
+    monkeypatch.setenv("SCOUT_ENV", "development")
+    monkeypatch.setenv("SCOUT_STORAGE_BACKEND", "memory")
+    client = TestClient(create_app())
+
+    # 1. Dev /api/v1/auth/session rejects system:connector_ingest
+    session_res = client.post(
+        "/api/v1/auth/session",
+        json={
+            "user_id": "attacker",
+            "role": "engineer",
+            "allowed_scopes": ["system:connector_ingest"],
+        },
+    )
+    assert session_res.status_code == 403
+
+    # 2. Signed HMAC token carrying system:connector_ingest fails closed on verification
+    forged_tok = create_signed_principal_token(
+        user_id="attacker",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["system:connector_ingest"],
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        verify_signed_principal_token(forged_tok)
+    assert exc_info.value.status_code == 403
+
+    # 3. OIDC/IAP claim builder rejects system:connector_ingest via direct_scopes or group_scope_map
+    scim_svc = SCIMDirectoryService()
+    with pytest.raises(AuthVerificationError) as oidc_exc:
+        _build_principal_from_claims(
+            user_id="oidc-attacker",
+            email="attacker@example.com",
+            tenant_id=uuid.uuid4(),
+            idp_groups=["eng"],
+            idp_roles=["engineer"],
+            direct_scopes=["system:connector_ingest"],
+            scim_service=scim_svc,
+            group_scope_map={},
+            role_map={},
+            betrvg_guard=BetrVGPrivacyGuard(enabled=False),
+        )
+    assert oidc_exc.value.status_code == 403

@@ -5,11 +5,13 @@ from __future__ import annotations
 import fnmatch
 import socket
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
 
+from context_scout.schemas.contracts import DEFAULT_TENANT_ID
 from context_scout.security.permission_mirror import (
     DEFAULT_ACL_CACHE_TTL_SECONDS,
     MAX_ACL_CACHE_TTL_SECONDS,
@@ -276,14 +278,68 @@ def test_redis_acl_cache_backend_mock_and_ttl_clamping() -> None:
     )
     scopes = svc.get_user_scopes(profile)
     assert scopes == ["repo:acme/api:admin", "repo:acme/api:read", "repo:acme/api:write"]
-    assert mock_client.last_ttl["scout:acl:carol"] == 60
+    expected_key = f"scout:acl:{DEFAULT_TENANT_ID}:carol"
+    assert mock_client.last_ttl[expected_key] == 60
 
     # New service instance with empty local cache reads from Redis backend
     svc_2 = CachedPermissionMirrorService(ttl_seconds=60, redis_backend=backend)
     assert svc_2.get_user_scopes(profile) == scopes
 
     svc_2.invalidate_user("carol")
-    assert mock_client.get("scout:acl:carol") is None
+    assert mock_client.get(expected_key) is None
+
+
+def test_cross_tenant_identical_user_id_non_collision_in_redis_and_memory() -> None:
+    """ECS-031: Tenants A and B sharing identical user_id never collide in ACL cache."""
+    server = _LocalRESP2TestServer(expected_password="s3cr3t")
+    try:
+        url = f"redis://:s3cr3t@127.0.0.1:{server.port}/3"
+        svc_a = CachedPermissionMirrorService(ttl_seconds=60, redis_url=url)
+        svc_b = CachedPermissionMirrorService(ttl_seconds=60, redis_url=url)
+        tenant_a = uuid.uuid4()
+        tenant_b = uuid.uuid4()
+
+        prof_a = EnterpriseIdentityProfile(
+            user_id="alice",
+            tenant_id=tenant_a,
+            gitlab_memberships=[
+                GitLabProjectMembership(project_path="tenant-a/core", role=GitLabRole.DEVELOPER)
+            ],
+        )
+        prof_b = EnterpriseIdentityProfile(
+            user_id="alice",
+            tenant_id=tenant_b,
+            github_memberships=[
+                GitHubRepoMembership(
+                    repo_full_name="tenant-b/secret", permission=GitHubPermission.ADMIN
+                )
+            ],
+        )
+        scopes_a = svc_a.get_user_scopes(prof_a)
+        scopes_b = svc_a.get_user_scopes(prof_b)
+        assert scopes_a == ["repo:tenant-a/core:read", "repo:tenant-a/core:write"]
+        assert scopes_b == [
+            "repo:tenant-b/secret:admin",
+            "repo:tenant-b/secret:read",
+            "repo:tenant-b/secret:write",
+        ]
+        assert f"scout:acl:{tenant_a}:alice" in server._dbs[3]
+        assert f"scout:acl:{tenant_b}:alice" in server._dbs[3]
+        assert PermissionMirror.create_principal_context(prof_a).tenant_id == tenant_a
+        assert PermissionMirror.create_principal_context(prof_b).tenant_id == tenant_b
+
+        # Cold second service reads isolated per-tenant ACLs from Redis
+        assert svc_b.get_user_scopes(prof_a) == scopes_a
+        assert svc_b.get_user_scopes(prof_b) == scopes_b
+
+        # Evicting tenant_a leaves tenant_b untouched in both memory & Redis
+        svc_a.invalidate_user("alice", tenant_id=tenant_a)
+        assert f"scout:acl:{tenant_a}:alice" not in server._dbs[3]
+        assert f"scout:acl:{tenant_b}:alice" in server._dbs[3]
+        assert f"{tenant_a}:alice" not in svc_a._cache
+        assert f"{tenant_b}:alice" in svc_a._cache
+    finally:
+        server.close()
 
 
 def test_redis_resp2_socket_server_round_trip() -> None:
@@ -353,8 +409,8 @@ def test_revocation_webhooks_across_all_sources() -> None:
         "gitlab", {"project": {"path_with_namespace": "fin/ledger"}}
     )
     assert evicted_gl == ["alice", "bob"]
-    assert mock_client.get("scout:acl:alice") is None
-    assert mock_client.get("scout:acl:bob") is None
+    assert mock_client.get(f"scout:acl:{DEFAULT_TENANT_ID}:alice") is None
+    assert mock_client.get(f"scout:acl:{DEFAULT_TENANT_ID}:bob") is None
 
     # Re-populate and test GitHub team/repo revocation
     svc.get_user_scopes(p_bob)

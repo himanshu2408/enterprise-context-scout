@@ -170,6 +170,7 @@ def _build_worker_env(mode: str) -> dict[str, str]:
     env["OPENBLAS_NUM_THREADS"] = "2"
     env["TOKENIZERS_PARALLELISM"] = "false"
     if mode in ("unit-offline", "fast"):
+        env["SCOUT_STORAGE_BACKEND"] = "memory"
         env["SCOUT_DB_APP_URL"] = "postgresql://scout_app_user:pw@127.0.0.1:59999/context_scout"
         env["SCOUT_DB_ADMIN_URL"] = "postgresql://postgres:pw@127.0.0.1:59999/context_scout"
         env["SCOUT_PG_CONNECT_TIMEOUT"] = "1"

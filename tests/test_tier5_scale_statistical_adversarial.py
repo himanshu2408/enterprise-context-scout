@@ -411,47 +411,50 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
 
     @pytest.mark.postgres
     def test_concurrent_multi_tenant_scoped_transactions_no_leakage(self) -> None:
-        """Executes simultaneous queries across distinct domains; asserts zero cross-tenant leak."""
+        """Executes concurrent queries across distinct UUID tenants with identical domain."""
         st = ScoutSettings()
-        conn_mgr = RLSConnectionManager(st.db_app_url, use_pool=True, max_size=10)
+        conn_mgr = RLSConnectionManager(st.db_app_url, use_pool=True, max_size=4)
         pg_repo = PostgresRLSRepository()
 
-        domain_a = f"{TIER5_SESSION_DOMAIN_PREFIX}domain_a_{uuid.uuid4().hex[:8]}"
-        domain_b = f"{TIER5_SESSION_DOMAIN_PREFIX}domain_b_{uuid.uuid4().hex[:8]}"
-        domain_c = f"{TIER5_SESSION_DOMAIN_PREFIX}domain_c_{uuid.uuid4().hex[:8]}"
+        tenant_a = uuid.uuid4()
+        tenant_b = uuid.uuid4()
+        tenant_c = uuid.uuid4()
+        shared_domain = f"{TIER5_SESSION_DOMAIN_PREFIX}shared_mt_{uuid.uuid4().hex[:8]}"
+        shared_scope = "scope:shared_eng"
 
-        # Seed data in three separate domains with strict scopes
+        # Seed identical domain_id and allowed_scopes under 3 separate tenant_ids
         with psycopg.connect(st.db_admin_url) as admin_conn:
-            for d, sc, sname in [
-                (domain_a, "scope:domain_a", "SymbolAlpha"),
-                (domain_b, "scope:domain_b", "SymbolBeta"),
-                (domain_c, "scope:domain_c", "SymbolGamma"),
+            for tid, sname in [
+                (tenant_a, "SymbolAlpha"),
+                (tenant_b, "SymbolBeta"),
+                (tenant_c, "SymbolGamma"),
             ]:
                 admin_conn.execute(
                     """
                     INSERT INTO domain_packs (
-                        domain_id, display_name, lora_adapter_id,
+                        tenant_id, domain_id, display_name, lora_adapter_id,
                         primary_truth_source, freshness_half_life_days, config_json
                     )
-                    VALUES (%s, %s, 'none', 'code', 30, '{}')
+                    VALUES (%s, %s, %s, 'none', 'code', 30, '{}')
                     ON CONFLICT (tenant_id, domain_id) DO NOTHING;
                     """,
-                    (d, f"Adversarial Domain {d}"),
+                    (tid, shared_domain, f"Adversarial Domain {sname}"),
                 )
                 fid = uuid.uuid4()
                 pg_repo.insert_code_file(
                     admin_conn,
                     CodeFileRecord(
                         file_id=fid,
-                        domain_id=d,
-                        repo_name=f"enterprise/{d}-repo",
+                        domain_id=shared_domain,
+                        repo_name=f"enterprise/{shared_domain}-repo",
                         file_path="src/service.py",
                         git_commit_sha="aaaa111122223333444455556666777788889999",
                         git_blob_sha="bbbb111122223333444455556666777788889999",
                         language="python",
-                        allowed_scopes=[sc],
+                        allowed_scopes=[shared_scope],
                         raw_content=f"class {sname}:\n    pass\n",
                         line_count=2,
+                        tenant_id=tid,
                     ),
                 )
                 pg_repo.insert_ast_symbol(
@@ -459,97 +462,131 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                     ASTSymbolRecord(
                         symbol_id=uuid.uuid4(),
                         file_id=fid,
-                        domain_id=d,
-                        qualified_name=f"{d}::src/service.py::{sname}",
+                        domain_id=shared_domain,
+                        qualified_name=f"{shared_domain}::src/service.py::{sname}",
                         symbol_kind="class",
                         start_line=1,
                         end_line=2,
                         signature_skeleton=f"class {sname}:",
                         contextual_summary=f"Adversarial class {sname}",
-                        allowed_scopes=[sc],
+                        allowed_scopes=[shared_scope],
                         embedding=[0.1] * 768,
+                        tenant_id=tid,
                     ),
                 )
             admin_conn.commit()
 
         try:
             principal_a = PrincipalContext(
-                user_id="user_a", role=RoleType.ENGINEER, allowed_scopes=["scope:domain_a"]
+                user_id="shared_user",
+                role=RoleType.ENGINEER,
+                allowed_scopes=[shared_scope],
+                tenant_id=tenant_a,
             )
             principal_b = PrincipalContext(
-                user_id="user_b", role=RoleType.ENGINEER, allowed_scopes=["scope:domain_b"]
+                user_id="shared_user",
+                role=RoleType.ENGINEER,
+                allowed_scopes=[shared_scope],
+                tenant_id=tenant_b,
             )
             principal_c = PrincipalContext(
-                user_id="user_c", role=RoleType.ENGINEER, allowed_scopes=["scope:domain_c"]
+                user_id="shared_user",
+                role=RoleType.ENGINEER,
+                allowed_scopes=[shared_scope],
+                tenant_id=tenant_c,
             )
             principal_guest = PrincipalContext(
-                user_id="guest", role=RoleType.ENGINEER, allowed_scopes=["scope:unauthorized_guest"]
+                user_id="guest",
+                role=RoleType.ENGINEER,
+                allowed_scopes=[shared_scope],
+                tenant_id=uuid.uuid4(),
             )
 
-            # Concurrent execution across 8 worker threads
+            # Concurrent pool contention across 12 worker threads on max_size=4 pool
             def query_domain(
                 principal: PrincipalContext, target_domain: str, expected_symbol: str | None
-            ) -> tuple[bool, int, list[str]]:
+            ) -> tuple[bool, int, list[str], str]:
                 with conn_mgr.scoped_transaction(principal) as conn:
+                    guc_row = conn.execute(
+                        "SELECT current_setting('app.tenant_id', true)"
+                    ).fetchone()
+                    observed_tid = str(guc_row[0]) if guc_row else ""
+                    if observed_tid != str(principal.tenant_id):
+                        return (False, -1, [], observed_tid)
                     symbols = pg_repo.list_visible_ast_symbols(conn, target_domain)
                     if expected_symbol is None:
-                        # Should see zero symbols
-                        return (len(symbols) == 0, len(symbols), symbols)
-                    # Should see symbol matching expected_symbol substring
+                        return (len(symbols) == 0, len(symbols), symbols, observed_tid)
                     match = any(expected_symbol in s for s in symbols) and len(symbols) == 1
-                    return (match, len(symbols), symbols)
+                    return (match, len(symbols), symbols, observed_tid)
 
             tasks: list[tuple[PrincipalContext, str, str | None]] = []
             for _ in range(25):
-                tasks.append((principal_a, domain_a, "SymbolAlpha"))
-                tasks.append((principal_a, domain_b, None))  # Principal A queries Domain B -> 0
-                tasks.append((principal_b, domain_b, "SymbolBeta"))
-                tasks.append((principal_b, domain_c, None))  # Principal B queries Domain C -> 0
-                tasks.append((principal_c, domain_c, "SymbolGamma"))
-                tasks.append((principal_guest, domain_a, None))  # Guest queries Domain A -> 0
+                tasks.append((principal_a, shared_domain, "SymbolAlpha"))
+                tasks.append((principal_b, shared_domain, "SymbolBeta"))
+                tasks.append((principal_c, shared_domain, "SymbolGamma"))
+                tasks.append((principal_guest, shared_domain, None))
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
                 futures = [executor.submit(query_domain, p, d, s) for p, d, s in tasks]
                 for fut in concurrent.futures.as_completed(futures):
-                    ok, count, names = fut.result()
+                    ok, count, names, observed_tid = fut.result()
                     assert ok is True, (
-                        f"RLS cross-tenant isolation breach! Count: {count}, Symbols: {names}"
+                        f"RLS multi-tenant UUID breach! GUC={observed_tid}, "
+                        f"Count={count}, Symbols={names}"
                     )
 
         finally:
             with psycopg.connect(st.db_admin_url) as cleanup_conn:
-                for d in (domain_a, domain_b, domain_c):
-                    cleanup_tier5_session_domain(cleanup_conn, d)
+                for tid in (tenant_a, tenant_b, tenant_c):
+                    cleanup_conn.execute("DELETE FROM ast_symbols WHERE tenant_id = %s", (tid,))
+                    cleanup_conn.execute("DELETE FROM code_files WHERE tenant_id = %s", (tid,))
+                    cleanup_conn.execute("DELETE FROM domain_packs WHERE tenant_id = %s", (tid,))
+                cleanup_conn.commit()
 
     @pytest.mark.postgres
     def test_connection_pool_session_variable_pollution_defense(self) -> None:
-        """Verifies connection reuse in pool does not leak app.principal_scopes."""
+        """Verifies connection reuse in pool resets app.principal_scopes and app.tenant_id."""
         st = ScoutSettings()
         conn_mgr = RLSConnectionManager(st.db_app_url, use_pool=True, max_size=2)
 
+        tid_priv = uuid.uuid4()
+        tid_unpriv = uuid.uuid4()
         p_privileged = PrincipalContext(
             user_id="priv",
             role=RoleType.COMPLIANCE_OFFICER,
             allowed_scopes=["scope:secret_vault_99"],
+            tenant_id=tid_priv,
         )
         p_unprivileged = PrincipalContext(
-            user_id="unpriv", role=RoleType.ENGINEER, allowed_scopes=["scope:public_view"]
+            user_id="unpriv",
+            role=RoleType.ENGINEER,
+            allowed_scopes=["scope:public_view"],
+            tenant_id=tid_unpriv,
         )
 
         # 1. Privileged transaction sets config
         with conn_mgr.scoped_transaction(p_privileged) as conn1:
-            row1 = conn1.execute("SELECT current_setting('app.principal_scopes', true)").fetchone()
+            row1 = conn1.execute(
+                "SELECT current_setting('app.principal_scopes', true), "
+                "current_setting('app.tenant_id', true)"
+            ).fetchone()
             assert row1 is not None
-            val1 = row1[0]
-            assert val1 == "scope:secret_vault_99"
+            assert row1[0] == "scope:secret_vault_99"
+            assert row1[1] == str(tid_priv)
 
         # 2. Immediately checkout connection for unprivileged transaction
         with conn_mgr.scoped_transaction(p_unprivileged) as conn2:
-            row2 = conn2.execute("SELECT current_setting('app.principal_scopes', true)").fetchone()
+            row2 = conn2.execute(
+                "SELECT current_setting('app.principal_scopes', true), "
+                "current_setting('app.tenant_id', true)"
+            ).fetchone()
             assert row2 is not None
-            val2 = row2[0]
+            val2, tid2 = row2[0], row2[1]
             assert val2 == "scope:public_view", (
                 f"Scope leakage! Expected 'scope:public_view', got '{val2}'"
+            )
+            assert tid2 == str(tid_unpriv), (
+                f"Tenant GUC leakage! Expected '{tid_unpriv}', got '{tid2}'"
             )
             assert "scope:secret_vault_99" not in str(val2)
 

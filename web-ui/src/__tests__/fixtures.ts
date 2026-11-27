@@ -1,4 +1,5 @@
 import { vi } from "vitest";
+import { clearCachedAuthSession, setRuntimeAuthMode } from "../api/client";
 import {
   AdminPurgeResponse,
   AuthSessionResponse,
@@ -757,6 +758,56 @@ export interface MockApiOverrides {
 }
 
 export function installMockApiFetch(overrides: MockApiOverrides = {}) {
+  clearCachedAuthSession();
+  setRuntimeAuthMode("development");
+
+  const mintedPrincipals = new Map<string, PrincipalContext>();
+
+  const extractBearerToken = (init?: RequestInit): string | null => {
+    const rawHeaders = init?.headers;
+    if (!rawHeaders) return null;
+    if (rawHeaders instanceof Headers) {
+      const val = rawHeaders.get("Authorization") ?? rawHeaders.get("authorization");
+      return val && val.startsWith("Bearer ") ? val.slice(7).trim() : null;
+    }
+    if (Array.isArray(rawHeaders)) {
+      for (const [k, v] of rawHeaders) {
+        if (k.toLowerCase() === "authorization" && v.startsWith("Bearer ")) {
+          return v.slice(7).trim();
+        }
+      }
+      return null;
+    }
+    for (const [k, v] of Object.entries(rawHeaders)) {
+      if (k.toLowerCase() === "authorization" && typeof v === "string" && v.startsWith("Bearer ")) {
+        return v.slice(7).trim();
+      }
+    }
+    return null;
+  };
+
+  const hasValidAuth = (init?: RequestInit): boolean => {
+    const token = extractBearerToken(init);
+    if (token && token.length > 0) {
+      return true;
+    }
+    if (overrides.runtimeMode === "production" && init?.credentials === "include") {
+      return true;
+    }
+    return false;
+  };
+
+  const resolveRequestPrincipal = (init?: RequestInit): PrincipalContext | null => {
+    const token = extractBearerToken(init);
+    if (token && mintedPrincipals.has(token)) {
+      return mintedPrincipals.get(token) ?? null;
+    }
+    if (overrides.runtimeMode === "production") {
+      return overrides.mePrincipal ?? TEST_ENGINEER_PRINCIPAL;
+    }
+    return null;
+  };
+
   const fetchMock = vi.fn(
     async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : input.toString();
@@ -769,6 +820,12 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
       }
 
       if (url.endsWith("/api/v1/auth/session")) {
+        if (overrides.runtimeMode === "production") {
+          return new Response(
+            JSON.stringify({ detail: "Dev session minting disabled in production mode" }),
+            { status: 403, headers: { "Content-Type": "application/json" } }
+          );
+        }
         const status = overrides.authStatus ?? 200;
         if (status >= 400) {
           return new Response(
@@ -788,7 +845,9 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
             parsedBody.max_session_paid_tokens ??
             TEST_ENGINEER_PRINCIPAL.max_session_paid_tokens,
         };
-        return new Response(JSON.stringify(buildTestSession(principal)), {
+        const session = buildTestSession(principal);
+        mintedPrincipals.set(session.access_token, principal);
+        return new Response(JSON.stringify(session), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -802,8 +861,18 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
             { status, headers: { "Content-Type": "application/json" } }
           );
         }
+        if (!hasValidAuth(init)) {
+          return new Response(
+            JSON.stringify({ detail: "Missing authentication credentials" }),
+            { status: 401, headers: { "Content-Type": "application/json" } }
+          );
+        }
         return new Response(
-          JSON.stringify(overrides.mePrincipal ?? TEST_ENGINEER_PRINCIPAL),
+          JSON.stringify(
+            overrides.mePrincipal ??
+              resolveRequestPrincipal(init) ??
+              TEST_ENGINEER_PRINCIPAL
+          ),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
       }
@@ -816,10 +885,20 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
             headers: { "Content-Type": "application/json" },
           });
         }
-        return new Response(
-          JSON.stringify(overrides.healthResponse ?? TEST_HEALTH_RESPONSE),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
+        const baseHealth = overrides.healthResponse ?? TEST_HEALTH_RESPONSE;
+        const resolvedHealth: HealthResponse = overrides.runtimeMode
+          ? {
+              ...baseHealth,
+              hardware_profile: {
+                ...baseHealth.hardware_profile,
+                runtime_mode: overrides.runtimeMode,
+              },
+            }
+          : baseHealth;
+        return new Response(JSON.stringify(resolvedHealth), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
       }
 
       if (url.endsWith("/api/v1/workspace-config")) {
@@ -830,6 +909,12 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
             JSON.stringify({ detail: "Workspace config failed" }),
             { status, headers: { "Content-Type": "application/json" } }
           );
+        }
+        if (!hasValidAuth(init)) {
+          return new Response(JSON.stringify({ detail: "Unauthorized" }), {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+          });
         }
         const baseCfg =
           overrides.workspaceConfigResponse ?? TEST_WORKSPACE_CONFIG;
@@ -860,6 +945,12 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
             headers: { "Content-Type": "application/json" },
           });
         }
+        if (!hasValidAuth(init)) {
+          return new Response(JSON.stringify({ detail: "Unauthorized" }), {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
         const details = overrides.domainsDetail ?? TEST_BACKEND_DOMAINS;
         return new Response(
           JSON.stringify({ domains: details, count: details.length }),
@@ -872,6 +963,12 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
         if (status >= 400) {
           return new Response(JSON.stringify({ detail: "ROI failed" }), {
             status,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (!hasValidAuth(init)) {
+          return new Response(JSON.stringify({ detail: "Unauthorized" }), {
+            status: 401,
             headers: { "Content-Type": "application/json" },
           });
         }
@@ -889,6 +986,12 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
             { status, headers: { "Content-Type": "application/json" } }
           );
         }
+        if (!hasValidAuth(init)) {
+          return new Response(JSON.stringify({ detail: "Unauthorized" }), {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
         return new Response(
           JSON.stringify(overrides.queryResponse ?? TEST_SCOUT_QUERY_RESPONSE),
           { status: 200, headers: { "Content-Type": "application/json" } }
@@ -902,6 +1005,12 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
             JSON.stringify({ detail: overrides.sseDetail ?? "Blocked by policy" }),
             { status, headers: { "Content-Type": "application/json" } }
           );
+        }
+        if (!hasValidAuth(init)) {
+          return new Response(JSON.stringify({ detail: "Unauthorized" }), {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+          });
         }
         if (overrides.hangSseStream) {
           const encoder = new TextEncoder();
@@ -974,6 +1083,19 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
             headers: { "Content-Type": "application/json" },
           });
         }
+        if (!hasValidAuth(init)) {
+          return new Response(JSON.stringify({ detail: "Unauthorized" }), {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        const reqPrincipal = resolveRequestPrincipal(init);
+        if (reqPrincipal && reqPrincipal.role !== "engineer") {
+          return new Response(JSON.stringify({ detail: "Engineer role required" }), {
+            status: 403,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
         return new Response(
           JSON.stringify(overrides.previewResponse ?? TEST_HANDOFF_PREVIEW),
           { status: 200, headers: { "Content-Type": "application/json" } }
@@ -985,6 +1107,19 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
         if (status >= 400) {
           return new Response(JSON.stringify({ detail: "Apply rejected" }), {
             status,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (!hasValidAuth(init)) {
+          return new Response(JSON.stringify({ detail: "Unauthorized" }), {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        const reqPrincipal = resolveRequestPrincipal(init);
+        if (reqPrincipal && reqPrincipal.role !== "engineer") {
+          return new Response(JSON.stringify({ detail: "Engineer role required" }), {
+            status: 403,
             headers: { "Content-Type": "application/json" },
           });
         }
@@ -1000,6 +1135,19 @@ export function installMockApiFetch(overrides: MockApiOverrides = {}) {
           return new Response(
             JSON.stringify({ detail: overrides.purgeDetail ?? "Purge forbidden" }),
             { status, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (!hasValidAuth(init)) {
+          return new Response(JSON.stringify({ detail: "Unauthorized" }), {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        const reqPrincipal = resolveRequestPrincipal(init);
+        if (reqPrincipal && reqPrincipal.role !== "compliance_officer") {
+          return new Response(
+            JSON.stringify({ detail: "Compliance officer role required" }),
+            { status: 403, headers: { "Content-Type": "application/json" } }
           );
         }
         let parsed: Record<string, unknown> = {};

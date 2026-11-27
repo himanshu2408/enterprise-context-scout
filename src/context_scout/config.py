@@ -73,6 +73,9 @@ INSECURE_DB_PASSWORDS: Final[frozenset[str]] = frozenset(
 _DEV_ENV_ALIASES: Final[frozenset[str]] = frozenset(
     {"", "development", "dev", "local", "test", "testing"}
 )
+ALLOWLISTED_DEV_SESSION_ENVS: Final[frozenset[str]] = frozenset(
+    {"development", "dev", "local", "test"}
+)
 
 
 def normalize_environment_name(raw: str | None) -> str:
@@ -87,16 +90,38 @@ def normalize_environment_name(raw: str | None) -> str:
     return cleaned
 
 
+def _raw_environment_name() -> str:
+    return (
+        (
+            os.environ.get("SCOUT_ENVIRONMENT")
+            or os.environ.get("SCOUT_ENV")
+            or os.environ.get("ENVIRONMENT")
+            or os.environ.get("ENV")
+            or "development"
+        )
+        .strip()
+        .lower()
+    )
+
+
 def get_normalized_environment() -> str:
     """Returns canonical environment from SCOUT_ENVIRONMENT > SCOUT_ENV > ENVIRONMENT > ENV."""
-    raw = (
-        os.environ.get("SCOUT_ENVIRONMENT")
-        or os.environ.get("SCOUT_ENV")
-        or os.environ.get("ENVIRONMENT")
-        or os.environ.get("ENV")
-        or "development"
-    )
-    return normalize_environment_name(raw)
+    return normalize_environment_name(_raw_environment_name())
+
+
+def is_dev_auth_session_allowed() -> bool:
+    """Returns True strictly when raw environment matches positive dev allowlist (ECS-057)."""
+    return _raw_environment_name() in ALLOWLISTED_DEV_SESSION_ENVS
+
+
+def get_storage_backend() -> Literal["postgres", "memory"]:
+    """Returns configured storage backend ('postgres' fail-closed default or 'memory')."""
+    raw = os.environ.get("SCOUT_STORAGE_BACKEND", "postgres").strip().lower()
+    if raw == "memory":
+        return "memory"
+    if raw in {"", "postgres", "pg"}:
+        return "postgres"
+    raise ValueError(f"Unsupported SCOUT_STORAGE_BACKEND value: {raw!r}")
 
 
 def _is_production_env() -> bool:
@@ -144,13 +169,11 @@ PROHIBITED_STALE_MODEL_REGEX: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 
-ALLOWED_EU_REGIONS: Final[frozenset[str]] = frozenset(
+ALLOWED_EEA_REGIONS: Final[frozenset[str]] = frozenset(
     {
         "europe-west1",  # Belgium
-        "europe-west2",  # London (UK)
         "europe-west3",  # Frankfurt (Germany) - Primary Default
         "europe-west4",  # Eemshaven (Netherlands)
-        "europe-west6",  # Zurich (Switzerland)
         "europe-west8",  # Milan (Italy)
         "europe-west9",  # Paris (France)
         "europe-west10",  # Berlin (Germany)
@@ -160,19 +183,40 @@ ALLOWED_EU_REGIONS: Final[frozenset[str]] = frozenset(
         "europe-southwest1",  # Madrid (Spain)
     }
 )
+UK_CH_ADEQUACY_REGIONS: Final[frozenset[str]] = frozenset(
+    {
+        "europe-west2",  # London (UK - GDPR adequacy decision)
+        "europe-west6",  # Zurich (Switzerland - GDPR adequacy decision)
+    }
+)
+ALLOWED_EU_REGIONS: Final[frozenset[str]] = ALLOWED_EEA_REGIONS
 
 
-def validate_vertex_location(location: str, allow_non_eu: bool = False) -> str:
-    """Enforces EU data residency for Vertex AI execution unless explicitly overridden."""
+def validate_vertex_location(
+    location: str,
+    allow_non_eu: bool = False,
+    allow_uk_ch_adequacy_regions: bool = False,
+) -> str:
+    """Enforces strict EEA residency for Vertex AI unless adequacy/non-EU override is enabled."""
     cleaned = location.strip().lower()
-    if not allow_non_eu and not (cleaned.startswith("europe-") or cleaned in ALLOWED_EU_REGIONS):
+    if cleaned in ALLOWED_EEA_REGIONS:
+        return cleaned
+    if allow_uk_ch_adequacy_regions and cleaned in UK_CH_ADEQUACY_REGIONS:
+        return cleaned
+    if allow_non_eu and cleaned:
+        return cleaned
+    if cleaned in UK_CH_ADEQUACY_REGIONS:
         raise ValueError(
-            f"Vertex AI region '{location}' violates EU data residency policy. "
-            "Only EU regions (e.g. 'europe-west3') are permitted to comply with GDPR data "
-            "residency requirements, unless allow_non_eu_regions=True "
-            "(or SCOUT_ALLOW_NON_EU_REGIONS=true) is explicitly configured."
+            f"Vertex AI region '{location}' is a UK/Swiss adequacy region and violates EU data "
+            "residency policy under strict EEA defaults unless allow_uk_ch_adequacy_regions=True "
+            "(or SCOUT_ALLOW_UK_CH_ADEQUACY_REGIONS=true) is explicitly configured."
         )
-    return cleaned
+    raise ValueError(
+        f"Vertex AI region '{location}' violates EU data residency policy. "
+        "Only approved EEA regions (e.g. 'europe-west3') are permitted to comply with GDPR "
+        "data residency requirements, unless allow_non_eu_regions=True "
+        "(or SCOUT_ALLOW_NON_EU_REGIONS=true) is explicitly configured."
+    )
 
 
 def _parse_registry_yaml(registry_path: Path) -> dict[str, Any]:
@@ -542,6 +586,10 @@ class ScoutSettings(BaseSettings):
 
     db_admin_url: str = Field(default="postgresql://postgres@127.0.0.1:5432/context_scout")
     db_app_url: str = Field(default="postgresql://scout_app_user@127.0.0.1:5432/context_scout")
+    storage_backend: Literal["postgres", "memory"] = Field(
+        default="postgres",
+        description="Primary runtime storage backend ('postgres' fail-closed or 'memory').",
+    )
 
     query_pool_min_size: int = Field(default=1, ge=1, le=64)
     query_pool_max_size: int = Field(default=16, ge=1, le=128)
@@ -820,6 +868,20 @@ class ScoutSettings(BaseSettings):
         default=False,
         description="Allows non-EU Vertex AI regions if explicitly enabled.",
     )
+    allow_uk_ch_adequacy_regions: bool = Field(
+        default=False,
+        description="Allows UK (europe-west2) / Swiss (europe-west6) adequacy Vertex AI regions.",
+    )
+
+    @field_validator("storage_backend", mode="before")
+    @classmethod
+    def _validate_storage_backend(cls, value: Any) -> Literal["postgres", "memory"]:
+        cleaned = str(value or "postgres").strip().lower()
+        if cleaned == "memory":
+            return "memory"
+        if cleaned in {"", "postgres", "pg"}:
+            return "postgres"
+        raise ValueError(f"Unsupported storage_backend {value!r}; expected 'postgres' or 'memory'")
 
     @field_validator(
         "iap_allowed_hosted_domains",
@@ -864,7 +926,9 @@ class ScoutSettings(BaseSettings):
         validate_db_app_url(self.db_app_url)
         if self.use_vertex_ai and self.gcp_location:
             self.gcp_location = validate_vertex_location(
-                self.gcp_location, allow_non_eu=self.allow_non_eu_regions
+                self.gcp_location,
+                allow_non_eu=self.allow_non_eu_regions,
+                allow_uk_ch_adequacy_regions=self.allow_uk_ch_adequacy_regions,
             )
         if (
             self.embedding_model_id != "google/embeddinggemma-2"

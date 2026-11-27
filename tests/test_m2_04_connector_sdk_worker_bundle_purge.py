@@ -41,7 +41,7 @@ from context_scout.plugins.connectors.gitlab import GitLabConnectorPlugin
 from context_scout.queue.indexing_worker import IndexingWorker
 from context_scout.queue.task_queue import InMemoryTaskQueue, QueueTask
 from context_scout.retrieval.zoekt_client import LocalTrigramZoektIndex
-from context_scout.schemas.contracts import PrincipalContext, RoleType
+from context_scout.schemas.contracts import DEFAULT_TENANT_ID, PrincipalContext, RoleType
 from context_scout.security.pre_index_scrubber import PreIndexScrubber
 from context_scout.storage.object_store import InMemoryObjectStore, build_tenant_domain_key
 
@@ -674,7 +674,7 @@ def test_purger_invalidates_cached_permission_mirror_service() -> None:
     )
     resolved_scopes = perm_cache.get_user_scopes(profile)
     assert "repo:acme/secret-repo:read" in resolved_scopes
-    assert "cached_user_1" in perm_cache._cache
+    assert f"{DEFAULT_TENANT_ID}:cached_user_1" in perm_cache._cache
 
     other_profile = EnterpriseIdentityProfile(
         user_id="other_repo_reader",
@@ -686,7 +686,7 @@ def test_purger_invalidates_cached_permission_mirror_service() -> None:
         ],
     )
     perm_cache.get_user_scopes(other_profile)
-    assert "other_repo_reader" in perm_cache._cache
+    assert f"{DEFAULT_TENANT_ID}:other_repo_reader" in perm_cache._cache
 
     purger = ArtifactPurgeCoordinator(
         repository=mem_repo,
@@ -698,8 +698,8 @@ def test_purger_invalidates_cached_permission_mirror_service() -> None:
         repo_name="acme/secret-repo",
     )
     assert report.permission_cache_invalidated is True
-    assert "cached_user_1" not in perm_cache._cache
-    assert "other_repo_reader" not in perm_cache._cache
+    assert f"{DEFAULT_TENANT_ID}:cached_user_1" not in perm_cache._cache
+    assert f"{DEFAULT_TENANT_ID}:other_repo_reader" not in perm_cache._cache
 
 
 @pytest.mark.postgres

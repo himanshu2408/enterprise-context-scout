@@ -8,7 +8,7 @@ import {
   SSEStageEvent,
   SSEStageUpdateData,
 } from "../types/contracts";
-import { clearCachedAuthSession, ensureBearerToken } from "./client";
+import { clearCachedAuthSession, resolveAuthHeaders } from "./client";
 
 export interface SSEStreamCallbacks {
   onEvent: (event: SSEStageEvent) => void;
@@ -124,9 +124,9 @@ export function streamScoutWorkflow(options: SSEStreamOptions): () => void {
   let aborted = false;
 
   void (async () => {
-    let token: string;
+    let authHeaders: Record<string, string>;
     try {
-      token = await ensureBearerToken(principal);
+      authHeaders = await resolveAuthHeaders(principal);
     } catch (authErr: unknown) {
       if (aborted) return;
       onError(
@@ -139,7 +139,7 @@ export function streamScoutWorkflow(options: SSEStreamOptions): () => void {
 
     if (aborted) return;
 
-const SECURITY_GUARDRAIL_TRIGGERED = "SECURITY_GUARDRAIL_TRIGGERED";
+    const SECURITY_GUARDRAIL_TRIGGERED = "SECURITY_GUARDRAIL_TRIGGERED";
 
     const requestBody: Record<string, unknown> = {
       query: request.query,
@@ -163,10 +163,11 @@ const SECURITY_GUARDRAIL_TRIGGERED = "SECURITY_GUARDRAIL_TRIGGERED";
     try {
       response = await fetch("/api/v1/scout/stream", {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
           Accept: "text/event-stream",
-          Authorization: `Bearer ${token}`,
+          ...authHeaders,
         },
         body: JSON.stringify(requestBody),
         signal: controller.signal,
@@ -226,8 +227,11 @@ const SECURITY_GUARDRAIL_TRIGGERED = "SECURITY_GUARDRAIL_TRIGGERED";
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        const frames = buffer.split(/\r?\n\r?\n/);
-        buffer = frames.pop() ?? "";
+        // Hold trailing '\r' so a split CRLF '\r\n\r\n' boundary across chunks is preserved.
+        const trailingCr = buffer.endsWith("\r");
+        const scanSlice = trailingCr ? buffer.slice(0, -1) : buffer;
+        const frames = scanSlice.split(/\r?\n\r?\n/);
+        buffer = (frames.pop() ?? "") + (trailingCr ? "\r" : "");
 
         for (const frame of frames) {
           if (frame.trim()) {
@@ -236,8 +240,14 @@ const SECURITY_GUARDRAIL_TRIGGERED = "SECURITY_GUARDRAIL_TRIGGERED";
         }
       }
 
+      buffer += decoder.decode();
       if (!aborted && buffer.trim()) {
-        dispatchSSEFrame(buffer, { onEvent, onError, onComplete });
+        const tailFrames = buffer.split(/\r?\n\r?\n/);
+        for (const frame of tailFrames) {
+          if (frame.trim()) {
+            dispatchSSEFrame(frame, { onEvent, onError, onComplete });
+          }
+        }
       }
       if (!aborted) {
         onComplete();
@@ -249,6 +259,19 @@ const SECURITY_GUARDRAIL_TRIGGERED = "SECURITY_GUARDRAIL_TRIGGERED";
       onError(
         readErr instanceof Error ? readErr : new Error(String(readErr))
       );
+    } finally {
+      if (aborted) {
+        try {
+          await reader.cancel();
+        } catch {
+          // Ignore stream cancel errors during abort cleanup
+        }
+      }
+      try {
+        reader.releaseLock();
+      } catch {
+        // Ignore if lock already released
+      }
     }
   })();
 
