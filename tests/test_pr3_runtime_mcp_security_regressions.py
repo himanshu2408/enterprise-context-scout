@@ -22,6 +22,7 @@ import psycopg
 import pytest
 from examples.quant_dogfood.contracts import MarketRegime
 from examples.quant_dogfood.ingestion.paper_harvester import parse_arxiv_atom_feed
+from mcp.types import CallToolResult, TextContent
 
 from context_scout.agents.domain_registry import DomainRegistry
 from context_scout.agents.llm_backend import (
@@ -33,6 +34,7 @@ from context_scout.agents.open_weights_vllm_executor import OpenWeightsVLLMExecu
 from context_scout.agents.scout_workflow import FederatedScoutCoordinator, LocalGemmaClient
 from context_scout.api.routes import scout as scout_routes
 from context_scout.api.routes.admin import get_admin_purge_coordinator
+from context_scout.api.schemas import ScoutStreamRequest
 from context_scout.config import ScoutSettings
 from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
 from context_scout.db.schema import DocChunkRecord as DbDocChunkRecord
@@ -115,7 +117,7 @@ def test_stream_scout_emits_keepalive_and_cancels_on_disconnect(
             return disconnect_checks >= 4
 
     async def _collect_stream() -> list[str]:
-        req = scout_routes.ScoutStreamRequest(
+        req = ScoutStreamRequest(
             domain_id=domain_id,
             query="Explain the SSE heartbeat flow",
         )
@@ -399,8 +401,20 @@ def test_is_stale_false_enforced_in_doc_corpus_mcp_in_memory(
                     "verbatim_quote": "Purged legacy tombstone key rotation token",
                 },
             )
-            s_data = search_res.structured_content or json.loads(search_res.content[0].text)
-            v_data = verify_res.structured_content or json.loads(verify_res.content[0].text)
+            assert isinstance(search_res, CallToolResult)
+            assert isinstance(verify_res, CallToolResult)
+            if search_res.structured_content is not None:
+                s_data = dict(search_res.structured_content)
+            else:
+                first_s = search_res.content[0]
+                assert isinstance(first_s, TextContent)
+                s_data = dict(json.loads(first_s.text))
+            if verify_res.structured_content is not None:
+                v_data = dict(verify_res.structured_content)
+            else:
+                first_v = verify_res.content[0]
+                assert isinstance(first_v, TextContent)
+                v_data = dict(json.loads(first_v.text))
             return (s_data, v_data)
 
     search_payload, verify_payload = asyncio.run(_run_tools())
