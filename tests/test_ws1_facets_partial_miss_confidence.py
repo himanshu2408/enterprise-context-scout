@@ -483,7 +483,7 @@ def test_remediation_batch_regressions() -> None:
         "and deep hedging under NSE transaction costs?"
     )
     assert p_t10.requested_cardinality == 3
-    assert len(p_t10.facets) >= 1
+    assert len(p_t10.facets) == 2
 
     # 4. Symbol direct-grounding in evaluate_facet_grounding
     sym_slice = VerbatimCodeSlice(

@@ -48,6 +48,8 @@ from context_scout.schemas.contracts import (
     RoleType,
 )
 
+pytestmark = pytest.mark.quant_dogfood
+
 
 def test_paper_harvester_market_queries() -> None:
     """Verifies query construction, URL formatting, and mock fixtures across IN, DE, and US."""

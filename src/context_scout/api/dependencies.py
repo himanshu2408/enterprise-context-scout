@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from context_scout.agents.scout_workflow import LocalGemmaClient
 
 from context_scout.agents.domain_registry import DomainRegistry
-from context_scout.config import ScoutSettings
+from context_scout.config import ScoutSettings, get_normalized_environment
 from context_scout.db.repositories import (
     ASTSymbolRecord,
     CodeFileRecord,
@@ -136,18 +136,7 @@ INSECURE_DEFAULT_SECRETS: Final[frozenset[str]] = frozenset(
 
 def is_development_environment() -> bool:
     """Returns True strictly when running in development/local/test mode."""
-    env = (
-        (
-            os.environ.get("SCOUT_ENV")
-            or os.environ.get("SCOUT_ENVIRONMENT")
-            or os.environ.get("ENVIRONMENT")
-            or os.environ.get("ENV")
-            or "development"
-        )
-        .strip()
-        .lower()
-    )
-    return env in {"", "development", "dev", "local", "test", "testing"}
+    return get_normalized_environment() == "development"
 
 
 def is_production_environment() -> bool:

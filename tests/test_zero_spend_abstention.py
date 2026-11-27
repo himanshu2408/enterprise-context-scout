@@ -130,6 +130,9 @@ class PaidExecutionSpy:
         self.invocations.clear()
 
 
+pytestmark = pytest.mark.postgres
+
+
 @pytest.fixture(scope="module")
 def paid_spy() -> PaidExecutionSpy:
     return PaidExecutionSpy()
@@ -581,11 +584,9 @@ def seed_synthetic_benchmark_repo(
 
 def teardown_synthetic_benchmark_repo(conn: psycopg.Connection, domain_id: str) -> None:
     """Strictly deletes all records belonging to domain_id and verifies 0 rows remain."""
-    conn.execute("DELETE FROM doc_chunks WHERE domain_id = %s;", (domain_id,))
-    conn.execute("DELETE FROM ast_symbols WHERE domain_id = %s;", (domain_id,))
-    conn.execute("DELETE FROM code_files WHERE domain_id = %s;", (domain_id,))
-    conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (domain_id,))
-    conn.commit()
+    from tests.fixtures.pg_isolation import cleanup_pg_tenants_and_eval_domains
+
+    cleanup_pg_tenants_and_eval_domains(conn, domain_ids=(domain_id,))
 
     with conn.cursor() as cur:
         for tbl in ("doc_chunks", "ast_symbols", "code_files", "domain_packs"):
@@ -619,19 +620,23 @@ def populated_benchmark_repo(domain_registry: DomainRegistry) -> Any:
         with psycopg.connect(st.db_admin_url) as conn:
             seed_synthetic_benchmark_repo(conn, domain_id, repo=in_mem_repo)
 
-        conn_mgr = RLSConnectionManager(st.db_app_url)
-        adapter = PostgresScoutGraphAdapter(conn_mgr, st)
-        cast(Any, adapter).benchmark_domain_id = domain_id
-        try:
-            yield adapter
-        finally:
-            with psycopg.connect(st.db_admin_url) as cleanup_conn:
-                teardown_synthetic_benchmark_repo(cleanup_conn, domain_id)
+        with RLSConnectionManager(st.db_app_url, use_pool=False) as conn_mgr:
+            adapter = PostgresScoutGraphAdapter(conn_mgr, st)
+            cast(Any, adapter).benchmark_domain_id = domain_id
+            try:
+                yield adapter
+            finally:
+                domain_registry.unregister(domain_id)
+                with psycopg.connect(st.db_admin_url) as cleanup_conn:
+                    teardown_synthetic_benchmark_repo(cleanup_conn, domain_id)
         return
 
     if os.environ.get("SCOUT_EVAL_IN_MEMORY_ONLY") == "1":
         cast(Any, in_mem_repo).benchmark_domain_id = domain_id
-        yield in_mem_repo
+        try:
+            yield in_mem_repo
+        finally:
+            domain_registry.unregister(domain_id)
         return
 
     pytest.fail(
@@ -1031,6 +1036,7 @@ class TestStorageParityAndNeutralScopes:
             for m in missing
         )
 
+    @pytest.mark.postgres
     def test_rls_scope_filtering_parity_in_memory_vs_postgres(
         self,
         populated_benchmark_repo: Any,
@@ -1066,6 +1072,7 @@ class TestStorageParityAndNeutralScopes:
         assert len(visible_eng) >= 300
         assert len(visible_guest) == 0
 
+    @pytest.mark.postgres
     def test_fixture_cannot_touch_rows_of_another_domain(self) -> None:
         """Proves benchmark teardown isolates by domain_id and cannot touch other domains."""
         if not is_postgres_reachable():

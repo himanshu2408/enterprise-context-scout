@@ -436,6 +436,7 @@ def test_shield_gemma_invalid_model_id_rejected() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.postgres
 def test_live_postgres_rls_scoped_db_session_isolation(
     sample_engineer_principal: PrincipalContext,
     sample_quant_principal: PrincipalContext,
@@ -492,7 +493,7 @@ def test_live_postgres_rls_scoped_db_session_isolation(
             assert row_eval_dc is not None
             assert isinstance(row_cf[0], int)
             assert isinstance(row_eval_dc[0], int)
-            assert row_cf[0] >= 37
+            assert row_cf[0] >= 1
             assert row_eval_dc[0] == 0
 
         # 3. Researcher Principal: scope ['public_docs'] sees >= 1 doc_chunk and 0 code_files

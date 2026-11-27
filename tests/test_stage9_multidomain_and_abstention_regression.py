@@ -19,10 +19,10 @@ Verifies:
 
 from __future__ import annotations
 
-import os
 import uuid
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from context_scout.agents.domain_registry import DomainRegistry
@@ -53,8 +53,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DOMAINS_DIR = REPO_ROOT / "domains"
 
 
-def _auth_headers(scopes: list[str] | None = None) -> dict[str, str]:
-    os.environ["SCOUT_ALLOW_INSECURE_DEV_SECRET"] = "true"
+def _auth_headers(
+    monkeypatch: pytest.MonkeyPatch, scopes: list[str] | None = None
+) -> dict[str, str]:
+    monkeypatch.setenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", "true")
     token = create_signed_principal_token(
         user_id="stage9_regression_user",
         role=RoleType.ENGINEER,
@@ -101,6 +103,10 @@ def test_rc6_unscripted_eval_suite_has_zero_spoilers_and_covers_all_domains() ->
 
     spoiler_tokens = (
         ".py",
+        ".ts",
+        ".tsx",
+        ".cs",
+        ".tf",
         "KalmanHedgeEstimator",
         "AlmgrenChrissExecutionOptimizer",
         "OrderFlowImbalanceSignal",
@@ -209,14 +215,17 @@ def test_rc3_rc4_cohesive_grounding_rejects_scattered_bag_of_words() -> None:
     assert cov.status == "not_found"
 
 
-def test_rc1_rc2_rc7_live_pg17_api_acid_cap_iceberg_and_zero_dollar_abstention() -> None:
+@pytest.mark.postgres
+def test_rc1_rc2_rc7_live_pg17_api_acid_cap_iceberg_and_zero_dollar_abstention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """RC-1, RC-2, RC-7: Live PG17 + FastAPI TestClient across all unscripted probes & $0 trap."""
     from context_scout.api import dependencies
 
-    os.environ["SCOUT_ALLOW_INSECURE_DEV_SECRET"] = "true"
+    monkeypatch.setenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", "true")
     prev_repo = dependencies._shared_repo
     dependencies._shared_repo = None
-    headers = _auth_headers()
+    headers = _auth_headers(monkeypatch)
     try:
         with TestClient(create_app()) as client:
             # 1. /api/v1/workspace-config exposes all 4 domains dynamically

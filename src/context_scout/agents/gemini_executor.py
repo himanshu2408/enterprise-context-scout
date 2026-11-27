@@ -613,7 +613,12 @@ class GeminiImplementationExecutor:
             if sa_path.is_file():
                 try:
                     raw_sa = json.loads(sa_path.read_text(encoding="utf-8"))
-                except Exception:
+                except Exception as exc:
+                    logger.debug(
+                        "Failed parsing GOOGLE_APPLICATION_CREDENTIALS JSON (%s): %s",
+                        type(exc).__name__,
+                        exc,
+                    )
                     raw_sa = {}
                 if isinstance(raw_sa, dict) and raw_sa.get("type") == "service_account":
                     raise PermissionError(

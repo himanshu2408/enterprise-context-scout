@@ -480,44 +480,17 @@ def test_seed_demo_populates_pg17_healthy_with_zero_git_mutations(
                 assert cnt > 0, f"Expected populated rows in {tbl} after seed-demo"
     finally:
         # Clean up ONLY isolated_tenant rows (never touch DEFAULT_TENANT_ID).
-        cleanup_principal = PrincipalContext(
-            user_id="seed_demo_cleanup",
-            role=RoleType.COMPLIANCE_OFFICER,
-            allowed_scopes=[
-                "public",
-                "public_eng",
-                "public_docs",
-                "audit:compliance",
-                "repo:code_architecture_scout",
-                "corpus:enterprise_docs",
-                "domain:code_architecture_scout",
-                "domain:enterprise_docs_scout",
-                "domain:data_engineering",
-                "domain:data_engineering_scout",
-                "domain:polyglot_unseen_v2",
-            ],
-            tenant_id=isolated_tenant,
-        )
-        with mgr.scoped_transaction(cleanup_principal, enable_hnsw_iterative_scan=False) as conn:
-            for tbl in (
-                "overlay_file_deltas",
-                "ref_snapshots",
-                "side_effects",
-                "ast_edges",
-                "ast_symbols",
-                "code_files",
-                "doc_chunks",
-                "repositories",
-                "domain_sync_manifests",
-                "model_artifacts",
-                "domain_packs",
-            ):
-                conn.execute(f"DELETE FROM {tbl};")
+        import psycopg
+        from tests.fixtures.pg_isolation import cleanup_pg_tenants_and_eval_domains
+
+        with psycopg.connect(settings.db_admin_url) as admin_conn:
+            cleanup_pg_tenants_and_eval_domains(admin_conn, tenant_ids=(isolated_tenant,))
 
     # Canary check: default-tenant rows strictly untouched.
     with mgr.scoped_transaction(canary_principal, enable_hnsw_iterative_scan=False) as conn:
         row_after = conn.execute("SELECT COUNT(*) FROM code_files;").fetchone()
         assert (int(str(row_after[0])) if row_after else 0) == default_tenant_code_count_before
+    mgr.close()
 
     status_after = subprocess.check_output(
         ["git", "-C", str(REPO_ROOT), "status", "--short"], text=True

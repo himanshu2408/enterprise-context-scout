@@ -8,6 +8,7 @@ RRF retrieval, VAL-02 NFKC verbatim quote verification, and hard payload caps (<
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,8 @@ from context_scout.security.rbac import (
     get_current_principal,
     validate_tool_call_arguments,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def create_doc_corpus_mcp_server(
@@ -64,7 +67,12 @@ def create_doc_corpus_mcp_server(
             with probe_mgr.scoped_transaction(probe, enable_hnsw_iterative_scan=False) as conn:
                 conn.execute("SELECT 1;")
             effective_repo = PostgresScoutGraphAdapter(get_query_pool(), st)
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Falling back to InMemoryRLSRepository in doc_corpus_mcp (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
             effective_repo = InMemoryRLSRepository()
     is_pg_repo = isinstance(effective_repo, PostgresRLSRepository) or hasattr(
         effective_repo, "connection_manager"

@@ -552,6 +552,7 @@ def test_session_compaction_coreference_and_commit_drift_in_memory() -> None:
     assert any("services/circuit_breaker.py" in w for w in drift_res.commit_drift_warnings)
 
 
+@pytest.mark.postgres
 def test_live_pg17_scout_sessions_forced_rls_and_cross_tenant_isolation() -> None:
     """Verifies live PG17 FORCE RLS isolation and ScoutSessionManager persistence."""
     settings = ScoutSettings()
@@ -949,6 +950,7 @@ def test_race_01_fifty_concurrent_tasks_shared_client_and_workflow() -> None:
             assert res.paid_tokens_spent == 0
 
 
+@pytest.mark.postgres
 def test_http_query_strips_client_normalized_rrf_score_override() -> None:
     """Client-supplied normalized_rrf_score cannot bypass Pre-Flight RRF floor."""
     token = create_signed_principal_token(

@@ -14,7 +14,6 @@ Tests all M5 components and cross-cutting invariants:
 
 from __future__ import annotations
 
-import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -1219,34 +1218,31 @@ def test_live_postgres_m5_preflight_and_scout_pipeline(
 def test_live_postgres_federated_scout_coordinator_seeded_corpus(
     principal: PrincipalContext,
     domain_registry: DomainRegistry,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verifies FederatedScoutCoordinator across live PostgreSQL 17 doc_chunks and AST tables."""
-    if os.environ.get("CONTEXT_SCOUT_USE_LIVE_MLX") != "1":
-        monkeypatch.setenv("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "1")
     settings = ScoutSettings()
-    conn_mgr = RLSConnectionManager(settings.db_app_url)
-    adapter = PostgresScoutGraphAdapter(conn_mgr)
-    coordinator = FederatedScoutCoordinator(registry=domain_registry, repo=adapter)
-    fed_principal = PrincipalContext(
-        user_id=principal.user_id,
-        role=principal.role,
-        allowed_scopes=[*principal.allowed_scopes, "public_docs", "public_eng", "public_quant"],
-        max_session_paid_tokens=principal.max_session_paid_tokens,
-    )
+    with RLSConnectionManager(settings.db_app_url) as conn_mgr:
+        adapter = PostgresScoutGraphAdapter(conn_mgr)
+        coordinator = FederatedScoutCoordinator(registry=domain_registry, repo=adapter)
+        fed_principal = PrincipalContext(
+            user_id=principal.user_id,
+            role=principal.role,
+            allowed_scopes=[*principal.allowed_scopes, "public_docs", "public_eng"],
+            max_session_paid_tokens=principal.max_session_paid_tokens,
+        )
 
-    pack = coordinator.run(
-        user_prompt=(
-            "Audit RLSConnectionManager tenant isolation using PostgreSQL 17 "
-            "FORCE ROW LEVEL SECURITY architecture documentation"
-        ),
-        principal=fed_principal,
-    )
-    assert isinstance(pack, ImplementationContextPack)
-    assert pack.preflight_report.passed is True
-    assert pack.domain_knowledge_brief is not None
-    assert any(c.verbatim_quote for c in pack.supporting_doc_citations)
-    assert len(pack.code_slices) >= 1
+        pack = coordinator.run(
+            user_prompt=(
+                "Audit RLSConnectionManager tenant isolation using PostgreSQL 17 "
+                "FORCE ROW LEVEL SECURITY architecture documentation"
+            ),
+            principal=fed_principal,
+        )
+        assert isinstance(pack, ImplementationContextPack)
+        assert pack.preflight_report.passed is True
+        assert pack.domain_knowledge_brief is not None
+        assert any(c.verbatim_quote for c in pack.supporting_doc_citations)
+        assert len(pack.code_slices) >= 1
 
 
 @pytest.mark.postgres

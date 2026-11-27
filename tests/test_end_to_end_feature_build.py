@@ -151,6 +151,7 @@ def test_build_real_feature_from_context_pack_in_worktree_sandbox(
     assert tests_passed is True, f"Behavioral test failed: {verify_out}"
 
 
+@pytest.mark.postgres
 def test_clone_and_train_custom_domain_end_to_end_via_cli(tmp_path: Path, capsys: object) -> None:
     """Verifies any user can scaffold, distill, and train a brand-new custom domain via CLI."""
     # 1. Verify hardware auto-detection CLI

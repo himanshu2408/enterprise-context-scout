@@ -146,6 +146,7 @@ def test_f07_indexing_worker_run_once(in_memory_queue: InMemoryTaskQueue) -> Non
     assert worker.run_once() is False
 
 
+@pytest.mark.postgres
 def test_f07_webhook_endpoints_hmac_and_ingress(
     app_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -212,6 +213,7 @@ def test_f07_webhook_endpoints_hmac_and_ingress(
     assert resp_gh_bad.status_code == 401
 
 
+@pytest.mark.postgres
 def test_f07_live_postgres_task_queue(ephemeral_pg_domain: str) -> None:
     """Verifies PostgreSQL 17 SKIP LOCKED atomic claims on live database."""
     settings = ScoutSettings()

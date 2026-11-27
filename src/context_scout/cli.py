@@ -2630,7 +2630,8 @@ def cmd_seed_demo(
 
     try:
         head_commit_sha = _resolve_commit_sha(root, "HEAD")
-    except Exception:
+    except Exception as exc:
+        logger.debug("Using synthetic seed commit SHA (%s): %s", type(exc).__name__, exc)
         head_commit_sha = hashlib.sha1(f"seed-demo:{root.name}".encode()).hexdigest()
 
     code_domain_id = "code_architecture_scout"

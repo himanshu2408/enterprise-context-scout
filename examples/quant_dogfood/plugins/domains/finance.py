@@ -647,7 +647,7 @@ class FinanceDomainPlugin:
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parents[4]
-        strat_dir = repo_root / "src" / "context_scout" / "trading_strategies"
+        strat_dir = repo_root / "examples" / "quant_dogfood" / "trading_strategies"
         code_files: list[CodeFileRecord] = []
         ast_symbols: list[ASTSymbolRecord] = []
         if strat_dir.is_dir():
@@ -672,7 +672,7 @@ class FinanceDomainPlugin:
                         line_count=len(lines),
                     )
                 )
-                module_parts = py_file.relative_to(repo_root / "src").with_suffix("").parts
+                module_parts = py_file.relative_to(repo_root).with_suffix("").parts
                 mod_dotted = ".".join(module_parts)
                 import ast as _ast
 
@@ -931,7 +931,7 @@ class FinanceDomainPlugin:
             "research_domain_id": DOMAIN_ID_FINANCE,
             "federated_domain_id": FEDERATED_DOMAIN_ID_FINANCE,
             "fallback_symbol_file": (
-                "src/context_scout/trading_strategies/almgren_chriss_execution.py"
+                "examples/quant_dogfood/trading_strategies/almgren_chriss_execution.py"
             ),
             "system_scopes": [
                 "public_eng",

@@ -247,6 +247,7 @@ def test_embed_custom_domain_texts_default_and_test_opt_out(
     assert real_vecs[0][0] == pytest.approx(0.25)
 
 
+@pytest.mark.postgres
 def test_multi_chunk_build_and_sync_deletes_stale_chunks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -394,6 +395,7 @@ def test_multi_chunk_build_and_sync_deletes_stale_chunks(
         assert stored_docs == {}
 
 
+@pytest.mark.postgres
 def test_cli_distill_custom_domain_handles_multi_chunk_and_unreadable_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

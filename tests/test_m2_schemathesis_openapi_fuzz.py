@@ -210,6 +210,7 @@ def test_schemathesis_unauthenticated_zero_5xx_and_zero_auth_bypass(
     case.validate_response(response, checks=_OPENAPI_CONFORMANCE_CHECKS)
 
 
+@pytest.mark.postgres
 @auth_schema.parametrize()
 @_FUZZ_SETTINGS
 def test_schemathesis_authenticated_schema_and_status_conformance(
@@ -286,6 +287,7 @@ def test_schemathesis_authenticated_schema_and_status_conformance(
         _cleanup_pg_tenants_and_users(tracked_tenants, principal_ids=tracked_users)
 
 
+@pytest.mark.postgres
 def test_schemathesis_positive_and_negative_modes_explicit(
     api_schema: Any,
 ) -> None:
@@ -346,6 +348,7 @@ def test_schemathesis_positive_and_negative_modes_explicit(
 # =============================================================================
 
 
+@pytest.mark.postgres
 def test_webhook_malformed_types_nul_bytes_and_pg17_fk_return_400_never_500(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -420,6 +423,7 @@ def test_webhook_malformed_types_nul_bytes_and_pg17_fk_return_400_never_500(
         _cleanup_pg_tenants_and_users({tenant_id})
 
 
+@pytest.mark.postgres
 def test_scim_malformed_scopes_operations_and_nul_bytes_return_400_never_500(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -509,6 +513,7 @@ def test_scim_malformed_scopes_operations_and_nul_bytes_return_400_never_500(
         _cleanup_pg_tenants_and_users({tenant_id})
 
 
+@pytest.mark.postgres
 def test_nul_bytes_across_auth_admin_scout_and_handoff_return_4xx_never_500(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -587,6 +592,7 @@ def test_nul_bytes_across_auth_admin_scout_and_handoff_return_4xx_never_500(
         _cleanup_pg_tenants_and_users({tenant_id}, principal_ids={comp_uid, eng_uid})
 
 
+@pytest.mark.postgres
 def test_cleanup_pg_tenants_and_users_protects_default_tenant_and_canary_rows() -> None:
     """Regression: Schemathesis cleanup refuses DEFAULT_TENANT_ID and preserves canary rows."""
     with pytest.raises(ValueError, match="DEFAULT_TENANT_ID"):
@@ -763,6 +769,7 @@ def test_mounted_mcp_http_get_405_well_known_200_and_duplicate_header_rejection(
         _run_checks(lifespan_client)
 
 
+@pytest.mark.postgres
 def test_lone_utf16_surrogates_return_4xx_never_500_across_all_endpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

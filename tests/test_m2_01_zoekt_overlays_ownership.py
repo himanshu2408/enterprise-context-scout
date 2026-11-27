@@ -525,6 +525,7 @@ def test_cow_mr_overlays_inmemory_and_zoekt_isolation(tmp_path: Path) -> None:
     assert res_102_legacy.file_matches == ()
 
 
+@pytest.mark.postgres
 def test_live_pg17_cow_mr_overlays_and_cross_tenant_rls(
     tmp_path: Path,
     ephemeral_pg_domain: str,
@@ -705,6 +706,7 @@ def test_live_pg17_cow_mr_overlays_and_cross_tenant_rls(
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.postgres
 def test_gitattributes_rules_and_search_downweighting(
     tmp_path: Path,
     ephemeral_pg_domain: str,
@@ -835,6 +837,7 @@ def test_gitattributes_rules_and_search_downweighting(
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.postgres
 def test_codeowners_and_backstage_ownership_graph_extraction(
     tmp_path: Path,
     ephemeral_pg_domain: str,
@@ -984,8 +987,20 @@ def test_scout_wt_conftest_skips_alembic_rebootstrap_when_pg_reachable(
 
     monkeypatch.setattr(root_conftest, "ensure_pg17_schema_and_seed_corpora", _forbid_bootstrap)
 
+    from types import SimpleNamespace
+
+    fake_request = SimpleNamespace(
+        session=SimpleNamespace(
+            items=[
+                SimpleNamespace(
+                    get_closest_marker=lambda m: object() if m == "postgres" else None,
+                    fixturenames=(),
+                )
+            ]
+        )
+    )
     fixture_fn: Any = root_conftest.bootstrap_pg17_session
-    gen = fixture_fn.__wrapped__()
+    gen = fixture_fn.__wrapped__(fake_request)
     next(gen)
     with pytest.raises(StopIteration):
         next(gen)

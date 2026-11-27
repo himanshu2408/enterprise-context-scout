@@ -11,7 +11,10 @@ import tarfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Generator
+from datetime import date
 from pathlib import Path
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -35,22 +38,117 @@ from examples.quant_dogfood.ingestion.scepticism_gate import (
     calculate_effective_friction_floor,
 )
 from pypdf import PdfWriter
+from tests.fixtures.pg_isolation import cleanup_pg_tenants_and_eval_domains
 
 from context_scout.config import ScoutSettings
-from context_scout.db.repositories import PostgresRLSRepository
+from context_scout.db.repositories import DocChunkRecord, PostgresRLSRepository
 from context_scout.db.session import RLSConnectionManager
 from context_scout.ingestion.doc_parser import PdfDocParser
-from context_scout.retrieval.embedder import LocalSemanticEmbedder
+from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import (
     DocCitationSpan,
     PrincipalContext,
     RoleType,
 )
 
+pytestmark = pytest.mark.quant_dogfood
+
 
 @pytest.fixture(scope="module")
 def settings() -> ScoutSettings:
     return ScoutSettings()
+
+
+@pytest.fixture(scope="module")
+def isolated_quant_pg_tenant(settings: ScoutSettings) -> Generator[UUID, None, None]:
+    """Seeds isolated tenant_id quant_research_scout chunks across IN_NSE/DE_XETRA/US_EQUITY."""
+    iso_tid = uuid4()
+    repo = PostgresRLSRepository()
+    embedder = get_embedding_provider(dimensions=768)
+
+    with psycopg.connect(settings.db_admin_url) as admin_conn:
+        admin_conn.execute(
+            """
+            INSERT INTO domain_packs (
+                tenant_id, domain_id, display_name, lora_adapter_id,
+                primary_truth_source, freshness_half_life_days, config_json
+            )
+            VALUES (%s, 'quant_research_scout', 'Quant Research Scout',
+                    'gemma4_26b_quant_research', 'document', 180, '{}'::jsonb)
+            ON CONFLICT (tenant_id, domain_id) DO NOTHING
+            """,
+            (iso_tid,),
+        )
+        admin_conn.commit()
+
+    seed_principal = PrincipalContext(
+        user_id="quant_harvest_seeder",
+        role=RoleType.DOMAIN_RESEARCHER,
+        allowed_scopes=["public_quant"],
+        tenant_id=iso_tid,
+    )
+    seed_rows = [
+        (
+            "arxiv:2211.07080",
+            "Securities Transaction Tax and Nifty Delivery Friction on NSE",
+            MarketRegime.INDIA_NSE_BSE,
+            "Abstract",
+            (
+                "Securities Transaction Tax (STT) and Nifty delivery friction on National Stock "
+                "Exchange of India (NSE) require >= 15 bps transaction cost floor."
+            ),
+        ),
+        (
+            "arxiv:2607.18001",
+            "Xetra Closing Auction Liquidity and DAX Tick Size Microstructure",
+            MarketRegime.GERMANY_XETRA_DAX,
+            "Empirical Evaluation",
+            (
+                "Xetra closing auction liquidity and DAX tick size microstructure models on "
+                "Deutsche Boerse clear a 10 bps transaction cost floor."
+            ),
+        ),
+        (
+            "arxiv:2502.07393",
+            "Limit Order Book Imbalance and Market Making on US Equities",
+            MarketRegime.US_NYSE_NASDAQ,
+            "Abstract",
+            (
+                "Limit order book imbalance and market making models on US NYSE and NASDAQ "
+                "equities clear a 5 bps transaction cost floor."
+            ),
+        ),
+    ]
+    try:
+        with (
+            RLSConnectionManager(settings.db_app_url, use_pool=False) as mgr,
+            mgr.scoped_transaction(seed_principal, enable_hnsw_iterative_scan=False) as conn,
+        ):
+            for doc_id, title, market, sec, body in seed_rows:
+                repo.insert_doc_chunk(
+                    conn,
+                    DocChunkRecord(
+                        chunk_id=uuid4(),
+                        tenant_id=iso_tid,
+                        domain_id="quant_research_scout",
+                        doc_id=doc_id,
+                        doc_title=title,
+                        source_uri=f"https://arxiv.org/abs/{doc_id.split(':', 1)[-1]}",
+                        market_scope=market,
+                        published_date=date(2026, 1, 15),
+                        authority_weight=1.0,
+                        section_heading=sec,
+                        contextual_header=f"Quant Seed [{market.value}]",
+                        verbatim_content=body,
+                        metadata_json={},
+                        allowed_scopes=["public_quant"],
+                        embedding=embedder.embed_text(f"{title} {sec} {body}", is_query=False),
+                    ),
+                )
+        yield iso_tid
+    finally:
+        with psycopg.connect(settings.db_admin_url) as admin_conn:
+            cleanup_pg_tenants_and_eval_domains(admin_conn, tenant_ids=(iso_tid,))
 
 
 def test_arxiv_tar_gz_decompression_and_include_resolution() -> None:
@@ -248,23 +346,32 @@ def test_arxiv_live_atom_feed() -> None:
     assert first_paper.doc_id.startswith("arxiv:")
 
 
-def test_postgres_doc_chunks_persisted_and_3way_rrf_retrieval(settings: ScoutSettings) -> None:
-    """Verifies that harvested corpus is permanently persisted in PostgreSQL 17 doc_chunks."""
-    # 1. Direct row count inspection
+@pytest.mark.postgres
+def test_postgres_doc_chunks_persisted_and_3way_rrf_retrieval(
+    settings: ScoutSettings,
+    isolated_quant_pg_tenant: UUID,
+) -> None:
+    """Verifies that harvested corpus is persisted in PostgreSQL 17 doc_chunks under tenant RLS."""
+    # 1. Direct row count inspection scoped to isolated tenant
     with psycopg.connect(settings.db_admin_url) as conn:
-        cur = conn.execute("SELECT count(*) FROM doc_chunks;")
+        cur = conn.execute(
+            "SELECT count(*) FROM doc_chunks WHERE tenant_id = %s;",
+            (isolated_quant_pg_tenant,),
+        )
         row = cur.fetchone()
         assert row is not None
         row_count = int(row[0])
-        assert row_count >= 7, f"Expected >= 7 persisted chunks, got {row_count}"
+        assert row_count >= 3, f"Expected >= 3 persisted chunks, got {row_count}"
 
         # Check breakdown across markets
         cur = conn.execute(
             """
             SELECT market_scope, count(*)
             FROM doc_chunks
+            WHERE tenant_id = %s
             GROUP BY market_scope;
-            """
+            """,
+            (isolated_quant_pg_tenant,),
         )
         counts: dict[str, int] = dict(cur.fetchall())
         assert counts.get("IN_NSE", 0) >= 1, f"Insufficient IN_NSE chunks: {counts.get('IN_NSE')}"
@@ -276,12 +383,12 @@ def test_postgres_doc_chunks_persisted_and_3way_rrf_retrieval(settings: ScoutSet
         )
 
     # 2. Live 3-Way Normalized RRF Hybrid Retrieval
-    mgr = RLSConnectionManager(settings.db_app_url)
     repo = PostgresRLSRepository()
     principal = PrincipalContext(
         user_id="research_evaluator",
         role=RoleType.DOMAIN_RESEARCHER,
         allowed_scopes=["public_quant"],
+        tenant_id=isolated_quant_pg_tenant,
     )
 
     test_queries = [
@@ -290,8 +397,11 @@ def test_postgres_doc_chunks_persisted_and_3way_rrf_retrieval(settings: ScoutSet
         (MarketRegime.US_NYSE_NASDAQ, "limit order book imbalance market making"),
     ]
 
-    embedder = LocalSemanticEmbedder()
-    with mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=True) as conn:
+    embedder = get_embedding_provider(dimensions=768)
+    with (
+        RLSConnectionManager(settings.db_app_url, use_pool=False) as mgr,
+        mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=True) as conn,
+    ):
         for market, query_str in test_queries:
             query_emb = embedder.embed_text(query_str, is_query=True)
             hits = repo.search_doc_chunks_hybrid_rrf(
@@ -311,7 +421,11 @@ def test_postgres_doc_chunks_persisted_and_3way_rrf_retrieval(settings: ScoutSet
             assert top_hit.qualified_name_or_title
 
 
-def test_postgres_scepticism_gate_against_persisted_corpus(settings: ScoutSettings) -> None:
+@pytest.mark.postgres
+def test_postgres_scepticism_gate_against_persisted_corpus(
+    settings: ScoutSettings,
+    isolated_quant_pg_tenant: UUID,
+) -> None:
     """Verifies Market-Regime Quant Scepticism Gate on persisted corpus chunks."""
     gate = MarketRegimeScepticismGate(min_citation_overlap_ratio=0.98)
 
@@ -337,15 +451,18 @@ def test_postgres_scepticism_gate_against_persisted_corpus(settings: ScoutSettin
     assert verdict_nse_pass == FrictionVerdict.REALISTIC_FRICTION
 
     # 3. Retrieve sample chunk from live PostgreSQL 17 and run gate evaluation
-    mgr = RLSConnectionManager(settings.db_app_url)
     repo = PostgresRLSRepository()
     principal = PrincipalContext(
         user_id="scepticism_evaluator",
         role=RoleType.DOMAIN_RESEARCHER,
         allowed_scopes=["public_quant"],
+        tenant_id=isolated_quant_pg_tenant,
     )
 
-    with mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn:
+    with (
+        RLSConnectionManager(settings.db_app_url, use_pool=False) as mgr,
+        mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn,
+    ):
         visible = repo.list_visible_doc_chunks(conn, "quant_research_scout")
         sample_chunk = visible[0]
         quote = sample_chunk.verbatim_content

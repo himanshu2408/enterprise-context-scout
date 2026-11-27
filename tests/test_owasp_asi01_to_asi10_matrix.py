@@ -789,6 +789,7 @@ def test_asi09_handoff_preview_rejects_failed_preflight_and_claim_verifier_stric
 # =============================================================================
 
 
+@pytest.mark.postgres
 def test_asi10_stream_block_and_handoff_emit_audit_chain_plus_budget_kill_switch() -> None:
     """ASI10 (GAP-06): /scout/stream blocks & /handoff/{preview,apply} log hash-chained events."""
     tenant_id = uuid.uuid4()

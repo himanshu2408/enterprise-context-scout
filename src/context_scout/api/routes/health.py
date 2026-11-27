@@ -148,7 +148,7 @@ def probe_runtime_environment(
             if isinstance(adapter_info, dict)
             else "no_trained_adapter"
         )
-        uses_lora = bool(manifest.lora_enabled and is_adapter_valid)
+        uses_lora = bool(manifest.lora_enabled and adapter_present and is_adapter_valid)
         runtime_models[domain_id] = {
             "base_model_id": manifest.base_model_id,
             "contextualizer_model_id": manifest.contextualizer_model_id,

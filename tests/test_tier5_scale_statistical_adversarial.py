@@ -391,16 +391,14 @@ def cleanup_tier5_session_domain(
     expected_prefix: str = TIER5_SESSION_DOMAIN_PREFIX,
 ) -> None:
     """Strictly deletes Tier-5 test rows scoped to a single session domain_id."""
+    from tests.fixtures.pg_isolation import cleanup_pg_tenants_and_eval_domains
+
     if not session_domain.startswith(expected_prefix):
         raise ValueError(
             f"Refusing to clean up domain_id={session_domain!r}: "
             f"must start with {expected_prefix!r}"
         )
-    conn.execute("DELETE FROM ast_edges WHERE domain_id = %s;", (session_domain,))
-    conn.execute("DELETE FROM ast_symbols WHERE domain_id = %s;", (session_domain,))
-    conn.execute("DELETE FROM code_files WHERE domain_id = %s;", (session_domain,))
-    conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (session_domain,))
-    conn.commit()
+    cleanup_pg_tenants_and_eval_domains(conn, domain_ids=(session_domain,))
 
 
 class TestMultiTenantConcurrencyAndRLSIsolation:
@@ -411,6 +409,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
         if not is_postgres_reachable():
             pytest.fail("Live PostgreSQL 17 is required for multi-tenant isolation tests!")
 
+    @pytest.mark.postgres
     def test_concurrent_multi_tenant_scoped_transactions_no_leakage(self) -> None:
         """Executes simultaneous queries across distinct domains; asserts zero cross-tenant leak."""
         st = ScoutSettings()
@@ -522,6 +521,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                 for d in (domain_a, domain_b, domain_c):
                     cleanup_tier5_session_domain(cleanup_conn, d)
 
+    @pytest.mark.postgres
     def test_connection_pool_session_variable_pollution_defense(self) -> None:
         """Verifies connection reuse in pool does not leak app.principal_scopes."""
         st = ScoutSettings()
@@ -553,6 +553,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
             )
             assert "scope:secret_vault_99" not in str(val2)
 
+    @pytest.mark.postgres
     def test_sql_injection_and_malformed_scope_resilience(self) -> None:
         """Verifies malicious SQL strings in allowed_scopes are safely parameterized."""
         st = ScoutSettings()
@@ -600,6 +601,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                 count = count_row[0]
                 assert isinstance(count, int)
 
+    @pytest.mark.postgres
     def test_aborted_transaction_rollback_and_state_cleanliness(self) -> None:
         """Verifies aborted transactions roll back cleanly without polluting pooled connection."""
         st = ScoutSettings()
@@ -618,6 +620,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
             row = conn_after.execute("SELECT 1").fetchone()
             assert row is not None and row[0] == 1
 
+    @pytest.mark.postgres
     def test_teardown_zero_residual_rows_and_canary_integrity(self) -> None:
         """Verifies teardown strictly purges session domain with 0 residual rows,
         preserving canary row in separate domain even with identical repo_name.
@@ -724,6 +727,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                 conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (session_domain,))
                 conn.commit()
 
+    @pytest.mark.postgres
     def test_recursive_cte_ast_closure_rls_cross_tenant_isolation(self) -> None:
         """Verifies recursive CTE 1-hop AST closure honors RLS and drops unauthorized edges."""
         st = ScoutSettings()
@@ -876,6 +880,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                 for d in (d1, d2):
                     cleanup_tier5_session_domain(cleanup_conn, d)
 
+    @pytest.mark.postgres
     def test_concurrent_read_write_rls_race_conditions(self) -> None:
         """Executes simultaneous concurrent writes/reads across tenants, verifying zero leakage."""
         st = ScoutSettings()
@@ -963,6 +968,7 @@ class TestMultiTenantConcurrencyAndRLSIsolation:
                 for d in (d_alpha, d_beta):
                     cleanup_tier5_session_domain(cleanup_conn, d)
 
+    @pytest.mark.postgres
     def test_teardown_mutation_adversarial_proof(self) -> None:
         """Adversarial mutation test: proves canary test catches un-scoped teardown queries."""
         st = ScoutSettings()

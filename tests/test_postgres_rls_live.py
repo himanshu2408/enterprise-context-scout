@@ -9,6 +9,8 @@ from context_scout.config import ScoutSettings
 from context_scout.db.session import RLSConnectionManager
 from context_scout.schemas.contracts import PrincipalContext, RoleType
 
+pytestmark = pytest.mark.postgres
+
 
 @pytest.fixture(scope="module")
 def settings() -> ScoutSettings:

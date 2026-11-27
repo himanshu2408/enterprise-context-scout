@@ -15,7 +15,6 @@ Covers:
 
 from __future__ import annotations
 
-import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -410,21 +409,71 @@ class TestUnseenRepoBenchmarkSuiteAndStats:
     def test_verify_frozen_adapter_integrity_passes_and_detects_tampering(
         self, tmp_path: Path
     ) -> None:
-        if os.getenv("GITHUB_ACTIONS") != "true":
-            res = verify_frozen_adapter_integrity(Path("."))
-            assert res["verified"] is True
+        import hashlib
+
+        import numpy as np
+        from safetensors.numpy import save_file as save_safetensors_numpy
+
+        # Clean clone (or real frozen weights) must pass deterministically on both local and CI.
+        res = verify_frozen_adapter_integrity(Path("."))
+        assert res["verified"] is True
+        if res.get("adapters_present"):
             assert res["code_adapter_sha256"] == FROZEN_CODE_ADAPTER_SHA256
             assert res["doc_adapter_sha256"] == FROZEN_DOC_ADAPTER_SHA256
+        else:
+            assert res["serving_mode"] == "base_open_weights"
+
+        code_dir = tmp_path / "domains/code_architecture_scout/adapters/gemma4_26b_code_scout"
+        doc_dir = tmp_path / "domains/enterprise_docs_scout/adapters/gemma4_26b_enterprise_docs"
+        code_dir.mkdir(parents=True)
+        doc_dir.mkdir(parents=True)
+
+        # Positive verification on genuine non-zero safetensors
+        real_tensors = {
+            "language_model.model.layers.26.self_attn.q_proj.lora_a": np.ones(
+                (8, 4), dtype=np.float32
+            ),
+            "language_model.model.layers.26.self_attn.q_proj.lora_b": np.full(
+                (4, 8), 0.05, dtype=np.float32
+            ),
+        }
+        code_st = code_dir / "adapters.safetensors"
+        doc_st = doc_dir / "adapters.safetensors"
+        save_safetensors_numpy(real_tensors, str(code_st))
+        save_safetensors_numpy(real_tensors, str(doc_st))
+        code_sha = hashlib.sha256(code_st.read_bytes()).hexdigest()
+        doc_sha = hashlib.sha256(doc_st.read_bytes()).hexdigest()
+        pos_res = verify_frozen_adapter_integrity(
+            tmp_path, expected_code_sha256=code_sha, expected_doc_sha256=doc_sha
+        )
+        assert pos_res["verified"] is True
+        assert pos_res["adapters_present"] is True
 
         # Tamper check on temporary copy
-        code_dir = tmp_path / "domains/code_architecture_scout/adapters/gemma4_26b_code_scout"
-        quant_dir = tmp_path / "domains/enterprise_docs_scout/adapters/gemma4_26b_enterprise_docs"
-        code_dir.mkdir(parents=True)
-        quant_dir.mkdir(parents=True)
-        (code_dir / "adapters.safetensors").write_bytes(b"tampered")
-        (quant_dir / "adapters.safetensors").write_bytes(b"tampered")
-
         with pytest.raises(ValueError, match="SHA-256 mismatch"):
+            verify_frozen_adapter_integrity(
+                tmp_path,
+                expected_code_sha256="0" * 64,
+                expected_doc_sha256=doc_sha,
+            )
+
+        # Zero-delta lora_b == 0 must be rejected
+        zero_tensors = {
+            "language_model.model.layers.26.self_attn.q_proj.lora_a": np.ones(
+                (8, 4), dtype=np.float32
+            ),
+            "language_model.model.layers.26.self_attn.q_proj.lora_b": np.zeros(
+                (4, 8), dtype=np.float32
+            ),
+        }
+        save_safetensors_numpy(zero_tensors, str(code_st))
+        with pytest.raises(ValueError, match="Zero-delta"):
+            verify_frozen_adapter_integrity(tmp_path)
+
+        # Corrupt bytes must fail closed
+        code_st.write_bytes(b"tampered")
+        doc_st.write_bytes(b"tampered")
+        with pytest.raises(ValueError, match="Corrupt"):
             verify_frozen_adapter_integrity(tmp_path)
 
     def test_distribution_stats_and_markdown_formatter(self) -> None:

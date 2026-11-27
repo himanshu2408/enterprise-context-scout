@@ -13,20 +13,17 @@ import os
 import re
 import uuid
 from collections import defaultdict
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any, Final
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-import numpy as np
 import psycopg
-import yaml
-from safetensors.numpy import save_file as save_safetensors_numpy
 
 import context_scout.retrieval.embedder as _embedder_mod
 import context_scout.schemas.contracts as _contracts_mod
 from context_scout.ast_engine.extractor import ASTExtractor
-from context_scout.config import ScoutSettings
 from context_scout.db.repositories import PostgresRLSRepository
 from context_scout.db.schema import (
     ASTEdgeRecord,
@@ -34,19 +31,28 @@ from context_scout.db.schema import (
     CodeFileRecord,
     DocChunkRecord,
 )
-from context_scout.db.session import RLSConnectionManager
+from context_scout.db.session import PoolRole, RLSConnectionManager
 from context_scout.plugins.domains.enterprise_core import EnterpriseCoreDomainPlugin
 from context_scout.schemas.contracts import PrincipalContext, RoleType
 
 
-def _embed_fixture_text(text: str, dim: int = 768) -> list[float]:
+def _embed_fixture_texts(texts: list[str], dim: int = 768) -> list[list[float]]:
+    if not texts:
+        return []
     factory = getattr(_embedder_mod, "get_embedding_provider", None)
     if callable(factory):
-        vec: list[float] = factory(dimensions=dim).embed_text(text, is_query=False)
-        return vec
+        provider = factory(dimensions=dim)
+        batch_fn = getattr(provider, "embed_batch", None)
+        if callable(batch_fn):
+            vecs: list[list[float]] = batch_fn(texts, is_query=False)
+            return vecs
+        return [provider.embed_text(t, is_query=False) for t in texts]
     embedder = _embedder_mod.LocalSemanticEmbedder()
-    raw: list[float] = embedder.embed_text(text, is_query=False)
-    return raw[:dim]
+    return [embedder.embed_text(t, is_query=False)[:dim] for t in texts]
+
+
+def _embed_fixture_text(text: str, dim: int = 768) -> list[float]:
+    return _embed_fixture_texts([text], dim=dim)[0]
 
 
 DEFAULT_TENANT_ID: Final[UUID] = getattr(
@@ -57,7 +63,7 @@ DEFAULT_TENANT_ID: Final[UUID] = getattr(
 
 EPHEMERAL_PG_DOMAIN_PREFIX: Final[str] = "eval_"
 
-_TENANT_TABLES_CHILD_TO_PARENT: Final[tuple[str, ...]] = (
+ALL_RLS_TABLES_FK_DELETE_ORDER: Final[tuple[str, ...]] = (
     "audit_events",
     "scim_groups",
     "scim_users",
@@ -69,6 +75,7 @@ _TENANT_TABLES_CHILD_TO_PARENT: Final[tuple[str, ...]] = (
     "ast_edges",
     "ast_symbols",
     "code_files",
+    "repo_commits",
     "repositories",
     "confluence_pages",
     "jira_issues",
@@ -80,6 +87,10 @@ _TENANT_TABLES_CHILD_TO_PARENT: Final[tuple[str, ...]] = (
     "embedding_spaces",
     "domain_sync_manifests",
     "domain_packs",
+)
+
+_TENANT_TABLES_CHILD_TO_PARENT: Final[tuple[str, ...]] = tuple(
+    t for t in ALL_RLS_TABLES_FK_DELETE_ORDER if t != "repo_commits"
 )
 
 
@@ -150,26 +161,56 @@ def create_ephemeral_pg_domain(
     return resolved_id
 
 
+def cleanup_pg_tenants_and_eval_domains(
+    admin_conn: psycopg.Connection[Any],
+    *,
+    tenant_ids: Sequence[UUID] = (),
+    domain_ids: Sequence[str] = (),
+) -> dict[str, int]:
+    """Delete rows strictly belonging to isolated ``tenant_ids`` and/or ``eval_*`` domains."""
+    deleted: dict[str, int] = {table: 0 for table in ALL_RLS_TABLES_FK_DELETE_ORDER}
+    clean_tenants = list(dict.fromkeys(tenant_ids))
+    for tid in clean_tenants:
+        if tid == DEFAULT_TENANT_ID:
+            raise ValueError(
+                f"Refusing tenant cleanup for protected DEFAULT_TENANT_ID ({DEFAULT_TENANT_ID})."
+            )
+    clean_domains = [validate_ephemeral_pg_domain_id(d) for d in dict.fromkeys(domain_ids)]
+
+    if clean_tenants:
+        for table in ALL_RLS_TABLES_FK_DELETE_ORDER:
+            cur = admin_conn.execute(
+                f"DELETE FROM {table} WHERE tenant_id = ANY(%s)",
+                (clean_tenants,),
+            )
+            deleted[table] += max(cur.rowcount or 0, 0)
+
+    if clean_domains:
+        repo_commits_cur = admin_conn.execute(
+            """
+            DELETE FROM repo_commits
+            WHERE repo_id IN (SELECT repo_id FROM repositories WHERE domain_id = ANY(%s))
+            """,
+            (clean_domains,),
+        )
+        deleted["repo_commits"] += max(repo_commits_cur.rowcount or 0, 0)
+        for table in _TENANT_TABLES_CHILD_TO_PARENT:
+            cur = admin_conn.execute(
+                f"DELETE FROM {table} WHERE domain_id = ANY(%s)",
+                (clean_domains,),
+            )
+            deleted[table] += max(cur.rowcount or 0, 0)
+
+    admin_conn.commit()
+    return deleted
+
+
 def cleanup_ephemeral_pg_domain(
     conn: psycopg.Connection[Any],
     domain_id: str,
 ) -> dict[str, int]:
     """Delete all rows belonging strictly to ``domain_id`` in child-to-parent order."""
-    validated_id = validate_ephemeral_pg_domain_id(domain_id)
-    deleted: dict[str, int] = {}
-    repo_commits_cur = conn.execute(
-        """
-        DELETE FROM repo_commits
-        WHERE repo_id IN (SELECT repo_id FROM repositories WHERE domain_id = %s)
-        """,
-        (validated_id,),
-    )
-    deleted["repo_commits"] = max(repo_commits_cur.rowcount or 0, 0)
-    for table in _TENANT_TABLES_CHILD_TO_PARENT:
-        cur = conn.execute(f"DELETE FROM {table} WHERE domain_id = %s", (validated_id,))
-        deleted[table] = max(cur.rowcount or 0, 0)
-    conn.commit()
-    return deleted
+    return cleanup_pg_tenants_and_eval_domains(conn, domain_ids=(domain_id,))
 
 
 _SEED_ALL_SCOPES: Final[list[str]] = [
@@ -177,7 +218,6 @@ _SEED_ALL_SCOPES: Final[list[str]] = [
     "public_eng",
     "public_docs",
     "docs_restricted",
-    "public_quant",
     "corpus:enterprise_docs",
     "repo:code_architecture_scout",
 ]
@@ -211,20 +251,65 @@ _REQUIRED_DOMAIN_PACKS: Final[tuple[tuple[str, str, str, str, int], ...]] = (
         "code",
         90,
     ),
-    (
-        "trading_code_scout",
-        "Trading Codebase & Architecture Scout",
-        "gemma4_26b_code_scout",
-        "code",
-        90,
-    ),
-    (
-        "quant_research_scout",
-        "Quantitative Research & Strategy Scout",
-        "gemma4_26b_quant_research",
-        "document",
-        180,
-    ),
+)
+
+_NEUTRAL_GITHUB_ISSUES_SEED: Final[tuple[dict[str, object], ...]] = (
+    {
+        "issue_number": 101,
+        "title": "Enforce transaction-scoped SET LOCAL tenant_id in RLSConnectionManager",
+        "state": "open",
+        "section": "Issue Description and Root Cause Analysis",
+        "content": (
+            "Ensure RLSConnectionManager sets app.tenant_id and app.principal_scopes via "
+            "set_config(..., is_local=true) inside explicit conn.transaction() blocks under "
+            "NOBYPASSRLS so pooled connections never leak tenant context across requests."
+        ),
+        "labels": ["security", "postgresql", "rls"],
+    },
+    {
+        "issue_number": 102,
+        "title": "Support 2-hop AST type and exception closure in PreFlightValidator",
+        "state": "open",
+        "section": "Architectural Proposal",
+        "content": (
+            "Extend ASTDependencyExpander to traverse USES_TYPE and TESTED_BY edges up to "
+            "two hops within the 10,000-token expansion budget while preserving full symbol bodies."
+        ),
+        "labels": ["feature", "ast_engine", "preflight"],
+    },
+    {
+        "issue_number": 103,
+        "title": "Bound PG17 HNSW iterative_scan and statement_timeout on query pools",
+        "state": "closed",
+        "section": "Resolution and Performance Audit",
+        "content": (
+            "Configured hnsw.iterative_scan = 'relaxed_order' and 5,000ms statement_timeout on "
+            "interactive query pools, keeping 1-hop neighborhood traversal under 50ms."
+        ),
+        "labels": ["performance", "pgvector", "hnsw"],
+    },
+    {
+        "issue_number": 104,
+        "title": "Fail-closed zero-spend abstention when citation overlap falls below 0.98",
+        "state": "closed",
+        "section": "Patch Notes and Benchmark Validation",
+        "content": (
+            "DocumentCitationGate rejects unverified or paraphrased quotes deterministically at "
+            "Stage 4 with paid_tokens_spent=0 before any frontier model handoff."
+        ),
+        "labels": ["reliability", "citations", "abstention"],
+    },
+    {
+        "issue_number": 105,
+        "title": "Normalize NFKC Unicode identifiers and strip bidi overrides in Guardrails",
+        "state": "open",
+        "section": "Security Hardening Notes",
+        "content": (
+            "Apply NFKC normalization and bidi/zero-width stripping before prompt-injection and "
+            "AST symbol verification so homoglyph spoofing cannot bypass PreFlight checks."
+        ),
+        "labels": ["security", "guardrails", "unicode"],
+    },
 )
 
 
@@ -248,11 +333,7 @@ def _seed_code_architecture_scout(
         ).fetchall()
     }
     extractor = ASTExtractor()
-    src_files = sorted((repo_root / "src" / "context_scout").rglob("*.py"))
-    strat_files = sorted(
-        (repo_root / "examples" / "quant_dogfood" / "trading_strategies").glob("*.py")
-    )
-    all_files = src_files + strat_files
+    all_files = sorted((repo_root / "src" / "context_scout").rglob("*.py"))
     commit_sha = hashlib.sha1(b"m0-03-code-arch-seed").hexdigest()[:40]
     scopes = ["public_eng", "repo:code_architecture_scout"]
 
@@ -335,8 +416,6 @@ def _seed_code_architecture_scout(
             repo.insert_ast_edge(conn, edge_rec)
 
     # Seed the 5 gh-issue:* doc chunks into code_architecture_scout
-    from examples.quant_dogfood.mcp_servers.seed_code_corpus import GITHUB_ISSUES_SEED
-
     existing_docs = {
         str(row[0])
         for row in conn.execute(
@@ -344,7 +423,7 @@ def _seed_code_architecture_scout(
             (domain_id,),
         ).fetchall()
     }
-    for issue in GITHUB_ISSUES_SEED:
+    for issue in _NEUTRAL_GITHUB_ISSUES_SEED:
         num = int(str(issue["issue_number"]))
         doc_id = f"gh-issue:{num}"
         if doc_id in existing_docs:
@@ -399,7 +478,6 @@ def _seed_enterprise_docs_scout(
         "public",
         "public_eng",
         "public_docs",
-        "public_quant",
         "corpus:enterprise_docs",
     ]
     extra_specs: list[tuple[str, str, str, str, str, str]] = [
@@ -422,89 +500,52 @@ def _seed_enterprise_docs_scout(
             ),
         ),
         (
-            "doc-vwap-mean-reversion",
-            "Intraday VWAP Mean Reversion Entry and Exit Rules",
-            "urn:enterprise_docs_scout:doc-vwap-mean-reversion",
+            "doc-pg17-force-rls-isolation",
+            "PostgreSQL 17 FORCE ROW LEVEL SECURITY and SET LOCAL Tenant Isolation",
+            "urn:enterprise_docs_scout:doc-pg17-force-rls-isolation",
             "GLOBAL",
-            "Signal Formula & Thresholds",
+            "Tenant & Scope Enforcement",
             (
-                "Intraday VWAP mean reversion enters when the standardized price deviation "
-                "exceeds two standard deviations: "
-                r"$$\alpha_t = \frac{P_t - \text{VWAP}_t}{\sigma_t}$$. "
-                "Positions exit on VWAP cross-back or end-of-session inventory flatten with "
-                "explicit slippage and transaction-cost guards."
+                "Every PostgreSQL 17 table enforces tenant_id UUID NOT NULL, ENABLE ROW LEVEL "
+                "SECURITY, and FORCE ROW LEVEL SECURITY under NOBYPASSRLS. Pools apply "
+                "set_config('app.tenant_id', ..., true) and set_config('app.principal_scopes', "
+                "..., true) inside explicit conn.transaction() blocks."
             ),
         ),
         (
-            "doc-nse-momentum-factor",
-            "NSE Cross-Sectional Momentum Factor Signals and Rebalancing",
-            "urn:enterprise_docs_scout:doc-nse-momentum-factor",
-            "REGIONAL_APAC",
-            "Rebalancing Rules",
-            (
-                "Cross-sectional momentum on NSE equities ranks 12-1 month residual returns "
-                "across liquid constituents, applying monthly decile rebalancing, sector-neutral "
-                "caps, and Securities Transaction Tax (STT) turnover dampening."
-            ),
-        ),
-        (
-            "doc-xetra-stat-arb",
-            "XETRA Statistical Arbitrage Spread Cointegration and Mean Reversion",
-            "urn:enterprise_docs_scout:doc-xetra-stat-arb",
-            "REGIONAL_EU",
-            "Cointegration & Kalman Hedge",
-            (
-                "XETRA statistical arbitrage pairs track cointegrated equity spreads via "
-                "Johansen trace tests and adaptive Kalman hedge ratios, triggering mean-reversion "
-                "entries when the z-score breaches +/-2.0 with strict tick-size rounding."
-            ),
-        ),
-        (
-            "doc-continuous-auction-ofi",
-            "Continuous Auction Order Flow Imbalance (OFI) Microstructure Research",
-            "urn:enterprise_docs_scout:doc-continuous-auction-ofi",
+            "doc-rrf-hybrid-retrieval",
+            "Three-Way Reciprocal Rank Fusion (RRF) Hybrid Retrieval Calibration",
+            "urn:enterprise_docs_scout:doc-rrf-hybrid-retrieval",
             "GLOBAL",
-            "Order Flow Imbalance Dynamics",
+            "Ranking Formula & Thresholds",
             (
-                "Continuous limit-order-book Order Flow Imbalance (OFI) measures net bid-ask "
-                "queue changes at the top price level to forecast short-horizon mid-price "
-                "impact across high-frequency continuous auction venues."
+                "Hybrid retrieval combines pg_trgm trigram similarity, BM25 lexical scoring, and "
+                "pgvector HNSW cosine distance via normalized Reciprocal Rank Fusion: "
+                "RRF(d) = sum(1 / (60 + rank_i(d))) with hnsw.iterative_scan = 'relaxed_order'."
             ),
         ),
         (
-            "doc-almgren-chriss-exec",
-            "Almgren-Chriss Optimal Execution Schedule Slicing",
-            "urn:enterprise_docs_scout:doc-almgren-chriss-exec",
+            "doc-zero-trust-iap-oidc",
+            "Zero-Trust Cloud IAP, OIDC JWKS, and HMAC Principal Attestation",
+            "urn:enterprise_docs_scout:doc-zero-trust-iap-oidc",
             "GLOBAL",
-            "Trajectory Optimization",
+            "Out-of-Band Authentication",
             (
-                "The Almgren-Chriss execution framework minimizes expected implementation "
-                "shortfall plus variance-penalized market impact by slicing parent orders "
-                "into deterministic child schedules parameterized by risk aversion lambda."
+                "PrincipalContext is extracted strictly out-of-band from Cloud IAP ES256 "
+                "assertions, OIDC JWKS Bearer JWTs, or HMAC-SHA256 signed tokens. Prompt text "
+                "and client X-Principal-* headers can never elevate scopes or tenant_id."
             ),
         ),
         (
-            "doc-finrl-deepseek-rl",
-            "FinRL-DeepSeek Actor-Critic Reinforcement Learning Allocation",
-            "urn:enterprise_docs_scout:doc-finrl-deepseek-rl",
+            "doc-rslora-scope-ceiling",
+            "ACL-Safe rsLoRA Specialization and Training Scope Ceiling",
+            "urn:enterprise_docs_scout:doc-rslora-scope-ceiling",
             "GLOBAL",
-            "Actor-Critic Policy",
+            "Adapter Governance",
             (
-                "FinRL-DeepSeek combines distilled reasoning signals with PPO/A2C actor-critic "
-                "reinforcement learning agents to dynamically allocate weights under drawdown "
-                "constraints, turnover penalties, and out-of-sample walk-forward validation."
-            ),
-        ),
-        (
-            "doc-nifty-hrp-allocation",
-            "NIFTY Hierarchical Risk Parity (HRP) Portfolio Construction",
-            "urn:enterprise_docs_scout:doc-nifty-hrp-allocation",
-            "REGIONAL_APAC",
-            "Hierarchical Clustering",
-            (
-                "NIFTY Hierarchical Risk Parity applies single-linkage tree clustering on the "
-                "correlation distance matrix followed by recursive bisection inverse-variance "
-                "weighting, avoiding ill-conditioned covariance matrix inversion."
+                "AdapterRouter enforces training_scope_ceiling containment and verified "
+                "safetensors weights before activating any rsLoRA cartridge, failing closed to "
+                "base open-weights whenever a principal holds scopes outside the ceiling."
             ),
         ),
         (
@@ -514,9 +555,9 @@ def _seed_enterprise_docs_scout(
             "ENTERPRISE_DOC",
             "Cross-Region Controls",
             (
-                "Regional governance enforces APAC SEBI/NSE audit trails, EU MiFID II "
-                "algorithmic kill-switch controls and GDPR residency, and US SEC Rule 15c3-5 "
-                "pre-trade risk checks across all deployed execution pipelines."
+                "Regional governance enforces EU GDPR data residency (europe-west3 default), "
+                "BetrVG works-council HMAC pseudonymization, and hash-chained audit logs "
+                "across all deployed enterprise execution pipelines."
             ),
         ),
     ]
@@ -837,432 +878,224 @@ def ensure_pg17_schema_and_seed_corpora(
     repo_root: Path,
 ) -> None:
     """Idempotently bootstrap PG17 schema via Alembic, domain_packs, and benchmark corpora."""
-    try:
-        from context_scout.db.migrations_runner import run_alembic_upgrade
+    advisory_lock_id = 7391042
+    with psycopg.connect(db_admin_url, autocommit=True) as lock_conn:
+        lock_conn.execute("SELECT pg_advisory_lock(%s)", (advisory_lock_id,))
+        try:
+            try:
+                from context_scout.db.migrations_runner import run_alembic_upgrade
 
-        run_alembic_upgrade(db_admin_url)
-    except ModuleNotFoundError:
-        with psycopg.connect(db_admin_url) as check_conn:
-            has_alembic = (
-                check_conn.execute("SELECT to_regclass('public.alembic_version')").fetchone()
-                or (None,)
-            )[0]
-            if has_alembic is None:
-                raise
+                run_alembic_upgrade(db_admin_url)
+            except ModuleNotFoundError:
+                with psycopg.connect(db_admin_url) as check_conn:
+                    has_alembic = (
+                        check_conn.execute(
+                            "SELECT to_regclass('public.alembic_version')"
+                        ).fetchone()
+                        or (None,)
+                    )[0]
+                    if has_alembic is None:
+                        raise
 
-    with psycopg.connect(db_admin_url) as admin_conn:
-        stale_eval_rows = admin_conn.execute(
-            "SELECT DISTINCT domain_id FROM domain_packs WHERE domain_id LIKE 'eval_%'"
-        ).fetchall()
-        for (stale_eval_id,) in stale_eval_rows:
-            cleanup_ephemeral_pg_domain(admin_conn, str(stale_eval_id))
-        for d_id, display_name, adapter_id, truth_src, half_life in _REQUIRED_DOMAIN_PACKS:
-            admin_conn.execute(
-                """
-                INSERT INTO domain_packs (
-                    tenant_id, domain_id, display_name, lora_adapter_id, primary_truth_source,
-                    freshness_half_life_days, config_json
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, '{}'::jsonb)
-                ON CONFLICT (tenant_id, domain_id) DO NOTHING
-                """,
-                (DEFAULT_TENANT_ID, d_id, display_name, adapter_id, truth_src, half_life),
+            with psycopg.connect(db_admin_url) as admin_conn:
+                if os.environ.get("SCOUT_PARALLEL_PYTEST") != "1":
+                    stale_eval_rows = admin_conn.execute(
+                        "SELECT DISTINCT domain_id FROM domain_packs "
+                        "WHERE domain_id LIKE 'eval_%%' "
+                        "AND created_at < NOW() - INTERVAL '2 hours'"
+                    ).fetchall()
+                    for (stale_eval_id,) in stale_eval_rows:
+                        cleanup_ephemeral_pg_domain(admin_conn, str(stale_eval_id))
+                for d_id, display_name, adapter_id, truth_src, half_life in _REQUIRED_DOMAIN_PACKS:
+                    admin_conn.execute(
+                        """
+                        INSERT INTO domain_packs (
+                            tenant_id, domain_id, display_name, lora_adapter_id,
+                            primary_truth_source, freshness_half_life_days, config_json
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, '{}'::jsonb)
+                        ON CONFLICT (tenant_id, domain_id) DO NOTHING
+                        """,
+                        (DEFAULT_TENANT_ID, d_id, display_name, adapter_id, truth_src, half_life),
+                    )
+                admin_conn.commit()
+
+            seed_principal = PrincipalContext(
+                user_id="pg_isolation_bootstrap",
+                role=RoleType.ENGINEER,
+                allowed_scopes=_SEED_ALL_SCOPES,
             )
-        admin_conn.commit()
 
-    prev_hash_flag = os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS")
-    os.environ["SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS"] = "1"
-    try:
-        mgr = RLSConnectionManager(db_app_url)
-        repo = PostgresRLSRepository()
-        seed_principal = PrincipalContext(
-            user_id="pg_isolation_bootstrap",
-            role=RoleType.ENGINEER,
-            allowed_scopes=_SEED_ALL_SCOPES,
-        )
+            def _row_count(row: tuple[object, ...] | None) -> int:
+                return int(str(row[0])) if row and row[0] is not None else 0
 
-        def _row_count(row: tuple[object, ...] | None) -> int:
-            return int(str(row[0])) if row and row[0] is not None else 0
-
-        # Pre-warm the embedding model outside any open DB transaction so cold
-        # HuggingFace downloads in CI never trigger PG17 idle_in_transaction_session_timeout.
-        _embed_fixture_text("bootstrap warmup")
-
-        with mgr.scoped_transaction(seed_principal, enable_hnsw_iterative_scan=False) as conn:
-            code_arch_row = conn.execute(
-                "SELECT count(*) FROM code_files WHERE domain_id = 'code_architecture_scout'"
-            ).fetchone()
-            if _row_count(code_arch_row) < 43:
-                _seed_code_architecture_scout(conn, repo, repo_root)
-
-            mr42_row = conn.execute(
-                "SELECT count(*) FROM ref_snapshots "
-                "WHERE domain_id = 'code_architecture_scout' AND ref_name = 'mr/42'"
-            ).fetchone()
-            if _row_count(mr42_row) == 0:
-                from context_scout.db.repositories import (
-                    OverlayFileDeltaRecord,
-                    RefSnapshotRecord,
-                )
-
-                reconciler_path = repo_root / "src/context_scout/ops/state_reconciler.py"
-                if reconciler_path.is_file():
-                    base_content = reconciler_path.read_text(encoding="utf-8", errors="ignore")
-                    overlay_addition = (
-                        "\n\n"
-                        "def verify_pitr_overlay_watermark_lag(\n"
-                        "    pg_lsn_lag_seconds: float,\n"
-                        "    max_allowed_lag_seconds: float = 30.0,\n"
-                        ") -> bool:\n"
-                        '    """MR !42 CoW overlay guard bounding PITR watermark lag."""\n'
-                        "    return 0.0 <= pg_lsn_lag_seconds <= max_allowed_lag_seconds\n"
+            with RLSConnectionManager(db_app_url, pool_role=PoolRole.INGESTION) as mgr:
+                repo = PostgresRLSRepository()
+                with mgr.scoped_transaction(
+                    seed_principal, enable_hnsw_iterative_scan=False
+                ) as check_conn:
+                    need_code_arch = (
+                        _row_count(
+                            check_conn.execute(
+                                "SELECT count(*) FROM code_files "
+                                "WHERE domain_id = 'code_architecture_scout'"
+                            ).fetchone()
+                        )
+                        < 43
                     )
-                    overlay_content = base_content.rstrip("\n") + overlay_addition
-                    base_lines = len(base_content.rstrip("\n").splitlines())
-                    mr_snapshot_id = uuid5(
-                        NAMESPACE_URL,
-                        f"{DEFAULT_TENANT_ID}:code_architecture_scout:mr_snapshot:42",
+                    need_mr42 = (
+                        _row_count(
+                            check_conn.execute(
+                                "SELECT count(*) FROM ref_snapshots "
+                                "WHERE domain_id = 'code_architecture_scout' "
+                                "AND ref_name = 'mr/42'"
+                            ).fetchone()
+                        )
+                        == 0
                     )
-                    base_sha = _git_blob_sha(base_content)
-                    head_sha = _git_blob_sha(overlay_content)
-                    repo.upsert_ref_snapshot(
-                        conn,
-                        RefSnapshotRecord(
-                            snapshot_id=mr_snapshot_id,
-                            domain_id="code_architecture_scout",
-                            repo_name="enterprise-context-scout",
-                            ref_name="mr/42",
-                            ref_kind="merge_request",
-                            base_commit_sha=base_sha,
-                            head_commit_sha=head_sha,
-                            allowed_scopes=["public_eng"],
-                            mr_iid="42",
-                            state="open",
-                            metadata_json={
-                                "title": "feat(ops): bound PITR watermark lag in StateReconciler",
-                                "seeded_by": "pg_isolation_bootstrap",
-                            },
-                            tenant_id=DEFAULT_TENANT_ID,
-                        ),
+                    need_ent_docs = (
+                        _row_count(
+                            check_conn.execute(
+                                "SELECT count(*) FROM doc_chunks "
+                                "WHERE domain_id = 'enterprise_docs_scout'"
+                            ).fetchone()
+                        )
+                        < 9
                     )
-                    repo.upsert_overlay_file_delta(
-                        conn,
-                        OverlayFileDeltaRecord(
-                            delta_id=uuid5(
+                    need_de = (
+                        _row_count(
+                            check_conn.execute(
+                                "SELECT count(*) FROM doc_chunks "
+                                "WHERE domain_id = 'data_engineering_scout' "
+                                "AND doc_id = 'de-cap-theorem'"
+                            ).fetchone()
+                        )
+                        == 0
+                    )
+                    need_poly = (
+                        _row_count(
+                            check_conn.execute(
+                                "SELECT count(*) FROM code_files "
+                                "WHERE domain_id = 'polyglot_unseen_v2' "
+                                "AND file_path = 'httpx/_transports/default.py'"
+                            ).fetchone()
+                        )
+                        == 0
+                    )
+
+                if need_code_arch or need_ent_docs or need_de or need_poly:
+                    # Pre-warm the neural embedding model outside any open DB transaction so cold
+                    # loads never trigger PG17 idle_in_transaction_session_timeout, and seeded
+                    # vectors live in the exact same neural space as live queries.
+                    _embed_fixture_text("bootstrap warmup")
+
+                with mgr.scoped_transaction(
+                    seed_principal, enable_hnsw_iterative_scan=False
+                ) as conn:
+                    if need_code_arch:
+                        _seed_code_architecture_scout(conn, repo, repo_root)
+
+                    if need_mr42:
+                        from context_scout.db.repositories import (
+                            OverlayFileDeltaRecord,
+                            RefSnapshotRecord,
+                        )
+
+                        reconciler_path = repo_root / "src/context_scout/ops/state_reconciler.py"
+                        if reconciler_path.is_file():
+                            base_content = reconciler_path.read_text(
+                                encoding="utf-8", errors="ignore"
+                            )
+                            overlay_addition = (
+                                "\n\n"
+                                "def verify_pitr_overlay_watermark_lag(\n"
+                                "    pg_lsn_lag_seconds: float,\n"
+                                "    max_allowed_lag_seconds: float = 30.0,\n"
+                                ") -> bool:\n"
+                                '    """MR !42 CoW overlay guard bounding PITR watermark lag."""\n'
+                                "    return 0.0 <= pg_lsn_lag_seconds <= max_allowed_lag_seconds\n"
+                            )
+                            overlay_content = base_content.rstrip("\n") + overlay_addition
+                            base_lines = len(base_content.rstrip("\n").splitlines())
+                            mr_snapshot_id = uuid5(
                                 NAMESPACE_URL,
-                                f"{DEFAULT_TENANT_ID}:code_architecture_scout:mr_delta:42:state_reconciler.py",
-                            ),
-                            snapshot_id=mr_snapshot_id,
-                            domain_id="code_architecture_scout",
-                            repo_name="enterprise-context-scout",
-                            file_path="src/context_scout/ops/state_reconciler.py",
-                            change_type="modified",
-                            allowed_scopes=["public_eng"],
-                            previous_file_path="src/context_scout/ops/state_reconciler.py",
-                            base_blob_sha=base_sha,
-                            overlay_blob_sha=head_sha,
-                            language="python",
-                            raw_content=overlay_content,
-                            line_count=len(overlay_content.splitlines()),
-                            symbols_json=[
-                                {
-                                    "qualified_name": (
-                                        "context_scout.ops.state_reconciler."
-                                        "verify_pitr_overlay_watermark_lag"
+                                f"{DEFAULT_TENANT_ID}:code_architecture_scout:mr_snapshot:42",
+                            )
+                            base_sha = _git_blob_sha(base_content)
+                            head_sha = _git_blob_sha(overlay_content)
+                            repo.upsert_ref_snapshot(
+                                conn,
+                                RefSnapshotRecord(
+                                    snapshot_id=mr_snapshot_id,
+                                    domain_id="code_architecture_scout",
+                                    repo_name="enterprise-context-scout",
+                                    ref_name="mr/42",
+                                    ref_kind="merge_request",
+                                    base_commit_sha=base_sha,
+                                    head_commit_sha=head_sha,
+                                    allowed_scopes=["public_eng"],
+                                    mr_iid="42",
+                                    state="open",
+                                    metadata_json={
+                                        "title": (
+                                            "feat(ops): bound PITR watermark lag in StateReconciler"
+                                        ),
+                                        "seeded_by": "pg_isolation_bootstrap",
+                                    },
+                                    tenant_id=DEFAULT_TENANT_ID,
+                                ),
+                            )
+                            repo.upsert_overlay_file_delta(
+                                conn,
+                                OverlayFileDeltaRecord(
+                                    delta_id=uuid5(
+                                        NAMESPACE_URL,
+                                        f"{DEFAULT_TENANT_ID}:code_architecture_scout:"
+                                        "mr_delta:42:state_reconciler.py",
                                     ),
-                                    "name": "verify_pitr_overlay_watermark_lag",
-                                    "symbol_kind": "function",
-                                    "start_line": base_lines + 3,
-                                    "end_line": len(overlay_content.splitlines()),
-                                }
-                            ],
-                            tenant_id=DEFAULT_TENANT_ID,
-                        ),
+                                    snapshot_id=mr_snapshot_id,
+                                    domain_id="code_architecture_scout",
+                                    repo_name="enterprise-context-scout",
+                                    file_path="src/context_scout/ops/state_reconciler.py",
+                                    change_type="modified",
+                                    allowed_scopes=["public_eng"],
+                                    previous_file_path="src/context_scout/ops/state_reconciler.py",
+                                    base_blob_sha=base_sha,
+                                    overlay_blob_sha=head_sha,
+                                    language="python",
+                                    raw_content=overlay_content,
+                                    line_count=len(overlay_content.splitlines()),
+                                    symbols_json=[
+                                        {
+                                            "qualified_name": (
+                                                "context_scout.ops.state_reconciler."
+                                                "verify_pitr_overlay_watermark_lag"
+                                            ),
+                                            "name": "verify_pitr_overlay_watermark_lag",
+                                            "symbol_kind": "function",
+                                            "start_line": base_lines + 3,
+                                            "end_line": len(overlay_content.splitlines()),
+                                        }
+                                    ],
+                                    tenant_id=DEFAULT_TENANT_ID,
+                                ),
+                            )
+
+                    if need_ent_docs:
+                        _seed_enterprise_docs_scout(conn, repo)
+                    conn.execute(
+                        """
+                        UPDATE doc_chunks
+                        SET allowed_scopes = array_remove(allowed_scopes, 'docs_restricted')
+                        WHERE domain_id = 'enterprise_docs_scout'
+                          AND allowed_scopes @> ARRAY['docs_restricted', 'public']::text[]
+                        """
                     )
 
-            ent_docs_row = conn.execute(
-                "SELECT count(*) FROM doc_chunks WHERE domain_id = 'enterprise_docs_scout'"
-            ).fetchone()
-            if _row_count(ent_docs_row) < 12:
-                _seed_enterprise_docs_scout(conn, repo)
-            conn.execute(
-                """
-                UPDATE doc_chunks
-                SET allowed_scopes = array_remove(allowed_scopes, 'docs_restricted')
-                WHERE domain_id = 'enterprise_docs_scout'
-                  AND allowed_scopes @> ARRAY['docs_restricted', 'public']::text[]
-                """
-            )
+                    if need_de:
+                        _seed_data_engineering_scout(conn, repo)
 
-            de_row = conn.execute(
-                "SELECT count(*) FROM doc_chunks WHERE domain_id = 'data_engineering_scout'"
-            ).fetchone()
-            if _row_count(de_row) == 0:
-                _seed_data_engineering_scout(conn, repo)
-
-            poly_row = conn.execute(
-                "SELECT count(*) FROM code_files WHERE domain_id = 'polyglot_unseen_v2'"
-            ).fetchone()
-            if _row_count(poly_row) == 0:
-                _seed_polyglot_unseen_v2(conn, repo)
-
-            trading_row = conn.execute(
-                "SELECT count(*) FROM code_files WHERE domain_id = 'trading_code_scout'"
-            ).fetchone()
-            quant_row = conn.execute(
-                "SELECT count(*) FROM doc_chunks WHERE domain_id = 'quant_research_scout'"
-            ).fetchone()
-            need_trading_seed = _row_count(trading_row) == 0 or _row_count(quant_row) == 0
-
-        if need_trading_seed:
-            from examples.quant_dogfood.mcp_servers.seed_code_corpus import (
-                seed_trading_codebase_and_issues,
-            )
-
-            seed_trading_codebase_and_issues(
-                repo_dir=repo_root,
-                settings=ScoutSettings(db_admin_url=db_admin_url, db_app_url=db_app_url),
-                principal=seed_principal,
-            )
-
-        with mgr.scoped_transaction(seed_principal, enable_hnsw_iterative_scan=False) as conn:
-            quant_chunk_id = uuid5(
-                NAMESPACE_URL,
-                "quant_research_scout:quant-ofi-vwap-spec",
-            )
-            ofi_row = conn.execute(
-                """
-                SELECT count(*) FROM doc_chunks
-                WHERE chunk_id = %s
-                   OR (
-                       domain_id = %s
-                       AND verbatim_content LIKE '%%OFI_t%%'
-                       AND verbatim_content LIKE '%%VWAP_t%%'
-                   )
-                """,
-                (quant_chunk_id, "quant_research_scout"),
-            ).fetchone()
-            if _row_count(ofi_row) == 0:
-                formula_content = (
-                    "Order Flow Imbalance and Intraday VWAP Signal Specification.\n\n"
-                    r"$$\alpha_t = \frac{P_t - \text{VWAP}_t}{\sigma_t}$$"
-                    "\n\n"
-                    r"\begin{equation}\text{OFI}_t = q_t^b - q_{t-1}^b\end{equation}"
-                    "\n\n"
-                    "| Metric | Threshold | Regime |\n"
-                    "| :--- | :--- | :--- |\n"
-                    "| alpha_t | 2.0 | GLOBAL |\n"
-                    "| OFI_t | 0.65 | CONTINUOUS |\n"
-                )
-                repo.insert_doc_chunk(
-                    conn,
-                    DocChunkRecord(
-                        chunk_id=quant_chunk_id,
-                        domain_id="quant_research_scout",
-                        doc_id="quant-ofi-vwap-spec",
-                        doc_title="VWAP Mean Reversion & Order Flow Imbalance (OFI) Formula Spec",
-                        source_uri="urn:quant_research_scout:quant-ofi-vwap-spec",
-                        market_scope="GLOBAL",
-                        published_date=date(2026, 2, 1),
-                        authority_weight=1.0,
-                        section_heading="Formulas & Thresholds",
-                        contextual_header="Quant Research Spec | VWAP & OFI",
-                        verbatim_content=formula_content,
-                        metadata_json={"seeded_by": "bootstrap_pg17_session"},
-                        allowed_scopes=["public", "public_quant"],
-                        embedding=_embed_fixture_text(formula_content),
-                    ),
-                )
-    finally:
-        if prev_hash_flag is None:
-            os.environ.pop("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", None)
-        else:
-            os.environ["SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS"] = prev_hash_flag
-
-
-def _is_research_domain_dir(dom_dir: Path) -> bool:
-    for meta_name in ("domain.yaml", "specialization.yaml"):
-        meta_path = dom_dir / meta_name
-        if meta_path.is_file():
-            data = yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}
-            if isinstance(data, dict):
-                truth = str(data.get("primary_truth_source", "")).lower()
-                if truth in {"document", "research", "docs"}:
-                    return True
-    return dom_dir.name in {"enterprise_docs_scout", "data_engineering_scout"}
-
-
-def _build_ephemeral_code_split(
-    domain_id: str,
-    split_name: str,
-    count: int,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for idx in range(1, count + 1):
-        pkg = f"ephemeral_{split_name}_{idx:02d}"
-        fpath = f"ephemeral_pkg/{pkg}/module_{idx:02d}.py"
-        qsym = f"ephemeral_pkg.{pkg}.module_{idx:02d}.Handler{idx:02d}"
-        s_line, e_line = 10 + idx, 55 + idx
-        reason = (
-            f"Target symbol {qsym} localized from AST candidate. "
-            "Ensures strict AST boundary localization, caller/callee edge resolution, "
-            "and fail-closed Stage 4 preflight verification."
-        )
-        ptrs = [
-            {
-                "repo_name": "enterprise-context-scout",
-                "file_path": fpath,
-                "start_line": s_line,
-                "end_line": e_line,
-                "qualified_symbol": qsym,
-                "selection_reason": reason,
-                "modification_intent": "modify_target",
-            }
-        ]
-        prompt = (
-            f"Localize {qsym} in {domain_id}.\n"
-            f"Retrieved AST Candidate: [repo=enterprise-context-scout | file={fpath} | "
-            f"symbol={qsym} | lines={s_line}-{e_line}]"
-        )
-        rows.append(
-            {
-                "source_artifact_ids": [f"{domain_id}:{split_name}:{pkg}"],
-                "messages": [
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": json.dumps(ptrs)},
-                ],
-            }
-        )
-    return rows
-
-
-def _build_ephemeral_doc_split(
-    domain_id: str,
-    split_name: str,
-    count: int,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for idx in range(1, count + 1):
-        doc_id = f"doc:test_{split_name}_{idx:02d}"
-        title = f"Enterprise {split_name.title()} Spec {idx:02d}"
-        uri = f"urn:{domain_id}:{split_name}-{idx:02d}"
-        section = f"Policy {idx:02d}"
-        quote = (
-            f"Policy {split_name} {idx:02d} requires PostgreSQL 17 FORCE ROW LEVEL SECURITY, "
-            "verbatim chunk_id provenance, and deterministic zero-spend abstention."
-        )
-        summary = (
-            f"Verified brief for {title} enforcing tenant isolation, strict citation "
-            "verification, and bounded token budgets across private VPC deployments."
-        )
-        brief = {
-            "brief_title": title,
-            "domain_id": domain_id,
-            "executive_summary": summary,
-            "formal_expression_or_rule": "RRF(d) = sum(1 / (k + rank_i(d)))",
-            "core_findings_and_rules": [quote],
-            "domain_constraints_and_caveats": [
-                "Enforce tenant_id RLS and server-side RBAC scopes."
-            ],
-            "known_risks_and_failure_modes": [
-                "Abstain with paid_tokens_spent=0 when citations are missing."
-            ],
-            "structured_metadata": {"doc_id": doc_id, "scope": "GLOBAL_MULTI"},
-            "verified_citations": [
-                {
-                    "chunk_id": f"chunk-{doc_id}",
-                    "doc_id": doc_id,
-                    "doc_title": title,
-                    "source_uri": uri,
-                    "section_heading": section,
-                    "verbatim_quote": quote,
-                }
-            ],
-        }
-        prompt = (
-            f"Synthesize a DomainKnowledgeBrief for {title} in {domain_id}.\n"
-            f"Retrieved Corpus Chunk: [chunk_id=chunk-{doc_id} | doc_id={doc_id} | "
-            f"title={title} | uri={uri} | section={section} | quote={quote}]"
-        )
-        rows.append(
-            {
-                "source_artifact_ids": [doc_id],
-                "messages": [
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": json.dumps(brief)},
-                ],
-            }
-        )
-    return rows
-
-
-def _build_ephemeral_lora_safetensors() -> dict[str, np.ndarray]:
-    rng = np.random.default_rng(42)
-    tensors: dict[str, np.ndarray] = {}
-    for layer in (26, 27, 28, 29):
-        attn_projs = (
-            ("q_proj", "k_proj", "o_proj")
-            if layer == 29
-            else (
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-            )
-        )
-        for proj in attn_projs:
-            prefix = f"language_model.model.layers.{layer}.self_attn.{proj}"
-            tensors[f"{prefix}.lora_a"] = rng.normal(0.0, 0.01, size=(2816, 16)).astype(np.float32)
-            tensors[f"{prefix}.lora_b"] = np.zeros((16, 2816), dtype=np.float32)
-        for proj in ("gate_proj", "up_proj", "down_proj"):
-            prefix = f"language_model.model.layers.{layer}.mlp.{proj}"
-            tensors[f"{prefix}.lora_a"] = rng.normal(0.0, 0.01, size=(2816, 16)).astype(np.float32)
-            tensors[f"{prefix}.lora_b"] = np.zeros((16, 2816), dtype=np.float32)
-    return tensors
-
-
-def ensure_ephemeral_domain_artifacts(repo_root: Path) -> list[Path]:
-    """Create missing gitignored tuning splits and LoRA safetensors for clean CI checkouts.
-
-    Never overwrites or deletes pre-existing files on disk. Returns only newly created file paths
-    so callers can clean them up in a ``finally:`` block.
-    """
-    domains_dir = repo_root / "domains"
-    if not domains_dir.is_dir():
-        return []
-
-    created: list[Path] = []
-    cached_tensors: dict[str, np.ndarray] | None = None
-
-    for dom_dir in sorted(p for p in domains_dir.iterdir() if p.is_dir()):
-        is_research = _is_research_domain_dir(dom_dir)
-        tuning_dir = dom_dir / "tuning"
-        split_counts = (("train", 16), ("valid", 6), ("eval", 4))
-        for split_name, count in split_counts:
-            split_path = tuning_dir / f"{split_name}.jsonl"
-            if not split_path.exists() or split_path.stat().st_size == 0:
-                was_missing = not split_path.exists()
-                tuning_dir.mkdir(parents=True, exist_ok=True)
-                rows = (
-                    _build_ephemeral_doc_split(dom_dir.name, split_name, count)
-                    if is_research
-                    else _build_ephemeral_code_split(dom_dir.name, split_name, count)
-                )
-                split_path.write_text(
-                    "\n".join(json.dumps(r) for r in rows) + "\n",
-                    encoding="utf-8",
-                )
-                if was_missing:
-                    created.append(split_path)
-
-        adapters_dir = dom_dir / "adapters"
-        if adapters_dir.is_dir():
-            for cfg_path in sorted(adapters_dir.glob("*/adapter_config.json")):
-                safetensors_path = cfg_path.parent / "adapters.safetensors"
-                if not safetensors_path.exists():
-                    if cached_tensors is None:
-                        cached_tensors = _build_ephemeral_lora_safetensors()
-                    save_safetensors_numpy(cached_tensors, str(safetensors_path))
-                    created.append(safetensors_path)
-
-    return created
+                    if need_poly:
+                        _seed_polyglot_unseen_v2(conn, repo)
+        finally:
+            lock_conn.execute("SELECT pg_advisory_unlock(%s)", (advisory_lock_id,))

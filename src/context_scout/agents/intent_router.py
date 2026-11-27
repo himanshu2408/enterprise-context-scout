@@ -555,6 +555,8 @@ def _strip_top_n_on_preamble(text: str) -> tuple[str, bool]:
         prefix_len = len("what are the top ")
     elif low.startswith("what are top "):
         prefix_len = len("what are top ")
+    elif low.startswith("top "):
+        prefix_len = len("top ")
     if prefix_len == 0:
         return text, False
     rest_after_top = low[prefix_len:]

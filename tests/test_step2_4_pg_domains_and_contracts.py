@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from psycopg import connect
 
 from context_scout.agents import preflight_gate
@@ -36,30 +37,16 @@ from context_scout.schemas.contracts import (
     RoleType,
 )
 
-_EVAL_CLEANUP_TABLES: tuple[str, ...] = (
-    "ast_edges",
-    "ast_symbols",
-    "code_files",
-    "repositories",
-    "confluence_pages",
-    "jira_issues",
-    "doc_chunks",
-    "indexing_queue",
-    "indexing_dead_letter",
-    "execution_telemetry",
-    "domain_sync_manifests",
-    "domain_packs",
-)
-
 
 def _cleanup_eval_domains(*domain_ids: str) -> None:
+    from tests.fixtures.pg_isolation import cleanup_pg_tenants_and_eval_domains
+
+    for did in domain_ids:
+        preflight_gate.CUSTOM_CORPUS_INDEX_PATHS.pop(did, None)
     if not domain_ids:
         return
-    ids = list(domain_ids)
     with connect(ScoutSettings().db_admin_url) as conn:
-        for tbl in _EVAL_CLEANUP_TABLES:
-            conn.execute(f"DELETE FROM {tbl} WHERE domain_id = ANY(%s)", (ids,))
-        conn.commit()
+        cleanup_pg_tenants_and_eval_domains(conn, domain_ids=domain_ids)
 
 
 def _copy_builtin_domains(domains_dir: Path) -> None:
@@ -69,6 +56,7 @@ def _copy_builtin_domains(domains_dir: Path) -> None:
             shutil.copytree(src, domains_dir / dname, dirs_exist_ok=True)
 
 
+@pytest.mark.postgres
 def test_custom_domain_pg17_lifecycle_zero_corpus_index(tmp_path: Path) -> None:
     """Init -> distill -> sync -> query uses PG17 + sync_manifest.json, never corpus_index.json."""
     for purged in (
@@ -191,6 +179,7 @@ def test_custom_domain_pg17_lifecycle_zero_corpus_index(tmp_path: Path) -> None:
         _cleanup_eval_domains(domain_id)
 
 
+@pytest.mark.postgres
 def test_custom_domain_pg17_force_rls_tenant_isolation(tmp_path: Path) -> None:
     """Unauthorized principals see zero rows on custom domains under PG17 FORCE RLS."""
     code_domain = f"eval_s24_rlsc_{uuid4().hex[:8]}"
@@ -272,6 +261,7 @@ def test_custom_domain_pg17_force_rls_tenant_isolation(tmp_path: Path) -> None:
         _cleanup_eval_domains(code_domain, doc_domain)
 
 
+@pytest.mark.postgres
 def test_polyglot_cross_boundary_contracts_and_pg17_1hop_expansion(tmp_path: Path) -> None:
     """Links C# API/DTO <-> RTK Query/TS DTO <-> Storybook <-> Terraform in live PG17."""
     assert normalize_route_template("/api/v1/orders/{orderId}") == "/api/v1/orders/{param}"
@@ -484,6 +474,7 @@ def test_polyglot_cross_boundary_contracts_and_pg17_1hop_expansion(tmp_path: Pat
         _cleanup_eval_domains(domain_id)
 
 
+@pytest.mark.postgres
 def test_guard22_same_name_symbol_isolation_and_negative_control() -> None:
     """Colliding `Task` symbol never bleeds when is_cross_repo=False; crosses when True."""
     domain_id = f"eval_s24_g22_{uuid4().hex[:8]}"

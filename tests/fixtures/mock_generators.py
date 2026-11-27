@@ -167,9 +167,6 @@ def deterministic_completion_generator(
             from context_scout.db.session import RLSConnectionManager
             from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
 
-            settings = ScoutSettings()
-            conn_mgr = RLSConnectionManager(settings.db_app_url)
-            adapter = PostgresScoutGraphAdapter(conn_mgr, settings)
             principal = PrincipalContext(
                 user_id="local_gemma_worker",
                 role=RoleType.ENGINEER,
@@ -180,8 +177,15 @@ def deterministic_completion_generator(
                     "docs_restricted",
                 ],
             )
-            syms = adapter.list_visible_ast_symbols(principal, "code_architecture_scout")
-            files = adapter.list_visible_code_files(principal, "code_architecture_scout")
+            if repo is not None:
+                syms = repo.list_visible_ast_symbols(principal, "code_architecture_scout")
+                files = repo.list_visible_code_files(principal, "code_architecture_scout")
+            else:
+                settings = ScoutSettings()
+                with RLSConnectionManager(settings.db_app_url, use_pool=False) as conn_mgr:
+                    adapter = PostgresScoutGraphAdapter(conn_mgr, settings)
+                    syms = adapter.list_visible_ast_symbols(principal, "code_architecture_scout")
+                    files = adapter.list_visible_code_files(principal, "code_architecture_scout")
             file_by_id = {f.file_id: f for f in files}
 
             for sym_name in clean_syms:

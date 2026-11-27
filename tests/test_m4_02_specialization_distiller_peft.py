@@ -152,31 +152,11 @@ def _bootstrap_pg_tenant(
 
 def _cleanup_pg_tenant(*, tenant_id: uuid.UUID) -> None:
     """Deletes all rows belonging exclusively to ``tenant_id``."""
+    from tests.fixtures.pg_isolation import cleanup_pg_tenants_and_eval_domains
+
     settings = ScoutSettings()
-    tables = (
-        "audit_events",
-        "scim_groups",
-        "scim_users",
-        "model_artifacts",
-        "scout_sessions",
-        "overlay_file_deltas",
-        "ref_snapshots",
-        "execution_telemetry",
-        "jira_issues",
-        "repo_commits",
-        "ast_edges",
-        "ast_symbols",
-        "code_files",
-        "doc_chunks",
-        "repositories",
-        "embedding_spaces",
-        "domain_sync_manifests",
-        "domain_packs",
-    )
     with psycopg.connect(settings.db_admin_url) as conn:
-        for table in tables:
-            conn.execute(f"DELETE FROM {table} WHERE tenant_id = %s;", (tenant_id,))
-        conn.commit()
+        cleanup_pg_tenants_and_eval_domains(conn, tenant_ids=(tenant_id,))
 
 
 def _start_local_gcs_emulator() -> tuple[HTTPServer, str, dict[str, tuple[bytes, str]]]:
@@ -609,6 +589,7 @@ class TestSpecializationCompilerAllArchetypes:
 class TestTeacherDistillerV2LivePG17RLS:
     """Tests ACL scope-ceiling bounds and 3-source distiller v2 against live PG17 FORCE RLS."""
 
+    @pytest.mark.postgres
     def test_distiller_ceiling_bounds_scrubber_canaries_bestof8_splits_and_replay(
         self, tmp_path: Path
     ) -> None:
@@ -1173,6 +1154,7 @@ class TestPEFTRsLoRATrainerMultiArchAndGates:
                 model_id="Qwen/Qwen3-Coder-30B-A3B"
             ).run_vllm_lora_dry_run_probe(adapter_id="bad", adapter_dir=bad_tmp)
 
+    @pytest.mark.postgres
     def test_end_to_end_peft_dpo_canary_gate_cosign_gcs_s3_and_2pod_sidecar(
         self, tmp_path: Path
     ) -> None:
@@ -1474,6 +1456,7 @@ class TestPEFTRsLoRATrainerMultiArchAndGates:
 class TestMigrateBaseModelCLIAndDAG:
     """Verifies context-scout migrate-base-model 4-stage replay DAG end-to-end."""
 
+    @pytest.mark.postgres
     def test_migrate_base_model_cli_and_atomic_swap(self, tmp_path: Path) -> None:
         tenant_id = uuid.uuid4()
         domain_id = f"eval_mig_{uuid.uuid4().hex[:8]}"
@@ -1675,6 +1658,7 @@ class TestMigrateBaseModelCLIAndDAG:
 class TestM402ASTHygieneAndSecurity:
     """AST scan verifying zero db_admin_url, zero use_pool=False, zero Gemma tag lock-in."""
 
+    @pytest.mark.postgres
     def test_tuning_modules_ast_hygiene(self) -> None:
         targets = (
             REPO_ROOT / "src" / "context_scout" / "tuning" / "specialization_compiler.py",

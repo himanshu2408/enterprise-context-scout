@@ -16,7 +16,7 @@ from typing import Annotated, Any, Final, Literal
 from urllib.parse import parse_qs, unquote, urlparse
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -70,18 +70,37 @@ INSECURE_DB_PASSWORDS: Final[frozenset[str]] = frozenset(
 )
 
 
-def _is_production_env() -> bool:
-    env = (
-        (
-            os.environ.get("SCOUT_ENV")
-            or os.environ.get("ENVIRONMENT")
-            or os.environ.get("ENV")
-            or ""
-        )
-        .strip()
-        .lower()
+_DEV_ENV_ALIASES: Final[frozenset[str]] = frozenset(
+    {"", "development", "dev", "local", "test", "testing"}
+)
+
+
+def normalize_environment_name(raw: str | None) -> str:
+    """Normalizes runtime environment strings across SCOUT_ENVIRONMENT / SCOUT_ENV / ENVIRONMENT."""
+    cleaned = (raw or "").strip().lower()
+    if cleaned in _DEV_ENV_ALIASES:
+        return "development"
+    if cleaned in {"prod", "production"}:
+        return "production"
+    if cleaned in {"staging", "qa"}:
+        return cleaned
+    return cleaned
+
+
+def get_normalized_environment() -> str:
+    """Returns canonical environment from SCOUT_ENVIRONMENT > SCOUT_ENV > ENVIRONMENT > ENV."""
+    raw = (
+        os.environ.get("SCOUT_ENVIRONMENT")
+        or os.environ.get("SCOUT_ENV")
+        or os.environ.get("ENVIRONMENT")
+        or os.environ.get("ENV")
+        or "development"
     )
-    return env in {"production", "prod", "staging"}
+    return normalize_environment_name(raw)
+
+
+def _is_production_env() -> bool:
+    return get_normalized_environment() != "development"
 
 
 def validate_db_app_url(db_app_url: str, *, require_env_in_prod: bool = True) -> None:
@@ -634,8 +653,16 @@ class ScoutSettings(BaseSettings):
     )
     environment: str = Field(
         default="development",
-        description="Deployment runtime environment ('development', 'staging', 'production').",
+        validation_alias=AliasChoices("SCOUT_ENVIRONMENT", "SCOUT_ENV", "ENVIRONMENT"),
+        description=(
+            "Deployment runtime environment ('development', 'staging', 'qa', 'production')."
+        ),
     )
+
+    @property
+    def normalized_environment(self) -> str:
+        """Canonical normalized environment name ('development', 'staging', 'qa', 'production')."""
+        return normalize_environment_name(self.environment)
 
     # Google Cloud IAP & Multi-Provider OIDC / SCIM Zero-Trust Auth (M5-01)
     iap_enabled: bool = Field(

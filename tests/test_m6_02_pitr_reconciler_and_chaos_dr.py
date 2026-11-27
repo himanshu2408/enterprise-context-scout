@@ -2384,6 +2384,7 @@ def test_chaos_vllm_overload_429_503_timeout_and_noisy_neighbor_degraded_extract
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.postgres
 def test_cli_reconcile_state_and_inmemory_parity(capsys: pytest.CaptureFixture[str]) -> None:
     """Verifies InMemoryRLSRepository reconciliation parity and `context-scout reconcile-state`."""
     tid = uuid.uuid4()

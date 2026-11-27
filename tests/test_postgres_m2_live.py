@@ -22,6 +22,8 @@ from context_scout.ingestion.git_merkle_indexer import (
 from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import PrincipalContext, RoleType
 
+pytestmark = pytest.mark.postgres
+
 
 @pytest.fixture(scope="module")
 def settings() -> ScoutSettings:
@@ -63,16 +65,14 @@ def cleanup_m2_live_session_domain(
     expected_prefix: str = M2_LIVE_SESSION_DOMAIN_PREFIX,
 ) -> None:
     """Strictly deletes M2 live test rows scoped to a single session domain_id."""
+    from tests.fixtures.pg_isolation import cleanup_pg_tenants_and_eval_domains
+
     if not session_domain.startswith(expected_prefix):
         raise ValueError(
             f"Refusing to clean up domain_id={session_domain!r}: "
             f"must start with {expected_prefix!r}"
         )
-    conn.execute("DELETE FROM ast_edges WHERE domain_id = %s;", (session_domain,))
-    conn.execute("DELETE FROM ast_symbols WHERE domain_id = %s;", (session_domain,))
-    conn.execute("DELETE FROM code_files WHERE domain_id = %s;", (session_domain,))
-    conn.execute("DELETE FROM domain_packs WHERE domain_id = %s;", (session_domain,))
-    conn.commit()
+    cleanup_pg_tenants_and_eval_domains(conn, domain_ids=(session_domain,))
 
 
 def test_live_postgres_merkle_sync_cold_and_warm_cache_hit(

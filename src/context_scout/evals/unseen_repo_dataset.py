@@ -68,8 +68,15 @@ class UnseenRepoBenchmarkSuite(BaseModel):
         return [t for t in self.tasks if t.verify_with_pytest]
 
 
-def verify_frozen_adapter_integrity(repo_root: Path = Path(".")) -> dict[str, Any]:
-    """Verify that QLoRA adapters match their pre-benchmark SHA-256 digests."""
+def verify_frozen_adapter_integrity(
+    repo_root: Path = Path("."),
+    *,
+    expected_code_sha256: str | None = None,
+    expected_doc_sha256: str | None = None,
+    allow_base_open_weights: bool = True,
+) -> dict[str, Any]:
+    """Verify that QLoRA adapters match their pre-benchmark SHA-256 digests, or clean base mode."""
+    from context_scout.agents.domain_registry import audit_safetensors_adapter_weights
     from context_scout.plugins.registry import PluginRegistry
 
     primary_plugin = PluginRegistry.get_primary_domain_plugin()
@@ -84,23 +91,44 @@ def verify_frozen_adapter_integrity(repo_root: Path = Path(".")) -> dict[str, An
     research_domain_id = research_spec["domain_id"]
     code_adapter = repo_root / code_spec["adapter_rel_path"] / "adapters.safetensors"
     doc_adapter = repo_root / research_spec["adapter_rel_path"] / "adapters.safetensors"
+    if not code_adapter.exists() and not doc_adapter.exists():
+        if allow_base_open_weights:
+            return {
+                "verified": True,
+                "serving_mode": "base_open_weights",
+                "adapters_present": False,
+                "code_adapter_sha256": None,
+                "doc_adapter_sha256": None,
+                code_domain_id: True,
+                research_domain_id: True,
+            }
+        raise FileNotFoundError("Frozen QLoRA adapter safetensors not found under domains/.")
+
     if not code_adapter.exists() or not doc_adapter.exists():
         raise FileNotFoundError("Frozen QLoRA adapter safetensors not found under domains/.")
 
+    for st_path in (code_adapter, doc_adapter):
+        ok, err = audit_safetensors_adapter_weights(st_path)
+        if not ok:
+            raise ValueError(err or f"Invalid adapter weights at {st_path}")
+
+    target_code_sha = expected_code_sha256 or FROZEN_CODE_ADAPTER_SHA256
+    target_doc_sha = expected_doc_sha256 or FROZEN_DOC_ADAPTER_SHA256
     code_sha = hashlib.sha256(code_adapter.read_bytes()).hexdigest()
     doc_sha = hashlib.sha256(doc_adapter.read_bytes()).hexdigest()
-    if code_sha != FROZEN_CODE_ADAPTER_SHA256:
+    if code_sha != target_code_sha:
         raise ValueError(
-            f"Frozen adapter SHA-256 mismatch for {code_domain_id}: "
-            f"{code_sha} != {FROZEN_CODE_ADAPTER_SHA256}"
+            f"Frozen adapter SHA-256 mismatch for {code_domain_id}: {code_sha} != {target_code_sha}"
         )
-    if doc_sha != FROZEN_DOC_ADAPTER_SHA256:
+    if doc_sha != target_doc_sha:
         raise ValueError(
             f"Frozen adapter SHA-256 mismatch for {research_domain_id}: "
-            f"{doc_sha} != {FROZEN_DOC_ADAPTER_SHA256}"
+            f"{doc_sha} != {target_doc_sha}"
         )
     return {
         "verified": True,
+        "serving_mode": "qlora_adapter",
+        "adapters_present": True,
         "code_adapter_sha256": code_sha,
         "doc_adapter_sha256": doc_sha,
         code_domain_id: True,

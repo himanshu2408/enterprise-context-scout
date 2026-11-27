@@ -35,6 +35,33 @@ from context_scout.storage.object_store import (
 logger = logging.getLogger(__name__)
 
 
+def audit_safetensors_adapter_weights(safetensors_path: Path) -> tuple[bool, str | None]:
+    """Validates a .safetensors adapter: non-corrupt, zero router/SSM keys, non-zero lora_b."""
+    if not safetensors_path.is_file() or safetensors_path.stat().st_size < 8:
+        return False, f"Corrupt or empty safetensors weights at {safetensors_path}"
+    try:
+        from safetensors.numpy import load_file as load_safetensors_numpy
+
+        tensors = load_safetensors_numpy(str(safetensors_path))
+    except Exception as exc:
+        return False, f"Corrupt safetensors weights at {safetensors_path}: {exc}"
+
+    if not tensors:
+        return False, f"No tensors found in safetensors weights at {safetensors_path}"
+
+    for key in tensors:
+        key_l = key.lower()
+        if "router" in key_l or "ssm" in key_l:
+            return False, (f"Prohibited frozen router/SSM tensor key '{key}' in {safetensors_path}")
+
+    lora_b_arrays = [arr for key, arr in tensors.items() if "lora_b" in key.lower()]
+    if lora_b_arrays and not any(float((arr * arr).sum()) > 0.0 for arr in lora_b_arrays):
+        return False, (
+            f"Zero-delta lora_b weights (all norms == 0.0) rejected at {safetensors_path}"
+        )
+    return True, None
+
+
 @dataclass(frozen=True)
 class AdapterSlot:
     """Represents a pre-warmed in-memory QLoRA adapter slot."""
@@ -181,6 +208,45 @@ class AdapterPool:
             "error_message": None,
         }
 
+    def _read_adapter_config_and_metrics(
+        self,
+        adapter_dir: Path,
+    ) -> tuple[dict[str, Any] | None, float | None, str | None]:
+        config_path = adapter_dir / "adapter_config.json"
+        metrics_path = adapter_dir / "training_metrics.json"
+        cfg: dict[str, Any] | None = None
+        if config_path.exists():
+            if config_path.stat().st_size == 0:
+                return None, None, f"Empty adapter_config.json at {config_path}"
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if not isinstance(loaded, dict):
+                    return None, None, f"Invalid adapter_config.json object at {config_path}"
+                if loaded.get("trust_remote_code") is True or "auto_map" in loaded:
+                    return None, None, f"Prohibited trust_remote_code/auto_map in {config_path}"
+                cfg_rank = loaded.get("r")
+                if cfg_rank is not None and int(cfg_rank) > 32:
+                    return None, None, f"Adapter rank r={cfg_rank} > 32 in {config_path}"
+                cfg = loaded
+            except Exception as exc:
+                return None, None, f"Corrupt adapter_config.json: {exc}"
+
+        final_loss: float | None = None
+        if metrics_path.exists():
+            try:
+                with open(metrics_path, encoding="utf-8") as f:
+                    metrics = json.load(f)
+                raw_loss = metrics.get("final_loss") if isinstance(metrics, dict) else None
+                final_loss = float(raw_loss) if raw_loss is not None else None
+            except Exception as exc:
+                logger.debug(
+                    "Failed reading training_metrics.json (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
+        return cfg, final_loss, None
+
     def verify_adapter(
         self,
         domain_id: str,
@@ -229,10 +295,12 @@ class AdapterPool:
                         return remote_res
                 return {
                     "domain_id": domain_id,
-                    "is_valid": False,
+                    "is_valid": True,
                     "adapter_present": False,
-                    "adapter_state": "no_trained_adapter",
-                    "weight_format": "missing",
+                    "adapters_present": False,
+                    "serving_mode": "base_open_weights",
+                    "adapter_state": "base_open_weights",
+                    "weight_format": "base_open_weights",
                     "safetensors_bytes": 0,
                     "adapter_path": display_path,
                     "error_message": None,
@@ -243,17 +311,35 @@ class AdapterPool:
             alt_safetensors = adapter_dir / "adapter_model.safetensors"
             if alt_safetensors.exists():
                 safetensors_path = alt_safetensors
-        config_path = adapter_dir / "adapter_config.json"
-        metrics_path = adapter_dir / "training_metrics.json"
 
+        cfg, final_loss, cfg_err = self._read_adapter_config_and_metrics(adapter_dir)
         if not safetensors_path.exists():
+            if cfg_err is not None:
+                return {
+                    "domain_id": domain_id,
+                    "is_valid": False,
+                    "adapter_present": False,
+                    "adapters_present": False,
+                    "serving_mode": "base_open_weights",
+                    "adapter_state": "corrupt",
+                    "weight_format": "base_open_weights",
+                    "safetensors_bytes": 0,
+                    "adapter_path": display_path,
+                    "error_message": cfg_err,
+                }
             return {
                 "domain_id": domain_id,
-                "is_valid": False,
+                "is_valid": True,
                 "adapter_present": False,
-                "adapter_state": "no_trained_adapter",
-                "weight_format": "missing",
+                "adapters_present": False,
+                "serving_mode": "base_open_weights",
+                "adapter_state": "base_open_weights",
+                "weight_format": "base_open_weights",
                 "safetensors_bytes": 0,
+                "r": int(cfg.get("r", 0)) if cfg else None,
+                "lora_alpha": int(cfg.get("lora_alpha", 0)) if cfg else None,
+                "is_moe": bool(cfg.get("is_moe", False)) if cfg else None,
+                "final_loss": final_loss,
                 "adapter_path": display_path,
                 "error_message": None,
             }
@@ -266,74 +352,58 @@ class AdapterPool:
                 "domain_id": domain_id,
                 "is_valid": False,
                 "adapter_present": True,
+                "adapters_present": True,
+                "serving_mode": "qlora_adapter",
                 "adapter_state": "corrupt",
                 "weight_format": "corrupt",
                 "safetensors_bytes": safetensors_path.stat().st_size,
                 "adapter_path": display_path,
-                "error_message": (f"Corrupt or empty safetensors weights at {safetensors_path}"),
+                "error_message": f"Corrupt or empty safetensors weights at {safetensors_path}",
             }
 
-        if not config_path.exists() or config_path.stat().st_size == 0:
+        weights_ok, weights_err = audit_safetensors_adapter_weights(safetensors_path)
+        if not weights_ok:
             return {
                 "domain_id": domain_id,
                 "is_valid": False,
                 "adapter_present": True,
+                "adapters_present": True,
+                "serving_mode": "qlora_adapter",
                 "adapter_state": "corrupt",
-                "weight_format": weight_format,
+                "weight_format": "corrupt",
                 "safetensors_bytes": safetensors_path.stat().st_size,
                 "adapter_path": display_path,
-                "error_message": f"Missing or empty adapter_config.json at {config_path}",
+                "error_message": weights_err,
             }
 
-        try:
-            with open(config_path, encoding="utf-8") as f:
-                cfg = json.load(f)
-            r = int(cfg.get("r", 0))
-            lora_alpha = int(cfg.get("lora_alpha", 0))
-            is_moe = bool(cfg.get("is_moe", False))
-        except Exception as exc:
-            logger.warning(
-                "Corrupt adapter_config.json for domain '%s' (%s): %s",
-                domain_id,
-                type(exc).__name__,
-                exc,
-            )
+        if cfg is None:
             return {
                 "domain_id": domain_id,
                 "is_valid": False,
                 "adapter_present": True,
+                "adapters_present": True,
+                "serving_mode": "qlora_adapter",
                 "adapter_state": "corrupt",
                 "weight_format": weight_format,
                 "safetensors_bytes": safetensors_path.stat().st_size,
                 "adapter_path": display_path,
-                "error_message": f"Corrupt adapter_config.json: {exc}",
+                "error_message": cfg_err
+                or f"Missing or empty adapter_config.json at {adapter_dir / 'adapter_config.json'}",
             }
-
-        final_loss = None
-        if metrics_path.exists():
-            try:
-                with open(metrics_path, encoding="utf-8") as f:
-                    metrics = json.load(f)
-                final_loss = metrics.get("final_loss")
-            except Exception as exc:
-                logger.debug(
-                    "Failed reading training_metrics.json for domain '%s' (%s): %s",
-                    domain_id,
-                    type(exc).__name__,
-                    exc,
-                )
 
         return {
             "domain_id": domain_id,
             "is_valid": True,
             "adapter_present": True,
+            "adapters_present": True,
+            "serving_mode": "qlora_adapter",
             "adapter_state": "ready",
             "weight_format": weight_format,
             "adapter_path": display_path,
             "safetensors_bytes": safetensors_path.stat().st_size,
-            "r": r,
-            "lora_alpha": lora_alpha,
-            "is_moe": is_moe,
+            "r": int(cfg.get("r", 0)),
+            "lora_alpha": int(cfg.get("lora_alpha", 0)),
+            "is_moe": bool(cfg.get("is_moe", False)),
             "final_loss": final_loss,
             "error_message": None,
         }
