@@ -30,6 +30,7 @@ from context_scout.queue.task_queue import QueueTask
 from context_scout.schemas.contracts import DEFAULT_TENANT_ID
 from context_scout.security.permission_mirror import sanitize_scope_identifier
 from context_scout.security.pre_index_scrubber import PreIndexScrubber
+from context_scout.security.ssrf_guard import validate_same_origin_url, validate_url_target
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ class GitHubEnterpriseConnectorPlugin(SourceConnectorPlugin):
         scrubber: PreIndexScrubber | None = None,
         side_effect_extractor: SideEffectExtractor | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = validate_url_target(base_url, allow_private_networks=True).rstrip("/")
         self.installation_id = installation_id
         self.scrubber = scrubber or PreIndexScrubber()
         self.side_effect_extractor = side_effect_extractor or SideEffectExtractor()
@@ -98,6 +99,26 @@ class GitHubEnterpriseConnectorPlugin(SourceConnectorPlugin):
     @property
     def source_type(self) -> str:
         return "github"
+
+    def validate_webhook_origin(self, payload: Mapping[str, Any]) -> None:
+        """Validates webhook repository URLs against configured GitHub API base_url origin."""
+        extra = (
+            frozenset({"github.com"}) if "api.github.com" in self.base_url.lower() else frozenset()
+        )
+        candidates: list[str] = []
+        repo_obj = payload.get("repository")
+        if isinstance(repo_obj, Mapping):
+            for key in ("url", "clone_url", "html_url"):
+                val = repo_obj.get(key)
+                if isinstance(val, str) and val.strip():
+                    candidates.append(val.strip())
+        for cand in candidates:
+            validate_same_origin_url(
+                cand,
+                self.base_url,
+                allowed_extra_hosts=extra,
+                allow_private_networks=True,
+            )
 
     @staticmethod
     def _normalize_repo_path(repo_full_name: str) -> tuple[str, str]:
@@ -387,6 +408,7 @@ class GitHubEnterpriseConnectorPlugin(SourceConnectorPlugin):
             if isinstance(raw_principal_tid, UUID)
             else (raw_task_tid if isinstance(raw_task_tid, UUID) else DEFAULT_TENANT_ID)
         )
+        self.validate_webhook_origin(payload)
         is_postgres = hasattr(repository, "upsert_repository") and conn is not None
 
         repo_rec = RepositoryRecord(

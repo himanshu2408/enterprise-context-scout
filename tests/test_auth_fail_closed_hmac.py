@@ -525,49 +525,47 @@ class TestExplicitSecretKeyAndMutationProofs:
         assert resolved == explicit_key.encode("utf-8")
 
     def test_mutation_revert_to_fail_open_proof(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Proves that reverting _resolve_auth_secret to return default secret fails the test."""
+        """Fail-closed secret check raises RuntimeError and fails only if bypassed."""
+        import context_scout.api.dependencies as deps
+
+        monkeypatch.setenv("SCOUT_ENVIRONMENT", "production")
         monkeypatch.delenv("SCOUT_AUTH_HMAC_SECRET", raising=False)
         monkeypatch.delenv("SCOUT_ALLOW_INSECURE_DEV_SECRET", raising=False)
+        monkeypatch.delenv("SCOUT_IAP_EXPECTED_AUDIENCE", raising=False)
+        monkeypatch.delenv("SCOUT_OIDC_ISSUER", raising=False)
+        monkeypatch.delenv("SCOUT_OIDC_JWKS_URL", raising=False)
 
-        # Mutated function simulating fail-open regression
-        def mutated_resolve_fail_open() -> bytes:
-            return DEFAULT_AUTH_HMAC_SECRET.encode("utf-8")
+        with pytest.raises(RuntimeError, match=r"SCOUT_AUTH_HMAC_SECRET|Insecure"):
+            deps.validate_auth_secret()
 
-        # The regression test expects a RuntimeError:
-        with pytest.raises(pytest.fail.Exception), pytest.raises(RuntimeError):
-            mutated_resolve_fail_open()
+        # Mutating real module symbol to fail open proves test exercises actual production code path
+        with monkeypatch.context() as mp:
+            mp.setattr(
+                deps, "_resolve_auth_secret", lambda *_a, **_kw: DEFAULT_AUTH_HMAC_SECRET.encode()
+            )
+            assert deps.validate_auth_secret() == DEFAULT_AUTH_HMAC_SECRET.encode()
 
     @pytest.mark.asyncio
     async def test_mutation_global_variable_principal_proof(self) -> None:
-        """Proves that replacing ContextVar with global variable causes cross-task leakage."""
-        mutated_global_principal = None
+        """ContextVar principal binding isolates concurrent asyncio tasks without leakage."""
+        from context_scout.schemas.contracts import PrincipalContext, RoleType
+        from context_scout.security.rbac import bind_session_principal, get_current_principal
 
-        from collections.abc import Iterator
-        from contextlib import contextmanager
-
-        @contextmanager
-        def mutated_bind(principal_id: str) -> Iterator[None]:
-            nonlocal mutated_global_principal
-            old = mutated_global_principal
-            mutated_global_principal = principal_id
-            try:
-                yield
-            finally:
-                mutated_global_principal = old
-
-        async def worker(name: str, delay_before_read: float, total_hold: float) -> str:
-            with mutated_bind(name):
+        async def real_worker(name: str, delay_before_read: float, total_hold: float) -> str:
+            princ = PrincipalContext(
+                user_id=name,
+                role=RoleType.ENGINEER,
+                allowed_scopes=["public_eng"],
+            )
+            with bind_session_principal(princ):
                 await asyncio.sleep(delay_before_read)
-                observed = mutated_global_principal or ""
+                observed = get_current_principal().user_id
                 await asyncio.sleep(total_hold - delay_before_read)
                 return observed
 
-        # Alice waits 0.03s before reading; Bob enters at 0.01s and overwrites global with 'bob'
         alice_read, bob_read = await asyncio.gather(
-            worker("alice", 0.03, 0.08),
-            worker("bob", 0.01, 0.06),
+            real_worker("alice", 0.03, 0.08),
+            real_worker("bob", 0.01, 0.06),
         )
-        # Under global variable mutation, Alice leaks and sees 'bob'!
-        assert alice_read == "bob"
+        assert alice_read == "alice"
         assert bob_read == "bob"
-        # Proves that ContextVar isolation in Category D is mathematically required to prevent this!

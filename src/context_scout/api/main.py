@@ -15,14 +15,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from context_scout.api.dependencies import _REQUEST_PRINCIPAL_SLOT, validate_auth_secret
+from context_scout.api.dependencies import (
+    _REQUEST_PRINCIPAL_SLOT,
+    authenticate_headers,
+    validate_auth_secret,
+)
 from context_scout.api.routes import api_router
+from context_scout.config import ScoutSettings
 from context_scout.mcp_servers.code_repo_mcp import (
     create_code_repo_mcp_http_app,
     create_code_repo_mcp_server,
 )
 from context_scout.mcp_servers.common import (
     build_mcp_well_known_metadata,
+    build_oauth_protected_resource_metadata,
     parse_cloud_trace_to_traceparent,
 )
 from context_scout.mcp_servers.doc_corpus_mcp import (
@@ -138,14 +144,59 @@ def create_app() -> FastAPI:
     # 3. Mount versioned API routes under /api/v1
     app.include_router(api_router, prefix="/api/v1")
 
-    # 4. SEP-2243 MCP discovery & stateless MCP 2026-07-28 mounts
+    mcp_settings = ScoutSettings()
+    code_mcp_http_app = create_code_repo_mcp_http_app(
+        settings=mcp_settings, streamable_http_path="/mcp"
+    )
+    doc_mcp_http_app = create_doc_corpus_mcp_http_app(
+        settings=mcp_settings, streamable_http_path="/mcp"
+    )
+    app.mount("/mcp/code", code_mcp_http_app)
+    app.mount("/mcp/docs", doc_mcp_http_app)
+
+    # 4. SEP-2243 MCP discovery, RFC 9728 metadata & stateless MCP 2026-07-28 mounts
+    @app.get("/.well-known/oauth-protected-resource", include_in_schema=False)
+    @app.get("/.well-known/oauth-protected-resource/{subpath:path}", include_in_schema=False)
+    def mcp_oauth_protected_resource(request: Request, subpath: str = "") -> JSONResponse:
+        active_settings = ScoutSettings()
+        origin = str(request.base_url).rstrip("/")
+        clean_sub = f"/{subpath.lstrip('/')}" if subpath else "/mcp"
+        return JSONResponse(
+            build_oauth_protected_resource_metadata(
+                origin, settings=active_settings, resource_path=clean_sub
+            ),
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.get("/.well-known/mcp", include_in_schema=False)
     @app.get("/api/v1/.well-known/mcp", include_in_schema=False)
-    def mcp_well_known_discovery() -> JSONResponse:
-        code_srv = create_code_repo_mcp_server()
-        doc_srv = create_doc_corpus_mcp_server()
-        code_meta = build_mcp_well_known_metadata(code_srv, endpoint_path="/mcp/code/mcp")
-        doc_meta = build_mcp_well_known_metadata(doc_srv, endpoint_path="/mcp/docs/mcp")
+    def mcp_well_known_discovery(request: Request) -> JSONResponse:
+        active_settings = ScoutSettings()
+        include_schemas = bool(active_settings.mcp_public_tool_schemas)
+        if not include_schemas:
+            hdrs = {k.lower(): v for k, v in request.headers.items()}
+            if "authorization" in hdrs or "x-goog-iap-jwt-assertion" in hdrs:
+                try:
+                    authenticate_headers(hdrs)
+                    include_schemas = True
+                except StarletteHTTPException:
+                    include_schemas = False
+        code_srv = getattr(code_mcp_http_app, "server", None) or create_code_repo_mcp_server(
+            settings=active_settings
+        )
+        doc_srv = getattr(doc_mcp_http_app, "server", None) or create_doc_corpus_mcp_server(
+            settings=active_settings
+        )
+        code_meta = build_mcp_well_known_metadata(
+            code_srv,
+            endpoint_path="/mcp/code/mcp",
+            include_tool_schemas=include_schemas,
+        )
+        doc_meta = build_mcp_well_known_metadata(
+            doc_srv,
+            endpoint_path="/mcp/docs/mcp",
+            include_tool_schemas=include_schemas,
+        )
         return JSONResponse(
             {
                 **code_meta,
@@ -154,9 +205,6 @@ def create_app() -> FastAPI:
             },
             headers={"Cache-Control": "no-store"},
         )
-
-    app.mount("/mcp/code", create_code_repo_mcp_http_app(streamable_http_path="/mcp"))
-    app.mount("/mcp/docs", create_doc_corpus_mcp_http_app(streamable_http_path="/mcp"))
 
     # 5. Top-level convenience route
     @app.get("/health", include_in_schema=False)

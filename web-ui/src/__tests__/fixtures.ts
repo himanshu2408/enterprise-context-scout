@@ -615,7 +615,12 @@ export const TEST_HANDOFF_APPLY: HandoffApplyResponse = {
   lint_passed: true,
   tests_passed: true,
   verification_passed: true,
-  details: "Applied patch in sandbox worktree and passed ruff + pytest.",
+  details:
+    "Confirmed diff structure & Python AST syntax verified for client-side git apply (host working tree unchanged; pytest disabled per OWASP ASI05).",
+  execution_mode: "client_side_git_apply",
+  server_files_mutated: false,
+  confirmed_patch_diff: TEST_HANDOFF_PREVIEW.patch_diff,
+  syntax_valid: true,
 };
 
 export const TEST_ADMIN_PURGE_RESPONSE: AdminPurgeResponse = {

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gc
 import json
 import logging
 import re
@@ -270,15 +269,9 @@ class TerraformPlugin:
 
         prefix = module_prefix or self._derive_module_prefix(file_path)
 
-        was_gc = gc.isenabled()
-        gc.disable()
-        try:
-            if file_path.lower().endswith(".tf.json"):
-                return self._extract_tf_json(code, file_path, repo_name, prefix)
-            return self._extract_hcl(code, file_path, repo_name, prefix)
-        finally:
-            if was_gc:
-                gc.enable()
+        if file_path.lower().endswith(".tf.json"):
+            return self._extract_tf_json(code, file_path, repo_name, prefix)
+        return self._extract_hcl(code, file_path, repo_name, prefix)
 
     def _extract_hcl(
         self,
@@ -370,6 +363,9 @@ class TerraformPlugin:
                                         break
                         if obj_nd is not None:
                             envs.extend(_extract_object_strings(obj_nd, code_bytes).keys())
+                    raw_expr = code_bytes[expr_node.start_byte : expr_node.end_byte]
+                    if b"." not in raw_expr and b"${" not in raw_expr and attr_name != "depends_on":
+                        continue
                     chains = _collect_hcl_attr_chains(expr_node, code_bytes)
                     if attr_name == "depends_on":
                         for parts in chains:
@@ -525,20 +521,25 @@ class TerraformPlugin:
                     walk_unrecognized(body_node)
                 continue
 
-            labels: list[str] = []
+            first_label: str | None = None
+            second_label: str | None = None
             for child in block_children:
                 ctype = child.type
                 if ctype == "block_start":
                     break
                 if ctype == "string_lit":
-                    labels.append(_unquote_hcl_string(child, code_bytes))
+                    val = _unquote_hcl_string(child, code_bytes)
                 elif ctype == "identifier" and child is not block_type_node:
-                    labels.append(_node_text(child, code_bytes).strip())
+                    val = _node_text(child, code_bytes).strip()
+                else:
+                    continue
+                if first_label is None:
+                    first_label = val
+                elif second_label is None:
+                    second_label = val
 
-            if not labels:
+            if first_label is None:
                 continue
-            first_label = labels[0]
-            second_label = labels[1] if len(labels) > 1 else None
 
             if block_type in ("resource", "data"):
                 bare = f"{first_label}.{second_label}" if second_label else first_label

@@ -6,6 +6,7 @@ import contextvars
 import json
 import logging
 import re
+import ssl
 import struct
 import threading
 import time
@@ -117,6 +118,25 @@ class GPUQuotaLease:
         self.actual_tokens = max(0, int(tokens))
 
 
+_QUOTA_ADD_LUA: Final[str] = """
+local val = redis.call('INCRBY', KEYS[1], tonumber(ARGV[1]))
+if val <= 0 then
+    redis.call('DEL', KEYS[1])
+    return 0
+end
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+return val
+""".strip()
+
+
+class _QuotaRESP2Client(_StdlibRESP2Client):
+    """RESP2 client adding TLS context enforcement and atomic Lua EVAL for quota counters."""
+
+    def eval(self, script: str, numkeys: int, *keys_and_args: str | int) -> int:
+        res = self._execute("EVAL", script, str(int(numkeys)), *(str(a) for a in keys_and_args))
+        return int(res or 0)
+
+
 class RedisGPUQuotaManager:
     """Redis/Memorystore + in-memory `(tenant, team, user)` GPU fair-share quota manager."""
 
@@ -125,6 +145,7 @@ class RedisGPUQuotaManager:
         *,
         redis_url: str | None = None,
         redis_client: Any | None = None,
+        ssl_context: ssl.SSLContext | None = None,
         max_global_inflight: int = 16,
         max_tenant_inflight: int = 8,
         max_team_inflight: int = 6,
@@ -153,7 +174,7 @@ class RedisGPUQuotaManager:
 
         if self._redis is None and redis_url and redis_url.strip():
             try:
-                self._redis = _StdlibRESP2Client(redis_url.strip())
+                self._redis = _QuotaRESP2Client(redis_url.strip(), ssl_context=ssl_context)
                 self._owns_redis = True
             except Exception as exc:
                 logger.warning(
@@ -207,26 +228,33 @@ class RedisGPUQuotaManager:
     def _add_counter(self, key: str, delta: int, ttl_seconds: int, now: float) -> tuple[int, bool]:
         if self._redis is not None:
             try:
+                ttl = max(1, int(ttl_seconds))
+                if hasattr(self._redis, "eval"):
+                    try:
+                        lua_val = int(self._redis.eval(_QUOTA_ADD_LUA, 1, key, int(delta), ttl))
+                        return max(0, lua_val), True
+                    except NotImplementedError:
+                        pass
                 if hasattr(self._redis, "incrby"):
                     new_val = int(self._redis.incrby(key, delta))
                     if new_val <= 0 and delta < 0:
                         if hasattr(self._redis, "delete"):
                             self._redis.delete(key)
                         elif hasattr(self._redis, "setex"):
-                            self._redis.setex(key, max(1, ttl_seconds), "0")
+                            self._redis.setex(key, ttl, "0")
                         return 0, True
                     if new_val < 0:
                         if hasattr(self._redis, "setex"):
-                            self._redis.setex(key, max(1, ttl_seconds), "0")
+                            self._redis.setex(key, ttl, "0")
                         return 0, True
                     if hasattr(self._redis, "expire"):
-                        self._redis.expire(key, max(1, ttl_seconds))
+                        self._redis.expire(key, ttl)
                     return max(0, new_val), True
                 cur_raw = self._redis.get(key)
                 cur = max(0, int(cur_raw)) if cur_raw is not None else 0
                 nxt = max(0, cur + delta)
                 if hasattr(self._redis, "setex"):
-                    self._redis.setex(key, max(1, ttl_seconds), str(nxt))
+                    self._redis.setex(key, ttl, str(nxt))
                 return nxt, True
             except Exception as exc:
                 logger.debug(

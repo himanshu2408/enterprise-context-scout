@@ -13,6 +13,7 @@ from pathlib import PurePosixPath
 from typing import Any, Final
 from uuid import UUID
 
+import anyio
 from mcp.server._otel import OpenTelemetryMiddleware
 from mcp.server.mcpserver import Context, MCPServer
 from starlette.types import ASGIApp
@@ -114,81 +115,87 @@ def create_code_repo_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Searches code_files under live PostgreSQL 17 RLS."""
-        validate_tool_call_arguments({"query": query, "file_pattern": file_pattern, "limit": limit})
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            default_domain_id, "code_repo_mcp:search_code_trigram", principal
-        )
 
-        clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
-        clean_pattern = (
-            f"%{_escape_sql_like(file_pattern.strip())}%"
-            if file_pattern and file_pattern.strip()
-            else None
-        )
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments(
+                {"query": query, "file_pattern": file_pattern, "limit": limit}
+            )
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                default_domain_id, "code_repo_mcp:search_code_trigram", principal
+            )
 
-        with scoped_db_session(conn_mgr, principal) as conn:
-            sql = """
-                SELECT file_path, repo_name, raw_content,
-                       (similarity(raw_content, %s) * COALESCE(ranking_weight, 1.0)) AS sim
-                FROM code_files
-                WHERE domain_id = %s
-                  AND (%s::text IS NULL OR file_path ILIKE %s ESCAPE '\\')
-                  AND (raw_content %% %s OR raw_content ILIKE %s ESCAPE '\\')
-                ORDER BY sim DESC, file_path ASC
-                LIMIT %s;
-            """
-            search_str = f"%{_escape_sql_like(query)}%"
-            rows = conn.execute(
-                sql,
-                (
-                    query,
-                    default_domain_id,
-                    clean_pattern,
-                    clean_pattern,
-                    query,
-                    search_str,
-                    clamped_limit,
-                ),
-            ).fetchall()
+            clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
+            clean_pattern = (
+                f"%{_escape_sql_like(file_pattern.strip())}%"
+                if file_pattern and file_pattern.strip()
+                else None
+            )
 
-            matches: list[dict[str, Any]] = []
-            for r in rows:
-                f_path = str(r[0])
-                r_name = str(r[1])
-                content = str(r[2])
-                sim = float(str(r[3]))
+            with scoped_db_session(conn_mgr, principal) as conn:
+                sql = """
+                    SELECT file_path, repo_name, raw_content,
+                           (similarity(raw_content, %s) * COALESCE(ranking_weight, 1.0)) AS sim
+                    FROM code_files
+                    WHERE domain_id = %s
+                      AND (%s::text IS NULL OR file_path ILIKE %s ESCAPE '\\')
+                      AND (raw_content %% %s OR raw_content ILIKE %s ESCAPE '\\')
+                    ORDER BY sim DESC, file_path ASC
+                    LIMIT %s;
+                """
+                search_str = f"%{_escape_sql_like(query)}%"
+                rows = conn.execute(
+                    sql,
+                    (
+                        query,
+                        default_domain_id,
+                        clean_pattern,
+                        clean_pattern,
+                        query,
+                        search_str,
+                        clamped_limit,
+                    ),
+                ).fetchall()
 
-                # Find line number of matching query snippet
-                match_line = 1
-                snippet = ""
-                content_lines = content.splitlines()
-                q_lower = query.lower()
-                for idx, line in enumerate(content_lines, start=1):
-                    if q_lower in line.lower():
-                        match_line = idx
-                        snippet = line.strip()
-                        break
-                if not snippet and content_lines:
-                    snippet = content_lines[0].strip()
+                matches: list[dict[str, Any]] = []
+                for r in rows:
+                    f_path = str(r[0])
+                    r_name = str(r[1])
+                    content = str(r[2])
+                    sim = float(str(r[3]))
 
-                matches.append(
-                    {
-                        "file_path": f_path,
-                        "repo_name": r_name,
-                        "match_line": match_line,
-                        "snippet": snippet,
-                        "similarity": round(sim, 4),
-                    }
-                )
+                    match_line = 1
+                    snippet = ""
+                    content_lines = content.splitlines()
+                    q_lower = query.lower()
+                    for idx, line in enumerate(content_lines, start=1):
+                        if q_lower in line.lower():
+                            match_line = idx
+                            snippet = line.strip()
+                            break
+                    if not snippet and content_lines:
+                        snippet = content_lines[0].strip()
 
-        payload = {
-            "query": query,
-            "file_pattern": file_pattern,
-            "total_matches": len(matches),
-            "matches": matches,
-        }
-        return bound_payload_dict(payload)
+                    matches.append(
+                        {
+                            "file_path": f_path,
+                            "repo_name": r_name,
+                            "match_line": match_line,
+                            "snippet": snippet,
+                            "similarity": round(sim, 4),
+                        }
+                    )
+
+            return bound_payload_dict(
+                {
+                    "query": query,
+                    "file_pattern": file_pattern,
+                    "total_matches": len(matches),
+                    "matches": matches,
+                }
+            )
+
+        return await anyio.to_thread.run_sync(_sync)
 
     # -------------------------------------------------------------------------
     # Canonical Tool 2: lookup_ast_symbol
@@ -203,69 +210,74 @@ def create_code_repo_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Resolves symbol in ast_symbols JOIN code_files under live PostgreSQL 17 RLS."""
-        validate_tool_call_arguments({"symbol_name": symbol_name, "limit": limit})
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            default_domain_id, "code_repo_mcp:lookup_ast_symbol", principal
-        )
 
-        clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
-        clean_name = symbol_name.strip()
-        wildcard_name = f"%{_escape_sql_like(clean_name)}%"
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments({"symbol_name": symbol_name, "limit": limit})
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                default_domain_id, "code_repo_mcp:lookup_ast_symbol", principal
+            )
 
-        with scoped_db_session(conn_mgr, principal) as conn:
-            sql = """
-                SELECT s.symbol_id, s.qualified_name, s.symbol_kind, f.file_path,
-                       s.start_line, s.end_line, s.signature_skeleton, s.contextual_summary,
-                       similarity(s.qualified_name, %s) AS sim
-                FROM ast_symbols s
-                JOIN code_files f ON s.file_id = f.file_id
-                WHERE s.domain_id = %s
-                  AND (
-                      s.qualified_name = %s
-                      OR s.qualified_name ILIKE %s ESCAPE '\\'
-                      OR s.qualified_name %% %s
-                      OR s.fts_doc @@ plainto_tsquery('english', %s)
-                  )
-                ORDER BY (s.qualified_name = %s) DESC, sim DESC, s.qualified_name ASC
-                LIMIT %s;
-            """
-            rows = conn.execute(
-                sql,
-                (
-                    clean_name,
-                    default_domain_id,
-                    clean_name,
-                    wildcard_name,
-                    clean_name,
-                    clean_name,
-                    clean_name,
-                    clamped_limit,
-                ),
-            ).fetchall()
+            clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
+            clean_name = symbol_name.strip()
+            wildcard_name = f"%{_escape_sql_like(clean_name)}%"
 
-            symbols: list[dict[str, Any]] = []
-            for r in rows:
-                symbols.append(
-                    {
-                        "symbol_id": str(r[0]),
-                        "qualified_name": str(r[1]),
-                        "symbol_kind": str(r[2]),
-                        "file_path": str(r[3]),
-                        "start_line": int(str(r[4])),
-                        "end_line": int(str(r[5])),
-                        "signature_skeleton": str(r[6]),
-                        "contextual_summary": str(r[7]),
-                        "similarity": round(float(str(r[8])), 4),
-                    }
-                )
+            with scoped_db_session(conn_mgr, principal) as conn:
+                sql = """
+                    SELECT s.symbol_id, s.qualified_name, s.symbol_kind, f.file_path,
+                           s.start_line, s.end_line, s.signature_skeleton, s.contextual_summary,
+                           similarity(s.qualified_name, %s) AS sim
+                    FROM ast_symbols s
+                    JOIN code_files f ON s.file_id = f.file_id
+                    WHERE s.domain_id = %s
+                      AND (
+                          s.qualified_name = %s
+                          OR s.qualified_name ILIKE %s ESCAPE '\\'
+                          OR s.qualified_name %% %s
+                          OR s.fts_doc @@ plainto_tsquery('english', %s)
+                      )
+                    ORDER BY (s.qualified_name = %s) DESC, sim DESC, s.qualified_name ASC
+                    LIMIT %s;
+                """
+                rows = conn.execute(
+                    sql,
+                    (
+                        clean_name,
+                        default_domain_id,
+                        clean_name,
+                        wildcard_name,
+                        clean_name,
+                        clean_name,
+                        clean_name,
+                        clamped_limit,
+                    ),
+                ).fetchall()
 
-        payload = {
-            "symbol_name": clean_name,
-            "total_matches": len(symbols),
-            "symbols": symbols,
-        }
-        return bound_payload_dict(payload)
+                symbols: list[dict[str, Any]] = []
+                for r in rows:
+                    symbols.append(
+                        {
+                            "symbol_id": str(r[0]),
+                            "qualified_name": str(r[1]),
+                            "symbol_kind": str(r[2]),
+                            "file_path": str(r[3]),
+                            "start_line": int(str(r[4])),
+                            "end_line": int(str(r[5])),
+                            "signature_skeleton": str(r[6]),
+                            "contextual_summary": str(r[7]),
+                            "similarity": round(float(str(r[8])), 4),
+                        }
+                    )
+
+            return bound_payload_dict(
+                {
+                    "symbol_name": clean_name,
+                    "total_matches": len(symbols),
+                    "symbols": symbols,
+                }
+            )
+
+        return await anyio.to_thread.run_sync(_sync)
 
     # -------------------------------------------------------------------------
     # Canonical Tool 3: expand_ast_1hop_closure
@@ -279,124 +291,131 @@ def create_code_repo_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Expands 1-hop AST closure using ASTDependencyExpander and PostgresScoutGraphAdapter."""
-        validate_tool_call_arguments({"symbol_name": symbol_name})
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            default_domain_id, "code_repo_mcp:expand_ast_1hop_closure", principal
-        )
 
-        clean_name = symbol_name.strip()
-        wildcard_name = f"%{_escape_sql_like(clean_name)}%"
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments({"symbol_name": symbol_name})
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                default_domain_id, "code_repo_mcp:expand_ast_1hop_closure", principal
+            )
 
-        with scoped_db_session(conn_mgr, principal) as conn:
-            row = conn.execute(
-                """
-                SELECT symbol_id, file_id, domain_id, qualified_name, symbol_kind,
-                       start_line, end_line, signature_skeleton, contextual_summary,
-                       allowed_scopes, embedding
-                FROM ast_symbols
-                WHERE domain_id = %s
-                  AND (qualified_name = %s OR qualified_name ILIKE %s ESCAPE '\\')
-                ORDER BY (qualified_name = %s) DESC
-                LIMIT 1;
-                """,
-                (default_domain_id, clean_name, wildcard_name, clean_name),
-            ).fetchone()
+            clean_name = symbol_name.strip()
+            wildcard_name = f"%{_escape_sql_like(clean_name)}%"
 
-            if not row:
-                return bound_payload_dict(
-                    {
-                        "symbol_name": clean_name,
-                        "error": f"Symbol '{clean_name}' not found under active RLS scopes",
-                        "total_callers": 0,
-                        "items": [],
-                    }
+            with scoped_db_session(conn_mgr, principal) as conn:
+                row = conn.execute(
+                    """
+                    SELECT symbol_id, file_id, domain_id, qualified_name, symbol_kind,
+                           start_line, end_line, signature_skeleton, contextual_summary,
+                           allowed_scopes, embedding
+                    FROM ast_symbols
+                    WHERE domain_id = %s
+                      AND (qualified_name = %s OR qualified_name ILIKE %s ESCAPE '\\')
+                    ORDER BY (qualified_name = %s) DESC
+                    LIMIT 1;
+                    """,
+                    (default_domain_id, clean_name, wildcard_name, clean_name),
+                ).fetchone()
+
+                if not row:
+                    return bound_payload_dict(
+                        {
+                            "symbol_name": clean_name,
+                            "error": f"Symbol '{clean_name}' not found under active RLS scopes",
+                            "total_callers": 0,
+                            "items": [],
+                        }
+                    )
+
+                raw_emb = row[10]
+                if isinstance(raw_emb, str):
+                    emb_floats = [
+                        float(x.strip()) for x in raw_emb.strip("[]").split(",") if x.strip()
+                    ]
+                elif hasattr(raw_emb, "tolist"):
+                    emb_floats = [float(x) for x in raw_emb.tolist()]
+                elif isinstance(raw_emb, (list, tuple)):
+                    emb_floats = [float(x) for x in raw_emb]
+                else:
+                    emb_floats = []
+
+                scopes_raw = row[9]
+                scopes_list = (
+                    [str(s) for s in scopes_raw] if isinstance(scopes_raw, (list, tuple)) else []
                 )
 
-            raw_emb = row[10]
-            if isinstance(raw_emb, str):
-                emb_floats = [float(x.strip()) for x in raw_emb.strip("[]").split(",") if x.strip()]
-            elif hasattr(raw_emb, "tolist"):
-                emb_floats = [float(x) for x in raw_emb.tolist()]
-            elif isinstance(raw_emb, (list, tuple)):
-                emb_floats = [float(x) for x in raw_emb]
-            else:
-                emb_floats = []
+                focus_record = ASTSymbolRecord(
+                    symbol_id=UUID(str(row[0])),
+                    file_id=UUID(str(row[1])),
+                    domain_id=str(row[2]),
+                    qualified_name=str(row[3]),
+                    symbol_kind=str(row[4]),
+                    start_line=int(str(row[5])),
+                    end_line=int(str(row[6])),
+                    signature_skeleton=str(row[7]),
+                    contextual_summary=str(row[8]),
+                    allowed_scopes=scopes_list,
+                    embedding=emb_floats,
+                )
 
-            scopes_raw = row[9]
-            scopes_list = (
-                [str(s) for s in scopes_raw] if isinstance(scopes_raw, (list, tuple)) else []
+            expansion_result = expander.expand_1hop(
+                focus_symbol=focus_record,
+                repo=graph_adapter,
+                principal=principal,
+                domain_id=default_domain_id,
             )
 
-            focus_record = ASTSymbolRecord(
-                symbol_id=UUID(str(row[0])),
-                file_id=UUID(str(row[1])),
-                domain_id=str(row[2]),
-                qualified_name=str(row[3]),
-                symbol_kind=str(row[4]),
-                start_line=int(str(row[5])),
-                end_line=int(str(row[6])),
-                signature_skeleton=str(row[7]),
-                contextual_summary=str(row[8]),
-                allowed_scopes=scopes_list,
-                embedding=emb_floats,
+            direct_callers: list[dict[str, Any]] = [
+                {
+                    "symbol_name": c.qualified_symbol,
+                    "file_path": c.file_path,
+                    "start_line": c.start_line,
+                    "end_line": c.end_line,
+                    "selection_reason": c.selection_reason,
+                    "modification_intent": str(c.modification_intent),
+                }
+                for c in expansion_result.caller_slices
+            ]
+
+            imported_types: list[dict[str, Any]] = [
+                {
+                    "symbol_name": t.qualified_symbol,
+                    "file_path": t.file_path,
+                    "start_line": t.start_line,
+                    "end_line": t.end_line,
+                    "selection_reason": t.selection_reason,
+                    "modification_intent": str(t.modification_intent),
+                }
+                for t in expansion_result.imported_type_slices
+            ]
+
+            test_fixtures: list[dict[str, Any]] = [
+                {
+                    "symbol_name": f.qualified_symbol,
+                    "file_path": f.file_path,
+                    "start_line": f.start_line,
+                    "end_line": f.end_line,
+                    "selection_reason": f.selection_reason,
+                    "modification_intent": str(f.modification_intent),
+                }
+                for f in expansion_result.test_fixture_slices
+            ]
+
+            return bound_payload_dict(
+                {
+                    "focus_symbol": focus_record.qualified_name,
+                    "accumulated_tokens": expansion_result.total_expansion_tokens,
+                    "token_budget_exhausted": expansion_result.budget_exhausted,
+                    "direct_callers_count": len(direct_callers),
+                    "direct_callers": direct_callers,
+                    "imported_types_count": len(imported_types),
+                    "imported_types": imported_types,
+                    "test_fixtures_count": len(test_fixtures),
+                    "test_fixtures": test_fixtures,
+                }
             )
 
-        expansion_result = expander.expand_1hop(
-            focus_symbol=focus_record,
-            repo=graph_adapter,
-            principal=principal,
-            domain_id=default_domain_id,
-        )
-
-        direct_callers: list[dict[str, Any]] = [
-            {
-                "symbol_name": c.qualified_symbol,
-                "file_path": c.file_path,
-                "start_line": c.start_line,
-                "end_line": c.end_line,
-                "selection_reason": c.selection_reason,
-                "modification_intent": str(c.modification_intent),
-            }
-            for c in expansion_result.caller_slices
-        ]
-
-        imported_types: list[dict[str, Any]] = [
-            {
-                "symbol_name": t.qualified_symbol,
-                "file_path": t.file_path,
-                "start_line": t.start_line,
-                "end_line": t.end_line,
-                "selection_reason": t.selection_reason,
-                "modification_intent": str(t.modification_intent),
-            }
-            for t in expansion_result.imported_type_slices
-        ]
-
-        test_fixtures: list[dict[str, Any]] = [
-            {
-                "symbol_name": f.qualified_symbol,
-                "file_path": f.file_path,
-                "start_line": f.start_line,
-                "end_line": f.end_line,
-                "selection_reason": f.selection_reason,
-                "modification_intent": str(f.modification_intent),
-            }
-            for f in expansion_result.test_fixture_slices
-        ]
-
-        payload = {
-            "focus_symbol": focus_record.qualified_name,
-            "accumulated_tokens": expansion_result.total_expansion_tokens,
-            "token_budget_exhausted": expansion_result.budget_exhausted,
-            "direct_callers_count": len(direct_callers),
-            "direct_callers": direct_callers,
-            "imported_types_count": len(imported_types),
-            "imported_types": imported_types,
-            "test_fixtures_count": len(test_fixtures),
-            "test_fixtures": test_fixtures,
-        }
-        return bound_payload_dict(payload)
+        return await anyio.to_thread.run_sync(_sync)
 
     # -------------------------------------------------------------------------
     # Canonical Tool 4: slice_file_lines
@@ -413,75 +432,79 @@ def create_code_repo_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Slices verbatim code lines using DeterministicSlicer with bounds checks."""
-        validate_tool_call_arguments(
-            {
-                "file_path": file_path,
-                "start_line": start_line,
-                "end_line": end_line,
-                "repo_name": repo_name,
-            }
-        )
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            default_domain_id, "code_repo_mcp:slice_file_lines", principal
-        )
 
-        clean_path = _validate_clean_file_path(file_path)
-        like_pattern = f"%{_escape_sql_like(clean_path)}"
-        requested_count = end_line - start_line + 1
-        if requested_count > MAX_SLICE_LINES:
-            raise ValueError(
-                f"Requested slice of {requested_count} lines exceeds "
-                f"maximum allowed {MAX_SLICE_LINES} lines"
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments(
+                {
+                    "file_path": file_path,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "repo_name": repo_name,
+                }
+            )
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                default_domain_id, "code_repo_mcp:slice_file_lines", principal
             )
 
-        with scoped_db_session(conn_mgr, principal) as conn:
-            row = conn.execute(
-                """
-                SELECT git_commit_sha, git_blob_sha, raw_content, line_count
-                FROM code_files
-                WHERE domain_id = %s
-                  AND repo_name = %s
-                  AND (file_path = %s OR file_path ILIKE %s ESCAPE '\\')
-                LIMIT 1;
-                """,
-                (default_domain_id, repo_name, clean_path, like_pattern),
-            ).fetchone()
-
-            if not row:
-                raise FileNotFoundError(
-                    f"File '{file_path}' not found in repo '{repo_name}' under active RLS scopes"
+            clean_path = _validate_clean_file_path(file_path)
+            like_pattern = f"%{_escape_sql_like(clean_path)}"
+            requested_count = end_line - start_line + 1
+            if requested_count > MAX_SLICE_LINES:
+                raise ValueError(
+                    f"Requested slice of {requested_count} lines exceeds "
+                    f"maximum allowed {MAX_SLICE_LINES} lines"
                 )
 
-            commit_sha = str(row[0])
-            blob_sha = str(row[1])
-            raw_content = str(row[2])
-            total_lines = int(str(row[3]))
+            with scoped_db_session(conn_mgr, principal) as conn:
+                row = conn.execute(
+                    """
+                    SELECT git_commit_sha, git_blob_sha, raw_content, line_count
+                    FROM code_files
+                    WHERE domain_id = %s
+                      AND repo_name = %s
+                      AND (file_path = %s OR file_path ILIKE %s ESCAPE '\\')
+                    LIMIT 1;
+                    """,
+                    (default_domain_id, repo_name, clean_path, like_pattern),
+                ).fetchone()
 
-        # Validate bounds (raises InvalidLineBoundsError or OffByOneBoundsError on violation)
-        try:
-            slicer.validate_bounds(start_line, end_line, total_lines)
-        except (InvalidLineBoundsError, OffByOneBoundsError) as err:
-            raise ValueError(f"Invalid line bounds [{start_line}, {end_line}]: {err}") from err
+                if not row:
+                    raise FileNotFoundError(
+                        f"File '{file_path}' not found in repo '{repo_name}' under RLS scopes"
+                    )
 
-        sliced_content = slicer.slice_lines(raw_content, start_line, end_line)
-        lines_data: list[dict[str, Any]] = []
-        sliced_lines = sliced_content.splitlines()
-        for line_no, text in zip(range(start_line, end_line + 1), sliced_lines, strict=False):
-            lines_data.append({"line_number": line_no, "content": text})
+                commit_sha = str(row[0])
+                blob_sha = str(row[1])
+                raw_content = str(row[2])
+                total_lines = int(str(row[3]))
 
-        payload = {
-            "file_path": clean_path,
-            "repo_name": repo_name,
-            "git_commit_sha": commit_sha,
-            "git_blob_sha": blob_sha,
-            "start_line": start_line,
-            "end_line": end_line,
-            "total_file_lines": total_lines,
-            "slice_line_count": len(lines_data),
-            "lines": lines_data,
-        }
-        return bound_payload_dict(payload)
+            try:
+                slicer.validate_bounds(start_line, end_line, total_lines)
+            except (InvalidLineBoundsError, OffByOneBoundsError) as err:
+                raise ValueError(f"Invalid line bounds [{start_line}, {end_line}]: {err}") from err
+
+            sliced_content = slicer.slice_lines(raw_content, start_line, end_line)
+            lines_data: list[dict[str, Any]] = []
+            sliced_lines = sliced_content.splitlines()
+            for line_no, text in zip(range(start_line, end_line + 1), sliced_lines, strict=False):
+                lines_data.append({"line_number": line_no, "content": text})
+
+            return bound_payload_dict(
+                {
+                    "file_path": clean_path,
+                    "repo_name": repo_name,
+                    "git_commit_sha": commit_sha,
+                    "git_blob_sha": blob_sha,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "total_file_lines": total_lines,
+                    "slice_line_count": len(lines_data),
+                    "lines": lines_data,
+                }
+            )
+
+        return await anyio.to_thread.run_sync(_sync)
 
     # -------------------------------------------------------------------------
     # Canonical Tool 5: search_github_issues
@@ -497,83 +520,89 @@ def create_code_repo_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Searches GitHub issues stored in doc_chunks under the configured code domain."""
-        validate_tool_call_arguments({"query": query, "state": state, "limit": limit})
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            default_domain_id, "code_repo_mcp:search_github_issues", principal
-        )
 
-        clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
-        clean_state = state.strip().lower() if state else None
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments({"query": query, "state": state, "limit": limit})
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                default_domain_id, "code_repo_mcp:search_github_issues", principal
+            )
 
-        with scoped_db_session(conn_mgr, principal) as conn:
-            sql = """
-                SELECT doc_id, doc_title, source_uri, section_heading,
-                       verbatim_content, metadata_json,
-                       ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) AS fts_score,
-                       similarity(verbatim_content, %s) AS trgm_score
-                FROM doc_chunks
-                WHERE domain_id = %s
-                  AND doc_id LIKE 'gh-issue:%%'
-                  AND (%s::text IS NULL OR metadata_json->>'state' = %s)
-                  AND (
-                      fts_doc @@ plainto_tsquery('english', %s)
-                      OR to_tsvector('english', doc_title || ' ' || verbatim_content)
-                         @@ plainto_tsquery('english', %s)
-                      OR verbatim_content %% %s
-                      OR doc_title ILIKE %s ESCAPE '\\'
-                      OR verbatim_content ILIKE %s ESCAPE '\\'
-                  )
-                ORDER BY (doc_title ILIKE %s ESCAPE '\\') DESC, fts_score DESC, trgm_score DESC
-                LIMIT %s;
-            """
-            wildcard = f"%{_escape_sql_like(query)}%"
-            rows = conn.execute(
-                sql,
-                (
-                    query,
-                    query,
-                    default_domain_id,
-                    clean_state,
-                    clean_state,
-                    query,
-                    query,
-                    query,
-                    wildcard,
-                    wildcard,
-                    wildcard,
-                    clamped_limit,
-                ),
-            ).fetchall()
+            clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
+            clean_state = state.strip().lower() if state else None
 
-            issues: list[dict[str, Any]] = []
-            for r in rows:
-                doc_id = str(r[0])
-                title = str(r[1])
-                source_uri = str(r[2])
-                section = str(r[3])
-                content = str(r[4])
-                meta = r[5] if isinstance(r[5], dict) else {}
+            with scoped_db_session(conn_mgr, principal) as conn:
+                sql = """
+                    SELECT doc_id, doc_title, source_uri, section_heading,
+                           verbatim_content, metadata_json,
+                           ts_rank_cd(fts_doc, plainto_tsquery('english', %s)) AS fts_score,
+                           similarity(verbatim_content, %s) AS trgm_score
+                    FROM doc_chunks
+                    WHERE domain_id = %s
+                      AND is_stale = FALSE
+                      AND doc_id LIKE 'gh-issue:%%'
+                      AND (%s::text IS NULL OR metadata_json->>'state' = %s)
+                      AND (
+                          fts_doc @@ plainto_tsquery('english', %s)
+                          OR to_tsvector('english', doc_title || ' ' || verbatim_content)
+                             @@ plainto_tsquery('english', %s)
+                          OR verbatim_content %% %s
+                          OR doc_title ILIKE %s ESCAPE '\\'
+                          OR verbatim_content ILIKE %s ESCAPE '\\'
+                      )
+                    ORDER BY (doc_title ILIKE %s ESCAPE '\\') DESC, fts_score DESC, trgm_score DESC
+                    LIMIT %s;
+                """
+                wildcard = f"%{_escape_sql_like(query)}%"
+                rows = conn.execute(
+                    sql,
+                    (
+                        query,
+                        query,
+                        default_domain_id,
+                        clean_state,
+                        clean_state,
+                        query,
+                        query,
+                        query,
+                        wildcard,
+                        wildcard,
+                        wildcard,
+                        clamped_limit,
+                    ),
+                ).fetchall()
 
-                issues.append(
-                    {
-                        "doc_id": doc_id,
-                        "title": title,
-                        "source_uri": source_uri,
-                        "section_heading": section,
-                        "state": meta.get("state", "unknown"),
-                        "labels": meta.get("labels", []),
-                        "excerpt": content[:400],
-                    }
-                )
+                issues: list[dict[str, Any]] = []
+                for r in rows:
+                    doc_id = str(r[0])
+                    title = str(r[1])
+                    source_uri = str(r[2])
+                    section = str(r[3])
+                    content = str(r[4])
+                    meta = r[5] if isinstance(r[5], dict) else {}
 
-        payload = {
-            "query": query,
-            "state_filter": clean_state,
-            "total_matches": len(issues),
-            "issues": issues,
-        }
-        return bound_payload_dict(payload)
+                    issues.append(
+                        {
+                            "doc_id": doc_id,
+                            "title": title,
+                            "source_uri": source_uri,
+                            "section_heading": section,
+                            "state": meta.get("state", "unknown"),
+                            "labels": meta.get("labels", []),
+                            "excerpt": content[:400],
+                        }
+                    )
+
+            return bound_payload_dict(
+                {
+                    "query": query,
+                    "state_filter": clean_state,
+                    "total_matches": len(issues),
+                    "issues": issues,
+                }
+            )
+
+        return await anyio.to_thread.run_sync(_sync)
 
     # -------------------------------------------------------------------------
     # Canonical Tool 6: assemble_verified_context_pack (High-Level IDE Tool)
@@ -594,38 +623,42 @@ def create_code_repo_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Assembles a verified ImplementationContextPack under out-of-band PrincipalContext."""
-        target_domain_id = domain_id or default_domain_id
-        validate_tool_call_arguments(
-            {
-                "query": query,
-                "domain_id": target_domain_id,
-                "max_bounce_backs": max_bounce_backs,
-            }
-        )
-        principal = get_current_principal()
-        registry.load_all()
-        auth_gate.authorize_tool_call(
-            target_domain_id, "code_repo_mcp:assemble_verified_context_pack", principal
-        )
 
-        from context_scout.agents.scout_workflow import ScoutWorkflow
+        def _sync() -> dict[str, Any]:
+            target_domain_id = domain_id or default_domain_id
+            validate_tool_call_arguments(
+                {
+                    "query": query,
+                    "domain_id": target_domain_id,
+                    "max_bounce_backs": max_bounce_backs,
+                }
+            )
+            principal = get_current_principal()
+            registry.load_all()
+            auth_gate.authorize_tool_call(
+                target_domain_id, "code_repo_mcp:assemble_verified_context_pack", principal
+            )
 
-        clamped_bounces = min(max(0, max_bounce_backs), 3)
-        workflow = ScoutWorkflow(
-            registry=registry,
-            repo=graph_adapter,
-            slicer=slicer,
-            expander=expander,
-            auth_gate=auth_gate,
-        )
-        pack_or_diag = workflow.run(
-            user_prompt=query,
-            principal=principal,
-            domain_id=target_domain_id,
-            max_bounce_backs=clamped_bounces,
-        )
-        dumped: dict[str, Any] = pack_or_diag.model_dump(mode="json")
-        return dumped
+            from context_scout.agents.scout_workflow import ScoutWorkflow
+
+            clamped_bounces = min(max(0, max_bounce_backs), 3)
+            workflow = ScoutWorkflow(
+                registry=registry,
+                repo=graph_adapter,
+                slicer=slicer,
+                expander=expander,
+                auth_gate=auth_gate,
+            )
+            pack_or_diag = workflow.run(
+                user_prompt=query,
+                principal=principal,
+                domain_id=target_domain_id,
+                max_bounce_backs=clamped_bounces,
+            )
+            dumped: dict[str, Any] = pack_or_diag.model_dump(mode="json")
+            return dumped
+
+        return await anyio.to_thread.run_sync(_sync)
 
     # -------------------------------------------------------------------------
     # Canonical Tool 7: list_repo_branches_and_mrs (M5-02 IDE Branch/MR Tools)
@@ -641,47 +674,51 @@ def create_code_repo_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Lists Copy-on-Write ref_snapshots visible to principal under Forced RLS."""
-        validate_tool_call_arguments({"repo_name": repo_name, "state": state, "limit": limit})
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            default_domain_id, "code_repo_mcp:list_repo_branches_and_mrs", principal
-        )
-        clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
-        clean_repo = repo_name.strip() if repo_name and repo_name.strip() else None
-        clean_state = state.strip().lower() if state and state.strip() else None
 
-        pg_repo = PostgresRLSRepository()
-        with scoped_db_session(conn_mgr, principal) as conn:
-            snaps = pg_repo.list_ref_snapshots(
-                conn,
-                default_domain_id,
-                repo_name=clean_repo,
-                state=clean_state,
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments({"repo_name": repo_name, "state": state, "limit": limit})
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                default_domain_id, "code_repo_mcp:list_repo_branches_and_mrs", principal
+            )
+            clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
+            clean_repo = repo_name.strip() if repo_name and repo_name.strip() else None
+            clean_state = state.strip().lower() if state and state.strip() else None
+
+            pg_repo = PostgresRLSRepository()
+            with scoped_db_session(conn_mgr, principal) as conn:
+                snaps = pg_repo.list_ref_snapshots(
+                    conn,
+                    default_domain_id,
+                    repo_name=clean_repo,
+                    state=clean_state,
+                )
+
+            snapshots_out = [
+                {
+                    "snapshot_id": str(s.snapshot_id),
+                    "repo_name": s.repo_name,
+                    "ref_name": s.ref_name,
+                    "ref_kind": s.ref_kind,
+                    "mr_iid": s.mr_iid,
+                    "base_commit_sha": s.base_commit_sha,
+                    "head_commit_sha": s.head_commit_sha,
+                    "state": s.state,
+                    "updated_at": s.updated_at.isoformat() if s.updated_at else "",
+                }
+                for s in snaps[:clamped_limit]
+            ]
+            return bound_payload_dict(
+                {
+                    "domain_id": default_domain_id,
+                    "repo_name": clean_repo,
+                    "state": clean_state,
+                    "count": len(snapshots_out),
+                    "snapshots": snapshots_out,
+                }
             )
 
-        snapshots_out = [
-            {
-                "snapshot_id": str(s.snapshot_id),
-                "repo_name": s.repo_name,
-                "ref_name": s.ref_name,
-                "ref_kind": s.ref_kind,
-                "mr_iid": s.mr_iid,
-                "base_commit_sha": s.base_commit_sha,
-                "head_commit_sha": s.head_commit_sha,
-                "state": s.state,
-                "updated_at": s.updated_at.isoformat() if s.updated_at else "",
-            }
-            for s in snaps[:clamped_limit]
-        ]
-        return bound_payload_dict(
-            {
-                "domain_id": default_domain_id,
-                "repo_name": clean_repo,
-                "state": clean_state,
-                "count": len(snapshots_out),
-                "snapshots": snapshots_out,
-            }
-        )
+        return await anyio.to_thread.run_sync(_sync)
 
     # -------------------------------------------------------------------------
     # Canonical Tool 8: inspect_mr_overlay_diff (M5-02 CoW MR Diff Tool)
@@ -699,120 +736,128 @@ def create_code_repo_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Computes bounded unified diffs across CoW overlay_file_deltas under Forced RLS."""
-        validate_tool_call_arguments(
-            {
-                "repo_name": repo_name,
-                "mr_iid": mr_iid,
-                "ref_name": ref_name,
-                "file_path": file_path,
-                "context_lines": context_lines,
-            }
-        )
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            default_domain_id, "code_repo_mcp:inspect_mr_overlay_diff", principal
-        )
-        clean_repo = repo_name.strip()
-        clean_ref = ref_name.strip() if ref_name and ref_name.strip() else None
-        clean_fp = (
-            _validate_clean_file_path(file_path)
-            if file_path is not None and file_path.strip()
-            else None
-        )
-        if mr_iid is None and clean_ref is None:
-            raise ValueError("Specify either mr_iid or ref_name to inspect MR/branch overlay diff.")
 
-        ctx_n = max(0, min(int(context_lines), 10))
-        pg_repo = PostgresRLSRepository()
-        with scoped_db_session(conn_mgr, principal) as conn:
-            snap = pg_repo.get_ref_snapshot(
-                conn,
-                default_domain_id,
-                repo_name=clean_repo,
-                ref_name=clean_ref,
-                mr_iid=str(mr_iid) if mr_iid is not None else None,
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments(
+                {
+                    "repo_name": repo_name,
+                    "mr_iid": mr_iid,
+                    "ref_name": ref_name,
+                    "file_path": file_path,
+                    "context_lines": context_lines,
+                }
             )
-            if snap is None:
-                return bound_payload_dict(
-                    {
-                        "domain_id": default_domain_id,
-                        "repo_name": clean_repo,
-                        "mr_iid": mr_iid,
-                        "ref_name": clean_ref,
-                        "found": False,
-                        "count": 0,
-                        "deltas": [],
-                    }
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                default_domain_id, "code_repo_mcp:inspect_mr_overlay_diff", principal
+            )
+            clean_repo = repo_name.strip()
+            clean_ref = ref_name.strip() if ref_name and ref_name.strip() else None
+            clean_fp = (
+                _validate_clean_file_path(file_path)
+                if file_path is not None and file_path.strip()
+                else None
+            )
+            if mr_iid is None and clean_ref is None:
+                raise ValueError(
+                    "Specify either mr_iid or ref_name to inspect MR/branch overlay diff."
                 )
-            raw_deltas = pg_repo.list_overlay_file_deltas(conn, default_domain_id, snap.snapshot_id)
-            if clean_fp is not None:
-                raw_deltas = [
-                    d
-                    for d in raw_deltas
-                    if d.file_path == clean_fp or d.previous_file_path == clean_fp
-                ]
 
-            deltas_out: list[dict[str, Any]] = []
-            for d in raw_deltas[:MAX_PAYLOAD_ITEMS]:
-                old_path = d.previous_file_path or d.file_path
-                base_text = ""
-                if d.change_type != "added":
-                    base_row = conn.execute(
-                        """
-                        SELECT raw_content
-                        FROM code_files
-                        WHERE domain_id = %s AND repo_name = %s AND file_path = %s
-                        LIMIT 1;
-                        """,
-                        (default_domain_id, clean_repo, old_path),
-                    ).fetchone()
-                    if base_row is not None:
-                        base_text = str(base_row[0] or "")
-                new_text = "" if d.change_type == "deleted" else (d.raw_content or "")
-                diff_text = "".join(
-                    difflib.unified_diff(
-                        base_text.splitlines(keepends=True),
-                        new_text.splitlines(keepends=True),
-                        fromfile=f"a/{old_path}",
-                        tofile=f"b/{d.file_path}",
-                        n=ctx_n,
+            ctx_n = max(0, min(int(context_lines), 10))
+            pg_repo = PostgresRLSRepository()
+            with scoped_db_session(conn_mgr, principal) as conn:
+                snap = pg_repo.get_ref_snapshot(
+                    conn,
+                    default_domain_id,
+                    repo_name=clean_repo,
+                    ref_name=clean_ref,
+                    mr_iid=str(mr_iid) if mr_iid is not None else None,
+                )
+                if snap is None:
+                    return bound_payload_dict(
+                        {
+                            "domain_id": default_domain_id,
+                            "repo_name": clean_repo,
+                            "mr_iid": mr_iid,
+                            "ref_name": clean_ref,
+                            "found": False,
+                            "count": 0,
+                            "deltas": [],
+                        }
                     )
+                raw_deltas = pg_repo.list_overlay_file_deltas(
+                    conn, default_domain_id, snap.snapshot_id
                 )
-                changed_symbols = [
-                    str(s.get("qualified_name"))
-                    for s in d.symbols_json
-                    if isinstance(s, dict) and s.get("qualified_name")
-                ]
-                deltas_out.append(
-                    {
-                        "delta_id": str(d.delta_id),
-                        "file_path": d.file_path,
-                        "previous_file_path": d.previous_file_path,
-                        "change_type": d.change_type,
-                        "language": d.language,
-                        "base_blob_sha": d.base_blob_sha,
-                        "overlay_blob_sha": d.overlay_blob_sha,
-                        "line_count": d.line_count,
-                        "changed_symbols": changed_symbols,
-                        "unified_diff": diff_text,
-                    }
-                )
+                if clean_fp is not None:
+                    raw_deltas = [
+                        d
+                        for d in raw_deltas
+                        if d.file_path == clean_fp or d.previous_file_path == clean_fp
+                    ]
 
-        return bound_payload_dict(
-            {
-                "found": True,
-                "domain_id": default_domain_id,
-                "snapshot_id": str(snap.snapshot_id),
-                "repo_name": snap.repo_name,
-                "ref_name": snap.ref_name,
-                "ref_kind": snap.ref_kind,
-                "mr_iid": snap.mr_iid,
-                "base_commit_sha": snap.base_commit_sha,
-                "head_commit_sha": snap.head_commit_sha,
-                "count": len(deltas_out),
-                "deltas": deltas_out,
-            }
-        )
+                deltas_out: list[dict[str, Any]] = []
+                for d in raw_deltas[:MAX_PAYLOAD_ITEMS]:
+                    old_path = d.previous_file_path or d.file_path
+                    base_text = ""
+                    if d.change_type != "added":
+                        base_row = conn.execute(
+                            """
+                            SELECT raw_content
+                            FROM code_files
+                            WHERE domain_id = %s AND repo_name = %s AND file_path = %s
+                            LIMIT 1;
+                            """,
+                            (default_domain_id, clean_repo, old_path),
+                        ).fetchone()
+                        if base_row is not None:
+                            base_text = str(base_row[0] or "")
+                    new_text = "" if d.change_type == "deleted" else (d.raw_content or "")
+                    diff_text = "".join(
+                        difflib.unified_diff(
+                            base_text.splitlines(keepends=True),
+                            new_text.splitlines(keepends=True),
+                            fromfile=f"a/{old_path}",
+                            tofile=f"b/{d.file_path}",
+                            n=ctx_n,
+                        )
+                    )
+                    changed_symbols = [
+                        str(s.get("qualified_name"))
+                        for s in d.symbols_json
+                        if isinstance(s, dict) and s.get("qualified_name")
+                    ]
+                    deltas_out.append(
+                        {
+                            "delta_id": str(d.delta_id),
+                            "file_path": d.file_path,
+                            "previous_file_path": d.previous_file_path,
+                            "change_type": d.change_type,
+                            "language": d.language,
+                            "base_blob_sha": d.base_blob_sha,
+                            "overlay_blob_sha": d.overlay_blob_sha,
+                            "line_count": d.line_count,
+                            "changed_symbols": changed_symbols,
+                            "unified_diff": diff_text,
+                        }
+                    )
+
+            return bound_payload_dict(
+                {
+                    "found": True,
+                    "domain_id": default_domain_id,
+                    "snapshot_id": str(snap.snapshot_id),
+                    "repo_name": snap.repo_name,
+                    "ref_name": snap.ref_name,
+                    "ref_kind": snap.ref_kind,
+                    "mr_iid": snap.mr_iid,
+                    "base_commit_sha": snap.base_commit_sha,
+                    "head_commit_sha": snap.head_commit_sha,
+                    "count": len(deltas_out),
+                    "deltas": deltas_out,
+                }
+            )
+
+        return await anyio.to_thread.run_sync(_sync)
 
     # -------------------------------------------------------------------------
     # Canonical Tool 9: slice_branch_or_mr_file (M5-02 CoW Overlay File Slicer)
@@ -831,79 +876,85 @@ def create_code_repo_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Resolves effective CoW overlay file and slices exact line range."""
-        validate_tool_call_arguments(
-            {
-                "repo_name": repo_name,
-                "file_path": file_path,
-                "start_line": start_line,
-                "end_line": end_line,
-                "mr_iid": mr_iid,
-                "ref_name": ref_name,
-            }
-        )
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            default_domain_id, "code_repo_mcp:slice_branch_or_mr_file", principal
-        )
-        clean_repo = repo_name.strip()
-        clean_fp = _validate_clean_file_path(file_path)
-        clean_ref = ref_name.strip() if ref_name and ref_name.strip() else None
-        if mr_iid is None and clean_ref is None:
-            raise ValueError("Specify either mr_iid or ref_name to slice branch/MR file.")
-        requested_count = end_line - start_line + 1
-        if requested_count > MAX_SLICE_LINES:
-            raise ValueError(
-                f"Requested slice of {requested_count} lines exceeds "
-                f"maximum allowed {MAX_SLICE_LINES} lines"
-            )
 
-        pg_repo = PostgresRLSRepository()
-        with scoped_db_session(conn_mgr, principal) as conn:
-            snap = pg_repo.get_ref_snapshot(
-                conn,
-                default_domain_id,
-                repo_name=clean_repo,
-                ref_name=clean_ref,
-                mr_iid=str(mr_iid) if mr_iid is not None else None,
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments(
+                {
+                    "repo_name": repo_name,
+                    "file_path": file_path,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "mr_iid": mr_iid,
+                    "ref_name": ref_name,
+                }
             )
-            if snap is None:
-                raise FileNotFoundError(
-                    f"Branch/MR snapshot not found in repo '{clean_repo}' under active RLS scopes."
-                )
-            resolved = pg_repo.get_overlay_file(conn, default_domain_id, snap.snapshot_id, clean_fp)
-            if resolved is None:
-                raise FileNotFoundError(
-                    f"File '{clean_fp}' not found on snapshot '{snap.ref_name}' under RLS."
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                default_domain_id, "code_repo_mcp:slice_branch_or_mr_file", principal
+            )
+            clean_repo = repo_name.strip()
+            clean_fp = _validate_clean_file_path(file_path)
+            clean_ref = ref_name.strip() if ref_name and ref_name.strip() else None
+            if mr_iid is None and clean_ref is None:
+                raise ValueError("Specify either mr_iid or ref_name to slice branch/MR file.")
+            requested_count = end_line - start_line + 1
+            if requested_count > MAX_SLICE_LINES:
+                raise ValueError(
+                    f"Requested slice of {requested_count} lines exceeds "
+                    f"maximum allowed {MAX_SLICE_LINES} lines"
                 )
 
-        try:
-            slicer.validate_bounds(start_line, end_line, resolved.line_count)
-        except (InvalidLineBoundsError, OffByOneBoundsError) as err:
-            raise ValueError(f"Invalid line bounds [{start_line}, {end_line}]: {err}") from err
+            pg_repo = PostgresRLSRepository()
+            with scoped_db_session(conn_mgr, principal) as conn:
+                snap = pg_repo.get_ref_snapshot(
+                    conn,
+                    default_domain_id,
+                    repo_name=clean_repo,
+                    ref_name=clean_ref,
+                    mr_iid=str(mr_iid) if mr_iid is not None else None,
+                )
+                if snap is None:
+                    raise FileNotFoundError(
+                        f"Branch/MR snapshot not found in repo '{clean_repo}' under RLS scopes."
+                    )
+                resolved = pg_repo.get_overlay_file(
+                    conn, default_domain_id, snap.snapshot_id, clean_fp
+                )
+                if resolved is None:
+                    raise FileNotFoundError(
+                        f"File '{clean_fp}' not found on snapshot '{snap.ref_name}' under RLS."
+                    )
 
-        sliced_content = slicer.slice_lines(resolved.raw_content, start_line, end_line)
-        lines_data: list[dict[str, Any]] = [
-            {"line_number": ln, "content": txt}
-            for ln, txt in zip(
-                range(start_line, end_line + 1), sliced_content.splitlines(), strict=False
+            try:
+                slicer.validate_bounds(start_line, end_line, resolved.line_count)
+            except (InvalidLineBoundsError, OffByOneBoundsError) as err:
+                raise ValueError(f"Invalid line bounds [{start_line}, {end_line}]: {err}") from err
+
+            sliced_content = slicer.slice_lines(resolved.raw_content, start_line, end_line)
+            lines_data: list[dict[str, Any]] = [
+                {"line_number": ln, "content": txt}
+                for ln, txt in zip(
+                    range(start_line, end_line + 1), sliced_content.splitlines(), strict=False
+                )
+            ]
+            return bound_payload_dict(
+                {
+                    "file_path": resolved.file_path,
+                    "repo_name": resolved.repo_name,
+                    "ref_name": snap.ref_name,
+                    "mr_iid": snap.mr_iid,
+                    "source_layer": resolved.source_layer,
+                    "git_commit_sha": resolved.git_commit_sha,
+                    "git_blob_sha": resolved.git_blob_sha,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "total_file_lines": resolved.line_count,
+                    "slice_line_count": len(lines_data),
+                    "lines": lines_data,
+                }
             )
-        ]
-        return bound_payload_dict(
-            {
-                "file_path": resolved.file_path,
-                "repo_name": resolved.repo_name,
-                "ref_name": snap.ref_name,
-                "mr_iid": snap.mr_iid,
-                "source_layer": resolved.source_layer,
-                "git_commit_sha": resolved.git_commit_sha,
-                "git_blob_sha": resolved.git_blob_sha,
-                "start_line": start_line,
-                "end_line": end_line,
-                "total_file_lines": resolved.line_count,
-                "slice_line_count": len(lines_data),
-                "lines": lines_data,
-            }
-        )
+
+        return await anyio.to_thread.run_sync(_sync)
 
     # -------------------------------------------------------------------------
     # Legacy Tool Aliases (for backward compatibility)
@@ -979,8 +1030,9 @@ def create_code_repo_mcp_http_app(
     require_auth: bool = True,
 ) -> ASGIApp:
     """Builds a stateless MCP 2026-07-28 Streamable HTTP ASGI app for code_repo_mcp."""
+    st = settings or ScoutSettings()
     server = create_code_repo_mcp_server(
-        settings=settings,
+        settings=st,
         connection_manager=connection_manager,
         domain_id=domain_id,
     )
@@ -990,6 +1042,7 @@ def create_code_repo_mcp_http_app(
         json_response=True,
         allowed_hosts=allowed_hosts,
         require_auth=require_auth,
+        settings=st,
     )
 
 

@@ -165,6 +165,8 @@ class AirGappedBundleImporter:
         scrubber: PreIndexScrubber | None = None,
         max_files: int = 5000,
         max_total_bytes: int = 250_000_000,
+        max_total_uncompressed_bytes: int | None = None,
+        max_member_bytes: int = 100_000_000,
     ) -> None:
         self.repository: Any = repository or InMemoryRLSRepository()
         self.connection_manager = connection_manager
@@ -173,7 +175,13 @@ class AirGappedBundleImporter:
         self.doc_extractor = doc_extractor or get_doc_extractor()
         self.scrubber = scrubber or PreIndexScrubber()
         self.max_files = max(1, max_files)
-        self.max_total_bytes = max(1024, max_total_bytes)
+        effective_max_bytes = (
+            max_total_uncompressed_bytes
+            if max_total_uncompressed_bytes is not None
+            else max_total_bytes
+        )
+        self.max_total_bytes = max(1024, effective_max_bytes)
+        self.max_member_bytes = max(1024, min(max_member_bytes, self.max_total_bytes))
 
     def _read_bundle_payloads(self, bundle_path: Path) -> dict[str, bytes]:
         if not bundle_path.exists():
@@ -225,29 +233,45 @@ class AirGappedBundleImporter:
                         raise BundleSecurityError(
                             f"Symlink/hardlink entry rejected in bundle archive: {member.name!r}"
                         )
+                    if not (member.isreg() or member.isdir()):
+                        raise BundleSecurityError(
+                            f"Non-regular file entry rejected in bundle archive: {member.name!r}"
+                        )
                     if member.isdir():
                         _normalize_bundle_relpath(
                             member.name.rstrip("/") or "."
                         ) if member.name not in (".", "./") else None
                         continue
-                    if not member.isreg():
+                    try:
+                        filtered = tarfile.data_filter(member, "/bundle")
+                    except tarfile.FilterError as exc:
                         raise BundleSecurityError(
-                            f"Non-regular file entry rejected in bundle archive: {member.name!r}"
-                        )
-                    norm_rel = _normalize_bundle_relpath(member.name)
+                            f"Tar data_filter rejected archive member {member.name!r}: {exc}"
+                        ) from exc
+                    norm_rel = _normalize_bundle_relpath(filtered.name)
                     file_count += 1
                     if file_count > self.max_files:
                         raise BundleSecurityError(
                             f"Bundle archive exceeds max_files limit ({self.max_files})"
                         )
-                    if member.size < 0 or total_bytes + member.size > self.max_total_bytes:
+                    if (
+                        filtered.size < 0
+                        or filtered.size > self.max_member_bytes
+                        or total_bytes + filtered.size > self.max_total_bytes
+                    ):
                         raise BundleSecurityError(
-                            f"Bundle archive exceeds max_total_bytes limit ({self.max_total_bytes})"
+                            f"Bundle archive exceeds byte limit ({self.max_total_bytes})"
                         )
-                    extracted = tf.extractfile(member)
+                    extracted = tf.extractfile(filtered)
                     if extracted is None:
                         raise BundleIntegrityError(f"Failed reading archive member '{member.name}'")
-                    raw = extracted.read(self.max_total_bytes + 1)
+                    read_cap = min(self.max_member_bytes, self.max_total_bytes - total_bytes)
+                    raw = extracted.read(read_cap + 1)
+                    if len(raw) > self.max_member_bytes:
+                        raise BundleSecurityError(
+                            f"Bundle archive member '{norm_rel}' exceeds "
+                            f"max_member_bytes ({self.max_member_bytes})"
+                        )
                     total_bytes += len(raw)
                     if total_bytes > self.max_total_bytes:
                         raise BundleSecurityError(

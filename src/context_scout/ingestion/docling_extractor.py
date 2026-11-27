@@ -835,9 +835,14 @@ class NativeStructuredDocExtractor:
         )
 
     def _extract_html(self, raw_bytes: bytes, *, filename: str) -> ExtractedDocument:
+        from context_scout.ingestion.doc_parser import assert_safe_xml_sgml_declarations
+
         raw_html = raw_bytes.decode("utf-8", errors="replace").replace("\x00", "")
-        if "<!DOCTYPE" in raw_html.upper() and "<!ENTITY" in raw_html.upper():
-            raise UnsafeDocumentError("Blocked HTML/XHTML document containing <!ENTITY>.")
+        is_xml = filename.lower().endswith((".xml", ".xhtml", ".svg"))
+        try:
+            assert_safe_xml_sgml_declarations(raw_html, strict_xml=is_xml)
+        except ValueError as exc:
+            raise UnsafeDocumentError(str(exc)) from exc
         md_text, tables = html_to_structured_markdown(raw_html)
         plain = html_mod.unescape(md_text)
         return ExtractedDocument(

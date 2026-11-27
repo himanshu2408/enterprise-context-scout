@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import anyio
 from mcp.server._otel import OpenTelemetryMiddleware
 from mcp.server.mcpserver import Context, MCPServer
 from starlette.types import ASGIApp
@@ -54,19 +55,19 @@ def create_doc_corpus_mcp_server(
     effective_repo = repo
     if effective_repo is None:
         try:
-            from context_scout.db.session import RLSConnectionManager, get_query_pool
+            from context_scout.db.session import get_query_pool
             from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
             from context_scout.schemas.contracts import PrincipalContext, RoleType
 
-            probe_mgr = RLSConnectionManager(st.db_app_url, use_pool=False, connect_timeout_s=1)
+            pool_mgr = get_query_pool(st)
             probe = PrincipalContext(
                 user_id="doc_mcp_probe",
                 role=RoleType.ENGINEER,
                 allowed_scopes=["public"],
             )
-            with probe_mgr.scoped_transaction(probe, enable_hnsw_iterative_scan=False) as conn:
+            with pool_mgr.scoped_transaction(probe, enable_hnsw_iterative_scan=False) as conn:
                 conn.execute("SELECT 1;")
-            effective_repo = PostgresScoutGraphAdapter(get_query_pool(), st)
+            effective_repo = PostgresScoutGraphAdapter(pool_mgr, st)
         except Exception as exc:
             logger.debug(
                 "Falling back to InMemoryRLSRepository in doc_corpus_mcp (%s): %s",
@@ -96,58 +97,64 @@ def create_doc_corpus_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Executes hybrid RRF search across visible doc_chunks for the given domain_id."""
-        validate_tool_call_arguments({"domain_id": domain_id, "query": query, "top_k": top_k})
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:search_hybrid_rrf", principal)
-        if is_pg_repo:
-            sync_custom_domain_corpus_if_needed(domain_id, require_manifest=True)
 
-        clamped_k = min(max(1, top_k), MAX_PAYLOAD_ITEMS)
-        if hasattr(bound_repo, "search_hybrid_rrf_doc_chunks"):
-            chunks, cal_hits = bound_repo.search_hybrid_rrf_doc_chunks(
-                principal,
-                domain_id,
-                query,
-                top_k=clamped_k,
-            )
-        else:
-            chunks, cal_hits = bound_repo.search_visible_doc_chunks_calibrated(
-                principal,
-                domain_id,
-                query,
-                limit=clamped_k,
-            )
-        hit_by_id = {str(h.item_id): h for h in cal_hits}
-        hits = []
-        for c in chunks[:clamped_k]:
-            cal_h = hit_by_id.get(str(c.chunk_id))
-            hits.append(
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments({"domain_id": domain_id, "query": query, "top_k": top_k})
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:search_hybrid_rrf", principal)
+            if is_pg_repo:
+                sync_custom_domain_corpus_if_needed(domain_id, require_manifest=True)
+
+            clamped_k = min(max(1, top_k), MAX_PAYLOAD_ITEMS)
+            if hasattr(bound_repo, "search_hybrid_rrf_doc_chunks"):
+                chunks, cal_hits = bound_repo.search_hybrid_rrf_doc_chunks(
+                    principal,
+                    domain_id,
+                    query,
+                    top_k=clamped_k,
+                )
+            else:
+                chunks, cal_hits = bound_repo.search_visible_doc_chunks_calibrated(
+                    principal,
+                    domain_id,
+                    query,
+                    limit=clamped_k,
+                )
+            hit_by_id = {str(h.item_id): h for h in cal_hits}
+            hits = []
+            for c in chunks[:clamped_k]:
+                if getattr(c, "is_stale", False):
+                    continue
+                cal_h = hit_by_id.get(str(c.chunk_id))
+                hits.append(
+                    {
+                        "chunk_id": str(c.chunk_id),
+                        "doc_id": c.doc_id,
+                        "doc_title": c.doc_title,
+                        "source_uri": c.source_uri,
+                        "section_heading": c.section_heading,
+                        "contextual_header": c.contextual_header,
+                        "verbatim_content": c.verbatim_content,
+                        "authority_weight": c.authority_weight,
+                        "source_type": c.source_type,
+                        "metadata_json": c.metadata_json,
+                        "rrf_score": cal_h.normalized_rrf_score if cal_h is not None else 0.0,
+                        "calibrated_score": cal_h.calibrated_score if cal_h is not None else 0.0,
+                        "trigram_rank": cal_h.trigram_rank if cal_h is not None else None,
+                        "bm25_rank": cal_h.bm25_rank if cal_h is not None else None,
+                        "vector_rank": cal_h.vector_rank if cal_h is not None else None,
+                    }
+                )
+            return bound_payload_dict(
                 {
-                    "chunk_id": str(c.chunk_id),
-                    "doc_id": c.doc_id,
-                    "doc_title": c.doc_title,
-                    "source_uri": c.source_uri,
-                    "section_heading": c.section_heading,
-                    "contextual_header": c.contextual_header,
-                    "verbatim_content": c.verbatim_content,
-                    "authority_weight": c.authority_weight,
-                    "source_type": c.source_type,
-                    "metadata_json": c.metadata_json,
-                    "rrf_score": cal_h.normalized_rrf_score if cal_h is not None else 0.0,
-                    "calibrated_score": cal_h.calibrated_score if cal_h is not None else 0.0,
-                    "trigram_rank": cal_h.trigram_rank if cal_h is not None else None,
-                    "bm25_rank": cal_h.bm25_rank if cal_h is not None else None,
-                    "vector_rank": cal_h.vector_rank if cal_h is not None else None,
+                    "domain_id": domain_id,
+                    "query": query,
+                    "count": len(hits),
+                    "hits": hits,
                 }
             )
-        return bound_payload_dict(
-            {
-                "domain_id": domain_id,
-                "query": query,
-                "count": len(hits),
-                "hits": hits,
-            }
-        )
+
+        return await anyio.to_thread.run_sync(_sync)
 
     @server.tool(
         name="verify_citation_quote",
@@ -163,62 +170,80 @@ def create_doc_corpus_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Deterministically verifies that verbatim_quote exists in chunk_id."""
-        validate_tool_call_arguments(
-            {
-                "domain_id": domain_id,
-                "chunk_id": chunk_id,
-                "verbatim_quote": verbatim_quote,
-            }
-        )
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:verify_citation_quote", principal)
-        if is_pg_repo:
-            sync_custom_domain_corpus_if_needed(domain_id, require_manifest=True)
 
-        target_chunk = None
-        if hasattr(bound_repo, "get_doc_chunks_by_ids"):
-            direct = bound_repo.get_doc_chunks_by_ids(principal, domain_id, [chunk_id])
-            if direct:
-                target_chunk = direct[0]
-        if target_chunk is None:
-            visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
-            target_chunk = next(
-                (c for c in visible_chunks if str(c.chunk_id) == chunk_id or c.doc_id == chunk_id),
-                None,
-            )
-        if target_chunk is None:
-            return bound_payload_dict(
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments(
                 {
                     "domain_id": domain_id,
                     "chunk_id": chunk_id,
-                    "verified": False,
-                    "is_valid": False,
-                    "overlap_ratio": 0.0,
-                    "reason": f"Chunk '{chunk_id}' not found or not visible to principal.",
+                    "verbatim_quote": verbatim_quote,
+                }
+            )
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                domain_id, "doc_corpus_mcp:verify_citation_quote", principal
+            )
+            if is_pg_repo:
+                sync_custom_domain_corpus_if_needed(domain_id, require_manifest=True)
+
+            target_chunk = None
+            if hasattr(bound_repo, "get_doc_chunks_by_ids"):
+                direct = [
+                    c
+                    for c in bound_repo.get_doc_chunks_by_ids(principal, domain_id, [chunk_id])
+                    if not getattr(c, "is_stale", False)
+                ]
+                if direct:
+                    target_chunk = direct[0]
+            if target_chunk is None:
+                visible_chunks = [
+                    c
+                    for c in bound_repo.list_visible_doc_chunks(principal, domain_id)
+                    if not getattr(c, "is_stale", False)
+                ]
+                target_chunk = next(
+                    (
+                        c
+                        for c in visible_chunks
+                        if str(c.chunk_id) == chunk_id or c.doc_id == chunk_id
+                    ),
+                    None,
+                )
+            if target_chunk is None:
+                return bound_payload_dict(
+                    {
+                        "domain_id": domain_id,
+                        "chunk_id": chunk_id,
+                        "verified": False,
+                        "is_valid": False,
+                        "overlap_ratio": 0.0,
+                        "reason": f"Chunk '{chunk_id}' not found or not visible to principal.",
+                    }
+                )
+
+            cit = DocCitationSpan(
+                chunk_id=str(target_chunk.chunk_id),
+                doc_id=target_chunk.doc_id,
+                doc_title=target_chunk.doc_title,
+                source_uri=target_chunk.source_uri,
+                section_heading=target_chunk.section_heading,
+                verbatim_quote=verbatim_quote,
+            )
+            verif = slicer.verify_doc_citation(cit, target_chunk.verbatim_content)
+            return bound_payload_dict(
+                {
+                    "domain_id": domain_id,
+                    "chunk_id": str(target_chunk.chunk_id),
+                    "doc_id": target_chunk.doc_id,
+                    "doc_title": target_chunk.doc_title,
+                    "verified": verif.is_valid,
+                    "is_valid": verif.is_valid,
+                    "matched_source_segment": verif.matched_source_segment,
+                    "token_overlap_ratio": verif.token_overlap_ratio,
                 }
             )
 
-        cit = DocCitationSpan(
-            chunk_id=str(target_chunk.chunk_id),
-            doc_id=target_chunk.doc_id,
-            doc_title=target_chunk.doc_title,
-            source_uri=target_chunk.source_uri,
-            section_heading=target_chunk.section_heading,
-            verbatim_quote=verbatim_quote,
-        )
-        verif = slicer.verify_doc_citation(cit, target_chunk.verbatim_content)
-        return bound_payload_dict(
-            {
-                "domain_id": domain_id,
-                "chunk_id": str(target_chunk.chunk_id),
-                "doc_id": target_chunk.doc_id,
-                "doc_title": target_chunk.doc_title,
-                "verified": verif.is_valid,
-                "is_valid": verif.is_valid,
-                "matched_source_segment": verif.matched_source_segment,
-                "token_overlap_ratio": verif.token_overlap_ratio,
-            }
-        )
+        return await anyio.to_thread.run_sync(_sync)
 
     @server.tool(
         name="get_document_section",
@@ -231,49 +256,59 @@ def create_doc_corpus_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Returns matching sections for doc_id under Forced RLS."""
-        validate_tool_call_arguments(
-            {"domain_id": domain_id, "doc_id": doc_id, "section_query": section_query}
-        )
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(domain_id, "doc_corpus_mcp:get_document_section", principal)
-        if is_pg_repo:
-            sync_custom_domain_corpus_if_needed(domain_id, require_manifest=True)
 
-        visible_chunks = bound_repo.list_visible_doc_chunks(principal, domain_id)
-        matching = [
-            c
-            for c in visible_chunks
-            if c.doc_id == doc_id or str(c.chunk_id) == doc_id or doc_id in c.doc_title
-        ]
-        if section_query:
-            sq_l = section_query.lower()
-            filtered = [
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments(
+                {"domain_id": domain_id, "doc_id": doc_id, "section_query": section_query}
+            )
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                domain_id, "doc_corpus_mcp:get_document_section", principal
+            )
+            if is_pg_repo:
+                sync_custom_domain_corpus_if_needed(domain_id, require_manifest=True)
+
+            visible_chunks = [
                 c
-                for c in matching
-                if sq_l in c.section_heading.lower() or sq_l in c.verbatim_content.lower()
+                for c in bound_repo.list_visible_doc_chunks(principal, domain_id)
+                if not getattr(c, "is_stale", False)
             ]
-            if filtered:
-                matching = filtered
+            matching = [
+                c
+                for c in visible_chunks
+                if c.doc_id == doc_id or str(c.chunk_id) == doc_id or doc_id in c.doc_title
+            ]
+            if section_query:
+                sq_l = section_query.lower()
+                filtered = [
+                    c
+                    for c in matching
+                    if sq_l in c.section_heading.lower() or sq_l in c.verbatim_content.lower()
+                ]
+                if filtered:
+                    matching = filtered
 
-        items = [
-            {
-                "chunk_id": str(c.chunk_id),
-                "doc_id": c.doc_id,
-                "doc_title": c.doc_title,
-                "source_uri": c.source_uri,
-                "section_heading": c.section_heading,
-                "verbatim_content": c.verbatim_content,
-            }
-            for c in matching[:MAX_PAYLOAD_ITEMS]
-        ]
-        return bound_payload_dict(
-            {
-                "domain_id": domain_id,
-                "doc_id": doc_id,
-                "count": len(items),
-                "items": items,
-            }
-        )
+            items = [
+                {
+                    "chunk_id": str(c.chunk_id),
+                    "doc_id": c.doc_id,
+                    "doc_title": c.doc_title,
+                    "source_uri": c.source_uri,
+                    "section_heading": c.section_heading,
+                    "verbatim_content": c.verbatim_content,
+                }
+                for c in matching[:MAX_PAYLOAD_ITEMS]
+            ]
+            return bound_payload_dict(
+                {
+                    "domain_id": domain_id,
+                    "doc_id": doc_id,
+                    "count": len(items),
+                    "items": items,
+                }
+            )
+
+        return await anyio.to_thread.run_sync(_sync)
 
     orig_call_tool = server.call_tool
 
@@ -303,10 +338,11 @@ def create_doc_corpus_mcp_http_app(
     require_auth: bool = True,
 ) -> ASGIApp:
     """Builds a stateless MCP 2026-07-28 Streamable HTTP ASGI app for doc_corpus_mcp."""
+    st = settings or ScoutSettings()
     server = create_doc_corpus_mcp_server(
         domains_dir=domains_dir,
         repo=repo,
-        settings=settings,
+        settings=st,
     )
     return create_stateless_mcp_http_app(
         server,
@@ -314,6 +350,7 @@ def create_doc_corpus_mcp_http_app(
         json_response=True,
         allowed_hosts=allowed_hosts,
         require_auth=require_auth,
+        settings=st,
     )
 
 

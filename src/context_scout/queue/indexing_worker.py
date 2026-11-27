@@ -97,11 +97,13 @@ class IndexingWorker:
         self._stop_event = threading.Event()
         self._current_task_id: UUID | None = None
         self._handlers: dict[str, Callable[[QueueTask], None]] = {}
+        self._custom_event_types: set[str] = set()
         self._register_default_handlers()
 
     def register_handler(self, event_type: str, handler: Callable[[QueueTask], None]) -> None:
         """Registers or overrides an event dispatcher handler."""
         self._handlers[event_type] = handler
+        self._custom_event_types.add(event_type)
 
     def stop(self) -> None:
         """Signals the worker loop to stop gracefully after completing current in-flight task."""
@@ -130,14 +132,32 @@ class IndexingWorker:
                 exc,
             )
 
+    def _assert_configured(self, event_type: str | None = None) -> None:
+        if event_type is not None and event_type in self._custom_event_types:
+            return
+        if event_type == "purge_artifact" and self.artifact_purger is not None:
+            return
+        if (
+            self.sync_coordinator is None
+            and self.repository is None
+            and self.connection_manager is None
+        ):
+            raise RuntimeError(
+                "IndexingWorker requires a configured repository, connection_manager, "
+                "or sync_coordinator before run_once() can process tasks."
+            )
+
     def run_once(self) -> bool:
         """Attempts to claim and execute a single task. Returns True if task processed."""
+        if not self._custom_event_types and self.artifact_purger is None:
+            self._assert_configured()
         task: QueueTask | None = None
         try:
             task = self.task_queue.fetch_next_task(self.worker_id)
             if not task:
                 return False
 
+            self._assert_configured(task.event_type)
             self._current_task_id = task.task_id
             logger.info(
                 "Worker %s claimed task %s [%s] (attempt %d/%d)",
@@ -246,12 +266,18 @@ class IndexingWorker:
             if isinstance(raw_scopes, Sequence) and not isinstance(raw_scopes, (str, bytes))
             else list(self._default_allowed_scopes)
         )
-        return PrincipalContext(
+        principal = PrincipalContext(
             user_id=f"worker:{self.worker_id}",
             role=RoleType.ENGINEER,
             allowed_scopes=scopes or ["public"],
             tenant_id=task.tenant_id,
         )
+        if principal.tenant_id != task.tenant_id:
+            raise ValueError(
+                f"Worker principal tenant_id {principal.tenant_id} != "
+                f"task tenant_id {task.tenant_id}"
+            )
+        return principal
 
     def _is_pg_repo(self) -> bool:
         return self.connection_manager is not None or (
@@ -315,13 +341,10 @@ class IndexingWorker:
             "gitlab",
             container_key=repo_name or "*",
         )
-        if self.sync_coordinator is None or self.sync_coordinator.get_connector("gitlab") is None:
-            logger.info(
-                "Validated queued gitlab_push event %s (standalone queue mode): %s",
-                task.task_id,
-                repo_name or project_obj,
-            )
-            return
+        if self.sync_coordinator is None:
+            raise RuntimeError("gitlab_push task requires configured repository/sync_coordinator")
+        if self.sync_coordinator.get_connector("gitlab") is None:
+            raise RuntimeError("gitlab_push task requires registered 'gitlab' connector")
 
         principal = self._principal_for_task(task)
         commit_sha = str(task.payload.get("after") or task.payload.get("after_sha") or "HEAD")
@@ -356,9 +379,10 @@ class IndexingWorker:
             "gitlab",
             container_key=repo_name or "*",
         )
-        if self.sync_coordinator is None or self.sync_coordinator.get_connector("gitlab") is None:
-            logger.info("Validated queued gitlab_mr event %s: %s", task.task_id, repo_name)
-            return
+        if self.sync_coordinator is None:
+            raise RuntimeError("gitlab_mr task requires configured repository/sync_coordinator")
+        if self.sync_coordinator.get_connector("gitlab") is None:
+            raise RuntimeError("gitlab_mr task requires registered 'gitlab' connector")
         principal = self._principal_for_task(task)
         self._run_with_tx(
             principal,
@@ -379,13 +403,10 @@ class IndexingWorker:
             "github",
             container_key=repo_name or "*",
         )
-        if self.sync_coordinator is None or self.sync_coordinator.get_connector("github") is None:
-            logger.info(
-                "Validated queued github_push event %s (standalone queue mode): %s",
-                task.task_id,
-                repo_name or repo_obj,
-            )
-            return
+        if self.sync_coordinator is None:
+            raise RuntimeError("github_push task requires configured repository/sync_coordinator")
+        if self.sync_coordinator.get_connector("github") is None:
+            raise RuntimeError("github_push task requires registered 'github' connector")
 
         principal = self._principal_for_task(task)
         commit_sha = str(task.payload.get("after") or "HEAD")
@@ -420,9 +441,10 @@ class IndexingWorker:
             "github",
             container_key=repo_name or "*",
         )
-        if self.sync_coordinator is None or self.sync_coordinator.get_connector("github") is None:
-            logger.info("Validated queued github_pr event %s: %s", task.task_id, repo_name)
-            return
+        if self.sync_coordinator is None:
+            raise RuntimeError("github_pr task requires configured repository/sync_coordinator")
+        if self.sync_coordinator.get_connector("github") is None:
+            raise RuntimeError("github_pr task requires registered 'github' connector")
         principal = self._principal_for_task(task)
         self._run_with_tx(
             principal,
@@ -440,12 +462,9 @@ class IndexingWorker:
             container_key=space_key,
         )
         if self.sync_coordinator is None:
-            logger.info(
-                "Validated queued confluence_update event %s: page=%s",
-                task.task_id,
-                page_id,
+            raise RuntimeError(
+                "confluence_update task requires configured repository/sync_coordinator"
             )
-            return
 
         principal = self._principal_for_task(task)
         connector = self.sync_coordinator.get_connector("confluence")
@@ -520,12 +539,7 @@ class IndexingWorker:
             container_key=project_key,
         )
         if self.sync_coordinator is None:
-            logger.info(
-                "Validated queued jira_update event %s: issue=%s",
-                task.task_id,
-                issue_key,
-            )
-            return
+            raise RuntimeError("jira_update task requires configured repository/sync_coordinator")
 
         principal = self._principal_for_task(task)
         connector = self.sync_coordinator.get_connector("jira")
@@ -634,12 +648,9 @@ class IndexingWorker:
 
     def _handle_cross_repo_relink(self, task: QueueTask) -> None:
         if self.sync_coordinator is None:
-            logger.info(
-                "Executing cross_repo_relink handler for task %s, domain: %s",
-                task.task_id,
-                task.domain_id,
+            raise RuntimeError(
+                "cross_repo_relink task requires configured repository/sync_coordinator"
             )
-            return
         principal = self._principal_for_task(task)
         repo_name = str(task.payload.get("repo_name") or "")
         commit_sha = str(task.payload.get("commit_sha") or "HEAD")
@@ -702,12 +713,28 @@ class IndexingWorker:
     def _resolve_artifact_purger(self) -> Any:
         if self.artifact_purger is not None:
             return self.artifact_purger
+        from context_scout.config import ScoutSettings
         from context_scout.ops.artifact_purger import ArtifactPurgeCoordinator
+
+        resolved_zoekt = self.zoekt_index
+        if resolved_zoekt is None:
+            settings = ScoutSettings()
+            zoekt_ep = (settings.zoekt_endpoint or "").strip()
+            if zoekt_ep:
+                from context_scout.retrieval.zoekt_client import ZoektGrpcJsonClient
+
+                resolved_zoekt = ZoektGrpcJsonClient(
+                    zoekt_ep,
+                    protocol=settings.zoekt_protocol,
+                    timeout_seconds=settings.zoekt_timeout_seconds,
+                    repository=self.repository,
+                    connection_manager=self.connection_manager,
+                )
 
         return ArtifactPurgeCoordinator(
             repository=self.repository,
             connection_manager=self.connection_manager,
-            zoekt_index=self.zoekt_index,
+            zoekt_index=resolved_zoekt,
             object_store=self.object_store,
         )
 

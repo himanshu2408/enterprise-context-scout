@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
+from collections.abc import Iterator
 from typing import ClassVar
 
 from context_scout.plugins.base import DomainPlugin, LanguagePlugin, SourceConnectorPlugin
@@ -22,6 +24,7 @@ class PluginRegistry:
     _domain_plugins: ClassVar[dict[str, DomainPlugin]] = {}
     _unregistered_languages: ClassVar[set[str]] = set()
     _initialized: ClassVar[bool] = False
+    _suppress_auto_init: ClassVar[bool] = False
 
     @classmethod
     def register_language(cls, plugin: LanguagePlugin, priority: int = 100) -> None:
@@ -30,6 +33,8 @@ class PluginRegistry:
         Lower priority numbers indicate higher precedence during dispatch (e.g. 10 before 100).
         """
         with cls._lock:
+            if not cls._initialized and not cls._suppress_auto_init:
+                cls._ensure_initialized()
             lang_key = plugin.language_id.lower()
             cls._unregistered_languages.discard(lang_key)
             cls._language_plugins[lang_key] = plugin
@@ -192,12 +197,58 @@ class PluginRegistry:
             cls._initialized = False
 
     @classmethod
-    def _ensure_initialized(cls) -> None:
-        if not cls._initialized:
+    @contextlib.contextmanager
+    def temporary_registry(cls, *, include_builtins: bool = False) -> Iterator[None]:
+        """Context manager isolating test mutations and restoring registry state cleanly."""
+        with cls._lock:
+            if not cls._initialized and not cls._suppress_auto_init:
+                cls._ensure_initialized()
+            prev_langs = dict(cls._language_plugins)
+            prev_spec = list(cls._specialized_plugins)
+            prev_ext = dict(cls._extension_map)
+            prev_conn = dict(cls._connector_plugins)
+            prev_dom = dict(cls._domain_plugins)
+            prev_unreg = set(cls._unregistered_languages)
+            prev_init = cls._initialized
+            prev_suppress = cls._suppress_auto_init
+            if not include_builtins:
+                cls._language_plugins.clear()
+                cls._specialized_plugins.clear()
+                cls._extension_map.clear()
+                cls._connector_plugins.clear()
+                cls._domain_plugins.clear()
+                cls._unregistered_languages.clear()
+                cls._initialized = True
+                cls._suppress_auto_init = True
+        try:
+            yield
+        finally:
             with cls._lock:
-                if not cls._initialized:
-                    cls._initialized = True
+                cls._language_plugins = prev_langs
+                cls._specialized_plugins = prev_spec
+                cls._extension_map = prev_ext
+                cls._connector_plugins = prev_conn
+                cls._domain_plugins = prev_dom
+                cls._unregistered_languages = prev_unreg
+                cls._initialized = prev_init
+                cls._suppress_auto_init = prev_suppress
+
+    @classmethod
+    def _ensure_initialized(cls) -> None:
+        with cls._lock:
+            needs_reload = not cls._initialized or (
+                not cls._suppress_auto_init
+                and not cls._language_plugins
+                and not cls._unregistered_languages
+            )
+            if needs_reload:
+                cls._initialized = True
+                prev_suppress = cls._suppress_auto_init
+                cls._suppress_auto_init = True
+                try:
                     cls._load_builtin_plugins()
+                finally:
+                    cls._suppress_auto_init = prev_suppress
 
     @classmethod
     def _load_builtin_plugins(cls) -> None:

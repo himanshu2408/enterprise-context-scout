@@ -25,6 +25,7 @@ verification, median/IQR statistics, and an explicit failure taxonomy of honest 
 
 from __future__ import annotations
 
+import argparse
 import datetime
 import gc
 import logging
@@ -41,7 +42,10 @@ from typing import Any, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from context_scout.agents.domain_registry import DomainRegistry
-from context_scout.agents.gemini_executor import GeminiImplementationExecutor
+from context_scout.agents.gemini_executor import (
+    SANDBOX_ENV_ALLOWLIST,
+    GeminiImplementationExecutor,
+)
 from context_scout.agents.scout_workflow import LocalGemmaClient, ScoutWorkflow
 from context_scout.config import ScoutSettings
 from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
@@ -505,6 +509,7 @@ class UnseenRepoABBenchmarkRunner:
         prefer_gemini_api: bool = True,
         verify_postgres_rls: bool = True,
         run_live_frozen_qlora: bool = True,
+        allow_host_pytest: bool = False,
     ) -> None:
         self.repos_base_dir = repos_base_dir
         self.repo_root = repo_root
@@ -512,6 +517,7 @@ class UnseenRepoABBenchmarkRunner:
         self.backend = SharedExecutionBackend(prefer_gemini_api=prefer_gemini_api)
         self.verify_postgres_rls = verify_postgres_rls
         self.run_live_frozen_qlora = run_live_frozen_qlora
+        self.allow_host_pytest = allow_host_pytest
         self.indexer = GitMerkleIndexer()
         self.registry = DomainRegistry(domains_dir=self.repo_root / "domains")
         self.registry.load_all()
@@ -1048,6 +1054,12 @@ class UnseenRepoABBenchmarkRunner:
         arm_result: ArmExecutionResult,
     ) -> tuple[bool, str]:
         """Verify LLM-generated patch on parent_commit_sha in an isolated Git worktree."""
+        if not self.allow_host_pytest:
+            raise PermissionError(
+                "Host worktree pytest execution is disabled by default (ECS-054 / ECS-102). "
+                "Pass allow_host_pytest=True or --allow-unsandboxed-benchmark-pytest only "
+                "inside an offline benchmark container."
+            )
         if not (arm_result.file_recall_at_5 and arm_result.symbol_recall_at_5):
             return (
                 False,
@@ -1167,21 +1179,7 @@ class UnseenRepoABBenchmarkRunner:
                 if not sr_ok:
                     apply_err_text = (apply_err_text or sr_msg)[:160]
 
-            env = {
-                k: v
-                for k, v in os.environ.items()
-                if not any(
-                    sec in k.upper()
-                    for sec in (
-                        "API_KEY",
-                        "SECRET",
-                        "TOKEN",
-                        "PASSWORD",
-                        "ADMIN_URL",
-                        "CREDENTIAL",
-                    )
-                )
-            }
+            env = {k: v for k, v in os.environ.items() if k in SANDBOX_ENV_ALLOWLIST}
             src_path = (
                 str(worktree_dir / "src") if (worktree_dir / "src").exists() else str(worktree_dir)
             )
@@ -1405,7 +1403,7 @@ class UnseenRepoABBenchmarkRunner:
                 task, scout_res, scout_ms, qlora_valid, qlora_ms
             )
 
-            if task.verify_with_pytest:
+            if task.verify_with_pytest and self.allow_host_pytest:
                 a_pass, a_sum = self.verify_task_in_worktree_pytest(task, repo_dir, arm_a)
                 b_pass, b_sum = self.verify_task_in_worktree_pytest(task, repo_dir, arm_b)
                 arm_a.pytest_verified = a_pass
@@ -1726,6 +1724,15 @@ def format_unseen_ab_markdown_report(report: UnseenRepoABReport) -> str:
 
 def main() -> None:
     """Execute the 30-task Unseen-Repo A/B Benchmark and write JSON/MD/JSONL artifacts."""
+    parser = argparse.ArgumentParser(description="Run Unseen-Repo A/B Benchmark")
+    parser.add_argument(
+        "--allow-unsandboxed-benchmark-pytest",
+        action="store_true",
+        default=False,
+        help="Opt in to run worktree pytest inside an isolated offline benchmark container.",
+    )
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -1741,6 +1748,7 @@ def main() -> None:
         prefer_gemini_api=True,
         verify_postgres_rls=True,
         run_live_frozen_qlora=True,
+        allow_host_pytest=bool(args.allow_unsandboxed_benchmark_pytest),
     )
     traces_path = reports_dir / "unseen_ab_traces.jsonl"
     report = runner.run_benchmark(traces_jsonl_path=traces_path)

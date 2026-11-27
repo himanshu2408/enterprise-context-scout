@@ -238,6 +238,24 @@ def apply_search_replace_or_hunk_blocks(
     return (False, "git apply and SEARCH/REPLACE fallback could not match target lines")
 
 
+SANDBOX_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "HOME",
+        "SYSTEMROOT",
+        "PYTHONPATH",
+        "VIRTUAL_ENV",
+        "PYTHONDONTWRITEBYTECODE",
+    }
+)
+
+
 class GitWorktreeSandbox:
     """Isolates patch application and verification inside a temporary git worktree."""
 
@@ -252,12 +270,31 @@ class GitWorktreeSandbox:
         self.sandbox_parent_dir = sandbox_parent_dir
         self.worktree_dir: Path | None = None
         self.branch_name: str | None = None
+        self._target_branch: str | None = None
+        self._base_commit_sha: str | None = None
         self._is_active: bool = False
         self._is_standalone_clone: bool = False
         self._merged_or_kept: bool = False
 
     def __enter__(self) -> GitWorktreeSandbox:
         self.branch_name = f"scout-wt-{uuid.uuid4().hex[:8]}"
+        sym_res = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if sym_res.returncode == 0 and sym_res.stdout.strip():
+            self._target_branch = sym_res.stdout.strip()
+        sha_res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if sha_res.returncode == 0 and sha_res.stdout.strip():
+            self._base_commit_sha = sha_res.stdout.strip()
+
         temp_dir = tempfile.mkdtemp(prefix="scout_wt_", dir=self.sandbox_parent_dir)
         self.worktree_dir = Path(temp_dir).resolve()
 
@@ -323,35 +360,51 @@ class GitWorktreeSandbox:
         return (False, res.stderr or res.stdout or "git apply failed")
 
     @staticmethod
+    def _sanitize_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+        """Builds a strict allowlisted subprocess environment (ECS-017 / ECS-105)."""
+        env = {k: v for k, v in os.environ.items() if k in SANDBOX_ENV_ALLOWLIST}
+        if extra:
+            env.update(extra)
+        return env
+
+    @staticmethod
     def _assert_no_pytest_command(cmd: list[str] | None) -> None:
         if not cmd:
             return
+        disallowed_modules = {"pytest", "py.test", "unittest"}
+        shell_runners = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
+        inline_pattern = re.compile(r"\b(?:pytest|py\.test|unittest)\b", flags=re.IGNORECASE)
         for idx, arg in enumerate(cmd):
             arg_clean = arg.strip().lower()
             name = Path(arg).name.lower()
             if (
-                name in {"pytest", "py.test"}
+                name in disallowed_modules
                 or name.startswith(("pytest-", "py.test-"))
-                or arg_clean in {"pytest", "py.test", "-mpytest"}
-                or arg_clean.startswith("-mpytest")
+                or arg_clean in {"pytest", "py.test", "unittest", "-mpytest", "-munittest"}
+                or arg_clean.startswith(("-mpytest", "-munittest"))
             ):
-                raise PermissionError("Subprocess pytest execution is prohibited (OWASP ASI05).")
+                raise PermissionError(
+                    "Subprocess test runner execution is prohibited (OWASP ASI05)."
+                )
             if (
                 arg == "-m"
                 and idx + 1 < len(cmd)
-                and cmd[idx + 1].strip().lower() in {"pytest", "py.test"}
+                and cmd[idx + 1].strip().lower() in disallowed_modules
             ):
+                mod = cmd[idx + 1].strip()
                 raise PermissionError(
-                    "Subprocess 'python -m pytest' execution is prohibited (OWASP ASI05)."
+                    f"Subprocess 'python -m {mod}' execution is prohibited (OWASP ASI05)."
                 )
-            if (
-                arg == "-c"
-                and idx + 1 < len(cmd)
-                and re.search(r"\b(?:pytest|py\.test)\b", cmd[idx + 1], flags=re.IGNORECASE)
-            ):
+            if arg in {"-c", "-lc"} and idx + 1 < len(cmd) and inline_pattern.search(cmd[idx + 1]):
                 raise PermissionError(
-                    "Inline subprocess pytest invocation is prohibited (OWASP ASI05)."
+                    "Inline subprocess pytest/unittest invocation is prohibited (OWASP ASI05)."
                 )
+            if name in shell_runners:
+                remainder = " ".join(cmd[idx + 1 :])
+                if inline_pattern.search(remainder):
+                    raise PermissionError(
+                        "Shell wrapper pytest/unittest execution is prohibited (OWASP ASI05)."
+                    )
 
     @staticmethod
     def _run_in_process_ast_syntax_check(worktree_dir: Path) -> tuple[bool, str]:
@@ -384,14 +437,7 @@ class GitWorktreeSandbox:
         self._assert_no_pytest_command(lint_cmd)
         self._assert_no_pytest_command(test_cmd)
 
-        env = {
-            k: v
-            for k, v in os.environ.items()
-            if not any(
-                sec in k.upper()
-                for sec in ("API_KEY", "SECRET", "TOKEN", "PASSWORD", "ADMIN_URL", "CREDENTIAL")
-            )
-        }
+        env = self._sanitize_env()
         venv_bin = self.repo_root / ".venv" / "bin"
         if not venv_bin.exists():
             venv_bin = Path(sys.executable).resolve().parent
@@ -443,7 +489,7 @@ class GitWorktreeSandbox:
         return (lint_passed, tests_passed, details)
 
     def confirm_and_merge(self, confirmed: bool) -> tuple[bool, str]:
-        """Enforces human approval before allowing commit/merge onto PR branch."""
+        """Enforces human approval and merges verified worktree changes onto repo_root."""
         if not self._is_active or self.worktree_dir is None:
             raise RuntimeError("Sandbox is not active")
         if self.require_confirmation and not confirmed:
@@ -466,10 +512,81 @@ class GitWorktreeSandbox:
             capture_output=True,
             text=True,
         )
-        if res.returncode == 0 or "nothing to commit" in (res.stdout + res.stderr):
-            self._merged_or_kept = True
-            return (True, f"Changes approved and committed on branch {self.branch_name}")
-        return (False, f"Commit failed: {res.stderr or res.stdout}")
+        nothing_to_commit = "nothing to commit" in (res.stdout + res.stderr)
+        if res.returncode != 0 and not nothing_to_commit:
+            return (False, f"Commit failed: {res.stderr or res.stdout}")
+
+        wt_sha_res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.worktree_dir,
+            capture_output=True,
+            text=True,
+        )
+        wt_sha = wt_sha_res.stdout.strip() if wt_sha_res.returncode == 0 else ""
+
+        if wt_sha and wt_sha != (self._base_commit_sha or ""):
+            if self._is_standalone_clone and self.branch_name:
+                fetch_res = subprocess.run(
+                    ["git", "fetch", str(self.worktree_dir), self.branch_name],
+                    cwd=self.repo_root,
+                    capture_output=True,
+                    text=True,
+                )
+                if fetch_res.returncode != 0:
+                    err = fetch_res.stderr or fetch_res.stdout
+                    return (
+                        False,
+                        f"Failed to fetch standalone sandbox commit: {err}",
+                    )
+                merge_target = "FETCH_HEAD"
+            else:
+                merge_target = self.branch_name or wt_sha
+
+            if self._target_branch:
+                subprocess.run(
+                    ["git", "checkout", self._target_branch],
+                    cwd=self.repo_root,
+                    capture_output=True,
+                )
+            merge_res = subprocess.run(
+                ["git", "merge", "--ff-only", merge_target],
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if merge_res.returncode != 0:
+                cp_res = subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "user.name=Context Scout",
+                        "-c",
+                        "user.email=scout@localhost",
+                        "cherry-pick",
+                        merge_target,
+                    ],
+                    cwd=self.repo_root,
+                    capture_output=True,
+                    text=True,
+                )
+                if cp_res.returncode != 0:
+                    subprocess.run(
+                        ["git", "cherry-pick", "--abort"],
+                        cwd=self.repo_root,
+                        capture_output=True,
+                    )
+                    err = cp_res.stderr or merge_res.stderr
+                    return (
+                        False,
+                        f"Merge/cherry-pick onto target branch failed: {err}",
+                    )
+
+        self._merged_or_kept = True
+        target_desc = self._target_branch or "HEAD"
+        return (
+            True,
+            f"Changes approved, committed on {self.branch_name}, and merged onto {target_desc}",
+        )
 
     def __exit__(
         self,
@@ -492,7 +609,7 @@ class GitWorktreeSandbox:
                     cwd=self.repo_root,
                     capture_output=True,
                 )
-                if self.branch_name and not self._merged_or_kept:
+                if self.branch_name:
                     subprocess.run(
                         ["git", "branch", "-D", self.branch_name],
                         cwd=self.repo_root,

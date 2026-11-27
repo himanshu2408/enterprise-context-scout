@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import json
 import logging
@@ -17,7 +18,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSIONS
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from context_scout.config import ScoutSettings
@@ -519,6 +520,7 @@ class PostgresScoutGraphAdapter:
                        metadata_json, allowed_scopes
                 FROM doc_chunks
                 WHERE domain_id = %s
+                  AND is_stale = FALSE
             """
             params: list[object] = [domain_id]
             if market_scope is not None:
@@ -680,6 +682,7 @@ class PostgresScoutGraphAdapter:
                            metadata_json, allowed_scopes
                     FROM doc_chunks, q
                     WHERE domain_id = %s
+                      AND is_stale = FALSE
                       AND fts_doc @@ q.tsq
                     ORDER BY {market_order_prefix}
                              ts_rank_cd(fts_doc, q.tsq) DESC,
@@ -715,6 +718,7 @@ class PostgresScoutGraphAdapter:
                        metadata_json, allowed_scopes
                 FROM doc_chunks
                 WHERE domain_id = %s
+                  AND is_stale = FALSE
                   AND ({where_expr})
                 ORDER BY ({score_expr}) DESC, authority_weight DESC, doc_id ASC, chunk_id ASC
                 LIMIT %s;
@@ -765,7 +769,8 @@ class PostgresScoutGraphAdapter:
                        metadata_json, allowed_scopes
                 FROM doc_chunks
                 WHERE domain_id = %s
-                  AND chunk_id = ANY(%s::uuid[]);
+                  AND chunk_id = ANY(%s::uuid[])
+                  AND is_stale = FALSE;
             """
             rows = conn.execute(sql, (domain_id, valid_uuids)).fetchall()
             return [self._row_to_doc_chunk(r) for r in rows]
@@ -871,6 +876,10 @@ _DEFAULT_ALLOWED_MCP_HOSTS: Final[list[str]] = [
     "[::1]:*",
     "testserver",
     "testserver:*",
+    "context-scout-api",
+    "context-scout-api:*",
+    "*.svc.cluster.local",
+    "*.svc.cluster.local:*",
 ]
 _DEFAULT_ALLOWED_MCP_ORIGINS: Final[list[str]] = [
     "http://127.0.0.1",
@@ -880,7 +889,148 @@ _DEFAULT_ALLOWED_MCP_ORIGINS: Final[list[str]] = [
     "http://[::1]",
     "http://[::1]:*",
     "http://testserver",
+    "http://context-scout-api",
+    "http://context-scout-api:*",
 ]
+
+
+def _host_matches_pattern(host: str | None, allowed_hosts: Sequence[str]) -> bool:
+    """Validates Host header against exact, `:*` port, and leading `*.` wildcard patterns."""
+    if not host:
+        return False
+    clean_host = host.strip().lower()
+    if not clean_host:
+        return False
+
+    def _split_host_port(val: str) -> tuple[str, str | None]:
+        if val.startswith("["):
+            end_br = val.find("]")
+            if end_br != -1:
+                h_part = val[: end_br + 1]
+                rest = val[end_br + 1 :]
+                return h_part, rest[1:] if rest.startswith(":") else None
+        if ":" in val:
+            h_part, p_part = val.rsplit(":", 1)
+            return h_part, p_part
+        return val, None
+
+    req_name, req_port = _split_host_port(clean_host)
+    for raw_pat in allowed_hosts:
+        pat = raw_pat.strip().lower()
+        if not pat:
+            continue
+        if pat == clean_host:
+            return True
+        pat_name, pat_port = _split_host_port(pat)
+        port_ok = (pat_port == "*" and req_port is not None) or (pat_port == req_port)
+        if not port_ok:
+            continue
+        if pat_name == req_name:
+            return True
+        if pat_name.startswith("*.") and len(pat_name) > 2:
+            suffix = pat_name[1:]  # '.svc.cluster.local'
+            if req_name.endswith(suffix) and len(req_name) > len(suffix):
+                return True
+    return False
+
+
+def _origin_matches_pattern(origin: str | None, allowed_origins: Sequence[str]) -> bool:
+    """Validates Origin header against exact and `:*` port patterns (empty Origin allowed)."""
+    if not origin:
+        return True
+    clean = origin.strip().lower()
+    for raw_pat in allowed_origins:
+        pat = raw_pat.strip().lower()
+        if not pat:
+            continue
+        if pat == clean:
+            return True
+        if pat.endswith(":*") and clean.startswith(pat[:-2] + ":"):
+            return True
+    return False
+
+
+def _request_origin_from_scope(scope: Scope) -> str:
+    scheme = str(scope.get("scheme") or "http")
+    host = ""
+    for k, v in scope.get("headers", ()):
+        if k.lower() == b"host":
+            host = v.decode("latin-1").strip()
+            break
+    if not host:
+        server_info = scope.get("server")
+        if isinstance(server_info, tuple) and server_info:
+            srv_host = str(server_info[0])
+            srv_port = server_info[1] if len(server_info) > 1 else None
+            host = f"{srv_host}:{srv_port}" if srv_port else srv_host
+        else:
+            host = "127.0.0.1"
+    return f"{scheme}://{host}"
+
+
+def _extract_bearer_token_claims(headers: Mapping[str, str]) -> dict[str, Any]:
+    """Decodes JSON claims from an already-verified Bearer token (JWT or HMAC payload.sig)."""
+    auth = ""
+    for k, v in headers.items():
+        if k.lower() == "authorization":
+            auth = v.strip()
+            break
+    if not auth.lower().startswith("bearer "):
+        return {}
+    token = auth[7:].strip()
+    if not token:
+        return {}
+    parts = token.split(".")
+    payload_b64 = parts[1] if len(parts) == 3 else (parts[0] if len(parts) == 2 else "")
+    if not payload_b64:
+        return {}
+    try:
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        return decoded if isinstance(decoded, dict) else {}
+    except Exception:
+        return {}
+
+
+def _token_matches_expected_resource(claims: Mapping[str, Any], expected_resource: str) -> bool:
+    """Checks RFC 8707 `resource` or `aud` claim matches the configured expected resource URI."""
+    target = expected_resource.strip().rstrip("/")
+    if not target:
+        return True
+    for claim_key in ("resource", "aud"):
+        val = claims.get(claim_key)
+        if isinstance(val, str) and val.strip().rstrip("/") == target:
+            return True
+        if (
+            isinstance(val, Sequence)
+            and not isinstance(val, (str, bytes))
+            and any(isinstance(item, str) and item.strip().rstrip("/") == target for item in val)
+        ):
+            return True
+    return False
+
+
+def build_oauth_protected_resource_metadata(
+    request_origin: str,
+    *,
+    settings: ScoutSettings | None = None,
+    resource_path: str = "/mcp",
+) -> dict[str, Any]:
+    """Builds RFC 9728 OAuth 2.0 Protected Resource Metadata for stateless MCP endpoints."""
+    cfg = settings or ScoutSettings()
+    expected = (cfg.mcp_expected_resource or "").strip()
+    resource_id = expected or f"{request_origin.rstrip('/')}{resource_path}"
+    issuer = (
+        os.environ.get("SCOUT_OIDC_ISSUER", "").strip()
+        or getattr(cfg, "oidc_issuer", None)
+        or request_origin.rstrip("/")
+    )
+    return {
+        "resource": resource_id,
+        "authorization_servers": [str(issuer).rstrip("/")],
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": ["mcp:tools:read", "public_eng", "public_docs"],
+    }
 
 
 def parse_cloud_trace_to_traceparent(cloud_trace: str | None) -> str | None:
@@ -930,13 +1080,19 @@ def build_mcp_well_known_metadata(
     *,
     endpoint_path: str = "/mcp",
     server_name: str | None = None,
+    include_tool_schemas: bool = True,
+    resource_metadata_url: str = "/.well-known/oauth-protected-resource",
 ) -> dict[str, Any]:
     """Builds SEP-2243 /.well-known/mcp discovery metadata for stateless MCP 2026-07-28."""
     resolved_name = server_name or getattr(server, "name", None) or "enterprise-context-scout"
     tools_desc: list[dict[str, Any]] = []
+    tool_names: list[str] = []
     tool_mgr = getattr(server, "_tool_manager", None)
     if tool_mgr is not None and hasattr(tool_mgr, "list_tools"):
         for tool in tool_mgr.list_tools():
+            tool_names.append(tool.name)
+            if not include_tool_schemas:
+                continue
             raw_props = (
                 dict(tool.parameters.get("properties", {}))
                 if isinstance(getattr(tool, "parameters", None), dict)
@@ -955,7 +1111,7 @@ def build_mcp_well_known_metadata(
                     },
                 }
             )
-    return {
+    payload: dict[str, Any] = {
         "server": resolved_name,
         "protocolVersion": MCP_PROTOCOL_VERSION_2026_07_28,
         "supportedProtocolVersions": list(SUPPORTED_MCP_PROTOCOL_VERSIONS),
@@ -977,9 +1133,15 @@ def build_mcp_well_known_metadata(
         "authentication": {
             "outOfBandOnly": True,
             "schemes": ["CloudIAP", "OIDC_JWKS_Bearer", "HMAC_Bearer"],
+            "resourceMetadataUrl": resource_metadata_url,
         },
+        "schemasRedacted": not include_tool_schemas,
+        "toolCount": len(tool_names),
         "tools": tools_desc,
     }
+    if not include_tool_schemas:
+        payload["toolNames"] = tool_names
+    return payload
 
 
 _SINGLE_AUTH_HEADERS: Final[frozenset[str]] = frozenset(
@@ -1023,19 +1185,30 @@ class _StatelessMCPHTTPASGIApp:
         allowed_hosts: Sequence[str] | None = None,
         allowed_origins: Sequence[str] | None = None,
         require_auth: bool = True,
+        settings: ScoutSettings | None = None,
     ) -> None:
         self.server = server
         self.streamable_http_path = streamable_http_path
         self.json_response = json_response
         self.require_auth = require_auth
+        self._explicit_settings = settings
+        cfg = settings or ScoutSettings()
+        resolved_hosts = (
+            list(allowed_hosts)
+            if allowed_hosts is not None
+            else (list(cfg.mcp_allowed_hosts) or list(_DEFAULT_ALLOWED_MCP_HOSTS))
+        )
+        resolved_origins = (
+            list(allowed_origins)
+            if allowed_origins is not None
+            else (list(cfg.mcp_allowed_origins) or list(_DEFAULT_ALLOWED_MCP_ORIGINS))
+        )
+        self._allowed_hosts_patterns = resolved_hosts
+        self._allowed_origins_patterns = resolved_origins
         self.security_settings = TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=list(allowed_hosts)
-            if allowed_hosts is not None
-            else list(_DEFAULT_ALLOWED_MCP_HOSTS),
-            allowed_origins=list(allowed_origins)
-            if allowed_origins is not None
-            else list(_DEFAULT_ALLOWED_MCP_ORIGINS),
+            allowed_hosts=resolved_hosts,
+            allowed_origins=resolved_origins,
         )
         self.starlette_app = server.streamable_http_app(
             streamable_http_path=streamable_http_path,
@@ -1044,6 +1217,9 @@ class _StatelessMCPHTTPASGIApp:
             transport_security=self.security_settings,
         )
 
+    def _active_settings(self) -> ScoutSettings:
+        return self._explicit_settings if self._explicit_settings is not None else ScoutSettings()
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.starlette_app(scope, receive, send)
@@ -1051,19 +1227,9 @@ class _StatelessMCPHTTPASGIApp:
 
         path = str(scope.get("path") or "").rstrip("/") or "/"
         method = str(scope.get("method") or "GET").upper()
-
-        # SEP-2243 capability discovery
-        if method == "GET" and (
-            path in {"/.well-known/mcp", "/.well-known/mcp.json"}
-            or path.endswith("/.well-known/mcp")
-            or path.endswith("/.well-known/mcp.json")
-        ):
-            metadata = build_mcp_well_known_metadata(
-                self.server, endpoint_path=self.streamable_http_path
-            )
-            resp = JSONResponse(metadata, headers={"Cache-Control": "no-store"})
-            await resp(scope, receive, send)
-            return
+        req_origin = _request_origin_from_scope(scope)
+        resource_meta_url = f"{req_origin}/.well-known/oauth-protected-resource"
+        www_auth_value = f'Bearer resource_metadata="{resource_meta_url}"'
 
         raw_headers = list(scope.get("headers", ()))
         folded_headers: dict[str, str] = {}
@@ -1075,7 +1241,7 @@ class _StatelessMCPHTTPASGIApp:
                 err_resp = JSONResponse(
                     {"error": f"Duplicate authentication header '{k_lower}' is not permitted."},
                     status_code=401,
-                    headers={"WWW-Authenticate": "Bearer"},
+                    headers={"WWW-Authenticate": www_auth_value},
                 )
                 await err_resp(scope, receive, send)
                 return
@@ -1088,6 +1254,67 @@ class _StatelessMCPHTTPASGIApp:
                 return
             seen_keys.add(k_lower)
             folded_headers.setdefault(k_lower, v_str)
+
+        # Enforce configurable Host/Origin protection (ECS-001) across exact, :*, and *.suffix rules
+        req_host = folded_headers.get("host")
+        if self.security_settings.enable_dns_rebinding_protection:
+            if not _host_matches_pattern(req_host, self._allowed_hosts_patterns):
+                resp421 = Response("Invalid Host header", status_code=421)
+                await resp421(scope, receive, send)
+                return
+            req_origin_hdr = folded_headers.get("origin")
+            if not _origin_matches_pattern(req_origin_hdr, self._allowed_origins_patterns):
+                resp403 = Response("Invalid Origin header", status_code=403)
+                await resp403(scope, receive, send)
+                return
+
+        active_settings = self._active_settings()
+
+        # RFC 9728 OAuth 2.0 Protected Resource Metadata
+        if method == "GET" and (
+            path == "/.well-known/oauth-protected-resource"
+            or "/.well-known/oauth-protected-resource" in path
+        ):
+            prm = build_oauth_protected_resource_metadata(
+                req_origin,
+                settings=active_settings,
+                resource_path=self.streamable_http_path,
+            )
+            resp = JSONResponse(prm, headers={"Cache-Control": "no-store"})
+            await resp(scope, receive, send)
+            return
+
+        # SEP-2243 capability discovery (schema exposure gated on auth or setting)
+        if method == "GET" and (
+            path in {"/.well-known/mcp", "/.well-known/mcp.json"}
+            or path.endswith("/.well-known/mcp")
+            or path.endswith("/.well-known/mcp.json")
+        ):
+            env_pub = os.environ.get("SCOUT_MCP_PUBLIC_TOOL_SCHEMAS", "").strip().lower()
+            include_schemas = bool(active_settings.mcp_public_tool_schemas) or env_pub in {
+                "1",
+                "true",
+                "yes",
+            }
+            if not include_schemas and (
+                "authorization" in folded_headers or "x-goog-iap-jwt-assertion" in folded_headers
+            ):
+                from context_scout.api.dependencies import authenticate_headers
+
+                try:
+                    authenticate_headers(folded_headers)
+                    include_schemas = True
+                except HTTPException:
+                    include_schemas = False
+            metadata = build_mcp_well_known_metadata(
+                self.server,
+                endpoint_path=self.streamable_http_path,
+                include_tool_schemas=include_schemas,
+                resource_metadata_url="/.well-known/oauth-protected-resource",
+            )
+            resp = JSONResponse(metadata, headers={"Cache-Control": "no-store"})
+            await resp(scope, receive, send)
+            return
 
         # SEP-2575 strict stateless check: prohibit sticky session state
         if "mcp-session-id" in folded_headers:
@@ -1108,7 +1335,7 @@ class _StatelessMCPHTTPASGIApp:
             await err_resp(scope, receive, send)
             return
 
-        # Out-of-band authentication (Cloud IAP / OIDC JWKS / HMAC Bearer)
+        # Out-of-band auth (Cloud IAP / OIDC JWKS / HMAC Bearer) + RFC 8707 aud/resource check
         principal: PrincipalContext | None = None
         if self.require_auth:
             from context_scout.api.dependencies import authenticate_headers
@@ -1116,7 +1343,7 @@ class _StatelessMCPHTTPASGIApp:
             try:
                 principal = authenticate_headers(folded_headers)
             except HTTPException as exc:
-                hdrs = {"WWW-Authenticate": "Bearer"} if exc.status_code == 401 else {}
+                hdrs = {"WWW-Authenticate": www_auth_value} if exc.status_code == 401 else {}
                 err_resp = JSONResponse(
                     {"error": str(exc.detail)},
                     status_code=exc.status_code,
@@ -1124,6 +1351,27 @@ class _StatelessMCPHTTPASGIApp:
                 )
                 await err_resp(scope, receive, send)
                 return
+
+            expected_res = (
+                os.environ.get("SCOUT_MCP_EXPECTED_RESOURCE")
+                or active_settings.mcp_expected_resource
+                or ""
+            ).strip()
+            if expected_res:
+                claims = _extract_bearer_token_claims(folded_headers)
+                if not _token_matches_expected_resource(claims, expected_res):
+                    err_resp = JSONResponse(
+                        {
+                            "error": (
+                                "Bearer token aud/resource claim does not match "
+                                f"expected MCP resource '{expected_res}'."
+                            )
+                        },
+                        status_code=401,
+                        headers={"WWW-Authenticate": www_auth_value},
+                    )
+                    await err_resp(scope, receive, send)
+                    return
 
         if method == "GET":
             err_resp = JSONResponse(
@@ -1247,19 +1495,27 @@ class _StatelessMCPHTTPASGIApp:
                 await send(message)
 
             async def _dispatch() -> None:
+                effective_security = self.security_settings
+                if req_host and req_host not in effective_security.allowed_hosts:
+                    effective_security = TransportSecuritySettings(
+                        enable_dns_rebinding_protection=effective_security.enable_dns_rebinding_protection,
+                        allowed_hosts=[*effective_security.allowed_hosts, req_host],
+                        allowed_origins=list(effective_security.allowed_origins),
+                    )
                 session_mgr = getattr(self.server._lowlevel_server, "_session_manager", None)
                 if (
                     session_mgr is not None
                     and getattr(session_mgr, "_task_group", None) is not None
+                    and effective_security is self.security_settings
                 ):
                     await self.starlette_app(modified_scope, active_receive, wrapped_send)
                     return
-                # Stateless fallback when caller invokes ASGI without lifespan startup
+                # Stateless fallback when ASGI runs without lifespan startup or wildcard host
                 per_req_mgr = StreamableHTTPSessionManager(
                     app=self.server._lowlevel_server,
                     json_response=self.json_response,
                     stateless=True,
-                    security_settings=self.security_settings,
+                    security_settings=effective_security,
                 )
                 async with per_req_mgr.run():
                     await per_req_mgr.handle_request(modified_scope, active_receive, wrapped_send)
@@ -1279,6 +1535,7 @@ def create_stateless_mcp_http_app(
     allowed_hosts: Sequence[str] | None = None,
     allowed_origins: Sequence[str] | None = None,
     require_auth: bool = True,
+    settings: ScoutSettings | None = None,
 ) -> ASGIApp:
     """Wraps an MCPServer in stateless Streamable HTTP 2026-07-28 ASGI transport."""
     return _StatelessMCPHTTPASGIApp(
@@ -1288,6 +1545,7 @@ def create_stateless_mcp_http_app(
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
         require_auth=require_auth,
+        settings=settings,
     )
 
 
@@ -1300,6 +1558,7 @@ __all__ = [
     "PostgresScoutGraphAdapter",
     "bound_payload_dict",
     "build_mcp_well_known_metadata",
+    "build_oauth_protected_resource_metadata",
     "create_stateless_mcp_http_app",
     "get_current_principal",
     "parse_cloud_trace_to_traceparent",

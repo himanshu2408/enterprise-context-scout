@@ -2,14 +2,17 @@
 
 import hashlib
 import hmac
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
+import psycopg
 import pytest
 from starlette.testclient import TestClient
 
 from context_scout.api.main import create_app
 from context_scout.api.routes.webhooks import set_task_queue
 from context_scout.config import ScoutSettings
+from context_scout.db.repositories import InMemoryRLSRepository
 from context_scout.queue.indexing_worker import IndexingWorker
 from context_scout.queue.task_queue import (
     InMemoryTaskQueue,
@@ -19,10 +22,13 @@ from context_scout.queue.task_queue import (
 
 
 @pytest.fixture
-def in_memory_queue() -> InMemoryTaskQueue:
+def in_memory_queue() -> Iterator[InMemoryTaskQueue]:
     queue = InMemoryTaskQueue()
     set_task_queue(queue)
-    return queue
+    try:
+        yield queue
+    finally:
+        set_task_queue(None)
 
 
 @pytest.fixture
@@ -122,21 +128,25 @@ def test_f07_in_memory_queue_claim_and_dlq(in_memory_queue: InMemoryTaskQueue) -
 
 
 def test_f07_indexing_worker_run_once(in_memory_queue: InMemoryTaskQueue) -> None:
-    """Verifies that IndexingWorker fetches and dispatches tasks cleanly."""
+    """Verifies IndexingWorker fails fast unconfigured and dispatches configured tasks cleanly."""
+    unconfigured = IndexingWorker(
+        task_queue=in_memory_queue,
+        worker_id="test_worker_unconfigured",
+    )
+    with pytest.raises(RuntimeError, match="requires a configured repository"):
+        unconfigured.run_once()
+
+    repo = InMemoryRLSRepository()
     worker = IndexingWorker(
         task_queue=in_memory_queue,
         worker_id="test_worker_unit",
+        repository=repo,
     )
 
-    # Enqueue a gitlab_push task
     in_memory_queue.enqueue_task(
         domain_id="code_architecture_scout",
-        event_type="gitlab_push",
-        payload={
-            "repo_name": "pricing-service",
-            "before_sha": "0" * 40,
-            "after_sha": "b" * 40,
-        },
+        event_type="cross_repo_relink",
+        payload={"domain_id": "code_architecture_scout", "repo_name": "pricing-service"},
         priority=10,
     )
 
@@ -215,30 +225,57 @@ def test_f07_webhook_endpoints_hmac_and_ingress(
 
 @pytest.mark.postgres
 def test_f07_live_postgres_task_queue(ephemeral_pg_domain: str) -> None:
-    """Verifies PostgreSQL 17 SKIP LOCKED atomic claims on live database."""
+    """Verifies concurrent 2-connection PostgreSQL 17 SKIP LOCKED claims on live database."""
+    from context_scout.schemas.contracts import DEFAULT_TENANT_ID
+
     settings = ScoutSettings()
     pg_queue = PostgresTaskQueue(db_url=settings.db_app_url)
     domain_id = ephemeral_pg_domain
 
-    # Enqueue task
+    # Clear any stale pending test tasks for this ephemeral domain and enqueue a task
     t_id = pg_queue.enqueue_task(
         domain_id=domain_id,
         event_type="cross_repo_relink",
         payload={"domain_id": domain_id},
-        priority=20,
+        priority=1,
     )
     assert t_id is not None
 
-    # Atomic claim with SKIP LOCKED
-    task = pg_queue.fetch_next_task(worker_id="pg_worker_1")
-    assert task is not None
-    assert task.task_id == t_id
-    assert task.status == "PROCESSING"
+    try:
+        # Hold row lock inside uncommitted connection 1 and prove connection 2 skips it live
+        claim_sql = """
+            SELECT task_id
+            FROM indexing_queue
+            WHERE domain_id = %s
+              AND task_id = %s
+              AND status = 'PENDING'
+            FOR UPDATE SKIP LOCKED;
+        """
+        with (
+            psycopg.connect(settings.db_app_url) as conn1,
+            psycopg.connect(settings.db_app_url) as conn2,
+            conn1.transaction(),
+        ):
+            conn1.execute(
+                "SELECT set_config('app.tenant_id', %s, TRUE);",
+                (str(DEFAULT_TENANT_ID),),
+            )
+            row1 = conn1.execute(claim_sql, (domain_id, t_id)).fetchone()
+            assert row1 is not None and row1[0] == t_id
 
-    # Concurrent fetch from worker 2 skips the locked row
-    task_2 = pg_queue.fetch_next_task(worker_id="pg_worker_2")
-    if task_2 is not None:
-        assert task_2.task_id != t_id
+            with conn2.transaction():
+                conn2.execute(
+                    "SELECT set_config('app.tenant_id', %s, TRUE);",
+                    (str(DEFAULT_TENANT_ID),),
+                )
+                row2 = conn2.execute(claim_sql, (domain_id, t_id)).fetchone()
+                assert row2 is None
 
-    # Complete task
-    pg_queue.complete_task(t_id)
+        task = pg_queue.fetch_next_task(worker_id="pg_worker_1")
+        assert task is not None
+        assert task.task_id == t_id
+        assert task.status == "PROCESSING"
+        pg_queue.complete_task(t_id)
+    finally:
+        with psycopg.connect(settings.db_admin_url, autocommit=True) as admin_conn:
+            admin_conn.execute("DELETE FROM indexing_queue WHERE task_id = %s;", (t_id,))

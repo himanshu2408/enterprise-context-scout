@@ -126,7 +126,11 @@ from context_scout.security.guardrails import (
     generate_untrusted_nonce,
     get_guardrail_provider,
 )
-from context_scout.security.rbac import DomainAuthorizationGate
+from context_scout.security.rbac import (
+    DomainAuthorizationGate,
+    ScopeAccessDeniedError,
+    SecurityError,
+)
 from context_scout.telemetry import ScoutTelemetryTracer
 from context_scout.telemetry.cost_governance import DEFAULT_EXPLORATION_TOKEN_KILL_SWITCH
 
@@ -8120,6 +8124,7 @@ class FederatedScoutCoordinator:
         adapter_router: AdapterRouter | None = None,
         gpu_quota_manager: RedisGPUQuotaManager | None = None,
         session_manager: ScoutSessionManager | None = None,
+        per_domain_probe_timeout_seconds: float = 5.0,
     ) -> None:
         default_code, default_research, default_federated = _resolve_role_domains()
         self.code_domain_id = code_domain_id or default_code
@@ -8127,6 +8132,7 @@ class FederatedScoutCoordinator:
         self.federated_domain_id = federated_domain_id or default_federated
         self.registry = registry
         self.repo = repo
+        self.per_domain_probe_timeout_seconds = max(0.05, float(per_domain_probe_timeout_seconds))
         self.slicer = slicer or DeterministicSlicer()
         self.expander = expander or ASTDependencyExpander(
             max_direct_callers=8,
@@ -8202,6 +8208,116 @@ class FederatedScoutCoordinator:
             fed_span.record_pack(result)
             return result
 
+    def _probe_single_domain(
+        self,
+        *,
+        dom_id: str,
+        manifest: DomainPackManifest,
+        user_prompt: str,
+        principal: PrincipalContext,
+        fed_bound_repo: BoundGraphRepository,
+        source_filter: SourceFilter,
+    ) -> tuple[DomainProbeTrace, dict[str, Any] | None]:
+        """Probe a single authorized domain under RLS and compute trace + domain candidates."""
+        modalities = list(manifest.modalities) or [manifest.authority_rules.primary_truth_source]
+        dom_plugin = PluginRegistry.get_domain_plugin(dom_id)
+        dom_principal = principal
+        if dom_plugin is not None and hasattr(dom_plugin, "elevate_principal_for_research"):
+            dom_principal = dom_plugin.elevate_principal_for_research(principal)
+
+        doc_records: list[DocChunkRecord] = []
+        doc_hits: list[CalibratedRankedSearchHit] = []
+        sym_records: list[ASTSymbolRecord] = []
+        sym_hits: list[CalibratedRankedSearchHit] = []
+
+        if source_filter != "code" and (
+            "document" in modalities
+            or "issues" in modalities
+            or manifest.output_contract != "ImplementationContextPack"
+        ):
+            doc_records, doc_hits = fed_bound_repo.search_visible_doc_chunks_calibrated(
+                principal=dom_principal,
+                domain_id=dom_id,
+                query_text=user_prompt,
+                limit=8,
+            )
+            if source_filter != "all" and doc_records:
+                filtered_recs = filter_doc_chunks_by_source(doc_records, source_filter)
+                allowed_ids = {str(c.chunk_id) for c in filtered_recs}
+                doc_records = filtered_recs
+                doc_hits = [h for h in doc_hits if str(h.item_id) in allowed_ids]
+
+        if source_filter in ("all", "code") and (
+            "code" in modalities or manifest.output_contract == "ImplementationContextPack"
+        ):
+            sym_records, sym_hits = fed_bound_repo.search_visible_ast_symbols_calibrated(
+                principal=dom_principal,
+                domain_id=dom_id,
+                query_text=user_prompt,
+                limit=8,
+            )
+
+        all_hits = [*doc_hits, *sym_hits]
+        accepted_doc_hits = [
+            h
+            for h in doc_hits
+            if h.calibrated_score >= CALIBRATED_RELEVANCE_FLOOR and not h.is_boilerplate
+        ]
+        accepted_sym_hits = [
+            h for h in sym_hits if h.calibrated_score >= CALIBRATED_RELEVANCE_FLOOR
+        ]
+        accepted_all = [*accepted_doc_hits, *accepted_sym_hits]
+        max_cos = round(max((h.cosine_similarity for h in all_hits), default=0.0), 4)
+        max_cal = round(max((h.calibrated_score for h in all_hits), default=0.0), 4)
+
+        top_hit_traces = _build_retrieval_hit_traces(
+            sorted(all_hits, key=lambda h: h.calibrated_score, reverse=True)[:5],
+            domain_id=dom_id,
+            modality="code" if (len(sym_hits) >= len(doc_hits) and sym_hits) else "document",
+        )
+        above_floor = bool(accepted_all) and max_cal >= CALIBRATED_RELEVANCE_FLOOR
+        reason = (
+            f"Matched {len(accepted_all)} above-floor hit(s) (max calibrated={max_cal:.3f})"
+            if above_floor
+            else (
+                f"Rejected: max calibrated={max_cal:.3f} < floor {CALIBRATED_RELEVANCE_FLOOR:.2f}"
+                if all_hits
+                else "No above-floor hits in PostgreSQL 17 RLS view"
+            )
+        )
+        trace = DomainProbeTrace(
+            domain_id=dom_id,
+            display_name=manifest.display_name,
+            authorized=bool(dom_principal.allowed_scopes),
+            probed_hits=len(all_hits),
+            accepted_hits=len(accepted_all),
+            rejected_hits=len(all_hits) - len(accepted_all),
+            max_cosine_similarity=max_cos,
+            max_calibrated_score=max_cal,
+            selected=above_floor,
+            selection_reason=reason,
+            top_hits=top_hit_traces,
+        )
+        result_entry: dict[str, Any] | None = None
+        if above_floor:
+            accepted_doc_ids = {str(h.item_id) for h in accepted_doc_hits}
+            accepted_sym_ids = {h.item_id for h in accepted_sym_hits}
+            kept_docs = [c for c in doc_records if str(c.chunk_id) in accepted_doc_ids]
+            kept_syms = [s for s in sym_records if s.symbol_id in accepted_sym_ids]
+            result_entry = {
+                "manifest": manifest,
+                "principal": dom_principal,
+                "doc_records": kept_docs or doc_records,
+                "doc_hits": accepted_doc_hits,
+                "sym_records": kept_syms or sym_records,
+                "sym_hits": accepted_sym_hits,
+                "max_calibrated_score": max_cal,
+                "is_code": bool(accepted_sym_hits)
+                and ("code" in modalities or len(accepted_sym_hits) > len(accepted_doc_hits)),
+                "is_doc": bool(accepted_doc_hits),
+            }
+        return trace, result_entry
+
     def _probe_all_authorized_domains(
         self,
         *,
@@ -8213,113 +8329,93 @@ class FederatedScoutCoordinator:
         list[DomainProbeTrace],
         dict[str, dict[str, Any]],
     ]:
-        """Dynamically probe EVERY registered domain authorized for principal under RLS."""
+        """Dynamically probe EVERY registered domain with per-domain timeout bounds under RLS."""
+        import concurrent.futures
+        import contextvars
+
         manifests = self.registry.load_all()
         probe_traces: list[DomainProbeTrace] = []
         domain_results: dict[str, dict[str, Any]] = {}
+        if not manifests:
+            return probe_traces, domain_results
 
-        for dom_id, manifest in manifests.items():
-            modalities = list(manifest.modalities) or [
-                manifest.authority_rules.primary_truth_source
-            ]
-            dom_plugin = PluginRegistry.get_domain_plugin(dom_id)
-            dom_principal = principal
-            if dom_plugin is not None and hasattr(dom_plugin, "elevate_principal_for_research"):
-                dom_principal = dom_plugin.elevate_principal_for_research(principal)
-
-            doc_records: list[DocChunkRecord] = []
-            doc_hits: list[CalibratedRankedSearchHit] = []
-            sym_records: list[ASTSymbolRecord] = []
-            sym_hits: list[CalibratedRankedSearchHit] = []
-
-            if source_filter != "code" and (
-                "document" in modalities
-                or "issues" in modalities
-                or manifest.output_contract != "ImplementationContextPack"
-            ):
-                doc_records, doc_hits = fed_bound_repo.search_visible_doc_chunks_calibrated(
-                    principal=dom_principal,
-                    domain_id=dom_id,
-                    query_text=user_prompt,
-                    limit=8,
+        max_workers = min(4, len(manifests))
+        timeout_s = self.per_domain_probe_timeout_seconds
+        pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="scout-dom-probe"
+        )
+        timed_out_any = False
+        try:
+            futures: dict[str, tuple[DomainPackManifest, concurrent.futures.Future[Any]]] = {}
+            for dom_id, manifest in manifests.items():
+                ctx = contextvars.copy_context()
+                fut = pool.submit(
+                    ctx.run,
+                    self._probe_single_domain,
+                    dom_id=dom_id,
+                    manifest=manifest,
+                    user_prompt=user_prompt,
+                    principal=principal,
+                    fed_bound_repo=fed_bound_repo,
+                    source_filter=source_filter,
                 )
-                if source_filter != "all" and doc_records:
-                    filtered_recs = filter_doc_chunks_by_source(doc_records, source_filter)
-                    allowed_ids = {str(c.chunk_id) for c in filtered_recs}
-                    doc_records = filtered_recs
-                    doc_hits = [h for h in doc_hits if str(h.item_id) in allowed_ids]
+                futures[dom_id] = (manifest, fut)
 
-            if source_filter in ("all", "code") and (
-                "code" in modalities or manifest.output_contract == "ImplementationContextPack"
-            ):
-                sym_records, sym_hits = fed_bound_repo.search_visible_ast_symbols_calibrated(
-                    principal=dom_principal,
-                    domain_id=dom_id,
-                    query_text=user_prompt,
-                    limit=8,
-                )
-
-            all_hits = [*doc_hits, *sym_hits]
-            accepted_doc_hits = [
-                h
-                for h in doc_hits
-                if h.calibrated_score >= CALIBRATED_RELEVANCE_FLOOR and not h.is_boilerplate
-            ]
-            accepted_sym_hits = [
-                h for h in sym_hits if h.calibrated_score >= CALIBRATED_RELEVANCE_FLOOR
-            ]
-            accepted_all = [*accepted_doc_hits, *accepted_sym_hits]
-            max_cos = round(max((h.cosine_similarity for h in all_hits), default=0.0), 4)
-            max_cal = round(max((h.calibrated_score for h in all_hits), default=0.0), 4)
-
-            top_hit_traces = _build_retrieval_hit_traces(
-                sorted(all_hits, key=lambda h: h.calibrated_score, reverse=True)[:5],
-                domain_id=dom_id,
-                modality="code" if (len(sym_hits) >= len(doc_hits) and sym_hits) else "document",
-            )
-            above_floor = bool(accepted_all) and max_cal >= CALIBRATED_RELEVANCE_FLOOR
-            reason = (
-                f"Matched {len(accepted_all)} above-floor hit(s) (max calibrated={max_cal:.3f})"
-                if above_floor
-                else (
-                    f"Rejected: max calibrated={max_cal:.3f} < "
-                    f"floor {CALIBRATED_RELEVANCE_FLOOR:.2f}"
-                    if all_hits
-                    else "No above-floor hits in PostgreSQL 17 RLS view"
-                )
-            )
-            probe_traces.append(
-                DomainProbeTrace(
-                    domain_id=dom_id,
-                    display_name=manifest.display_name,
-                    authorized=bool(dom_principal.allowed_scopes),
-                    probed_hits=len(all_hits),
-                    accepted_hits=len(accepted_all),
-                    rejected_hits=len(all_hits) - len(accepted_all),
-                    max_cosine_similarity=max_cos,
-                    max_calibrated_score=max_cal,
-                    selected=above_floor,
-                    selection_reason=reason,
-                    top_hits=top_hit_traces,
-                )
-            )
-            if above_floor:
-                accepted_doc_ids = {str(h.item_id) for h in accepted_doc_hits}
-                accepted_sym_ids = {h.item_id for h in accepted_sym_hits}
-                kept_docs = [c for c in doc_records if str(c.chunk_id) in accepted_doc_ids]
-                kept_syms = [s for s in sym_records if s.symbol_id in accepted_sym_ids]
-                domain_results[dom_id] = {
-                    "manifest": manifest,
-                    "principal": dom_principal,
-                    "doc_records": kept_docs or doc_records,
-                    "doc_hits": accepted_doc_hits,
-                    "sym_records": kept_syms or sym_records,
-                    "sym_hits": accepted_sym_hits,
-                    "max_calibrated_score": max_cal,
-                    "is_code": bool(accepted_sym_hits)
-                    and ("code" in modalities or len(accepted_sym_hits) > len(accepted_doc_hits)),
-                    "is_doc": bool(accepted_doc_hits),
-                }
+            for dom_id, (manifest, fut) in futures.items():
+                try:
+                    trace, result_entry = fut.result(timeout=timeout_s)
+                    probe_traces.append(trace)
+                    if result_entry is not None:
+                        domain_results[dom_id] = result_entry
+                except concurrent.futures.TimeoutError:
+                    timed_out_any = True
+                    fut.cancel()
+                    logger.warning(
+                        "Federated domain probe timed out for '%s' after %.2fs",
+                        dom_id,
+                        timeout_s,
+                    )
+                    probe_traces.append(
+                        DomainProbeTrace(
+                            domain_id=dom_id,
+                            display_name=manifest.display_name,
+                            authorized=bool(principal.allowed_scopes),
+                            probed_hits=0,
+                            accepted_hits=0,
+                            rejected_hits=0,
+                            max_cosine_similarity=0.0,
+                            max_calibrated_score=0.0,
+                            selected=False,
+                            selection_reason=f"Probe timed out after {timeout_s:.2f}s",
+                            top_hits=[],
+                        )
+                    )
+                except (SecurityError, ScopeAccessDeniedError):
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Federated domain probe failed for '%s' (%s): %s",
+                        dom_id,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    probe_traces.append(
+                        DomainProbeTrace(
+                            domain_id=dom_id,
+                            display_name=manifest.display_name,
+                            authorized=bool(principal.allowed_scopes),
+                            probed_hits=0,
+                            accepted_hits=0,
+                            rejected_hits=0,
+                            max_cosine_similarity=0.0,
+                            max_calibrated_score=0.0,
+                            selected=False,
+                            selection_reason=f"Probe error ({type(exc).__name__}): {exc}",
+                            top_hits=[],
+                        )
+                    )
+        finally:
+            pool.shutdown(wait=not timed_out_any, cancel_futures=True)
 
         probe_traces.sort(key=lambda t: t.max_calibrated_score, reverse=True)
         return probe_traces, domain_results

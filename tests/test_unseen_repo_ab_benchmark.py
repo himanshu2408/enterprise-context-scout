@@ -661,6 +661,7 @@ class TestWorktreePatchVerificationAndEnterpriseHardening:
             prefer_gemini_api=False,
             verify_postgres_rls=False,
             run_live_frozen_qlora=False,
+            allow_host_pytest=True,
         )
 
         # 1. Empty/non-diff response MUST fail even when file_recall and symbol_recall are True
@@ -704,6 +705,17 @@ class TestWorktreePatchVerificationAndEnterpriseHardening:
             task, repo_dir, arm_with_diff
         )
         assert passed_valid is True, f"Expected pytest pass on patched parent, got: {msg_valid}"
+
+        # Default-deny: without allow_host_pytest=True, host worktree pytest fails closed
+        default_runner = UnseenRepoABBenchmarkRunner(
+            repos_base_dir=tmp_path,
+            repo_root=Path("."),
+            prefer_gemini_api=False,
+            verify_postgres_rls=False,
+            run_live_frozen_qlora=False,
+        )
+        with pytest.raises(PermissionError, match="disabled by default"):
+            default_runner.verify_task_in_worktree_pytest(task, repo_dir, arm_with_diff)
 
     def test_hmac_signed_principal_token_and_require_signed_auth_enforcement(
         self, monkeypatch: pytest.MonkeyPatch

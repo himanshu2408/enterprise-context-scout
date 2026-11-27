@@ -19,14 +19,12 @@ import json
 import subprocess
 import uuid
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from context_scout.agents.gemini_executor import GitWorktreeSandbox
 from context_scout.api.dependencies import (
     DEFAULT_ROLE_SCOPES,
     create_signed_principal_token,
@@ -675,42 +673,8 @@ def test_handoff_apply_invalid_token_http_400(client: TestClient) -> None:
 def test_handoff_apply_confirmed_true_applies_and_consumes_token(
     client: TestClient,
     sample_pack: ImplementationContextPack,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verifies confirmed=True with valid token executes worktree sandbox and consumes token."""
-    orig_run_verification = GitWorktreeSandbox.run_verification
-    repo_root = get_repo_root()
-    sync_rel_paths = (
-        Path("tests/conftest.py"),
-        Path("tests/fixtures/pg_isolation.py"),
-    )
-
-    def _wrapped_run_verification(
-        self: GitWorktreeSandbox,
-        lint_cmd: list[str] | None = None,
-        test_cmd: list[str] | None = None,
-    ) -> tuple[bool, bool, str]:
-        if self.worktree_dir is None:
-            return orig_run_verification(self, lint_cmd=lint_cmd, test_cmd=test_cmd)
-        backups: list[tuple[Path, bool, bytes]] = []
-        for rel_path in sync_rel_paths:
-            target_file = self.worktree_dir / rel_path
-            had_original = target_file.exists()
-            original_bytes = target_file.read_bytes() if had_original else b""
-            backups.append((target_file, had_original, original_bytes))
-            target_file.parent.mkdir(parents=True, exist_ok=True)
-            target_file.write_bytes((repo_root / rel_path).read_bytes())
-        try:
-            return orig_run_verification(self, lint_cmd=lint_cmd, test_cmd=test_cmd)
-        finally:
-            for target_file, had_original, original_bytes in reversed(backups):
-                if had_original:
-                    target_file.write_bytes(original_bytes)
-                elif target_file.exists():
-                    target_file.unlink()
-
-    monkeypatch.setattr(GitWorktreeSandbox, "run_verification", _wrapped_run_verification)
-
+    """Verifies confirmed=True with valid token returns client-side patch & consumes token."""
     # Step 1: Generate preview token
     preview_res = client.post(
         "/api/v1/handoff/preview",
@@ -720,7 +684,8 @@ def test_handoff_apply_confirmed_true_applies_and_consumes_token(
         },
     )
     assert preview_res.status_code == 200
-    token = preview_res.json()["confirmation_token"]
+    preview_json = preview_res.json()
+    token = preview_json["confirmation_token"]
 
     # Step 2: Apply patch with confirmed=True
     apply_res = client.post(
@@ -735,6 +700,10 @@ def test_handoff_apply_confirmed_true_applies_and_consumes_token(
     assert data["confirmed"] is True
     assert data["success"] is True
     assert data["verification_passed"] is True
+    assert data["execution_mode"] == "client_side_git_apply"
+    assert data["server_files_mutated"] is False
+    assert data["syntax_valid"] is True
+    assert data["confirmed_patch_diff"] == preview_json["patch_diff"]
     assert "telemetry" in data
 
     # Step 3: Verify token consumption (re-applying must return HTTP 400)
@@ -746,7 +715,39 @@ def test_handoff_apply_confirmed_true_applies_and_consumes_token(
         },
     )
     assert reapply_res.status_code == 400
-    assert "Invalid or expired confirmation token" in reapply_res.json()["detail"]
+
+
+def test_handoff_apply_rejects_broken_python_hunk_syntax(
+    client: TestClient,
+    sample_pack: ImplementationContextPack,
+) -> None:
+    """In-memory Python AST validation catches broken Python syntax without disk I/O (ECS-043)."""
+    broken_pack = sample_pack.model_copy(deep=True)
+    broken_pack.code_slices[0].verbatim_code_with_lines = "1: def broken_fn(:\n2:     pass\n"
+
+    preview_res = client.post(
+        "/api/v1/handoff/preview",
+        json={
+            "pack": broken_pack.model_dump(),
+            "model_id": "gemini-3.8-flash",
+        },
+    )
+    assert preview_res.status_code == 200
+    token = preview_res.json()["confirmation_token"]
+
+    apply_res = client.post(
+        "/api/v1/handoff/apply",
+        json={"confirmation_token": token, "confirmed": True},
+    )
+    assert apply_res.status_code == 200
+    data = apply_res.json()
+    assert data["success"] is False
+    assert data["syntax_valid"] is False
+    assert data["lint_passed"] is False
+    assert data["verification_passed"] is False
+    assert data["server_files_mutated"] is False
+    assert data["execution_mode"] == "client_side_git_apply"
+    assert data["confirmed_patch_diff"] == ""
 
 
 # =============================================================================

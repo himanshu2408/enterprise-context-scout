@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Final
 from uuid import UUID
 
+import anyio
 from mcp.server.mcpserver import Context, MCPServer
 
 from context_scout.agents.domain_registry import DomainRegistry
@@ -144,70 +145,75 @@ def create_quant_corpus_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Executes 3-way Normalized RRF across live doc_chunks in PostgreSQL 17."""
-        validate_tool_call_arguments({"query": query, "market": market, "top_k": top_k})
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            DOMAIN_ID, "quant_corpus_mcp:search_quant_papers_hybrid", principal
-        )
 
-        clamped_k = min(max(1, top_k), MAX_PAYLOAD_ITEMS)
-        market_scope = _resolve_market_scope(market)
-
-        # Generate 768-dim semantic embedding vector
-        query_vector = local_embedder.embed_text(query, is_query=True)
-
-        with scoped_db_session(conn_mgr, principal) as conn:
-            ranked_hits = repo.search_doc_chunks_hybrid_rrf(
-                conn=conn,
-                domain_id=DOMAIN_ID,
-                query_text=query,
-                query_embedding=query_vector,
-                market_scope=market_scope,
-                top_k=clamped_k,
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments({"query": query, "market": market, "top_k": top_k})
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                DOMAIN_ID, "quant_corpus_mcp:search_quant_papers_hybrid", principal
             )
 
-            hits_data: list[dict[str, Any]] = []
-            if ranked_hits:
-                chunk_ids = [h.item_id for h in ranked_hits]
-                rows = conn.execute(
-                    """
-                    SELECT chunk_id, doc_id, doc_title, source_uri, market_scope,
-                           section_heading, contextual_header, verbatim_content, authority_weight
-                    FROM doc_chunks
-                    WHERE chunk_id = ANY(%s);
-                    """,
-                    (chunk_ids,),
-                ).fetchall()
+            clamped_k = min(max(1, top_k), MAX_PAYLOAD_ITEMS)
+            market_scope = _resolve_market_scope(market)
+            query_vector = local_embedder.embed_text(query, is_query=True)
 
-                lookup = {UUID(str(r[0])): r for r in rows}
-                for hit in ranked_hits:
-                    if hit.item_id in lookup:
-                        r = lookup[hit.item_id]
-                        hits_data.append(
-                            {
-                                "chunk_id": str(r[0]),
-                                "doc_id": str(r[1]),
-                                "doc_title": str(r[2]),
-                                "source_uri": str(r[3]),
-                                "market_scope": str(r[4]),
-                                "section_heading": str(r[5]),
-                                "contextual_header": str(r[6]),
-                                "verbatim_content": str(r[7]),
-                                "authority_weight": float(str(r[8])),
-                                "normalized_rrf_score": round(hit.normalized_rrf_score, 4),
-                                "trigram_rank": hit.trigram_rank,
-                                "fts_rank": hit.bm25_rank,
-                                "vector_rank": hit.vector_rank,
-                            }
-                        )
+            with scoped_db_session(conn_mgr, principal) as conn:
+                ranked_hits = repo.search_doc_chunks_hybrid_rrf(
+                    conn=conn,
+                    domain_id=DOMAIN_ID,
+                    query_text=query,
+                    query_embedding=query_vector,
+                    market_scope=market_scope,
+                    top_k=clamped_k,
+                )
 
-        payload = {
-            "query": query,
-            "market_filter": market_scope.value if market_scope else None,
-            "total_hits": len(hits_data),
-            "hits": hits_data,
-        }
-        return bound_payload_dict(payload)
+                hits_data: list[dict[str, Any]] = []
+                if ranked_hits:
+                    chunk_ids = [h.item_id for h in ranked_hits]
+                    rows = conn.execute(
+                        """
+                        SELECT chunk_id, doc_id, doc_title, source_uri, market_scope,
+                               section_heading, contextual_header, verbatim_content,
+                               authority_weight
+                        FROM doc_chunks
+                        WHERE chunk_id = ANY(%s)
+                          AND is_stale = FALSE;
+                        """,
+                        (chunk_ids,),
+                    ).fetchall()
+
+                    lookup = {UUID(str(r[0])): r for r in rows}
+                    for hit in ranked_hits:
+                        if hit.item_id in lookup:
+                            r = lookup[hit.item_id]
+                            hits_data.append(
+                                {
+                                    "chunk_id": str(r[0]),
+                                    "doc_id": str(r[1]),
+                                    "doc_title": str(r[2]),
+                                    "source_uri": str(r[3]),
+                                    "market_scope": str(r[4]),
+                                    "section_heading": str(r[5]),
+                                    "contextual_header": str(r[6]),
+                                    "verbatim_content": str(r[7]),
+                                    "authority_weight": float(str(r[8])),
+                                    "normalized_rrf_score": round(hit.normalized_rrf_score, 4),
+                                    "trigram_rank": hit.trigram_rank,
+                                    "fts_rank": hit.bm25_rank,
+                                    "vector_rank": hit.vector_rank,
+                                }
+                            )
+
+            return bound_payload_dict(
+                {
+                    "query": query,
+                    "market_filter": market_scope.value if market_scope else None,
+                    "total_hits": len(hits_data),
+                    "hits": hits_data,
+                }
+            )
+
+        return await anyio.to_thread.run_sync(_sync)
 
     # -------------------------------------------------------------------------
     # Canonical Tool 2: extract_paper_equations_and_tables
@@ -223,84 +229,87 @@ def create_quant_corpus_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Extracts mathematical formulas and tabular structures from live doc_chunks."""
-        validate_tool_call_arguments(
-            {"doc_id": doc_id, "section_filter": section_filter, "max_items": max_items}
-        )
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            DOMAIN_ID, "quant_corpus_mcp:extract_paper_equations_and_tables", principal
-        )
 
-        clamped_max = min(max(1, max_items), MAX_PAYLOAD_ITEMS)
-        clean_doc = doc_id.strip()
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments(
+                {"doc_id": doc_id, "section_filter": section_filter, "max_items": max_items}
+            )
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                DOMAIN_ID, "quant_corpus_mcp:extract_paper_equations_and_tables", principal
+            )
 
-        with scoped_db_session(conn_mgr, principal) as conn:
-            rows = conn.execute(
-                """
-                SELECT chunk_id, section_heading, verbatim_content
-                FROM doc_chunks
-                WHERE domain_id = %s
-                  AND doc_id = %s
-                ORDER BY chunk_id;
-                """,
-                (DOMAIN_ID, clean_doc),
-            ).fetchall()
+            clamped_max = min(max(1, max_items), MAX_PAYLOAD_ITEMS)
+            clean_doc = doc_id.strip()
 
-            equations: list[dict[str, Any]] = []
-            tables: list[dict[str, Any]] = []
+            with scoped_db_session(conn_mgr, principal) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT chunk_id, section_heading, verbatim_content
+                    FROM doc_chunks
+                    WHERE domain_id = %s
+                      AND doc_id = %s
+                      AND is_stale = FALSE
+                    ORDER BY chunk_id;
+                    """,
+                    (DOMAIN_ID, clean_doc),
+                ).fetchall()
 
-            for r in rows:
-                section = str(r[1])
-                content = str(r[2])
+                equations: list[dict[str, Any]] = []
+                tables: list[dict[str, Any]] = []
 
-                if section_filter and section_filter.lower() not in section.lower():
-                    continue
+                for r in rows:
+                    section = str(r[1])
+                    content = str(r[2])
 
-                # Extract LaTeX math blocks
-                for math_match in MATH_DISPLAY_PATTERN.finditer(content):
-                    if len(equations) < clamped_max:
-                        eq_text = math_match.group(1).strip()
-                        equations.append(
-                            {
-                                "section_heading": section,
-                                "formula_latex": eq_text,
-                                "char_length": len(eq_text),
-                            }
-                        )
+                    if section_filter and section_filter.lower() not in section.lower():
+                        continue
 
-                # Extract LaTeX tables
-                for tbl_match in TABLE_LATEX_PATTERN.finditer(content):
-                    if len(tables) < clamped_max:
-                        tbl_text = tbl_match.group(1).strip()
-                        tables.append(
-                            {
-                                "section_heading": section,
-                                "format": "latex",
-                                "table_content": tbl_text,
-                            }
-                        )
+                    for math_match in MATH_DISPLAY_PATTERN.finditer(content):
+                        if len(equations) < clamped_max:
+                            eq_text = math_match.group(1).strip()
+                            equations.append(
+                                {
+                                    "section_heading": section,
+                                    "formula_latex": eq_text,
+                                    "char_length": len(eq_text),
+                                }
+                            )
 
-                # Extract Markdown tables
-                for md_match in TABLE_MARKDOWN_PATTERN.finditer(content):
-                    if len(tables) < clamped_max:
-                        md_text = md_match.group(1).strip()
-                        tables.append(
-                            {
-                                "section_heading": section,
-                                "format": "markdown",
-                                "table_content": md_text,
-                            }
-                        )
+                    for tbl_match in TABLE_LATEX_PATTERN.finditer(content):
+                        if len(tables) < clamped_max:
+                            tbl_text = tbl_match.group(1).strip()
+                            tables.append(
+                                {
+                                    "section_heading": section,
+                                    "format": "latex",
+                                    "table_content": tbl_text,
+                                }
+                            )
 
-        payload = {
-            "doc_id": clean_doc,
-            "total_chunks_inspected": len(rows),
-            "equations_extracted": len(equations),
-            "tables_extracted": len(tables),
-            "equations": equations,
-            "tables": tables,
-        }
-        return bound_payload_dict(payload)
+                    for md_match in TABLE_MARKDOWN_PATTERN.finditer(content):
+                        if len(tables) < clamped_max:
+                            md_text = md_match.group(1).strip()
+                            tables.append(
+                                {
+                                    "section_heading": section,
+                                    "format": "markdown",
+                                    "table_content": md_text,
+                                }
+                            )
+
+            return bound_payload_dict(
+                {
+                    "doc_id": clean_doc,
+                    "total_chunks_inspected": len(rows),
+                    "equations_extracted": len(equations),
+                    "tables_extracted": len(tables),
+                    "equations": equations,
+                    "tables": tables,
+                }
+            )
+
+        return await anyio.to_thread.run_sync(_sync)
 
     # -------------------------------------------------------------------------
     # Canonical Tool 3: verify_market_friction_assumptions
@@ -319,94 +328,98 @@ def create_quant_corpus_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Evaluates strategy viability using institutional friction floors and Sharpe drag."""
-        validate_tool_call_arguments(
-            {
-                "target_markets": target_markets,
-                "assumed_cost_bps": assumed_cost_bps,
-                "is_intraday_futures": is_intraday_futures,
-                "reported_sharpe": reported_sharpe,
-                "reported_max_drawdown_pct": reported_max_drawdown_pct,
-                "turnover_annual": turnover_annual,
-            }
-        )
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            DOMAIN_ID, "quant_corpus_mcp:verify_market_friction_assumptions", principal
-        )
 
-        regimes: list[MarketRegime] = []
-        for m in target_markets:
-            r = _resolve_market_scope(m)
-            if r:
-                regimes.append(r)
-
-        if not regimes:
-            regimes = [MarketRegime.INDIA_NSE_BSE]
-
-        floor_bps = calculate_effective_friction_floor(
-            target_markets=regimes,
-            is_intraday_futures=is_intraday_futures,
-        )
-
-        friction_deficit_bps = max(0.0, floor_bps - assumed_cost_bps)
-        annual_drag = (friction_deficit_bps * turnover_annual) / 10000.0
-        net_sharpe = scepticism_gate.estimate_net_sharpe(
-            reported_sharpe=reported_sharpe,
-            assumed_bps=assumed_cost_bps,
-            floor_bps=floor_bps,
-            turnover_annual=turnover_annual,
-        )
-
-        # Verdict assignment
-        if (net_sharpe is not None and net_sharpe <= 0.5) or (
-            reported_max_drawdown_pct is not None and abs(reported_max_drawdown_pct) > 30.0
-        ):
-            verdict = FrictionVerdict.FAILS_AFTER_COSTS
-            reason = (
-                f"Net Sharpe ratio ({net_sharpe}) after institutional cost drag of "
-                f"{floor_bps:.1f} bps falls <= 0.5 survival hurdle or drawdown exceeds 30%."
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments(
+                {
+                    "target_markets": target_markets,
+                    "assumed_cost_bps": assumed_cost_bps,
+                    "is_intraday_futures": is_intraday_futures,
+                    "reported_sharpe": reported_sharpe,
+                    "reported_max_drawdown_pct": reported_max_drawdown_pct,
+                    "turnover_annual": turnover_annual,
+                }
             )
-        elif assumed_cost_bps < floor_bps:
-            verdict = FrictionVerdict.UNVERIFIED_FRICTION_WARNING
-            reason = (
-                f"Assumed cost of {assumed_cost_bps:.1f} bps is below institutional minimum floor "
-                f"of {floor_bps:.1f} bps for {[reg.value for reg in regimes]}."
-            )
-        else:
-            verdict = FrictionVerdict.REALISTIC_FRICTION
-            reason = (
-                f"Assumed cost ({assumed_cost_bps:.1f} bps) meets or exceeds institutional floor "
-                f"({floor_bps:.1f} bps); strategy remains viable after friction."
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                DOMAIN_ID, "quant_corpus_mcp:verify_market_friction_assumptions", principal
             )
 
-        citations: list[dict[str, str]] = []
-        for reg in regimes:
-            if reg.value in MARKET_MICROSTRUCTURE_PROFILES:
-                prof = MARKET_MICROSTRUCTURE_PROFILES[reg.value]
-                citations.append(
-                    {
-                        "market": reg.value,
-                        "statutory_basis": prof["regulatory_statutes"],
-                        "microstructure_rule": prof["microstructure_mechanisms"],
-                    }
+            regimes: list[MarketRegime] = []
+            for m in target_markets:
+                r = _resolve_market_scope(m)
+                if r:
+                    regimes.append(r)
+
+            if not regimes:
+                regimes = [MarketRegime.INDIA_NSE_BSE]
+
+            floor_bps = calculate_effective_friction_floor(
+                target_markets=regimes,
+                is_intraday_futures=is_intraday_futures,
+            )
+
+            friction_deficit_bps = max(0.0, floor_bps - assumed_cost_bps)
+            annual_drag = (friction_deficit_bps * turnover_annual) / 10000.0
+            net_sharpe = scepticism_gate.estimate_net_sharpe(
+                reported_sharpe=reported_sharpe,
+                assumed_bps=assumed_cost_bps,
+                floor_bps=floor_bps,
+                turnover_annual=turnover_annual,
+            )
+
+            if (net_sharpe is not None and net_sharpe <= 0.5) or (
+                reported_max_drawdown_pct is not None and abs(reported_max_drawdown_pct) > 30.0
+            ):
+                verdict = FrictionVerdict.FAILS_AFTER_COSTS
+                reason = (
+                    f"Net Sharpe ratio ({net_sharpe}) after institutional cost drag of "
+                    f"{floor_bps:.1f} bps falls <= 0.5 survival hurdle or drawdown exceeds 30%."
+                )
+            elif assumed_cost_bps < floor_bps:
+                verdict = FrictionVerdict.UNVERIFIED_FRICTION_WARNING
+                reason = (
+                    f"Assumed cost of {assumed_cost_bps:.1f} bps is below minimum floor "
+                    f"of {floor_bps:.1f} bps for {[reg.value for reg in regimes]}."
+                )
+            else:
+                verdict = FrictionVerdict.REALISTIC_FRICTION
+                reason = (
+                    f"Assumed cost ({assumed_cost_bps:.1f} bps) meets or exceeds floor "
+                    f"({floor_bps:.1f} bps); strategy remains viable after friction."
                 )
 
-        payload = {
-            "target_markets": [r.value for r in regimes],
-            "assumed_cost_bps": assumed_cost_bps,
-            "institutional_floor_bps": floor_bps,
-            "friction_deficit_bps": round(friction_deficit_bps, 2),
-            "estimated_annual_cost_drag": round(annual_drag, 6),
-            "reported_sharpe": reported_sharpe,
-            "estimated_net_sharpe": net_sharpe,
-            "reported_max_drawdown_pct": reported_max_drawdown_pct,
-            "turnover_annual": turnover_annual,
-            "is_intraday_futures": is_intraday_futures,
-            "friction_verdict": verdict.value,
-            "rationale": reason,
-            "regulatory_citations": citations,
-        }
-        return bound_payload_dict(payload)
+            citations: list[dict[str, str]] = []
+            for reg in regimes:
+                if reg.value in MARKET_MICROSTRUCTURE_PROFILES:
+                    prof = MARKET_MICROSTRUCTURE_PROFILES[reg.value]
+                    citations.append(
+                        {
+                            "market": reg.value,
+                            "statutory_basis": prof["regulatory_statutes"],
+                            "microstructure_rule": prof["microstructure_mechanisms"],
+                        }
+                    )
+
+            return bound_payload_dict(
+                {
+                    "target_markets": [r.value for r in regimes],
+                    "assumed_cost_bps": assumed_cost_bps,
+                    "institutional_floor_bps": floor_bps,
+                    "friction_deficit_bps": round(friction_deficit_bps, 2),
+                    "estimated_annual_cost_drag": round(annual_drag, 6),
+                    "reported_sharpe": reported_sharpe,
+                    "estimated_net_sharpe": net_sharpe,
+                    "reported_max_drawdown_pct": reported_max_drawdown_pct,
+                    "turnover_annual": turnover_annual,
+                    "is_intraday_futures": is_intraday_futures,
+                    "friction_verdict": verdict.value,
+                    "rationale": reason,
+                    "regulatory_citations": citations,
+                }
+            )
+
+        return await anyio.to_thread.run_sync(_sync)
 
     # -------------------------------------------------------------------------
     # Canonical Tool 4: compare_cross_market_regimes
@@ -421,71 +434,78 @@ def create_quant_corpus_mcp_server(
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Compares strategy feasibility across market regimes with empirical evidence."""
-        validate_tool_call_arguments({"strategy_concept": strategy_concept, "markets": markets})
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(
-            DOMAIN_ID, "quant_corpus_mcp:compare_cross_market_regimes", principal
-        )
 
-        requested_markets = markets or ["IN_NSE", "DE_XETRA", "US_EQUITY"]
-        comparison: list[dict[str, Any]] = []
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments({"strategy_concept": strategy_concept, "markets": markets})
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                DOMAIN_ID, "quant_corpus_mcp:compare_cross_market_regimes", principal
+            )
 
-        with scoped_db_session(conn_mgr, principal) as conn:
-            for mkt_str in requested_markets:
-                regime = _resolve_market_scope(mkt_str)
-                if not regime:
-                    continue
+            requested_markets = markets or ["IN_NSE", "DE_XETRA", "US_EQUITY"]
+            comparison: list[dict[str, Any]] = []
 
-                floor_bps = calculate_effective_friction_floor([regime])
-                profile = MARKET_MICROSTRUCTURE_PROFILES.get(regime.value, {})
+            with scoped_db_session(conn_mgr, principal) as conn:
+                for mkt_str in requested_markets:
+                    regime = _resolve_market_scope(mkt_str)
+                    if not regime:
+                        continue
 
-                # Find empirical findings in live corpus
-                rows = conn.execute(
-                    """
-                    SELECT doc_id, doc_title, section_heading, verbatim_content
-                    FROM doc_chunks
-                    WHERE domain_id = %s
-                      AND market_scope = %s
-                      AND (
-                          fts_doc @@ plainto_tsquery('english', %s)
-                          OR verbatim_content ILIKE %s
-                      )
-                    ORDER BY authority_weight DESC
-                    LIMIT 2;
-                    """,
-                    (DOMAIN_ID, regime.value, strategy_concept, f"%{strategy_concept}%"),
-                ).fetchall()
+                    floor_bps = calculate_effective_friction_floor([regime])
+                    profile = MARKET_MICROSTRUCTURE_PROFILES.get(regime.value, {})
 
-                findings: list[dict[str, str]] = []
-                for r in rows:
-                    findings.append(
+                    rows = conn.execute(
+                        """
+                        SELECT doc_id, doc_title, section_heading, verbatim_content
+                        FROM doc_chunks
+                        WHERE domain_id = %s
+                          AND market_scope = %s
+                          AND is_stale = FALSE
+                          AND (
+                              fts_doc @@ plainto_tsquery('english', %s)
+                              OR verbatim_content ILIKE %s
+                          )
+                        ORDER BY authority_weight DESC
+                        LIMIT 2;
+                        """,
+                        (DOMAIN_ID, regime.value, strategy_concept, f"%{strategy_concept}%"),
+                    ).fetchall()
+
+                    findings: list[dict[str, str]] = []
+                    for r in rows:
+                        findings.append(
+                            {
+                                "doc_id": str(r[0]),
+                                "title": str(r[1]),
+                                "section": str(r[2]),
+                                "empirical_excerpt": str(r[3])[:300],
+                            }
+                        )
+
+                    comparison.append(
                         {
-                            "doc_id": str(r[0]),
-                            "title": str(r[1]),
-                            "section": str(r[2]),
-                            "empirical_excerpt": str(r[3])[:300],
+                            "market": regime.value,
+                            "institutional_friction_floor_bps": floor_bps,
+                            "regulatory_statutes": profile.get(
+                                "regulatory_statutes", "Standard rules"
+                            ),
+                            "microstructure_mechanisms": profile.get(
+                                "microstructure_mechanisms", "Standard matching"
+                            ),
+                            "empirical_evidence_count": len(findings),
+                            "top_empirical_findings": findings,
                         }
                     )
 
-                comparison.append(
-                    {
-                        "market": regime.value,
-                        "institutional_friction_floor_bps": floor_bps,
-                        "regulatory_statutes": profile.get("regulatory_statutes", "Standard rules"),
-                        "microstructure_mechanisms": profile.get(
-                            "microstructure_mechanisms", "Standard matching"
-                        ),
-                        "empirical_evidence_count": len(findings),
-                        "top_empirical_findings": findings,
-                    }
-                )
+            return bound_payload_dict(
+                {
+                    "strategy_concept": strategy_concept,
+                    "compared_markets_count": len(comparison),
+                    "comparison": comparison,
+                }
+            )
 
-        payload = {
-            "strategy_concept": strategy_concept,
-            "compared_markets_count": len(comparison),
-            "comparison": comparison,
-        }
-        return bound_payload_dict(payload)
+        return await anyio.to_thread.run_sync(_sync)
 
     # -------------------------------------------------------------------------
     # Legacy Tool Aliases
@@ -509,53 +529,60 @@ def create_quant_corpus_mcp_server(
         limit: int = 5,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        validate_tool_call_arguments(
-            {"doc_id": doc_id, "section_heading": section_heading, "limit": limit}
-        )
-        principal = get_current_principal()
-        auth_gate.authorize_tool_call(DOMAIN_ID, "quant_corpus_mcp:get_paper_section", principal)
+        def _sync() -> dict[str, Any]:
+            validate_tool_call_arguments(
+                {"doc_id": doc_id, "section_heading": section_heading, "limit": limit}
+            )
+            principal = get_current_principal()
+            auth_gate.authorize_tool_call(
+                DOMAIN_ID, "quant_corpus_mcp:get_paper_section", principal
+            )
 
-        clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
-        clean_doc = doc_id.strip()
+            clamped_limit = min(max(1, limit), MAX_PAYLOAD_ITEMS)
+            clean_doc = doc_id.strip()
 
-        with scoped_db_session(conn_mgr, principal) as conn:
-            sql = """
-                SELECT chunk_id, doc_id, doc_title, source_uri, market_scope,
-                       section_heading, contextual_header, verbatim_content
-                FROM doc_chunks
-                WHERE domain_id = %s
-                  AND doc_id = %s
-                  AND (%s::text IS NULL OR section_heading ILIKE %s)
-                ORDER BY chunk_id
-                LIMIT %s;
-            """
-            s_filter = f"%{section_heading.strip()}%" if section_heading else None
-            rows = conn.execute(
-                sql, (DOMAIN_ID, clean_doc, s_filter, s_filter, clamped_limit)
-            ).fetchall()
+            with scoped_db_session(conn_mgr, principal) as conn:
+                sql = """
+                    SELECT chunk_id, doc_id, doc_title, source_uri, market_scope,
+                           section_heading, contextual_header, verbatim_content
+                    FROM doc_chunks
+                    WHERE domain_id = %s
+                      AND doc_id = %s
+                      AND is_stale = FALSE
+                      AND (%s::text IS NULL OR section_heading ILIKE %s)
+                    ORDER BY chunk_id
+                    LIMIT %s;
+                """
+                s_filter = f"%{section_heading.strip()}%" if section_heading else None
+                rows = conn.execute(
+                    sql, (DOMAIN_ID, clean_doc, s_filter, s_filter, clamped_limit)
+                ).fetchall()
 
-            sections_data: list[dict[str, Any]] = []
-            for r in rows:
-                sections_data.append(
-                    {
-                        "chunk_id": str(r[0]),
-                        "doc_id": str(r[1]),
-                        "doc_title": str(r[2]),
-                        "source_uri": str(r[3]),
-                        "market_scope": str(r[4]),
-                        "section_heading": str(r[5]),
-                        "contextual_header": str(r[6]),
-                        "verbatim_content": str(r[7]),
-                    }
-                )
+                sections_data: list[dict[str, Any]] = []
+                for r in rows:
+                    sections_data.append(
+                        {
+                            "chunk_id": str(r[0]),
+                            "doc_id": str(r[1]),
+                            "doc_title": str(r[2]),
+                            "source_uri": str(r[3]),
+                            "market_scope": str(r[4]),
+                            "section_heading": str(r[5]),
+                            "contextual_header": str(r[6]),
+                            "verbatim_content": str(r[7]),
+                        }
+                    )
 
-        payload = {
-            "doc_id": clean_doc,
-            "section_filter": section_heading,
-            "total_sections": len(sections_data),
-            "items": sections_data,
-        }
-        return bound_payload_dict(payload)
+            return bound_payload_dict(
+                {
+                    "doc_id": clean_doc,
+                    "section_filter": section_heading,
+                    "total_sections": len(sections_data),
+                    "items": sections_data,
+                }
+            )
+
+        return await anyio.to_thread.run_sync(_sync)
 
     @server.tool(
         name="compare_market_frictions",

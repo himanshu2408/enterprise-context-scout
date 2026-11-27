@@ -602,6 +602,12 @@ class ScoutSettings(BaseSettings):
     local_mlx_endpoint: str = Field(default="http://127.0.0.1:8000/v1")
     zoekt_endpoint_url: str | None = Field(
         default=None,
+        validation_alias=AliasChoices(
+            "zoekt_endpoint_url",
+            "zoekt_endpoint",
+            "SCOUT_ZOEKT_ENDPOINT_URL",
+            "SCOUT_ZOEKT_ENDPOINT",
+        ),
         description="Optional Zoekt webserver HTTP/Connect gRPC-JSON endpoint URL.",
     )
     zoekt_protocol: Literal["grpc_json", "json_api"] = Field(
@@ -609,6 +615,68 @@ class ScoutSettings(BaseSettings):
         description="Zoekt RPC wire protocol ('grpc_json' Connect or 'json_api').",
     )
     zoekt_timeout_seconds: float = Field(default=10.0, ge=0.5, le=120.0)
+    mcp_allowed_hosts: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "127.0.0.1",
+            "127.0.0.1:*",
+            "localhost",
+            "localhost:*",
+            "[::1]",
+            "[::1]:*",
+            "testserver",
+            "testserver:*",
+            "context-scout-api",
+            "context-scout-api:*",
+            "*.svc.cluster.local",
+            "*.svc.cluster.local:*",
+        ],
+        description="Allowed Host header values/patterns for stateless HTTP MCP endpoints.",
+    )
+    mcp_allowed_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "http://127.0.0.1",
+            "http://127.0.0.1:*",
+            "http://localhost",
+            "http://localhost:*",
+            "http://[::1]",
+            "http://[::1]:*",
+            "http://testserver",
+            "http://context-scout-api",
+            "http://context-scout-api:*",
+        ],
+        description="Allowed Origin header values/patterns for stateless HTTP MCP endpoints.",
+    )
+    mcp_expected_resource: str | None = Field(
+        default=None,
+        description="Optional RFC 8707 expected resource/audience identifier for HTTP MCP tokens.",
+    )
+    mcp_public_tool_schemas: bool = Field(
+        default=False,
+        description="When True, /.well-known/mcp includes full tool inputSchema unauthenticated.",
+    )
+
+    @property
+    def zoekt_endpoint(self) -> str | None:
+        return self.zoekt_endpoint_url
+
+    @field_validator("mcp_allowed_hosts", "mcp_allowed_origins", mode="before")
+    @classmethod
+    def _parse_mcp_csv_or_list(cls, v: Any) -> list[str]:
+        if v is None:
+            return []
+        if isinstance(v, str):
+            stripped = v.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+            return [part.strip() for part in stripped.split(",") if part.strip()]
+        if isinstance(v, Sequence):
+            return [str(item).strip() for item in v if str(item).strip()]
+        return [str(v).strip()] if str(v).strip() else []
+
     docling_endpoint_url: str | None = Field(
         default=None,
         description="Optional self-hosted IBM docling-serve HTTP endpoint URL.",
