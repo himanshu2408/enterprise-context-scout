@@ -558,8 +558,19 @@ def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+SYSTEM_CONNECTOR_INGEST_SCOPE: Final[str] = "system:connector_ingest"
+
+
 def _scopes_intersect(row_scopes: list[str], principal_scopes: list[str]) -> bool:
     return bool(set(row_scopes).intersection(principal_scopes))
+
+
+def _connector_ingest_or_scopes_intersect(
+    row_scopes: list[str], principal_scopes: list[str]
+) -> bool:
+    return SYSTEM_CONNECTOR_INGEST_SCOPE in principal_scopes or _scopes_intersect(
+        row_scopes, principal_scopes
+    )
 
 
 def _trigram_similarity(text_a: str, text_b: str) -> float:
@@ -4490,6 +4501,15 @@ class PostgresRLSRepository:
         conn: Connection[tuple[object, ...]],
         record: ScoutSessionRecord,
     ) -> ScoutSessionRecord:
+        existing_owner_row = conn.execute(
+            "SELECT principal_id FROM scout_sessions WHERE session_id = %s;",
+            (record.session_id,),
+        ).fetchone()
+        if existing_owner_row is not None and str(existing_owner_row[0]) != record.principal_id:
+            raise PermissionError(
+                f"Session '{record.session_id}' belongs to principal "
+                f"'{existing_owner_row[0]}', not '{record.principal_id}'."
+            )
         row = conn.execute(
             """
             INSERT INTO scout_sessions (
@@ -4513,6 +4533,7 @@ class PostgresRLSRepository:
                 pinned_symbols_json = EXCLUDED.pinned_symbols_json,
                 total_tokens_compacted = EXCLUDED.total_tokens_compacted,
                 updated_at = NOW()
+            WHERE scout_sessions.principal_id = EXCLUDED.principal_id
             RETURNING tenant_id, session_id, domain_id, principal_id, allowed_scopes,
                       turn_count, recent_turns_json, pinned_file_blobs_json,
                       pinned_symbols_json, compacted_summary, total_tokens_compacted,
@@ -5207,7 +5228,9 @@ class InMemoryRLSRepository:
     def insert_repository(self, principal: PrincipalContext, record: RepositoryRecord) -> None:
         if record.tenant_id != principal.tenant_id:
             raise PermissionError("Principal tenant_id mismatch on insert_repository")
-        if not _scopes_intersect(record.allowed_scopes, principal.allowed_scopes):
+        if not _connector_ingest_or_scopes_intersect(
+            record.allowed_scopes, principal.allowed_scopes
+        ):
             raise PermissionError("Principal lacks scope to insert repository row")
         # Upsert: purge existing record for (tenant_id, domain_id, repo_name) to mirror ON CONFLICT
         for old_id, r in list(self._repos.items()):
@@ -5230,7 +5253,9 @@ class InMemoryRLSRepository:
                 r.tenant_id == principal.tenant_id
                 and r.domain_id == domain_id
                 and r.repo_name == repo_name
-                and _scopes_intersect(r.allowed_scopes, principal.allowed_scopes)
+                and _connector_ingest_or_scopes_intersect(
+                    r.allowed_scopes, principal.allowed_scopes
+                )
             ):
                 return r
         return None
@@ -5243,7 +5268,7 @@ class InMemoryRLSRepository:
             for r in self._repos.values()
             if r.tenant_id == principal.tenant_id
             and r.domain_id == domain_id
-            and _scopes_intersect(r.allowed_scopes, principal.allowed_scopes)
+            and _connector_ingest_or_scopes_intersect(r.allowed_scopes, principal.allowed_scopes)
         ]
 
     def insert_repo_commit(self, principal: PrincipalContext, record: RepoCommitRecord) -> None:
@@ -5259,7 +5284,7 @@ class InMemoryRLSRepository:
             for r in self._repos.values()
             if r.tenant_id == principal.tenant_id
             and r.repo_id == repo_id
-            and _scopes_intersect(r.allowed_scopes, principal.allowed_scopes)
+            and _connector_ingest_or_scopes_intersect(r.allowed_scopes, principal.allowed_scopes)
         }
         return [
             c
@@ -5274,7 +5299,9 @@ class InMemoryRLSRepository:
     ) -> None:
         if record.tenant_id != principal.tenant_id:
             raise PermissionError("Principal tenant_id mismatch on insert_confluence_page")
-        if not _scopes_intersect(record.allowed_scopes, principal.allowed_scopes):
+        if not _connector_ingest_or_scopes_intersect(
+            record.allowed_scopes, principal.allowed_scopes
+        ):
             raise PermissionError("Principal lacks scope to insert confluence_page row")
         self._deleted_confluence.discard(
             (record.tenant_id, record.domain_id, record.confluence_page_id)
@@ -5306,7 +5333,9 @@ class InMemoryRLSRepository:
                 p.tenant_id == principal.tenant_id
                 and p.domain_id == domain_id
                 and p.confluence_page_id == confluence_page_id
-                and _scopes_intersect(p.allowed_scopes, principal.allowed_scopes)
+                and _connector_ingest_or_scopes_intersect(
+                    p.allowed_scopes, principal.allowed_scopes
+                )
             ):
                 return p
         return None
@@ -5328,7 +5357,7 @@ class InMemoryRLSRepository:
                 include_deleted
                 or (p.tenant_id, p.domain_id, p.confluence_page_id) not in self._deleted_confluence
             )
-            and _scopes_intersect(p.allowed_scopes, principal.allowed_scopes)
+            and _connector_ingest_or_scopes_intersect(p.allowed_scopes, principal.allowed_scopes)
         ]
 
     def tombstone_confluence_pages(
@@ -5417,7 +5446,9 @@ class InMemoryRLSRepository:
     def insert_jira_issue(self, principal: PrincipalContext, record: JiraIssueRecord) -> None:
         if record.tenant_id != principal.tenant_id:
             raise PermissionError("Principal tenant_id mismatch on insert_jira_issue")
-        if not _scopes_intersect(record.allowed_scopes, principal.allowed_scopes):
+        if not _connector_ingest_or_scopes_intersect(
+            record.allowed_scopes, principal.allowed_scopes
+        ):
             raise PermissionError("Principal lacks scope to insert jira_issue row")
         # Upsert: purge existing record for (tenant_id, domain_id, issue_key) to mirror ON CONFLICT
         for old_id, i in list(self._jira.items()):
@@ -5437,7 +5468,9 @@ class InMemoryRLSRepository:
                 i.tenant_id == principal.tenant_id
                 and i.domain_id == domain_id
                 and i.issue_key == issue_key
-                and _scopes_intersect(i.allowed_scopes, principal.allowed_scopes)
+                and _connector_ingest_or_scopes_intersect(
+                    i.allowed_scopes, principal.allowed_scopes
+                )
             ):
                 return i
         return None
@@ -5451,36 +5484,50 @@ class InMemoryRLSRepository:
             if i.tenant_id == principal.tenant_id
             and i.domain_id == domain_id
             and (project_key is None or i.project_key == project_key)
-            and _scopes_intersect(i.allowed_scopes, principal.allowed_scopes)
+            and _connector_ingest_or_scopes_intersect(i.allowed_scopes, principal.allowed_scopes)
         ]
 
     def insert_code_file(self, principal: PrincipalContext, record: CodeFileRecord) -> None:
         if record.tenant_id != principal.tenant_id:
             raise PermissionError("Principal tenant_id mismatch on insert_code_file")
-        if not _scopes_intersect(record.allowed_scopes, principal.allowed_scopes):
+        if not _connector_ingest_or_scopes_intersect(
+            record.allowed_scopes, principal.allowed_scopes
+        ):
             raise PermissionError("Principal lacks scope to insert code_file row")
         self._files[record.file_id] = record
 
     def insert_ast_symbol(self, principal: PrincipalContext, record: ASTSymbolRecord) -> None:
         if record.tenant_id != principal.tenant_id:
             raise PermissionError("Principal tenant_id mismatch on insert_ast_symbol")
-        if not _scopes_intersect(record.allowed_scopes, principal.allowed_scopes):
+        if not _connector_ingest_or_scopes_intersect(
+            record.allowed_scopes, principal.allowed_scopes
+        ):
             raise PermissionError("Principal lacks scope to insert ast_symbol row")
         self._symbols[record.symbol_id] = record
 
     def insert_ast_edge(self, principal: PrincipalContext, record: ASTEdgeRecord) -> None:
         if record.tenant_id != principal.tenant_id:
             raise PermissionError("Principal tenant_id mismatch on insert_ast_edge")
-        if not _scopes_intersect(record.allowed_scopes, principal.allowed_scopes):
+        if not _connector_ingest_or_scopes_intersect(
+            record.allowed_scopes, principal.allowed_scopes
+        ):
             raise PermissionError("Principal lacks scope to insert ast_edge row")
         self._edges[record.edge_id] = record
 
     def insert_doc_chunk(self, principal: PrincipalContext, record: DocChunkRecord) -> None:
+        import dataclasses
+
         if record.tenant_id != principal.tenant_id:
             raise PermissionError("Principal tenant_id mismatch on insert_doc_chunk")
-        if not _scopes_intersect(record.allowed_scopes, principal.allowed_scopes):
+        if not _connector_ingest_or_scopes_intersect(
+            record.allowed_scopes, principal.allowed_scopes
+        ):
             raise PermissionError("Principal lacks scope to insert doc_chunk row")
-        self._docs[record.chunk_id] = record
+        normalized = dataclasses.replace(
+            record,
+            market_scope=_parse_market_scope(_serialize_market_scope(record.market_scope)),
+        )
+        self._docs[normalized.chunk_id] = normalized
 
     def insert_doc_chunks_batch(
         self, principal: PrincipalContext, records: list[DocChunkRecord]
@@ -5497,7 +5544,7 @@ class InMemoryRLSRepository:
             for f in self._files.values()
             if f.tenant_id == principal.tenant_id
             and f.domain_id == domain_id
-            and _scopes_intersect(f.allowed_scopes, principal.allowed_scopes)
+            and _connector_ingest_or_scopes_intersect(f.allowed_scopes, principal.allowed_scopes)
         ]
 
     def list_visible_ast_symbols(
@@ -5508,7 +5555,7 @@ class InMemoryRLSRepository:
             for s in self._symbols.values()
             if s.tenant_id == principal.tenant_id
             and s.domain_id == domain_id
-            and _scopes_intersect(s.allowed_scopes, principal.allowed_scopes)
+            and _connector_ingest_or_scopes_intersect(s.allowed_scopes, principal.allowed_scopes)
         ]
 
     def list_visible_ast_edges(
@@ -5519,7 +5566,7 @@ class InMemoryRLSRepository:
             for e in self._edges.values()
             if e.tenant_id == principal.tenant_id
             and e.domain_id == domain_id
-            and _scopes_intersect(e.allowed_scopes, principal.allowed_scopes)
+            and _connector_ingest_or_scopes_intersect(e.allowed_scopes, principal.allowed_scopes)
         ]
 
     def list_visible_doc_chunks(
@@ -5537,20 +5584,19 @@ class InMemoryRLSRepository:
             and d.domain_id == domain_id
             and (include_stale or not d.is_stale)
             and (target_mkt is None or _serialize_market_scope(d.market_scope) == target_mkt)
-            and _scopes_intersect(d.allowed_scopes, principal.allowed_scopes)
+            and _connector_ingest_or_scopes_intersect(d.allowed_scopes, principal.allowed_scopes)
         ]
 
     def get_file_blob_hashes(
         self, principal: PrincipalContext, domain_id: str, repo_name: str
     ) -> dict[str, tuple[UUID, str]]:
-        p_scopes = set(principal.allowed_scopes)
         return {
             f.file_path: (f.file_id, f.git_blob_sha)
             for f in self._files.values()
             if f.tenant_id == principal.tenant_id
             and f.domain_id == domain_id
             and f.repo_name == repo_name
-            and bool(p_scopes.intersection(f.allowed_scopes))
+            and _connector_ingest_or_scopes_intersect(f.allowed_scopes, principal.allowed_scopes)
         }
 
     def delete_code_file(self, principal: PrincipalContext, file_id: UUID) -> None:
@@ -6030,6 +6076,7 @@ class InMemoryRLSRepository:
         trgm_order = sorted(range(len(visible)), key=lambda i: trgm_scores[i], reverse=True)
         trgm_ranks = {visible[idx].chunk_id: rank + 1 for rank, idx in enumerate(trgm_order)}
 
+        domain_cnt = len(visible)
         scored_hits: list[tuple[float, float, float, CalibratedRankedSearchHit]] = []
         for idx, d in enumerate(visible):
             r_trgm = trgm_ranks[d.chunk_id]
@@ -6050,7 +6097,7 @@ class InMemoryRLSRepository:
                 market_scope=d.market_scope,
                 domain_id=domain_id,
             )
-            if is_boiler and len(visible) > 25:
+            if is_boiler and domain_cnt > 50:
                 continue
             if min_calibrated_score > 0.0 and calibrated_score < min_calibrated_score:
                 continue
@@ -6070,9 +6117,8 @@ class InMemoryRLSRepository:
                 lexical_coverage=lexical_cov,
                 is_boilerplate=is_boiler,
             )
-            scored_hits.append(
-                (weighted_score, base_rrf * d.authority_weight, d.authority_weight, hit)
-            )
+            rank_key = calibrated_score if domain_cnt > 50 else weighted_score
+            scored_hits.append((rank_key, weighted_score, d.authority_weight, hit))
 
         scored_hits.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
         return [item[3] for item in scored_hits[:top_k]]
@@ -7119,11 +7165,18 @@ class InMemoryRLSRepository:
     ) -> ScoutSessionRecord:
         if record.tenant_id != principal.tenant_id:
             raise PermissionError("Principal tenant_id mismatch on upsert_scout_session")
+        if record.principal_id != principal.user_id:
+            raise PermissionError("Principal user_id mismatch on upsert_scout_session")
         if not _scopes_intersect(record.allowed_scopes, principal.allowed_scopes):
             raise PermissionError("Principal lacks scope to upsert scout_session row")
         with self._lock:
             key = (record.tenant_id, record.session_id)
             prev = self._sessions.get(key)
+            if prev is not None and prev.principal_id != principal.user_id:
+                raise PermissionError(
+                    f"Session '{record.session_id}' belongs to principal '{prev.principal_id}', "
+                    f"not '{principal.user_id}'."
+                )
             now = datetime.now(UTC)
             stored = ScoutSessionRecord(
                 tenant_id=record.tenant_id,

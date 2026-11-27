@@ -16,8 +16,8 @@ from context_scout.api.dependencies import (
     get_repo_root,
 )
 from context_scout.api.schemas import DomainDetail, DomainsResponse
-from context_scout.config import ScoutSettings
-from context_scout.db.session import RLSConnectionManager
+from context_scout.config import ScoutSettings, get_storage_backend
+from context_scout.db.session import get_query_pool
 from context_scout.schemas.contracts import PrincipalContext
 
 logger = logging.getLogger(__name__)
@@ -27,12 +27,12 @@ router = APIRouter(tags=["Domains"])
 def _query_rls_domain_counts(principal: PrincipalContext) -> dict[str, dict[str, int]]:
     """Query live PostgreSQL 17 row counts per domain under RLS for principal."""
     counts: dict[str, dict[str, int]] = {}
+    if get_storage_backend() == "memory":
+        return counts
     try:
         settings = ScoutSettings()
-        with (
-            RLSConnectionManager(settings.db_app_url, use_pool=False) as conn_mgr,
-            conn_mgr.scoped_transaction(principal) as conn,
-        ):
+        conn_mgr = get_query_pool(settings)
+        with conn_mgr.scoped_transaction(principal) as conn:
             doc_rows = conn.execute(
                 "SELECT domain_id, COUNT(*), COUNT(DISTINCT doc_id) "
                 "FROM doc_chunks GROUP BY domain_id;"

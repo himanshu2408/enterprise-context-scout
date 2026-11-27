@@ -5,12 +5,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 
-from context_scout.db.repositories import InMemoryRLSRepository
+from context_scout.config import ScoutSettings
+from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
+from context_scout.db.session import PoolRole, RLSConnectionManager
 from context_scout.plugins.connectors.confluence import (
     ConfluenceConnectorPlugin,
     ConfluencePageDTO,
 )
+from context_scout.schemas.contracts import PrincipalContext, RoleType
 
 
 def _make_page(
@@ -198,7 +202,14 @@ def test_parent_cycle_detection_fails_closed() -> None:
     ]
 
 
-def test_fetch_missing_ancestors_and_sync_propagation_to_in_memory_repo() -> None:
+@pytest.mark.parametrize(
+    "backend",
+    ["memory", pytest.param("postgres", marks=pytest.mark.postgres)],
+)
+def test_fetch_missing_ancestors_and_sync_propagation_to_in_memory_repo(
+    backend: str,
+    request: pytest.FixtureRequest,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/wiki/api/v2/pages/anc-parent":
@@ -253,29 +264,80 @@ def test_fetch_missing_ancestors_and_sync_propagation_to_in_memory_repo() -> Non
         parent_id="anc-403",
     )
 
-    repo = InMemoryRLSRepository()
-    result = plugin.sync_space_to_repository(
-        domain_id="tenant-1",
-        space_key="ENG",
-        repository=repo,
-        current_pages=[child, unrestricted_grandchild, blocked_child],
-        fetch_missing_ancestors=True,
-    )
-
-    assert result.items_updated == 3
-
     expected_bob = ["confluence:space:ENG:principal:bob:read"]
     expected_none = ["confluence:space:ENG:restricted:none"]
 
-    pages_by_cid = {p.confluence_page_id: p for p in repo._confluence.values()}
-    assert pages_by_cid["child-1"].allowed_scopes == expected_bob
-    assert pages_by_cid["grandchild-1"].allowed_scopes == expected_bob
-    assert pages_by_cid["blocked-1"].allowed_scopes == expected_none
+    if backend == "memory":
+        repo = InMemoryRLSRepository()
+        result = plugin.sync_space_to_repository(
+            domain_id="tenant-1",
+            space_key="ENG",
+            repository=repo,
+            current_pages=[child, unrestricted_grandchild, blocked_child],
+            fetch_missing_ancestors=True,
+        )
+        assert result.items_updated == 3
 
-    docs_by_page = {d.doc_id: d for d in repo._docs.values()}
-    assert docs_by_page["confluence:child-1"].allowed_scopes == expected_bob
-    assert docs_by_page["confluence:grandchild-1"].allowed_scopes == expected_bob
-    assert docs_by_page["confluence:blocked-1"].allowed_scopes == expected_none
+        pages_by_cid = {p.confluence_page_id: p for p in repo._confluence.values()}
+        assert pages_by_cid["child-1"].allowed_scopes == expected_bob
+        assert pages_by_cid["grandchild-1"].allowed_scopes == expected_bob
+        assert pages_by_cid["blocked-1"].allowed_scopes == expected_none
+
+        docs_by_page = {d.doc_id: d for d in repo._docs.values()}
+        assert docs_by_page["confluence:child-1"].allowed_scopes == expected_bob
+        assert docs_by_page["confluence:grandchild-1"].allowed_scopes == expected_bob
+        assert docs_by_page["confluence:blocked-1"].allowed_scopes == expected_none
+        return
+
+    domain_id = str(request.getfixturevalue("ephemeral_pg_domain"))
+    settings = ScoutSettings()
+    ingest_mgr = RLSConnectionManager(settings.db_app_url, pool_role=PoolRole.INGESTION)
+    read_mgr = RLSConnectionManager(settings.db_app_url)
+    pg_repo = PostgresRLSRepository()
+    ingest_principal = PrincipalContext(
+        user_id="conf-ingest",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["system:connector_ingest"],
+    )
+    with ingest_mgr.scoped_transaction(
+        ingest_principal, enable_hnsw_iterative_scan=False
+    ) as ingest_conn:
+        result = plugin.sync_space_to_repository(
+            domain_id=domain_id,
+            space_key="ENG",
+            repository=pg_repo,
+            conn=ingest_conn,
+            current_pages=[child, unrestricted_grandchild, blocked_child],
+            fetch_missing_ancestors=True,
+        )
+    assert result.items_updated == 3
+
+    bob_principal = PrincipalContext(
+        user_id="bob",
+        role=RoleType.ENGINEER,
+        allowed_scopes=expected_bob,
+    )
+    stranger_principal = PrincipalContext(
+        user_id="stranger",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["confluence:space:ENG:read"],
+    )
+    with read_mgr.scoped_transaction(bob_principal, enable_hnsw_iterative_scan=False) as bob_conn:
+        bob_pages = {
+            p.confluence_page_id: p
+            for p in pg_repo.list_confluence_pages(bob_conn, domain_id, space_key="ENG")
+        }
+        assert set(bob_pages.keys()) == {"child-1", "grandchild-1"}
+        assert bob_pages["child-1"].allowed_scopes == expected_bob
+        assert bob_pages["grandchild-1"].allowed_scopes == expected_bob
+        bob_docs = {d.doc_id: d for d in pg_repo.list_visible_doc_chunks(bob_conn, domain_id)}
+        assert set(bob_docs.keys()) == {"confluence:child-1", "confluence:grandchild-1"}
+
+    with read_mgr.scoped_transaction(
+        stranger_principal, enable_hnsw_iterative_scan=False
+    ) as stranger_conn:
+        assert pg_repo.list_confluence_pages(stranger_conn, domain_id, space_key="ENG") == []
+        assert pg_repo.list_visible_doc_chunks(stranger_conn, domain_id) == []
 
 
 def test_confluence_429_propagates_from_ancestor_and_restriction_fetches() -> None:

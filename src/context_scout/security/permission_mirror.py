@@ -13,10 +13,11 @@ from collections.abc import Callable, Mapping, Sequence
 from enum import IntEnum, StrEnum
 from typing import Any, Final, Protocol, runtime_checkable
 from urllib.parse import unquote, urlparse
+from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-from context_scout.schemas.contracts import PrincipalContext, RoleType
+from context_scout.schemas.contracts import DEFAULT_TENANT_ID, PrincipalContext, RoleType
 
 DEFAULT_ACL_CACHE_TTL_SECONDS: Final[int] = 60
 MAX_ACL_CACHE_TTL_SECONDS: Final[int] = 60
@@ -131,6 +132,7 @@ class EnterpriseIdentityProfile(BaseModel):
     """Aggregated enterprise identity containing all provider memberships."""
 
     user_id: str = Field(min_length=1)
+    tenant_id: UUID = Field(default=DEFAULT_TENANT_ID)
     gitlab_memberships: list[GitLabProjectMembership] = Field(default_factory=list)
     github_memberships: list[GitHubRepoMembership] = Field(default_factory=list)
     confluence_memberships: list[ConfluenceSpaceMembership] = Field(default_factory=list)
@@ -408,6 +410,7 @@ class PermissionMirror:
 
         return PrincipalContext(
             user_id=profile.user_id,
+            tenant_id=profile.tenant_id,
             role=role,
             allowed_scopes=scopes,
             max_session_paid_tokens=max_session_paid_tokens,
@@ -538,6 +541,20 @@ class _StdlibRESP2Client:
         if ex is not None:
             return self.setex(key, int(ex), value)
         return self._execute("SET", key, value)
+
+    def set_nx_ex(self, key: str, value: str, ttl_seconds: int) -> bool:
+        """Atomically sets key only if absent with TTL; returns True if acquired."""
+        ttl = max(1, int(ttl_seconds))
+        res = self._execute("SET", key, value, "EX", str(ttl), "NX")
+        if res is None:
+            return False
+        if isinstance(res, bool):
+            return res
+        return str(res).upper() == "OK"
+
+    def eval_script(self, script: str, numkeys: int, *keys_and_args: str | int) -> Any:
+        """Executes a Lua script via Redis EVAL using standard (script, numkeys, *args) form."""
+        return self._execute("EVAL", script, str(int(numkeys)), *(str(a) for a in keys_and_args))
 
     def setex(self, key: str, ttl_seconds: int, value: str) -> Any:
         return self._execute("SETEX", key, str(ttl_seconds), value)
@@ -701,27 +718,31 @@ class CachedPermissionMirrorService:
         else:
             self._backend = None
 
-    def _cache_key(self, user_id: str) -> str:
-        return f"{self.key_prefix}{user_id}"
+    @staticmethod
+    def _composite_key(tenant_id: UUID, user_id: str) -> str:
+        return f"{tenant_id}:{user_id}"
 
-    def _remove_user_from_reverse_index(self, user_id: str) -> None:
-        entry = self._cache.pop(user_id, None)
+    def _cache_key(self, user_id: str, tenant_id: UUID = DEFAULT_TENANT_ID) -> str:
+        return f"{self.key_prefix}{tenant_id}:{user_id}"
+
+    def _remove_user_from_reverse_index(self, composite_key: str) -> None:
+        entry = self._cache.pop(composite_key, None)
         if entry is None:
             return
         _, old_scopes = entry
         for scope in old_scopes:
-            users = self._scope_to_users.get(scope)
-            if users is not None:
-                users.discard(user_id)
-                if not users:
+            members = self._scope_to_users.get(scope)
+            if members is not None:
+                members.discard(composite_key)
+                if not members:
                     self._scope_to_users.pop(scope, None)
 
-    def _store_in_memory(self, user_id: str, ts: float, scopes: Sequence[str]) -> list[str]:
-        self._remove_user_from_reverse_index(user_id)
+    def _store_in_memory(self, composite_key: str, ts: float, scopes: Sequence[str]) -> list[str]:
+        self._remove_user_from_reverse_index(composite_key)
         copied = list(scopes)
-        self._cache[user_id] = (ts, copied)
+        self._cache[composite_key] = (ts, copied)
         for scope in copied:
-            self._scope_to_users.setdefault(scope, set()).add(user_id)
+            self._scope_to_users.setdefault(scope, set()).add(composite_key)
         return list(copied)
 
     def get_user_scopes(
@@ -729,44 +750,70 @@ class CachedPermissionMirrorService:
     ) -> list[str]:
         with self._lock:
             now = self._clock()
-            cache_key = self._cache_key(profile.user_id)
+            comp_key = self._composite_key(profile.tenant_id, profile.user_id)
+            cache_key = self._cache_key(profile.user_id, profile.tenant_id)
 
             if not force_refresh:
-                cached = self._cache.get(profile.user_id)
+                cached = self._cache.get(comp_key)
                 if cached is not None:
                     ts, scopes = cached
                     if now - ts < self.ttl_seconds:
                         return list(scopes)
-                    self._remove_user_from_reverse_index(profile.user_id)
+                    self._remove_user_from_reverse_index(comp_key)
 
                 if self._backend is not None:
                     backend_scopes = self._backend.get(cache_key)
                     if backend_scopes is not None:
-                        return self._store_in_memory(profile.user_id, now, backend_scopes)
+                        return self._store_in_memory(comp_key, now, backend_scopes)
 
             resolved = PermissionMirror.resolve_allowed_scopes(profile)
-            stored = self._store_in_memory(profile.user_id, now, resolved)
+            stored = self._store_in_memory(comp_key, now, resolved)
             if self._backend is not None:
                 self._backend.set(cache_key, stored, self.ttl_seconds)
             return list(stored)
 
-    def invalidate_user(self, user_id: str) -> None:
-        """Called upon receiving GitLab/GitHub/Confluence/Jira membership change webhooks."""
+    def invalidate_user(self, user_id: str, tenant_id: UUID | None = None) -> None:
+        """Called upon receiving GitLab/GitHub/Confluence/Jira/SCIM change webhooks."""
         with self._lock:
-            self._remove_user_from_reverse_index(user_id)
+            if tenant_id is not None:
+                self._remove_user_from_reverse_index(self._composite_key(tenant_id, user_id))
+                if self._backend is not None:
+                    self._backend.delete(self._cache_key(user_id, tenant_id))
+                return
+
+            suffix = f":{user_id}"
+            matching_comp_keys = [ck for ck in self._cache if ck == user_id or ck.endswith(suffix)]
+            for ck in matching_comp_keys:
+                self._remove_user_from_reverse_index(ck)
             if self._backend is not None:
-                self._backend.delete(self._cache_key(user_id))
+                self._backend.delete(self._cache_key(user_id, DEFAULT_TENANT_ID))
+                client = getattr(self._backend, "_client", None)
+                pattern = f"{self.key_prefix}*{suffix}"
+                matched_redis_keys: list[str] = []
+                if client is not None and hasattr(client, "scan_iter"):
+                    matched_redis_keys = [str(k) for k in client.scan_iter(match=pattern)]
+                elif client is not None and hasattr(client, "keys"):
+                    matched_redis_keys = [str(k) for k in client.keys(pattern)]
+                if matched_redis_keys and client is not None:
+                    client.delete(*matched_redis_keys)
 
     def invalidate_scope_prefix(self, scope_prefix: str) -> int:
         """Evicts all cached users holding any scope matching scope_prefix."""
         with self._lock:
-            affected_users: set[str] = set()
-            for scope, users in self._scope_to_users.items():
+            affected_keys: set[str] = set()
+            for scope, members in self._scope_to_users.items():
                 if scope.startswith(scope_prefix):
-                    affected_users.update(users)
-            for user_id in affected_users:
-                self.invalidate_user(user_id)
-            return len(affected_users)
+                    affected_keys.update(members)
+            for comp_key in affected_keys:
+                if ":" in comp_key:
+                    tid_str, uid = comp_key.split(":", 1)
+                    try:
+                        self.invalidate_user(uid, tenant_id=UUID(tid_str))
+                        continue
+                    except ValueError:
+                        pass
+                self.invalidate_user(comp_key)
+            return len(affected_keys)
 
     def process_revocation_webhook(self, source_type: str, payload: Mapping[str, Any]) -> list[str]:
         """Processes membership/permission/restriction revocation webhooks across providers."""
@@ -871,15 +918,27 @@ class CachedPermissionMirrorService:
                 if project_key:
                     scope_prefixes.append(f"jira:project:{sanitize_scope_identifier(project_key)}:")
 
-            for prefix in scope_prefixes:
-                for scope, users in list(self._scope_to_users.items()):
-                    if scope.startswith(prefix):
-                        invalidated.update(users)
-
+            invalidated_targets: set[tuple[str, UUID | None]] = set()
             for uid in invalidated:
-                self.invalidate_user(uid)
+                invalidated_targets.add((uid, None))
 
-            return sorted(invalidated)
+            for prefix in scope_prefixes:
+                for scope, comp_keys in list(self._scope_to_users.items()):
+                    if scope.startswith(prefix):
+                        for comp_key in comp_keys:
+                            if ":" in comp_key:
+                                tid_str, uid = comp_key.split(":", 1)
+                                try:
+                                    invalidated_targets.add((uid, UUID(tid_str)))
+                                    continue
+                                except ValueError:
+                                    pass
+                            invalidated_targets.add((comp_key, None))
+
+            for uid, target_tid in invalidated_targets:
+                self.invalidate_user(uid, tenant_id=target_tid)
+
+            return sorted({uid for uid, _ in invalidated_targets})
 
     def clear(self) -> None:
         with self._lock:

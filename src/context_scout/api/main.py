@@ -8,6 +8,8 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
+import psycopg
+import psycopg_pool
 from fastapi import FastAPI, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -136,6 +138,10 @@ def create_app() -> FastAPI:
                 out_carrier = inject_trace_context({})
                 if out_carrier.get("traceparent") and "traceparent" not in response.headers:
                     response.headers["traceparent"] = out_carrier["traceparent"]
+                if route_path.startswith("/api/"):
+                    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+                    response.headers.setdefault("X-Frame-Options", "DENY")
+                    response.headers.setdefault("Cache-Control", "no-store")
                 return response
             finally:
                 _CURRENT_PRINCIPAL.reset(token)
@@ -210,6 +216,23 @@ def create_app() -> FastAPI:
     @app.get("/health", include_in_schema=False)
     def root_health_redirect() -> RedirectResponse:
         return RedirectResponse(url="/api/v1/health")
+
+    @app.exception_handler(psycopg.OperationalError)
+    @app.exception_handler(psycopg_pool.PoolTimeout)
+    async def database_unavailable_handler(request: Request, exc: Exception) -> JSONResponse:
+        del exc
+        headers: dict[str, str] = {}
+        if request.url.path.startswith("/api/"):
+            headers = {
+                "X-Content-Type-Options": "nosniff",
+                "X-Frame-Options": "DENY",
+                "Cache-Control": "no-store",
+            }
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Database temporarily unavailable"},
+            headers=headers,
+        )
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(

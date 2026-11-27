@@ -19,7 +19,8 @@ import psycopg.errors
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 
 from context_scout.api.dependencies import get_principal_context, is_development_environment
-from context_scout.config import ScoutSettings
+from context_scout.config import ScoutSettings, get_storage_backend
+from context_scout.db.session import get_ingestion_pool
 from context_scout.queue.task_queue import (
     InMemoryTaskQueue,
     PostgresTaskQueue,
@@ -27,36 +28,48 @@ from context_scout.queue.task_queue import (
 )
 from context_scout.schemas.contracts import DEFAULT_TENANT_ID, PrincipalContext, RoleType
 from context_scout.security.audit_chain import get_audit_chain_service
+from context_scout.security.permission_mirror import _StdlibRESP2Client
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
+_QUEUE_LOCK = threading.Lock()
 _GLOBAL_QUEUE: TaskQueueProtocol | None = None
+_GLOBAL_QUEUE_EXPLICIT: bool = False
+_GLOBAL_QUEUE_KEY: tuple[str, str] | None = None
 
 
 def get_task_queue() -> TaskQueueProtocol:
-    """Dependency provider returning the active TaskQueueProtocol instance."""
-    global _GLOBAL_QUEUE
-    if _GLOBAL_QUEUE is not None:
+    """Dependency provider returning the configured TaskQueueProtocol without fallback latching."""
+    global _GLOBAL_QUEUE, _GLOBAL_QUEUE_EXPLICIT, _GLOBAL_QUEUE_KEY
+    if _GLOBAL_QUEUE_EXPLICIT and _GLOBAL_QUEUE is not None:
         return _GLOBAL_QUEUE
-
+    backend = get_storage_backend()
     settings = ScoutSettings()
-    try:
-        queue = PostgresTaskQueue(settings.db_app_url)
-        queue.get_queue_stats()
-        _GLOBAL_QUEUE = queue
+    desired_key = (backend, settings.db_app_url if backend == "postgres" else "memory")
+    if _GLOBAL_QUEUE is not None and desired_key == _GLOBAL_QUEUE_KEY:
         return _GLOBAL_QUEUE
-    except Exception as exc:
-        logger.warning("PostgresTaskQueue initialization failed, using InMemoryTaskQueue: %s", exc)
-        _GLOBAL_QUEUE = InMemoryTaskQueue()
+    with _QUEUE_LOCK:
+        if _GLOBAL_QUEUE_EXPLICIT and _GLOBAL_QUEUE is not None:
+            return _GLOBAL_QUEUE
+        if _GLOBAL_QUEUE is not None and desired_key == _GLOBAL_QUEUE_KEY:
+            return _GLOBAL_QUEUE
+        if backend == "memory":
+            _GLOBAL_QUEUE = InMemoryTaskQueue()
+        else:
+            _GLOBAL_QUEUE = PostgresTaskQueue(connection_manager=get_ingestion_pool(settings))
+        _GLOBAL_QUEUE_KEY = desired_key
         return _GLOBAL_QUEUE
 
 
 def set_task_queue(queue: TaskQueueProtocol | None) -> None:
     """Sets or resets the global task queue instance (used for testing)."""
-    global _GLOBAL_QUEUE
-    _GLOBAL_QUEUE = queue
+    global _GLOBAL_QUEUE, _GLOBAL_QUEUE_EXPLICIT, _GLOBAL_QUEUE_KEY
+    with _QUEUE_LOCK:
+        _GLOBAL_QUEUE = queue
+        _GLOBAL_QUEUE_EXPLICIT = queue is not None
+        _GLOBAL_QUEUE_KEY = None
 
 
 def _allow_unsigned_dev_webhooks() -> bool:
@@ -267,6 +280,43 @@ _SEEN_WEBHOOK_DELIVERIES: deque[tuple[str, float]] = deque(maxlen=2048)
 _SEEN_WEBHOOK_IDS: set[str] = set()
 _WEBHOOK_MAX_SKEW_SECONDS = 300.0
 _ASCII_FLOAT_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
+_WEBHOOK_REDIS_CLIENT: _StdlibRESP2Client | None = None
+_WEBHOOK_REDIS_URL: str | None = None
+
+
+def _get_webhook_redis_client() -> _StdlibRESP2Client | None:
+    global _WEBHOOK_REDIS_CLIENT, _WEBHOOK_REDIS_URL
+    url = (os.environ.get("SCOUT_REDIS_URL") or ScoutSettings().redis_url or "").strip()
+    if not url:
+        return None
+    if _WEBHOOK_REDIS_CLIENT is not None and url == _WEBHOOK_REDIS_URL:
+        return _WEBHOOK_REDIS_CLIENT
+    with _WEBHOOK_REPLAY_LOCK:
+        if _WEBHOOK_REDIS_CLIENT is not None and url == _WEBHOOK_REDIS_URL:
+            return _WEBHOOK_REDIS_CLIENT
+        if _WEBHOOK_REDIS_CLIENT is not None:
+            _WEBHOOK_REDIS_CLIENT.close()
+        _WEBHOOK_REDIS_CLIENT = _StdlibRESP2Client(url)
+        _WEBHOOK_REDIS_URL = url
+        return _WEBHOOK_REDIS_CLIENT
+
+
+def _reserve_webhook_nonce_redis(
+    client: _StdlibRESP2Client,
+    nonce_key: str,
+    ttl_seconds: int,
+) -> bool:
+    try:
+        return bool(client.set_nx_ex(nonce_key, "1", ttl_seconds))
+    except RuntimeError as exc:
+        err_l = str(exc).lower()
+        if "unknown command" not in err_l and "syntax" not in err_l:
+            raise
+    with _WEBHOOK_REPLAY_LOCK:
+        if client.get(nonce_key) is not None:
+            return False
+        client.setex(nonce_key, ttl_seconds, "1")
+        return True
 
 
 def _validate_optional_replay_headers(request: Request, vendor: str) -> None:
@@ -322,6 +372,19 @@ def _validate_optional_replay_headers(request: Request, vendor: str) -> None:
                 detail="Invalid webhook delivery ID header.",
             )
         scoped_id = f"{vendor}:{clean_id}"
+        redis_client = _get_webhook_redis_client()
+        if redis_client is not None:
+            nonce_key = f"scout:webhook_nonce:{scoped_id}"
+            acquired = _reserve_webhook_nonce_redis(
+                redis_client, nonce_key, int(_WEBHOOK_MAX_SKEW_SECONDS)
+            )
+            if not acquired:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Duplicate webhook delivery ID rejected (ASI07 replay guard).",
+                )
+            return
+
         now = time.time()
         with _WEBHOOK_REPLAY_LOCK:
             while (

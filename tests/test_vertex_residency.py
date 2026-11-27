@@ -67,7 +67,10 @@ def sample_pack() -> ImplementationContextPack:
 
 def test_default_initialization_vertex_eu_residency() -> None:
     """Verifies that executor defaults to Vertex AI mode and Frankfurt (europe-west3)."""
-    executor = GeminiImplementationExecutor(project="enterprise-scout-prod")
+    executor = GeminiImplementationExecutor(
+        project="enterprise-scout-prod",
+        allow_external_cloud_egress=True,
+    )
     assert executor.vertexai is True
     assert executor.location == "europe-west3"
     assert executor.project == "enterprise-scout-prod"
@@ -91,10 +94,13 @@ def test_default_initialization_vertex_eu_residency() -> None:
         "asia-northeast1",
         "southamerica-east1",
         "australia-southeast1",
+        "europe-west2",
+        "europe-west6",
+        "europe-fake99",
     ],
 )
 def test_rejection_of_non_eu_regions_by_default(forbidden_region: str) -> None:
-    """Verifies that non-EU regions are rejected by default with a clear GDPR violation error."""
+    """Verifies non-EEA, UK/CH adequacy, and bogus europe-* regions are rejected by default."""
     with pytest.raises(ValueError, match="violates EU data residency policy"):
         GeminiImplementationExecutor(
             project="enterprise-scout-prod",
@@ -106,10 +112,8 @@ def test_rejection_of_non_eu_regions_by_default(forbidden_region: str) -> None:
     "approved_region",
     [
         "europe-west1",
-        "europe-west2",
         "europe-west3",
         "europe-west4",
-        "europe-west6",
         "europe-west8",
         "europe-west9",
         "europe-west10",
@@ -120,10 +124,11 @@ def test_rejection_of_non_eu_regions_by_default(forbidden_region: str) -> None:
     ],
 )
 def test_allowed_eu_regions(approved_region: str) -> None:
-    """Verifies that all approved EU regions pass validation and configure the client endpoint."""
+    """Verifies all 10 approved strict EEA regions pass validation when egress is enabled."""
     executor = GeminiImplementationExecutor(
         project="enterprise-scout-prod",
         location=approved_region,
+        allow_external_cloud_egress=True,
     )
     assert executor.location == approved_region
     client = executor._create_genai_client()
@@ -132,12 +137,44 @@ def test_allowed_eu_regions(approved_region: str) -> None:
     assert f"https://{approved_region}-aiplatform.googleapis.com/" in base_url
 
 
+@pytest.mark.parametrize("adequacy_region", ["europe-west2", "europe-west6"])
+def test_uk_ch_adequacy_regions_require_explicit_opt_in(
+    adequacy_region: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies UK/Swiss adequacy regions require allow_uk_ch_adequacy_regions=True."""
+    executor = GeminiImplementationExecutor(
+        project="enterprise-scout-prod",
+        location=adequacy_region,
+        allow_uk_ch_adequacy_regions=True,
+        allow_external_cloud_egress=True,
+    )
+    assert executor.location == adequacy_region
+
+    monkeypatch.setenv("SCOUT_GCP_LOCATION", adequacy_region)
+    with pytest.raises(ValueError, match="violates EU data residency policy"):
+        ScoutSettings()
+
+    monkeypatch.setenv("SCOUT_ALLOW_UK_CH_ADEQUACY_REGIONS", "true")
+    cfg = ScoutSettings()
+    assert cfg.gcp_location == adequacy_region
+    assert cfg.allow_uk_ch_adequacy_regions is True
+
+    # UK/CH opt-in must never unlock bogus europe-* or non-EU regions
+    with pytest.raises(ValueError, match="violates EU data residency policy"):
+        GeminiImplementationExecutor(
+            project="enterprise-scout-prod",
+            location="europe-fake99",
+            allow_uk_ch_adequacy_regions=True,
+        )
+
+
 def test_explicit_override_for_non_eu_regions() -> None:
     """Verifies that non-EU regions are permitted ONLY when allow_non_eu_regions=True is passed."""
     executor = GeminiImplementationExecutor(
         project="enterprise-scout-prod",
         location="us-central1",
         allow_non_eu_regions=True,
+        allow_external_cloud_egress=True,
     )
     assert executor.location == "us-central1"
     client = executor._create_genai_client()
@@ -150,6 +187,7 @@ def test_read_only_service_token_authentication() -> None:
     executor = GeminiImplementationExecutor(
         project="enterprise-scout-prod",
         service_token=service_token,
+        allow_external_cloud_egress=True,
     )
     assert executor.api_key is None
     assert executor.credentials is not None
@@ -203,6 +241,7 @@ def test_mock_gemini_client_patch_generation(
     executor = GeminiImplementationExecutor(
         project="enterprise-scout-prod",
         client=mock_client,
+        allow_external_cloud_egress=True,
     )
     patch_diff = executor._generate_gemini_patch(sample_pack, tmp_path)
 
@@ -214,6 +253,40 @@ def test_mock_gemini_client_patch_generation(
     }
 
 
+def test_allow_external_cloud_egress_false_blocks_all_auth_modes(
+    sample_pack: ImplementationContextPack, tmp_path: Path
+) -> None:
+    """ECS-016: Default allow_external_cloud_egress=False blocks every Gemini auth mode."""
+    fake_creds = MagicMock()
+    candidates = [
+        GeminiImplementationExecutor(
+            project="enterprise-scout-prod",
+            service_token="ya29.blocked-token",
+        ),
+        GeminiImplementationExecutor(
+            vertexai=False,
+            api_key="AIzaBlockedApiKey",
+        ),
+        GeminiImplementationExecutor(
+            project="enterprise-scout-prod",
+            credentials=fake_creds,
+        ),
+        GeminiImplementationExecutor(
+            project="enterprise-scout-prod",
+            use_keyless_adc=True,
+        ),
+        GeminiImplementationExecutor(
+            project="enterprise-scout-prod",
+            client=MagicMock(),
+        ),
+    ]
+    for executor in candidates:
+        assert executor.allow_external_cloud_egress is False
+        assert executor.is_live_configured() is False
+        with pytest.raises(PermissionError, match="allow_external_cloud_egress=False"):
+            executor._create_genai_client()
+
+
 def test_scout_settings_residency_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies ScoutSettings validation for GCP residency and overrides."""
     # 1. Default settings
@@ -221,6 +294,7 @@ def test_scout_settings_residency_validation(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.gcp_location == "europe-west3"
     assert settings.use_vertex_ai is True
     assert settings.allow_non_eu_regions is False
+    assert settings.allow_uk_ch_adequacy_regions is False
 
     # 2. Non-EU region rejected on load
     monkeypatch.setenv("SCOUT_GCP_LOCATION", "us-east4")

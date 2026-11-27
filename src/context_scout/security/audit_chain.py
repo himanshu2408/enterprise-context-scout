@@ -23,7 +23,7 @@ import httpx
 import opentelemetry.trace as otel_trace
 from pydantic import BaseModel, Field
 
-from context_scout.config import ScoutSettings
+from context_scout.config import ScoutSettings, get_storage_backend
 from context_scout.db.session import RLSConnectionManager, get_query_pool
 from context_scout.schemas.contracts import DEFAULT_TENANT_ID, PrincipalContext, RoleType
 from context_scout.security.betrvg_privacy import BetrVGPrivacyGuard
@@ -458,7 +458,7 @@ class AuditEventChainService:
 
         clean_payload = _normalize_payload_for_hash(payload or {})
         if self._betrvg.enabled:
-            clean_payload = self._betrvg.sanitize_telemetry_attributes(
+            clean_payload = self._betrvg.scrub_dict_if_enabled(
                 clean_payload, tenant_id=resolved_tid
             )
 
@@ -476,8 +476,8 @@ class AuditEventChainService:
                 tx_principal, enable_hnsw_iterative_scan=False
             ) as conn:
                 conn.execute(
-                    "SELECT pg_advisory_xact_lock(hashtextextended('audit_chain:' || %s, 0));",
-                    (str(resolved_tid),),
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0));",
+                    (f"audit_chain:{resolved_tid}",),
                 )
                 prev_row = conn.execute(
                     """
@@ -764,41 +764,42 @@ class AuditEventChainService:
 
 _AUDIT_LOCK = threading.Lock()
 _GLOBAL_AUDIT_SERVICE: AuditEventChainService | None = None
+_GLOBAL_AUDIT_EXPLICIT: bool = False
+_GLOBAL_AUDIT_KEY: tuple[str, str] | None = None
 
 
 def get_audit_chain_service() -> AuditEventChainService:
-    """Returns shared AuditEventChainService backed by PG17 RLS when reachable, else memory."""
-    global _GLOBAL_AUDIT_SERVICE
-    if _GLOBAL_AUDIT_SERVICE is not None:
+    """Returns shared AuditEventChainService for storage_backend without silent fallback."""
+    global _GLOBAL_AUDIT_SERVICE, _GLOBAL_AUDIT_EXPLICIT, _GLOBAL_AUDIT_KEY
+    if _GLOBAL_AUDIT_EXPLICIT and _GLOBAL_AUDIT_SERVICE is not None:
+        return _GLOBAL_AUDIT_SERVICE
+    backend = get_storage_backend()
+    settings = ScoutSettings()
+    desired_key = (backend, settings.db_app_url if backend == "postgres" else "memory")
+    if _GLOBAL_AUDIT_SERVICE is not None and desired_key == _GLOBAL_AUDIT_KEY:
         return _GLOBAL_AUDIT_SERVICE
     with _AUDIT_LOCK:
-        if _GLOBAL_AUDIT_SERVICE is not None:
+        if _GLOBAL_AUDIT_EXPLICIT and _GLOBAL_AUDIT_SERVICE is not None:
             return _GLOBAL_AUDIT_SERVICE
-        settings = ScoutSettings()
-        try:
-            conn_mgr = get_query_pool(settings)
-            probe = PrincipalContext(
-                user_id="audit_probe",
-                role=RoleType.COMPLIANCE_OFFICER,
-                allowed_scopes=["audit:compliance"],
-            )
-            with conn_mgr.scoped_transaction(probe, enable_hnsw_iterative_scan=False) as conn:
-                conn.execute("SELECT 1 FROM audit_events LIMIT 1;")
-            _GLOBAL_AUDIT_SERVICE = AuditEventChainService(connection_manager=conn_mgr)
-        except Exception as exc:
-            logger.debug(
-                "PG17 audit_events unavailable (%s); using in-memory AuditEventChainService.",
-                exc,
-            )
+        if _GLOBAL_AUDIT_SERVICE is not None and desired_key == _GLOBAL_AUDIT_KEY:
+            return _GLOBAL_AUDIT_SERVICE
+        if backend == "memory":
             _GLOBAL_AUDIT_SERVICE = AuditEventChainService()
+        else:
+            _GLOBAL_AUDIT_SERVICE = AuditEventChainService(
+                connection_manager=get_query_pool(settings)
+            )
+        _GLOBAL_AUDIT_KEY = desired_key
         return _GLOBAL_AUDIT_SERVICE
 
 
 def set_audit_chain_service(service: AuditEventChainService | None) -> None:
     """Overrides or resets the global AuditEventChainService instance (used in tests)."""
-    global _GLOBAL_AUDIT_SERVICE
+    global _GLOBAL_AUDIT_SERVICE, _GLOBAL_AUDIT_EXPLICIT, _GLOBAL_AUDIT_KEY
     with _AUDIT_LOCK:
         _GLOBAL_AUDIT_SERVICE = service
+        _GLOBAL_AUDIT_EXPLICIT = service is not None
+        _GLOBAL_AUDIT_KEY = None
 
 
 __all__ = [

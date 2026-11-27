@@ -134,6 +134,8 @@ class ScoutSessionManager:
                 loaded = repo.get_scout_session(storage_principal, sid)
                 if isinstance(loaded, ScoutSessionRecord):
                     existing = loaded
+            except PermissionError:
+                raise
             except Exception as exc:
                 logger.debug(
                     "Unable to load scout_session '%s' (%s): %s",
@@ -146,6 +148,12 @@ class ScoutSessionManager:
             return SessionPreflightResult(
                 session_id=sid,
                 effective_query=cleaned_prompt,
+            )
+
+        if existing.principal_id != storage_principal.user_id:
+            raise PermissionError(
+                f"Session '{sid}' belongs to principal '{existing.principal_id}', "
+                f"not '{storage_principal.user_id}'."
             )
 
         same_domain = existing.domain_id == domain_id
@@ -227,6 +235,8 @@ class ScoutSessionManager:
                 loaded = repo.get_scout_session(storage_principal, sid)
                 if isinstance(loaded, ScoutSessionRecord):
                     prior = loaded
+            except PermissionError:
+                raise
             except Exception as exc:
                 logger.debug(
                     "Unable to reload scout_session '%s' (%s): %s",
@@ -234,6 +244,11 @@ class ScoutSessionManager:
                     type(exc).__name__,
                     exc,
                 )
+        if prior is not None and prior.principal_id != storage_principal.user_id:
+            raise PermissionError(
+                f"Session '{sid}' belongs to principal '{prior.principal_id}', "
+                f"not '{storage_principal.user_id}'."
+            )
 
         next_turn = (prior.turn_count if prior is not None else 0) + 1
         turn_entry = _build_turn_summary(
@@ -298,6 +313,8 @@ class ScoutSessionManager:
                 saved = repo.upsert_scout_session(storage_principal, record)
                 if isinstance(saved, ScoutSessionRecord):
                     return saved
+            except PermissionError:
+                raise
             except Exception as exc:
                 logger.warning(
                     "Failed persisting scout_session '%s' (%s): %s",

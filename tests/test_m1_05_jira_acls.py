@@ -6,8 +6,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+import pytest
 
-from context_scout.db.repositories import InMemoryRLSRepository
+from context_scout.config import ScoutSettings
+from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
+from context_scout.db.session import PoolRole, RLSConnectionManager
 from context_scout.plugins.connectors.jira import (
     JiraCommentDTO,
     JiraConnectorPlugin,
@@ -289,7 +292,14 @@ def test_fail_closed_on_malformed_and_empty_intersections() -> None:
     ]
 
 
-def test_sync_project_retains_all_chunks_and_enforces_issue_record_acls() -> None:
+@pytest.mark.parametrize(
+    "backend",
+    ["memory", pytest.param("postgres", marks=pytest.mark.postgres)],
+)
+def test_sync_project_retains_all_chunks_and_enforces_issue_record_acls(
+    backend: str,
+    request: pytest.FixtureRequest,
+) -> None:
     """Regression test: sync_project_to_repository retains Description + AC + Comments."""
     captured_payloads: list[dict[str, Any]] = []
 
@@ -344,31 +354,86 @@ def test_sync_project_retains_all_chunks_and_enforces_issue_record_acls() -> Non
         transport=httpx.MockTransport(handler), base_url="https://mock.atlassian.net"
     )
     plugin = JiraConnectorPlugin(client=client)
-    repo = InMemoryRLSRepository()
 
-    result = plugin.sync_project_to_repository("default", "SEC", repo)
-    assert result.items_scanned == 1
-    assert result.items_indexed == 4  # Description + AC + 2 Comments
+    if backend == "memory":
+        repo = InMemoryRLSRepository()
+        result = plugin.sync_project_to_repository("default", "SEC", repo)
+        assert result.items_scanned == 1
+        assert result.items_indexed == 4  # Description + AC + 2 Comments
 
-    # Verify search_issues_incremental requested security and comment fields
+        assert len(captured_payloads) == 1
+        assert "security" in captured_payloads[0]["fields"]
+        assert "comment" in captured_payloads[0]["fields"]
+
+        assert len(repo._docs) == 4
+        assert {c.section_heading for c in repo._docs.values()} == {
+            "Description",
+            "Acceptance Criteria",
+            "Comment:c1",
+            "Comment:c2",
+        }
+
+        assert len(repo._jira) == 1
+        issue_rec = next(iter(repo._jira.values()))
+        assert issue_rec.allowed_scopes == ["jira:project:SEC:security_level:sec_501:read"]
+
+        plugin.sync_project_to_repository("default", "SEC", repo)
+        assert len(repo._docs) == 4
+        return
+
+    domain_id = str(request.getfixturevalue("ephemeral_pg_domain"))
+    settings = ScoutSettings()
+    ingest_mgr = RLSConnectionManager(settings.db_app_url, pool_role=PoolRole.INGESTION)
+    read_mgr = RLSConnectionManager(settings.db_app_url)
+    pg_repo = PostgresRLSRepository()
+    ingest_principal = PrincipalContext(
+        user_id="jira-ingest",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["system:connector_ingest"],
+    )
+    with ingest_mgr.scoped_transaction(
+        ingest_principal, enable_hnsw_iterative_scan=False
+    ) as ingest_conn:
+        result = plugin.sync_project_to_repository(
+            domain_id, "SEC", pg_repo, conn=ingest_conn, principal=ingest_principal
+        )
+        assert result.items_scanned == 1
+        assert result.items_indexed == 4
+
     assert len(captured_payloads) == 1
     assert "security" in captured_payloads[0]["fields"]
     assert "comment" in captured_payloads[0]["fields"]
 
-    # Verify all 4 chunks were retained in repo._docs (no premature purge inside insert loop)
-    assert len(repo._docs) == 4
-    assert {c.section_heading for c in repo._docs.values()} == {
-        "Description",
-        "Acceptance Criteria",
-        "Comment:c1",
-        "Comment:c2",
-    }
+    # Re-sync under scout_app_user replaces old chunks cleanly (still 4 chunks)
+    with ingest_mgr.scoped_transaction(
+        ingest_principal, enable_hnsw_iterative_scan=False
+    ) as ingest_conn:
+        plugin.sync_project_to_repository(
+            domain_id, "SEC", pg_repo, conn=ingest_conn, principal=ingest_principal
+        )
 
-    # Verify JiraIssueRecord uses security-level scopes, NOT bare project read
-    assert len(repo._jira) == 1
-    issue_rec = next(iter(repo._jira.values()))
-    assert issue_rec.allowed_scopes == ["jira:project:SEC:security_level:sec_501:read"]
-
-    # Re-sync replaces old chunks cleanly (still 4 chunks, not 8)
-    plugin.sync_project_to_repository("default", "SEC", repo)
-    assert len(repo._docs) == 4
+    sec_reader = _make_principal("sec-reader", ["jira:project:SEC:security_level:sec_501:read"])
+    secops_reader = _make_principal(
+        "secops-reader", ["jira:project:SEC:security_level:sec_501:role:SecOps:read"]
+    )
+    bare_project_user = _make_principal("bare-user", ["jira:project:SEC:read"])
+    with read_mgr.scoped_transaction(sec_reader, enable_hnsw_iterative_scan=False) as sec_conn:
+        issues = pg_repo.list_jira_issues(sec_conn, domain_id)
+        assert len(issues) == 1
+        assert issues[0].allowed_scopes == ["jira:project:SEC:security_level:sec_501:read"]
+        chunks = pg_repo.list_visible_doc_chunks(sec_conn, domain_id)
+        assert {c.section_heading for c in chunks} == {
+            "Description",
+            "Acceptance Criteria",
+            "Comment:c1",
+        }
+    with read_mgr.scoped_transaction(
+        secops_reader, enable_hnsw_iterative_scan=False
+    ) as secops_conn:
+        secops_chunks = pg_repo.list_visible_doc_chunks(secops_conn, domain_id)
+        assert {c.section_heading for c in secops_chunks} == {"Comment:c2"}
+    with read_mgr.scoped_transaction(
+        bare_project_user, enable_hnsw_iterative_scan=False
+    ) as bare_conn:
+        assert pg_repo.list_jira_issues(bare_conn, domain_id) == []
+        assert pg_repo.list_visible_doc_chunks(bare_conn, domain_id) == []

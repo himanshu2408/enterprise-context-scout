@@ -90,7 +90,7 @@ def create_code_repo_mcp_server(
     default_domain_id = _resolve_default_code_domain_id(st, domain_id=domain_id)
     conn_mgr = connection_manager or RLSConnectionManager(st.db_app_url)
     registry = DomainRegistry(st.domains_dir)
-    registry.load_all()
+    registry.load_all(include_pg=False)
     auth_gate = DomainAuthorizationGate(registry)
     graph_adapter = PostgresScoutGraphAdapter(conn_mgr, st)
     slicer = DeterministicSlicer()

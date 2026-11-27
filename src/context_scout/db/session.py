@@ -51,10 +51,10 @@ def _resolve_pool_timeout_s(connect_timeout_s: int) -> float:
         try:
             return max(1.0, float(raw_pool))
         except ValueError:
-            return 30.0
+            return 5.0
     if "SCOUT_PG_CONNECT_TIMEOUT" in os.environ:
         return float(max(1, connect_timeout_s))
-    return 30.0
+    return min(5.0, float(max(2, connect_timeout_s + 1)))
 
 
 def _close_all_shared_pools() -> None:
@@ -144,20 +144,30 @@ class RLSConnectionManager:
             self._pool_timeout_s,
         )
         pool = _SHARED_POOLS.get(pool_key)
-        if pool is None or pool.closed:
+        if pool is None or (pool.closed and getattr(pool, "_scout_opened", False)):
             with _POOL_LOCK:
                 pool = _SHARED_POOLS.get(pool_key)
-                if pool is None or pool.closed:
+                if pool is None or (pool.closed and getattr(pool, "_scout_opened", False)):
                     pool = psycopg_pool.ConnectionPool(
                         self._app_db_url,
                         min_size=min(self._min_size, self._max_size),
                         max_size=self._max_size,
                         timeout=self._pool_timeout_s,
                         kwargs={"connect_timeout": self._connect_timeout_s},
-                        open=True,
+                        open=False,
                     )
+                    pool._scout_opened = False  # type: ignore[attr-defined]
                     _SHARED_POOLS[pool_key] = pool
         return pool
+
+    def _ensure_pool_open(
+        self, pool: psycopg_pool.ConnectionPool[Connection[tuple[object, ...]]]
+    ) -> None:
+        if not getattr(pool, "_scout_opened", False):
+            with _POOL_LOCK:
+                if not getattr(pool, "_scout_opened", False):
+                    pool.open(wait=False)
+                    pool._scout_opened = True  # type: ignore[attr-defined]
 
     _get_pool = get_pool
 
@@ -200,6 +210,7 @@ class RLSConnectionManager:
         )
         if self._use_pool:
             pool = self.get_pool()
+            self._ensure_pool_open(pool)
             with pool.connection(timeout=self._pool_timeout_s) as conn, conn.transaction():
                 self._apply_tx_session_guards(conn, principal, use_hnsw)
                 yield conn
@@ -225,6 +236,9 @@ class RLSConnectionManager:
             pool = _SHARED_POOLS.pop(pool_key, None)
             if pool is not None and not pool.closed:
                 pool.close()
+            elif pool is not None:
+                with suppress(Exception):
+                    pool.close()
 
     def __enter__(self) -> RLSConnectionManager:
         return self

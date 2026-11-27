@@ -26,13 +26,17 @@ if TYPE_CHECKING:
     from context_scout.agents.scout_workflow import LocalGemmaClient
 
 from context_scout.agents.domain_registry import DomainRegistry
-from context_scout.config import ScoutSettings, get_normalized_environment
+from context_scout.config import (
+    ScoutSettings,
+    get_normalized_environment,
+    get_storage_backend,
+)
 from context_scout.db.repositories import (
     ASTSymbolRecord,
     CodeFileRecord,
     InMemoryRLSRepository,
 )
-from context_scout.db.session import RLSConnectionManager
+from context_scout.db.session import get_query_pool
 from context_scout.plugins.registry import PluginRegistry
 from context_scout.retrieval.embedder import get_embedding_provider
 from context_scout.schemas.contracts import (
@@ -49,6 +53,7 @@ from context_scout.security.oidc_iap_auth import (
     build_iap_verifier_from_env,
     build_oidc_verifier_from_env,
 )
+from context_scout.security.permission_mirror import _StdlibRESP2Client
 from context_scout.security.rbac import _CURRENT_PRINCIPAL
 from context_scout.telemetry import ScoutTelemetryTracer
 
@@ -358,6 +363,11 @@ def verify_signed_principal_token(
             status_code=401,
             detail="Invalid NUL byte inside signed principal token.",
         )
+    if any(s.strip().lower().startswith("system:") for s in principal.allowed_scopes):
+        raise HTTPException(
+            status_code=403,
+            detail="Reserved internal 'system:*' scopes are forbidden on bearer tokens (ASI03).",
+        )
     return BetrVGPrivacyGuard().apply_to_principal(principal)
 
 
@@ -484,6 +494,11 @@ def _authenticate_principal_components(
 
     if x_principal_scopes and x_principal_scopes.strip():
         scopes = [s.strip() for s in x_principal_scopes.split(",") if s.strip()]
+        if any(s.lower().startswith("system:") for s in scopes):
+            raise HTTPException(
+                status_code=403,
+                detail="Reserved internal 'system:*' scopes cannot be supplied via headers.",
+            )
     else:
         scopes = list(DEFAULT_ROLE_SCOPES[role])
 
@@ -572,13 +587,95 @@ class TokenRecord:
     ttl_seconds: int = 3600
 
 
-class ConfirmationTokenStore:
-    """Thread-safe in-memory store for handoff confirmation tokens."""
+_CONSUME_TOKEN_LUA = (
+    "local raw = redis.call('GET', KEYS[1])\n"
+    "if not raw then return 0 end\n"
+    "local obj = cjson.decode(raw)\n"
+    "if tostring(obj.tenant_id) ~= tostring(ARGV[1]) "
+    "or tostring(obj.user_id) ~= tostring(ARGV[2]) then\n"
+    "  return -1\n"
+    "end\n"
+    "redis.call('DEL', KEYS[1])\n"
+    "return 1\n"
+)
 
-    def __init__(self, default_ttl_seconds: int = 3600) -> None:
+
+class ConfirmationTokenStore:
+    """Thread-safe in-memory or Redis-backed store for handoff confirmation tokens."""
+
+    def __init__(
+        self,
+        default_ttl_seconds: int = 3600,
+        *,
+        redis_url: str | None = None,
+        redis_client: Any | None = None,
+        key_prefix: str = "scout:confirm_token:",
+    ) -> None:
         self._lock = threading.Lock()
         self._records: dict[str, TokenRecord] = {}
         self._default_ttl_seconds = default_ttl_seconds
+        self._explicit_redis_url = redis_url
+        self._explicit_redis_client = redis_client
+        self._cached_redis_url: str | None = None
+        self._cached_redis_client: Any | None = None
+        self._key_prefix = key_prefix
+
+    def _get_redis_client(self) -> Any | None:
+        if self._explicit_redis_client is not None:
+            return self._explicit_redis_client
+        url = (
+            self._explicit_redis_url
+            or os.environ.get("SCOUT_REDIS_URL")
+            or ScoutSettings().redis_url
+            or ""
+        ).strip()
+        if not url:
+            return None
+        if self._cached_redis_client is not None and self._cached_redis_url == url:
+            return self._cached_redis_client
+        with self._lock:
+            if self._cached_redis_client is not None and self._cached_redis_url == url:
+                return self._cached_redis_client
+            if self._cached_redis_client is not None and hasattr(
+                self._cached_redis_client, "close"
+            ):
+                self._cached_redis_client.close()
+            self._cached_redis_client = _StdlibRESP2Client(url)
+            self._cached_redis_url = url
+            return self._cached_redis_client
+
+    def _redis_key(self, token: str) -> str:
+        return f"{self._key_prefix}{token}"
+
+    @staticmethod
+    def _serialize_record(rec: TokenRecord) -> str:
+        payload = {
+            "token": rec.token,
+            "pack": rec.pack.model_dump(mode="json"),
+            "patch_diff": rec.patch_diff,
+            "target_files": rec.target_files,
+            "model_id": rec.model_id,
+            "principal": rec.principal.model_dump(mode="json"),
+            "tenant_id": str(rec.principal.tenant_id),
+            "user_id": rec.principal.user_id,
+            "created_at": rec.created_at,
+            "ttl_seconds": rec.ttl_seconds,
+        }
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+    @staticmethod
+    def _deserialize_record(raw: str) -> TokenRecord:
+        obj = json.loads(raw)
+        return TokenRecord(
+            token=str(obj["token"]),
+            pack=ImplementationContextPack.model_validate(obj["pack"]),
+            patch_diff=str(obj["patch_diff"]),
+            target_files=[str(p) for p in obj.get("target_files", [])],
+            model_id=str(obj["model_id"]),
+            principal=PrincipalContext.model_validate(obj["principal"]),
+            created_at=float(obj["created_at"]),
+            ttl_seconds=int(obj["ttl_seconds"]),
+        )
 
     def save(
         self,
@@ -590,37 +687,63 @@ class ConfirmationTokenStore:
         principal: PrincipalContext,
         ttl_seconds: int | None = None,
     ) -> TokenRecord:
+        now = time.time()
+        effective_ttl = max(1, int(ttl_seconds or self._default_ttl_seconds))
+        rec = TokenRecord(
+            token=token,
+            pack=pack,
+            patch_diff=patch_diff,
+            target_files=target_files,
+            model_id=model_id,
+            principal=principal,
+            created_at=now,
+            ttl_seconds=effective_ttl,
+        )
+        client = self._get_redis_client()
+        if client is not None:
+            serialized = self._serialize_record(rec)
+            r_key = self._redis_key(token)
+            if hasattr(client, "setex"):
+                client.setex(r_key, effective_ttl, serialized)
+            else:
+                client.set(r_key, serialized, ex=effective_ttl)
+            return rec
+
         with self._lock:
-            now = time.time()
             expired_keys = [
                 k for k, v in self._records.items() if now - v.created_at > v.ttl_seconds
             ]
             for k in expired_keys:
                 del self._records[k]
-            rec = TokenRecord(
-                token=token,
-                pack=pack,
-                patch_diff=patch_diff,
-                target_files=target_files,
-                model_id=model_id,
-                principal=principal,
-                created_at=now,
-                ttl_seconds=ttl_seconds or self._default_ttl_seconds,
-            )
             self._records[token] = rec
             return rec
 
     def get(self, token: str) -> TokenRecord | None:
-        with self._lock:
-            rec = self._records.get(token)
-            if rec is None:
+        client = self._get_redis_client()
+        if client is not None:
+            raw = client.get(self._redis_key(token))
+            if raw is None:
                 return None
+            rec = self._deserialize_record(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
             if time.time() - rec.created_at > rec.ttl_seconds:
-                del self._records[token]
+                client.delete(self._redis_key(token))
                 return None
             return rec
 
+        with self._lock:
+            mem_rec = self._records.get(token)
+            if mem_rec is None:
+                return None
+            if time.time() - mem_rec.created_at > mem_rec.ttl_seconds:
+                del self._records[token]
+                return None
+            return mem_rec
+
     def invalidate(self, token: str) -> None:
+        client = self._get_redis_client()
+        if client is not None:
+            client.delete(self._redis_key(token))
+            return
         with self._lock:
             self._records.pop(token, None)
 
@@ -632,12 +755,15 @@ class ConfirmationTokenStore:
         pre_commit_check: Any | None = None,
     ) -> TokenRecord:
         """Atomically verifies tenant + user ownership and consumes the confirmation token."""
-        with self._lock:
-            rec = self._records.get(token)
-            if rec is None:
+        client = self._get_redis_client()
+        if client is not None:
+            r_key = self._redis_key(token)
+            raw = client.get(r_key)
+            if raw is None:
                 raise KeyError("Invalid or expired confirmation token.")
+            rec = self._deserialize_record(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
             if time.time() - rec.created_at > rec.ttl_seconds:
-                del self._records[token]
+                client.delete(r_key)
                 raise KeyError("Invalid or expired confirmation token.")
             if (
                 rec.principal.tenant_id != principal.tenant_id
@@ -648,8 +774,70 @@ class ConfirmationTokenStore:
                 )
             if callable(pre_commit_check):
                 pre_commit_check(rec)
+
+            used_lua = False
+            eval_fn = getattr(client, "eval_script", None) or getattr(client, "eval", None)
+            if callable(eval_fn):
+                try:
+                    lua_res = eval_fn(
+                        _CONSUME_TOKEN_LUA,
+                        1,
+                        r_key,
+                        str(principal.tenant_id),
+                        principal.user_id,
+                    )
+                    used_lua = True
+                except RuntimeError as exc:
+                    if "unknown command" not in str(exc).lower() and "eval" not in str(exc).lower():
+                        raise
+                if used_lua:
+                    code = int(lua_res)
+                    if code == 0:
+                        raise KeyError("Invalid or expired confirmation token.")
+                    if code == -1:
+                        raise PermissionError(
+                            "Confirmation token belongs to a different principal "
+                            "or tenant (SEC-04)."
+                        )
+                    return rec
+
+            with self._lock:
+                raw_check = client.get(r_key)
+                if raw_check is None:
+                    raise KeyError("Invalid or expired confirmation token.")
+                rec_check = self._deserialize_record(
+                    raw_check.decode("utf-8") if isinstance(raw_check, bytes) else raw_check
+                )
+                if (
+                    rec_check.principal.tenant_id != principal.tenant_id
+                    or rec_check.principal.user_id != principal.user_id
+                ):
+                    raise PermissionError(
+                        "Confirmation token belongs to a different principal or tenant (SEC-04)."
+                    )
+                deleted = int(client.delete(r_key) or 0)
+                if deleted != 1:
+                    raise KeyError("Invalid or expired confirmation token.")
+                return rec_check
+
+        with self._lock:
+            mem_rec = self._records.get(token)
+            if mem_rec is None:
+                raise KeyError("Invalid or expired confirmation token.")
+            if time.time() - mem_rec.created_at > mem_rec.ttl_seconds:
+                del self._records[token]
+                raise KeyError("Invalid or expired confirmation token.")
+            if (
+                mem_rec.principal.tenant_id != principal.tenant_id
+                or mem_rec.principal.user_id != principal.user_id
+            ):
+                raise PermissionError(
+                    "Confirmation token belongs to a different principal or tenant (SEC-04)."
+                )
+            if callable(pre_commit_check):
+                pre_commit_check(mem_rec)
             del self._records[token]
-            return rec
+            return mem_rec
 
 
 _token_store = ConfirmationTokenStore()
@@ -684,6 +872,7 @@ def get_domain_registry() -> DomainRegistry:
 
 
 _shared_repo: Any = None
+_shared_repo_key: tuple[str, str] | None = None
 _shared_repo_lock = threading.Lock()
 
 
@@ -810,33 +999,24 @@ def _populate_in_memory_repository(repo_root: Path) -> InMemoryRLSRepository:
 
 
 def get_repository() -> Any:
-    """Provides shared repository (Postgres if connected, else populated in-memory)."""
-    global _shared_repo
-    if _shared_repo is None:
-        with _shared_repo_lock:
-            if _shared_repo is None:
-                repo_root = get_repo_root()
-                settings = ScoutSettings()
-                try:
-                    conn_mgr = RLSConnectionManager(settings.db_app_url)
-                    probe = PrincipalContext(
-                        user_id="db_probe",
-                        role=RoleType.ENGINEER,
-                        allowed_scopes=["public_eng"],
-                    )
-                    with conn_mgr.scoped_transaction(probe) as conn:
-                        conn.execute("SELECT 1;")
-                    # Live PostgreSQL available
-                    from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
+    """Provides shared repository configured by storage_backend without silent fallback."""
+    global _shared_repo, _shared_repo_key
+    backend = get_storage_backend()
+    settings = ScoutSettings()
+    desired_key = (backend, settings.db_app_url if backend == "postgres" else "memory")
+    if _shared_repo is not None and _shared_repo_key == desired_key:
+        return _shared_repo
+    with _shared_repo_lock:
+        if _shared_repo is not None and _shared_repo_key == desired_key:
+            return _shared_repo
+        if backend == "memory":
+            _shared_repo = _populate_in_memory_repository(get_repo_root())
+        else:
+            from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
 
-                    _shared_repo = PostgresScoutGraphAdapter(conn_mgr, settings)
-                    logger.info("API initialized with live PostgreSQL 17 repository.")
-                except Exception as exc:
-                    logger.info(
-                        "Live PostgreSQL 17 unavailable (%s); using InMemoryRLSRepository.",
-                        exc,
-                    )
-                    _shared_repo = _populate_in_memory_repository(repo_root)
+            conn_mgr = get_query_pool(settings)
+            _shared_repo = PostgresScoutGraphAdapter(conn_mgr, settings)
+        _shared_repo_key = desired_key
     return _shared_repo
 
 
@@ -851,9 +1031,10 @@ _local_gemma_lock = threading.Lock()
 
 def reset_shared_repository() -> None:
     """Clears the cached shared repository singleton (for runtime mode switches/tests)."""
-    global _shared_repo
+    global _shared_repo, _shared_repo_key
     with _shared_repo_lock:
         _shared_repo = None
+        _shared_repo_key = None
 
 
 def reset_local_gemma_client() -> None:

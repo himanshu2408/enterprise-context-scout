@@ -41,6 +41,7 @@ interface CachedSession {
 }
 
 let cachedSession: CachedSession | null = null;
+let runtimeAuthMode: "development" | "production" = "development";
 
 function buildPrincipalKey(principal: PrincipalContext): string {
   const scopes = [...principal.allowed_scopes].map((s) => s.trim()).join(",");
@@ -49,6 +50,33 @@ function buildPrincipalKey(principal: PrincipalContext): string {
 
 export function clearCachedAuthSession(): void {
   cachedSession = null;
+}
+
+export function setRuntimeAuthMode(mode: "development" | "production"): void {
+  runtimeAuthMode = mode;
+  if (mode === "production") {
+    cachedSession = null;
+  }
+}
+
+export function getRuntimeAuthMode(): "development" | "production" {
+  return runtimeAuthMode;
+}
+
+export async function resolveAuthHeaders(
+  principal?: PrincipalContext
+): Promise<Record<string, string>> {
+  if (runtimeAuthMode === "production") {
+    return {};
+  }
+  if (principal) {
+    const token = await ensureBearerToken(principal);
+    return { Authorization: `Bearer ${token}` };
+  }
+  if (cachedSession && Date.now() < cachedSession.expiresAtMs) {
+    return { Authorization: `Bearer ${cachedSession.token}` };
+  }
+  return {};
 }
 
 async function parseErrorDetail(res: Response): Promise<string> {
@@ -73,6 +101,13 @@ async function parseErrorDetail(res: Response): Promise<string> {
 export async function exchangeAuthSession(
   principal: PrincipalContext
 ): Promise<AuthSessionResponse> {
+  if (runtimeAuthMode === "production") {
+    cachedSession = null;
+    throw new ApiClientError(
+      403,
+      "Dev session minting is disabled in production OIDC/IAP mode."
+    );
+  }
   const payload: AuthSessionRequest = {
     user_id: principal.user_id.trim() || "demo_engineer",
     role: principal.role,
@@ -84,6 +119,7 @@ export async function exchangeAuthSession(
   try {
     res = await fetch("/api/v1/auth/session", {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
       },
@@ -130,17 +166,14 @@ export async function ensureBearerToken(principal: PrincipalContext): Promise<st
 export async function fetchCurrentPrincipal(
   principal?: PrincipalContext
 ): Promise<PrincipalContext> {
-  const headers: Record<string, string> = {};
-  if (principal) {
-    const token = await ensureBearerToken(principal);
-    headers.Authorization = `Bearer ${token}`;
-  } else if (cachedSession && Date.now() < cachedSession.expiresAtMs) {
-    headers.Authorization = `Bearer ${cachedSession.token}`;
-  }
+  const headers = await resolveAuthHeaders(principal);
 
   let res: Response;
   try {
-    res = await fetch("/api/v1/auth/me", { headers });
+    res = await fetch("/api/v1/auth/me", {
+      headers,
+      credentials: "include",
+    });
   } catch (err: unknown) {
     throw new ApiClientError(
       0,
@@ -159,7 +192,7 @@ export async function fetchCurrentPrincipal(
 export async function fetchHealth(): Promise<HealthResponse> {
   let res: Response;
   try {
-    res = await fetch("/api/v1/health");
+    res = await fetch("/api/v1/health", { credentials: "include" });
   } catch (err: unknown) {
     throw new ApiClientError(
       0,
@@ -245,13 +278,12 @@ export function mapDomainDetailToInfo(detail: BackendDomainDetail): DomainInfo {
 export async function fetchWorkspaceConfig(
   principal: PrincipalContext
 ): Promise<WorkspaceConfigResponse> {
-  const token = await ensureBearerToken(principal);
+  const headers = await resolveAuthHeaders(principal);
   let res: Response;
   try {
     res = await fetch("/api/v1/workspace-config", {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+      headers,
+      credentials: "include",
     });
   } catch (err: unknown) {
     throw new ApiClientError(
@@ -268,10 +300,16 @@ export async function fetchWorkspaceConfig(
   return (await res.json()) as WorkspaceConfigResponse;
 }
 
-export async function fetchDomains(): Promise<DomainInfo[]> {
+export async function fetchDomains(
+  principal?: PrincipalContext
+): Promise<DomainInfo[]> {
+  const headers = await resolveAuthHeaders(principal);
   let res: Response;
   try {
-    res = await fetch("/api/v1/domains");
+    res = await fetch("/api/v1/domains", {
+      headers,
+      credentials: "include",
+    });
   } catch (err: unknown) {
     throw new ApiClientError(
       0,
@@ -279,6 +317,9 @@ export async function fetchDomains(): Promise<DomainInfo[]> {
     );
   }
   if (!res.ok) {
+    if (res.status === 401) {
+      clearCachedAuthSession();
+    }
     throw new ApiClientError(res.status, await parseErrorDetail(res));
   }
 
@@ -290,21 +331,19 @@ export async function fetchDomains(): Promise<DomainInfo[]> {
 export async function fetchROIMetrics(
   principal?: PrincipalContext
 ): Promise<ROIMetricsResponse> {
-  const headers: Record<string, string> = {};
-  if (principal) {
-    try {
-      const token = await ensureBearerToken(principal);
-      headers.Authorization = `Bearer ${token}`;
-    } catch {
-      // Fall through so /api/v1/telemetry/roi still executes and reports its own status/error
-    }
-  } else if (cachedSession && Date.now() < cachedSession.expiresAtMs) {
-    headers.Authorization = `Bearer ${cachedSession.token}`;
+  let headers: Record<string, string> = {};
+  try {
+    headers = await resolveAuthHeaders(principal);
+  } catch {
+    // Fall through so /api/v1/telemetry/roi still executes and reports its own status/error
   }
 
   let res: Response;
   try {
-    res = await fetch("/api/v1/telemetry/roi", { headers });
+    res = await fetch("/api/v1/telemetry/roi", {
+      headers,
+      credentials: "include",
+    });
   } catch (err: unknown) {
     throw new ApiClientError(
       0,
@@ -312,16 +351,21 @@ export async function fetchROIMetrics(
     );
   }
   if (!res.ok) {
+    if (res.status === 401) {
+      clearCachedAuthSession();
+    }
     throw new ApiClientError(res.status, await parseErrorDetail(res));
   }
   return (await res.json()) as ROIMetricsResponse;
 }
 
+export const fetchTelemetryRoi = fetchROIMetrics;
+
 export async function executeScoutQuery(
   request: ScoutQueryRequest & { source_filter?: SourceFilterType },
   principal: PrincipalContext
 ): Promise<ScoutQueryResponse> {
-  const token = await ensureBearerToken(principal);
+  const authHeaders = await resolveAuthHeaders(principal);
   const bodyPayload: Record<string, unknown> = {
     domain_id: request.domain_id,
     query: request.query,
@@ -344,9 +388,10 @@ export async function executeScoutQuery(
   try {
     res = await fetch("/api/v1/scout/query", {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        ...authHeaders,
       },
       body: JSON.stringify(bodyPayload),
     });
@@ -372,14 +417,15 @@ export async function previewHandoff(
   modelId: "gemini-3.8-flash" | "gemini-4-argon",
   principal: PrincipalContext
 ): Promise<HandoffPreviewResponse> {
-  const token = await ensureBearerToken(principal);
+  const authHeaders = await resolveAuthHeaders(principal);
   let res: Response;
   try {
     res = await fetch("/api/v1/handoff/preview", {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        ...authHeaders,
       },
       body: JSON.stringify({
         pack: contextPack,
@@ -394,6 +440,9 @@ export async function previewHandoff(
   }
 
   if (!res.ok) {
+    if (res.status === 401) {
+      clearCachedAuthSession();
+    }
     const detail = await parseErrorDetail(res);
     throw new ApiClientError(res.status, `Preview failed (${res.status}): ${detail}`);
   }
@@ -412,7 +461,7 @@ export async function applyHandoff(
     );
   }
 
-  const token = await ensureBearerToken(principal);
+  const authHeaders = await resolveAuthHeaders(principal);
   const safePayload: HandoffApplyRequest = {
     confirmation_token: request.confirmation_token,
     confirmed: request.confirmed,
@@ -421,9 +470,10 @@ export async function applyHandoff(
   try {
     res = await fetch("/api/v1/handoff/apply", {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        ...authHeaders,
       },
       body: JSON.stringify(safePayload),
     });
@@ -435,6 +485,9 @@ export async function applyHandoff(
   }
 
   if (!res.ok) {
+    if (res.status === 401) {
+      clearCachedAuthSession();
+    }
     const detail = await parseErrorDetail(res);
     throw new ApiClientError(res.status, `Apply patch failed (${res.status}): ${detail}`);
   }
@@ -446,25 +499,22 @@ export async function executeAdminPurge(
   request: AdminPurgeRequest,
   principal?: PrincipalContext
 ): Promise<AdminPurgeResponse> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (principal) {
-    try {
-      const token = await ensureBearerToken(principal);
-      headers.Authorization = `Bearer ${token}`;
-    } catch {
-      // Production OIDC/IAP mode relies on ambient credentials if dev token exchange is disabled
-    }
-  } else if (cachedSession && Date.now() < cachedSession.expiresAtMs) {
-    headers.Authorization = `Bearer ${cachedSession.token}`;
+  let authHeaders: Record<string, string> = {};
+  try {
+    authHeaders = await resolveAuthHeaders(principal);
+  } catch {
+    // Production OIDC/IAP mode relies on ambient credentials if dev token exchange is disabled
   }
 
   let res: Response;
   try {
     res = await fetch("/api/v1/admin/purge", {
       method: "POST",
-      headers,
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders,
+      },
       body: JSON.stringify(request),
     });
   } catch (err: unknown) {

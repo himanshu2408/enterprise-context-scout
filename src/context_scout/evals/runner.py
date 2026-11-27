@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import platform
 import sys
 from collections.abc import Mapping
@@ -267,6 +268,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.postgres and args.in_memory:
         parser.error("Cannot specify both --postgres and --in-memory simultaneously.")
+
+    if args.in_memory:
+        os.environ.setdefault("SCOUT_STORAGE_BACKEND", "memory")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     logger.info("Starting Milestone 6 Evaluation Harness...")

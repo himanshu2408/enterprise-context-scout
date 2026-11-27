@@ -32,6 +32,7 @@ CONCURRENT_INDEX_REVISIONS: Final[frozenset[str]] = frozenset(
         "0016_m3_sess_conc_idx",
         "0019_m4_art_conc_idx",
         "0022_m5_audit_conc_idx",
+        "0024_m5_scim_idx_conn_rls",
     }
 )
 CONSTRAINT_SWAP_REVISIONS: Final[frozenset[str]] = frozenset(
@@ -349,13 +350,18 @@ def run_alembic_upgrade(
         _reconcile_m1_halfvec_spaces(admin_db_url)
 
     resolved_pw = _resolve_app_role_password(app_role_password, app_db_url=app_db_url)
-    if resolved_pw:
-        with psycopg.connect(admin_db_url, autocommit=True) as conn:
+    with psycopg.connect(admin_db_url, autocommit=True) as conn:
+        if resolved_pw:
             conn.execute(
                 pg_sql.SQL(
                     "ALTER ROLE scout_app_user WITH LOGIN PASSWORD {} "
                     "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;"
                 ).format(pg_sql.Literal(resolved_pw))
+            )
+        else:
+            conn.execute(
+                "ALTER ROLE scout_app_user WITH LOGIN "
+                "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;"
             )
 
 

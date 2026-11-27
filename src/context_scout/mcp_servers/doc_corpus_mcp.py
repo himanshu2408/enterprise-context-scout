@@ -24,7 +24,7 @@ from context_scout.agents.preflight_gate import (
     sync_custom_domain_corpus_if_needed,
 )
 from context_scout.ast_engine.deterministic_slicer import DeterministicSlicer
-from context_scout.config import ScoutSettings
+from context_scout.config import ScoutSettings, get_storage_backend
 from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
 from context_scout.mcp_servers.common import (
     MAX_PAYLOAD_ITEMS,
@@ -50,28 +50,17 @@ def create_doc_corpus_mcp_server(
     st = settings or ScoutSettings()
     resolved_domains_dir = domains_dir or st.domains_dir
     registry = DomainRegistry(resolved_domains_dir)
-    registry.load_all()
+    registry.load_all(include_pg=False)
     auth_gate = DomainAuthorizationGate(registry)
     effective_repo = repo
     if effective_repo is None:
-        try:
-            import psycopg
-
+        if st.storage_backend == "memory" or get_storage_backend() == "memory":
+            effective_repo = InMemoryRLSRepository()
+        else:
             from context_scout.db.session import get_query_pool
             from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
 
-            # Fast 1s connect probe so unreachable PG never stalls import for 30s pool timeout
-            with psycopg.connect(st.db_app_url, connect_timeout=1) as conn:
-                conn.execute("SELECT 1;")
-            pool_mgr = get_query_pool(st)
-            effective_repo = PostgresScoutGraphAdapter(pool_mgr, st)
-        except Exception as exc:
-            logger.debug(
-                "Falling back to InMemoryRLSRepository in doc_corpus_mcp (%s): %s",
-                type(exc).__name__,
-                exc,
-            )
-            effective_repo = InMemoryRLSRepository()
+            effective_repo = PostgresScoutGraphAdapter(get_query_pool(st), st)
     is_pg_repo = isinstance(effective_repo, PostgresRLSRepository) or hasattr(
         effective_repo, "connection_manager"
     )

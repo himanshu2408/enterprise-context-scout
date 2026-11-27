@@ -31,6 +31,29 @@ interface ArchEdge {
   label: string;
 }
 
+export const MERMAID_SECURITY_CONFIG = {
+  securityLevel: "strict",
+  startOnLoad: false,
+  htmlLabels: false,
+} as const;
+
+const MERMAID_STRICT_HEADER = "%%{init: {'securityLevel': 'strict'}}%%";
+
+function sanitizeUntrustedMermaidLines(raw: string): string {
+  return raw
+    .split(/\r?\n/)
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (/^%%\{.*\}%%$/.test(trimmed)) return false;
+      if (/^\s*click\b/i.test(trimmed)) return false;
+      if (/javascript:/i.test(trimmed)) return false;
+      if (/<script/i.test(trimmed)) return false;
+      return true;
+    })
+    .join("\n")
+    .trim();
+}
+
 function sanitizeMermaidId(raw: string, fallbackIdx: number): string {
   const cleaned = raw.replace(/[^a-zA-Z0-9_]/g, "_");
   if (!cleaned) return `node_${fallbackIdx}`;
@@ -137,14 +160,14 @@ function compileMermaidSource(
   edges: ArchEdge[]
 ): string {
   if (pack.architecture_mermaid && pack.architecture_mermaid.trim().length > 0) {
-    const raw = pack.architecture_mermaid.trim();
-    if (/^flowchart\s+(LR|TD|TB|RL)/m.test(raw)) {
-      return raw.replace(/^flowchart\s+(LR|TD|TB|RL)/m, `flowchart ${direction}`);
-    }
-    return `flowchart ${direction}\n${raw}`;
+    const raw = sanitizeUntrustedMermaidLines(pack.architecture_mermaid);
+    const body = /^flowchart\s+(LR|TD|TB|RL)/m.test(raw)
+      ? raw.replace(/^flowchart\s+(LR|TD|TB|RL)/m, `flowchart ${direction}`)
+      : `flowchart ${direction}\n${raw}`;
+    return `${MERMAID_STRICT_HEADER}\n${body}`;
   }
 
-  const lines: string[] = [`flowchart ${direction}`];
+  const lines: string[] = [MERMAID_STRICT_HEADER, `flowchart ${direction}`];
   for (const node of nodes) {
     const label = sanitizeMermaidLabel(node.label);
     lines.push(`  ${node.id}["${label}"]`);

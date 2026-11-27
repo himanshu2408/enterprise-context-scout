@@ -32,6 +32,11 @@ _PROMPT_SNIPPET_ATTRS: Final[frozenset[str]] = frozenset(
         "scout.retrieval.query_snippet",
         "scout.gating.prompt_snippet",
         "query",
+        "user_query",
+        "prompt",
+        "prompt_snippet",
+        "query_snippet",
+        "input_text",
     }
 )
 
@@ -42,6 +47,14 @@ _PRINCIPAL_ID_ATTRS: Final[frozenset[str]] = frozenset(
         "principal_id",
         "actor_id",
     }
+)
+
+_EMAIL_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9_%+-]{1,64}(?:\.[A-Za-z0-9_%+-]{1,64}){0,4}"
+    r"@(?:[A-Za-z0-9-]{1,63}\.){1,6}[A-Za-z]{2,24}\b"
+)
+_DIAGNOSTIC_QUERY_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?i)(\b(?:query|prompt|user_task|input)\b\s*[:=]\s*)(?:'[^'\n]{0,512}'|\"[^\"\n]{0,512}\"|[^\n;]{1,512})"
 )
 
 
@@ -121,6 +134,78 @@ class BetrVGPrivacyGuard:
         pseudo_id = self.pseudonymize_user_id(principal.user_id, principal.tenant_id)
         return principal.model_copy(update={"user_id": pseudo_id})
 
+    def scrub_text_if_enabled(
+        self,
+        text: str,
+        *,
+        tenant_id: UUID | None = None,
+    ) -> str:
+        """Redacts emails and embedded query/prompt snippets from diagnostic/error strings."""
+        if not self.enabled or not text:
+            return text
+        resolved_tid = tenant_id or DEFAULT_TENANT_ID
+
+        def _replace_email(match: re.Match[str]) -> str:
+            return self.pseudonymize_user_id(match.group(0), resolved_tid)
+
+        scrubbed = _EMAIL_RE.sub(_replace_email, text) if "@" in text else text
+        scrubbed = _DIAGNOSTIC_QUERY_RE.sub(r"\1[REDACTED_BETRVG]", scrubbed)
+        return scrubbed
+
+    def scrub_dict_if_enabled(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        tenant_id: UUID | None = None,
+        _depth: int = 0,
+    ) -> dict[str, Any]:
+        """Recursively redacts prompts, emails, and principal IDs from nested dictionaries."""
+        out: dict[str, Any] = {}
+        if not self.enabled:
+            return dict(payload)
+        if _depth > 16:
+            return {"_truncated": "[REDACTED_BETRVG_DEPTH]"}
+        resolved_tid = tenant_id or DEFAULT_TENANT_ID
+        for key, val in payload.items():
+            key_str = str(key)
+            key_l = key_str.lower()
+            if key_l in _PROMPT_SNIPPET_ATTRS or key_str in _PROMPT_SNIPPET_ATTRS:
+                out[key_str] = "[REDACTED_BETRVG]"
+            elif key_l in _PRINCIPAL_ID_ATTRS or key_str in _PRINCIPAL_ID_ATTRS:
+                if (
+                    isinstance(val, str)
+                    and val.strip()
+                    and val.strip().lower() not in {"anonymous", "system"}
+                ):
+                    out[key_str] = self.pseudonymize_user_id(val, resolved_tid)
+                else:
+                    out[key_str] = val
+            elif isinstance(val, Mapping):
+                out[key_str] = self.scrub_dict_if_enabled(
+                    val, tenant_id=resolved_tid, _depth=_depth + 1
+                )
+            elif isinstance(val, list):
+                cleaned_list: list[Any] = []
+                for item in val:
+                    if isinstance(item, Mapping):
+                        cleaned_list.append(
+                            self.scrub_dict_if_enabled(
+                                item, tenant_id=resolved_tid, _depth=_depth + 1
+                            )
+                        )
+                    elif isinstance(item, str):
+                        cleaned_list.append(
+                            self.scrub_text_if_enabled(item, tenant_id=resolved_tid)
+                        )
+                    else:
+                        cleaned_list.append(item)
+                out[key_str] = cleaned_list
+            elif isinstance(val, str):
+                out[key_str] = self.scrub_text_if_enabled(val, tenant_id=resolved_tid)
+            else:
+                out[key_str] = val
+        return out
+
     def sanitize_telemetry_attributes(
         self,
         attrs: Mapping[str, Any],
@@ -128,18 +213,9 @@ class BetrVGPrivacyGuard:
         tenant_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Redacts raw prompt snippets and pseudonymizes principal identifiers in BetrVG mode."""
-        out = dict(attrs)
         if not self.enabled:
-            return out
-        resolved_tid = tenant_id or DEFAULT_TENANT_ID
-        for key in list(out.keys()):
-            if key in _PROMPT_SNIPPET_ATTRS:
-                out[key] = "[REDACTED_BETRVG]"
-            elif key in _PRINCIPAL_ID_ATTRS:
-                val = out[key]
-                if isinstance(val, str) and val.strip() and val.strip().lower() != "anonymous":
-                    out[key] = self.pseudonymize_user_id(val, resolved_tid)
-        return out
+            return dict(attrs)
+        return self.scrub_dict_if_enabled(attrs, tenant_id=tenant_id)
 
 
 def apply_betrvg_to_principal(principal: PrincipalContext) -> PrincipalContext:

@@ -37,7 +37,6 @@ from context_scout.db.repositories import InMemoryRLSRepository
 from context_scout.queue.task_queue import PostgresTaskQueue
 from context_scout.schemas.contracts import DEFAULT_TENANT_ID, RoleType
 from context_scout.security.audit_chain import (
-    AuditEventChainService,
     get_audit_chain_service,
     set_audit_chain_service,
 )
@@ -161,8 +160,8 @@ def api_schema(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
 
     prev_scim = get_scim_directory_service()
     prev_audit = get_audit_chain_service()
-    set_scim_directory_service(SCIMDirectoryService())
-    set_audit_chain_service(AuditEventChainService())
+    set_scim_directory_service(None)
+    set_audit_chain_service(None)
     set_task_queue(None)
 
     try:
@@ -252,13 +251,10 @@ def test_schemathesis_authenticated_schema_and_status_conformance(
         headers["Authorization"] = "Bearer fuzz-scim-bearer-token-0123456789"
         headers["X-Scout-Tenant-Id"] = str(tenant_id)
     elif case.path in _WEBHOOK_ENV_AND_HEADERS:
+        from schemathesis.core import NOT_SET
+
         _env_key, sig_hdr, secret_val = _WEBHOOK_ENV_AND_HEADERS[case.path]
-        body_payload = (
-            case.body
-            if isinstance(case.body, (dict, list))
-            else {"domain_id": "code_architecture_scout", "ref": "main"}
-        )
-        raw_body = json.dumps(body_payload).encode("utf-8")
+        raw_body = b"" if case.body is NOT_SET else json.dumps(case.body).encode("utf-8")
         sig = "sha256=" + hmac.new(secret_val.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
         headers[sig_hdr] = sig
         headers["Content-Type"] = "application/json"
@@ -299,48 +295,90 @@ def test_schemathesis_positive_and_negative_modes_explicit(
     ops = list(api_schema.get_all_operations())
     assert len(ops) >= 30
 
+    tenant_id = uuid.uuid4()
+    eng_uid = f"fuzz_eng_{uuid.uuid4().hex[:8]}"
     eng_tok = create_signed_principal_token(
-        user_id=f"fuzz_eng_{uuid.uuid4().hex[:8]}",
+        user_id=eng_uid,
         role=RoleType.ENGINEER,
         allowed_scopes=DEFAULT_ROLE_SCOPES[RoleType.ENGINEER],
+        tenant_id=tenant_id,
+    )
+    comp_uid = f"fuzz_comp_{uuid.uuid4().hex[:8]}"
+    comp_tok = create_signed_principal_token(
+        user_id=comp_uid,
+        role=RoleType.COMPLIANCE_OFFICER,
+        allowed_scopes=sorted(
+            set(DEFAULT_ROLE_SCOPES[RoleType.COMPLIANCE_OFFICER])
+            | {"audit:compliance", "admin:purge"}
+        ),
+        tenant_id=tenant_id,
     )
     target_paths = [
         ("/api/v1/auth/session", "POST", {}),
         ("/api/v1/scout/query", "POST", {"Authorization": f"Bearer {eng_tok}"}),
+        (
+            "/api/v1/scim/v2/Users",
+            "POST",
+            {
+                "Authorization": "Bearer fuzz-scim-bearer-token-0123456789",
+                "X-Scout-Tenant-Id": str(tenant_id),
+            },
+        ),
+        (
+            "/api/v1/webhooks/stats",
+            "GET",
+            {"Authorization": f"Bearer {comp_tok}"},
+        ),
+        (
+            "/api/v1/admin/audit/verify",
+            "GET",
+            {"Authorization": f"Bearer {comp_tok}"},
+        ),
     ]
-    for path, method, extra_headers in target_paths:
-        op = api_schema[path][method]
-        for mode in (GenerationMode.POSITIVE, GenerationMode.NEGATIVE):
+    tracked_tenants: set[uuid.UUID] = {tenant_id}
+    try:
+        for path, method, extra_headers in target_paths:
+            op = api_schema[path][method]
+            for mode in (GenerationMode.POSITIVE, GenerationMode.NEGATIVE):
 
-            def _make_runner(
-                operation: Any,
-                hdrs_override: dict[str, str],
-                gen_mode: GenerationMode,
-            ) -> Any:
-                @given(case=operation.as_strategy(generation_mode=gen_mode))
-                @settings(
-                    max_examples=3,
-                    deadline=None,
-                    database=None,
-                    suppress_health_check=[
-                        HealthCheck.too_slow,
-                        HealthCheck.function_scoped_fixture,
-                        HealthCheck.filter_too_much,
-                    ],
-                )
-                def _run_case(case: Case[Any]) -> None:
-                    hdrs = dict(case.headers or {})
-                    hdrs.update(hdrs_override)
-                    resp = case.call(headers=hdrs)
-                    assert resp.status_code < 500, (
-                        f"5xx in {gen_mode.name} mode for {case.method} {case.path}: "
-                        f"{resp.status_code} {resp.text}"
+                def _make_runner(
+                    operation: Any,
+                    hdrs_override: dict[str, str],
+                    gen_mode: GenerationMode,
+                ) -> Any:
+                    @given(case=operation.as_strategy(generation_mode=gen_mode))
+                    @settings(
+                        max_examples=3,
+                        deadline=None,
+                        database=None,
+                        suppress_health_check=[
+                            HealthCheck.too_slow,
+                            HealthCheck.function_scoped_fixture,
+                            HealthCheck.filter_too_much,
+                        ],
                     )
-                    case.validate_response(resp, checks=_OPENAPI_CONFORMANCE_CHECKS)
+                    def _run_case(case: Case[Any]) -> None:
+                        hdrs = dict(case.headers or {})
+                        hdrs.update(hdrs_override)
+                        if case.path == "/api/v1/auth/session" and isinstance(case.body, dict):
+                            raw_tid = case.body.get("tenant_id")
+                            if isinstance(raw_tid, str):
+                                with contextlib.suppress(ValueError):
+                                    parsed_tid = uuid.UUID(raw_tid)
+                                    if parsed_tid != DEFAULT_TENANT_ID:
+                                        tracked_tenants.add(parsed_tid)
+                        resp = case.call(headers=hdrs)
+                        assert resp.status_code < 500, (
+                            f"5xx in {gen_mode.name} mode for {case.method} {case.path}: "
+                            f"{resp.status_code} {resp.text}"
+                        )
+                        case.validate_response(resp, checks=_OPENAPI_CONFORMANCE_CHECKS)
 
-                return _run_case
+                    return _run_case
 
-            _make_runner(op, extra_headers, mode)()
+                _make_runner(op, extra_headers, mode)()
+    finally:
+        _cleanup_pg_tenants_and_users(tracked_tenants, principal_ids={eng_uid, comp_uid})
 
 
 # =============================================================================

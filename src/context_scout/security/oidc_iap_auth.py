@@ -8,7 +8,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 from urllib.parse import urlparse
 from uuid import UUID
@@ -60,25 +60,32 @@ class AuthVerificationError(Exception):
 @dataclass
 class _CachedJWKS:
     fetched_at: float
-    last_refresh_attempt_at: float
     keys_by_kid: dict[str, jwt.PyJWK]
     ordered_keys: list[jwt.PyJWK]
+    negative_kid_cooldowns: dict[str, float] = field(default_factory=dict)
+    refresh_tokens: float = 3.0
+    last_refill_at: float = 0.0
 
 
 class JWKSCache:
-    """Thread-safe JWKS cache supporting kid rotation cooldown and HTTPS enforcement."""
+    """Thread-safe JWKS cache with per-(jwks_url, kid) cooldown & refresh token bucket."""
+
+    _MAX_NEGATIVE_KIDS: Final[int] = 1024
+    _REFRESH_BUCKET_CAPACITY: Final[float] = 3.0
 
     def __init__(
         self,
         *,
         cache_ttl_seconds: float = 300.0,
         min_refresh_interval_seconds: float = 10.0,
+        refresh_bucket_capacity: float = 3.0,
         http_client: httpx.Client | None = None,
         jwks_loader: Callable[[str], Mapping[str, Any]] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._ttl = max(1.0, float(cache_ttl_seconds))
         self._min_refresh = max(0.0, float(min_refresh_interval_seconds))
+        self._bucket_capacity = max(1.0, float(refresh_bucket_capacity))
         self._http_client = http_client
         self._jwks_loader = jwks_loader
         self._clock = clock
@@ -151,14 +158,45 @@ class JWKSCache:
             raise AuthVerificationError(
                 503, f"No usable signing keys in JWKS from {validated_url}."
             )
+        existing = self._cache.get(validated_url)
+        neg_cooldowns = dict(existing.negative_kid_cooldowns) if existing is not None else {}
+        tokens = existing.refresh_tokens if existing is not None else self._bucket_capacity
+        last_refill = existing.last_refill_at if existing is not None else now
+        for known_kid in by_kid:
+            neg_cooldowns.pop(known_kid, None)
         cached = _CachedJWKS(
             fetched_at=now,
-            last_refresh_attempt_at=now,
             keys_by_kid=by_kid,
             ordered_keys=ordered,
+            negative_kid_cooldowns=neg_cooldowns,
+            refresh_tokens=tokens,
+            last_refill_at=last_refill,
         )
         self._cache[validated_url] = cached
         return cached
+
+    def _consume_refresh_token(self, entry: _CachedJWKS, now: float) -> bool:
+        if self._min_refresh <= 0.0:
+            return True
+        elapsed = max(0.0, now - entry.last_refill_at)
+        refill_rate = 1.0 / self._min_refresh
+        entry.refresh_tokens = min(
+            self._bucket_capacity,
+            entry.refresh_tokens + elapsed * refill_rate,
+        )
+        entry.last_refill_at = now
+        if entry.refresh_tokens >= 1.0:
+            entry.refresh_tokens -= 1.0
+            return True
+        return False
+
+    def _record_negative_kid(self, entry: _CachedJWKS, kid: str, now: float) -> None:
+        if kid not in entry.negative_kid_cooldowns and (
+            len(entry.negative_kid_cooldowns) >= self._MAX_NEGATIVE_KIDS
+        ):
+            oldest_kid = next(iter(entry.negative_kid_cooldowns))
+            entry.negative_kid_cooldowns.pop(oldest_kid, None)
+        entry.negative_kid_cooldowns[kid] = now
 
     def get_signing_key(
         self,
@@ -167,7 +205,7 @@ class JWKSCache:
         *,
         require_kid: bool = False,
     ) -> jwt.PyJWK:
-        """Resolves a verification JWK by kid with TTL cache and rotation refresh."""
+        """Resolves a verification JWK by kid with per-kid negative cooldown & token bucket."""
         if require_kid and (not kid or not kid.strip()):
             raise AuthVerificationError(401, "JWT header is missing required 'kid'.")
         clean_kid = kid.strip() if isinstance(kid, str) and kid.strip() else None
@@ -177,13 +215,13 @@ class JWKSCache:
             entry = self._cache.get(jwks_url.strip())
             if entry is None or (now - entry.fetched_at) >= self._ttl:
                 entry = self._fetch_jwks(jwks_url)
-            elif (
-                clean_kid is not None
-                and clean_kid not in entry.keys_by_kid
-                and (now - entry.last_refresh_attempt_at) >= self._min_refresh
-            ):
-                entry.last_refresh_attempt_at = now
-                entry = self._fetch_jwks(jwks_url)
+            elif clean_kid is not None and clean_kid not in entry.keys_by_kid:
+                last_miss = entry.negative_kid_cooldowns.get(clean_kid)
+                kid_cooled_down = last_miss is not None and (now - last_miss) < self._min_refresh
+                if not kid_cooled_down and self._consume_refresh_token(entry, now):
+                    entry = self._fetch_jwks(jwks_url)
+                    if clean_kid not in entry.keys_by_kid:
+                        self._record_negative_kid(entry, clean_kid, now)
 
             if clean_kid is not None:
                 found = entry.keys_by_kid.get(clean_kid)
@@ -325,6 +363,13 @@ def _build_principal_from_claims(
             clean_ds = sanitize_scope_identifier(ds)
             if clean_ds not in scopes:
                 scopes.append(clean_ds)
+
+    for s in [*scim_res.scopes, *scopes]:
+        if s.lower().startswith("system:"):
+            raise AuthVerificationError(
+                403,
+                f"Reserved internal scope {s!r} is forbidden on external identities (ASI03).",
+            )
 
     if not scopes:
         scopes = [f"unprivileged:user:{_sanitize_group_slug(user_id)}"]

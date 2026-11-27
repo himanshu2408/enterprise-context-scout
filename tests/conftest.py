@@ -81,7 +81,14 @@ def _session_requires_pg17(session: pytest.Session) -> bool:
 def bootstrap_pg17_session(request: pytest.FixtureRequest) -> Generator[None, None, None]:
     """Ensure PG17 schema + seeded corpora only when PostgreSQL tests are collected."""
     if not _session_requires_pg17(request.session) or _PROJECT_ROOT.name.startswith("scout_wt_"):
-        yield
+        prev_backend = os.environ.get("SCOUT_STORAGE_BACKEND")
+        if prev_backend is None:
+            os.environ["SCOUT_STORAGE_BACKEND"] = "memory"
+        try:
+            yield
+        finally:
+            if prev_backend is None:
+                os.environ.pop("SCOUT_STORAGE_BACKEND", None)
         return
 
     container: PostgresContainer | None = None
