@@ -31,7 +31,12 @@ export interface FrontierHandoffModalProps {
   principal: PrincipalContext;
 }
 
-type FrontierModelChoice = "gemini-3.8-flash" | "gemini-4-argon";
+type FrontierModelChoice =
+  | "gemini-4-hydrogen"
+  | "gemini-4-neon"
+  | "gemini-4-carbon"
+  | "gemini-3.8-flash"
+  | "gemini-4-argon";
 
 const EXPORT_FORMAT_OPTIONS: Array<{
   id: HandoffExportFormat;
@@ -455,6 +460,39 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
             <button
               type="button"
               className={`model-choice-btn ${
+                selectedModel === "gemini-4-hydrogen" ? "model-choice-active" : ""
+              }`}
+              onClick={() => setSelectedModel("gemini-4-hydrogen")}
+              data-testid="select-model-hydrogen"
+              disabled={applying}
+            >
+              Gemini 4 Hydrogen
+            </button>
+            <button
+              type="button"
+              className={`model-choice-btn ${
+                selectedModel === "gemini-4-neon" ? "model-choice-active" : ""
+              }`}
+              onClick={() => setSelectedModel("gemini-4-neon")}
+              data-testid="select-model-neon"
+              disabled={applying}
+            >
+              Gemini 4 Neon
+            </button>
+            <button
+              type="button"
+              className={`model-choice-btn ${
+                selectedModel === "gemini-4-carbon" ? "model-choice-active" : ""
+              }`}
+              onClick={() => setSelectedModel("gemini-4-carbon")}
+              data-testid="select-model-carbon"
+              disabled={applying}
+            >
+              Gemini 4 Carbon
+            </button>
+            <button
+              type="button"
+              className={`model-choice-btn ${
                 selectedModel === "gemini-3.8-flash" ? "model-choice-active" : ""
               }`}
               onClick={() => setSelectedModel("gemini-3.8-flash")}
@@ -516,6 +554,8 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
                     key={fmt.id}
                     type="button"
                     role="tab"
+                    id={`handoff-tab-${fmt.id}`}
+                    aria-controls={`handoff-tabpanel-${fmt.id}`}
                     aria-selected={active}
                     className={`handoff-format-tab ${
                       active ? "handoff-format-tab-active" : ""
@@ -528,6 +568,11 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
                 );
               })}
             </div>
+            <div
+              role="tabpanel"
+              id={`handoff-tabpanel-${exportFormat}`}
+              aria-labelledby={`handoff-tab-${exportFormat}`}
+            >
 
             <div className="handoff-slice-feedback-header">
               <span
@@ -604,6 +649,7 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
             >
               {exportText}
             </pre>
+            </div>
           </section>
 
           <section

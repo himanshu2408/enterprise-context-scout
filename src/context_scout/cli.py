@@ -943,6 +943,7 @@ def cmd_migrate_base_model(
     activate: bool = False,
     redistill: bool = False,
     register_in_db: bool = True,
+    allow_synthetic_artifact_registration: bool = False,
     tenant_id: UUID | str | None = None,
     rls_conn_manager: Any | None = None,
     in_memory_repo: Any | None = None,
@@ -986,6 +987,7 @@ def cmd_migrate_base_model(
         activate=activate,
         register_in_db=register_in_db,
         allow_offline_tiny_model=True,
+        allow_synthetic_artifact_registration=allow_synthetic_artifact_registration,
         redistill=redistill,
     )
     return {
@@ -2653,7 +2655,17 @@ def cmd_seed_demo(
     target_code_paths: list[Path] = []
     src_pkg = root / "src" / "context_scout"
     if quick:
-        for sub in ("api", "security", "agents", "retrieval", "db", "ops"):
+        for sub in (
+            "api",
+            "security",
+            "agents",
+            "retrieval",
+            "db",
+            "ops",
+            "ast_engine",
+            "telemetry",
+            "schemas",
+        ):
             sub_dir = src_pkg / sub
             if sub_dir.is_dir():
                 target_code_paths.extend(

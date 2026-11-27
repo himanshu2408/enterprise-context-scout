@@ -184,8 +184,8 @@ export const SpecializationAdminView: React.FC<SpecializationAdminViewProps> = (
       passed,
       domainId: selectedDomain.domain_id,
       summary: passed
-        ? `PASS: 1-step vLLM multi-LoRA dry-run verified for ${selectedDomain.domain_id}.`
-        : `FAIL: Dry-run validation failed for ${selectedDomain.domain_id}.`,
+        ? `PASS (Simulated UI Metadata Check): 1-step vLLM dry-run schema valid for ${selectedDomain.domain_id} (live sidecar not probed).`
+        : `FAIL (Simulated UI Metadata Check): Dry-run validation failed for ${selectedDomain.domain_id}.`,
       checks: [
         `rank_bound (r <= 32): ${rankValue} (${
           rankValue > 32 ? "EXCEEDED" : rankOk ? "OK" : "MISSING"

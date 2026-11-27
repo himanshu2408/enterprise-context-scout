@@ -450,6 +450,7 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
     console_tsx = (REPO_ROOT / "web-ui" / "src" / "components" / "ScoutConsole.tsx").read_text(
         encoding="utf-8"
     )
+    client_ts = (REPO_ROOT / "web-ui" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
     tf_cand = REPO_ROOT / "data" / "unseen_repos_v2" / "enterprise_gitlab_ops" / "infra" / "main.tf"
     if tf_cand.exists():
         tf_hcl = tf_cand.read_text(encoding="utf-8")
@@ -458,6 +459,10 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
             'variable "gcp_project_id" {\n'
             "  type        = string\n"
             '  description = "Target GCP project ID for regional Cloud Run deployment"\n'
+            "}\n\n"
+            'variable "scout_force_pg_telemetry_in_tests" {\n'
+            "  type    = string\n"
+            '  default = "0"\n'
             "}\n\n"
             'variable "primary_region" {\n'
             "  type    = string\n"
@@ -472,6 +477,7 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
 
     f_api_id = uuid.uuid4()
     f_ui_id = uuid.uuid4()
+    f_client_id = uuid.uuid4()
     f_tf_id = uuid.uuid4()
 
     files = [
@@ -500,6 +506,18 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
             line_count=len(console_tsx.splitlines()),
         ),
         CodeFileRecord(
+            file_id=f_client_id,
+            domain_id=domain_id,
+            repo_name="scout-ui",
+            file_path="web-ui/src/api/client.ts",
+            git_commit_sha="56c9d5e00001",
+            git_blob_sha="ui002",
+            language="typescript",
+            allowed_scopes=["public_eng", f"domain:{domain_id}", "repo:scout-ui"],
+            raw_content=client_ts,
+            line_count=len(client_ts.splitlines()),
+        ),
+        CodeFileRecord(
             file_id=f_tf_id,
             domain_id=domain_id,
             repo_name="gitlab-ops",
@@ -519,6 +537,9 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
     ui_parsed, _ = ext.parse_source(
         console_tsx, "tsx", file_path="web-ui/src/components/ScoutConsole.tsx", repo_name="scout-ui"
     )
+    client_parsed, _ = ext.parse_source(
+        client_ts, "typescript", file_path="web-ui/src/api/client.ts", repo_name="scout-ui"
+    )
     tf_parsed, _ = ext.parse_source(
         tf_hcl, "terraform", file_path="infra/main.tf", repo_name="gitlab-ops"
     )
@@ -527,19 +548,11 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
     for repo_name, fid, parsed in (
         ("scout-api", f_api_id, api_parsed),
         ("scout-ui", f_ui_id, ui_parsed),
+        ("scout-ui", f_client_id, client_parsed),
         ("gitlab-ops", f_tf_id, tf_parsed),
     ):
         for ps in parsed:
             summary = ps.contextual_summary or ps.signature_skeleton
-            leaf = (ps.bare_name or ps.name).rsplit(".", 1)[-1].rsplit("::", 1)[-1]
-            if repo_name == "scout-api" and leaf == "stream_scout":
-                summary = f"{summary}\n@route POST /api/v1/scout/stream @env TF_VAR_gcp_project_id"
-            elif (repo_name == "scout-api" and leaf == "query_scout") or (
-                repo_name == "scout-ui" and leaf in {"ScoutConsole", "ScoutConsoleProps"}
-            ):
-                summary = f"{summary}\n@route POST /api/v1/scout/query"
-            elif repo_name == "gitlab-ops" and leaf == "gcp_project_id":
-                summary = f"{summary}\n@env TF_VAR_gcp_project_id"
             symbols.append(
                 ASTSymbolRecord(
                     symbol_id=uuid.uuid4(),
@@ -728,11 +741,11 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
             ],
         )
 
-        # 1. Cross-boundary contract 1-hop expansion
+        # 1. Cross-boundary contract 1-hop expansion (@route executeScoutQuery -> query_scout)
         ui_focus = next(
             s
             for s in symbols
-            if (s.bare_name or s.qualified_name).rsplit(".", 1)[-1] == "ScoutConsoleProps"
+            if (s.bare_name or s.qualified_name).rsplit(".", 1)[-1] == "executeScoutQuery"
         )
         exp = ASTDependencyExpander().expand_1hop(
             focus_symbol=ui_focus, repo=bound, principal=eng, domain_id=domain_id
@@ -771,6 +784,7 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
         # 4. 20-way concurrent multi-principal FastAPI ASGI SSE non-bleed test
         os.environ["SCOUT_REQUIRE_SIGNED_AUTH"] = "true"
         os.environ["SCOUT_AUTH_HMAC_SECRET"] = _HMAC_SECRET
+        dependencies.reset_shared_repository()
         dependencies._shared_repo = None
         dependencies._local_gemma_client = None
         dependencies.get_domain_registry().register(manifest)
@@ -831,17 +845,28 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
 
         sse_results = asyncio.run(run_20_sse())
         assert len(sse_results) == 20
+        ready_count = 0
+        blocked_researcher_count = 0
         for code, role_name, body in sse_results:
             assert code == 200
-            assert (
-                "event: context_pack_ready" in body or '"category":"insufficient_context"' in body
-            )
+            if role_name == "domain_researcher":
+                # DOMAIN_RESEARCHER lacks ["audit:compliance"] -> must fail closed with 0 leaks
+                assert '"category":"insufficient_context"' in body
+                blocked_researcher_count += 1
+            else:
+                assert "event: context_pack_ready" in body, (
+                    f"Expected context_pack_ready for authorized role={role_name}: {body[:200]}"
+                )
+                ready_count += 1
             if role_name != "compliance_officer":
                 assert "S3_CANARY_COMPLIANCE_ONLY" not in body
             if role_name != "product_manager":
                 assert "S3_CANARY_PM_ONLY" not in body
+        assert ready_count == 15
+        assert blocked_researcher_count == 5
     finally:
         dependencies.get_domain_registry().unregister(domain_id)
+        dependencies.reset_shared_repository()
         dependencies._shared_repo = prev_repo
         dependencies._local_gemma_client = prev_client
         if prev_req is None:

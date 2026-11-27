@@ -233,3 +233,19 @@ def test_homoglyph_spoofing_boundary_cases() -> None:
         is False
     )
     assert detect_homoglyph_spoofing("\u0391\u03b2\u03b3 \u03b4\u03b5\u03b6")[0] is False
+
+
+def test_claim_verifier_rejects_nfkc_compatibility_homoglyphs_before_normalization() -> None:
+    """PR-4 (ECS-011): Fullwidth/mathematical/enclosed NFKC homoglyphs must be rejected."""
+    verifier = ClaimVerifier(ClaimVerifierConfig(reject_homoglyphs=True))
+    source = "The API timeout is set to 500 ms."
+
+    for spoofed_claim in (
+        "The \uff21PI timeout is set to 500 ms.",  # fullwidth capital A
+        "The \U0001d400PI timeout is set to 500 ms.",  # mathematical bold capital A
+        "Version \u2161 timeout is set to 500 ms.",  # compatibility Roman numeral II
+    ):
+        rec = verifier.verify_single_claim(spoofed_claim, [source])
+        assert rec.is_verified is False, f"Accepted NFKC spoofed claim: {spoofed_claim!r}"
+        assert rec.failure_code == ClaimFailureCode.HOMOGLYPH_SPOOFING
+        assert rec.is_homoglyph_attack is True

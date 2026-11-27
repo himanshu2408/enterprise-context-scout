@@ -56,7 +56,7 @@ describe("TokenSavingsMeter", () => {
       width: "90.95%",
     });
     expect(screen.getByTestId("token-savings-meter")).toHaveTextContent(
-      "Gemini 4 Argon"
+      "Gemini 4 Carbon"
     );
     expect(screen.getByTestId("token-savings-meter")).toHaveTextContent(
       "Claude Opus 5.5"
@@ -79,7 +79,7 @@ describe("TokenSavingsMeter", () => {
     fireEvent.click(screen.getByTestId("toggle-telemetry-strip-btn"));
     const drawer = screen.getByTestId("frontier-rates-drawer");
     expect(drawer).toBeInTheDocument();
-    expect(drawer).toHaveTextContent("Gemini 3.8 Flash");
+    expect(drawer).toHaveTextContent("Gemini 4 Hydrogen");
     expect(drawer).toHaveTextContent("GPT-5.6 Sol");
 
     fireEvent.click(screen.getByTestId("toggle-telemetry-strip-btn"));

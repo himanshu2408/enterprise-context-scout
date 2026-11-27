@@ -79,18 +79,18 @@ def test_october_2026_pricing_table(estimator: PaidComputeCostEstimator) -> None
 
     # Claude Opus 5.5
     p_opus = estimator.get_pricing_record("claude-opus-5.5")
-    assert p_opus.input_usd_per_1m_low == 4.00
-    assert p_opus.input_usd_per_1m_expected == 4.00
-    assert p_opus.input_usd_per_1m_high == 4.00
-    assert p_opus.output_usd_per_1m_low == 20.00
-    assert p_opus.output_usd_per_1m_expected == 20.00
-    assert p_opus.output_usd_per_1m_high == 20.00
+    assert p_opus.input_usd_per_1m_low == 10.00
+    assert p_opus.input_usd_per_1m_expected == 15.00
+    assert p_opus.input_usd_per_1m_high == 20.00
+    assert p_opus.output_usd_per_1m_low == 50.00
+    assert p_opus.output_usd_per_1m_expected == 75.00
+    assert p_opus.output_usd_per_1m_high == 90.00
 
     # GPT-5.6 Sol
     p_sol = estimator.get_pricing_record("gpt-5.6-sol")
-    assert p_sol.input_usd_per_1m_low == 4.00
-    assert p_sol.input_usd_per_1m_expected == 4.00
-    assert p_sol.output_usd_per_1m_expected == 20.00
+    assert p_sol.input_usd_per_1m_low == 2.00
+    assert p_sol.input_usd_per_1m_expected == 2.50
+    assert p_sol.output_usd_per_1m_expected == 10.00
 
     # Gemini 3.8 Flash
     p_flash = estimator.get_pricing_record("gemini-3.8-flash")
@@ -335,3 +335,97 @@ def test_cost_estimator_boundary_condition_prevents_output_token_inversion(
     )
     assert report_1.estimated_output_tokens == 1
     assert report_1.max_output_tokens == 1
+
+
+def test_single_source_yaml_pricing_includes_gemini4_hydrogen_neon_carbon(
+    estimator: PaidComputeCostEstimator,
+) -> None:
+    """PR-4 (ECS-046/ECS-086/ECS-109): YAML pricing must include active Gemini 4 tiers."""
+    from pathlib import Path
+
+    import yaml
+
+    from context_scout.config import ModelGovernancePolicy
+    from context_scout.telemetry.cost_governance import OCTOBER_2026_PRICING
+
+    raw_pricing = yaml.safe_load(Path("config/model_pricing.yaml").read_text(encoding="utf-8"))
+    yaml_models = raw_pricing["models"]
+    for model_id in (
+        "gemini-4-hydrogen",
+        "gemini-4-neon",
+        "gemini-4-carbon",
+        "gemini-3.8-flash",
+        "gemini-4-argon",
+        "claude-sonnet-5.5",
+        "claude-opus-5.5",
+        "gpt-5.6-sol",
+    ):
+        assert model_id in yaml_models, f"Missing {model_id} in config/model_pricing.yaml"
+        rec = estimator.get_pricing_record(model_id)
+        entry = yaml_models[model_id]
+        assert rec.input_usd_per_1m_expected == float(entry["input_expected"])
+        assert rec.output_usd_per_1m_expected == float(entry["output_expected"])
+        assert rec.input_usd_per_1m_low == float(entry["input_low"])
+        assert rec.input_usd_per_1m_high == float(entry["input_high"])
+        assert rec.output_usd_per_1m_low == float(entry["output_low"])
+        assert rec.output_usd_per_1m_high == float(entry["output_high"])
+        assert rec.is_zero_cost is False
+        assert OCTOBER_2026_PRICING[model_id] == rec
+
+    # Registry also permits active Gemini 4 models only when external egress is allowed
+    policy_off = ModelGovernancePolicy.from_registry_file("config/model_registry.yaml")
+    for model_id in ("gemini-4-hydrogen", "gemini-4-neon", "gemini-4-carbon"):
+        with pytest.raises(ValueError, match="allow_external_cloud_egress=False"):
+            policy_off.validate_cloud_egress(model_id)
+
+    policy_on = ModelGovernancePolicy.from_registry_file(
+        "config/model_registry.yaml",
+        allow_external_cloud_egress=True,
+    )
+    for model_id in (
+        "gemini-4-hydrogen",
+        "gemini-4-neon",
+        "gemini-4-carbon",
+        "gemini-3.8-flash",
+        "gemini-4-argon",
+    ):
+        assert policy_on.validate_cloud_egress(model_id) == model_id
+
+    for retired in (
+        "gemini-2.5-flash",
+        "codegemma",
+        "gemma-3-27b-it",
+        "text-embedding-004",
+        "gemini-ultra",
+    ):
+        with pytest.raises(ValueError, match="Prohibited or retired model ID"):
+            policy_on.validate_cloud_egress(retired)
+
+
+def test_budget_tracker_atomic_reservation_under_concurrency() -> None:
+    """PR-4 (ECS-012): Concurrent check_and_reserve calls must be atomic under lock."""
+    import concurrent.futures
+
+    tracker = SessionBudgetTracker()
+    principal = PrincipalContext(
+        user_id="concurrent_user",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng"],
+        session_budget_tokens=1000,
+    )
+
+    def _try_reserve() -> bool:
+        try:
+            tracker.check_and_reserve(principal, projected_tokens=400, estimated_cost_usd=0.01)
+            return True
+        except BudgetExceededError:
+            return False
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: _try_reserve(), range(8)))
+
+    assert sum(1 for ok in results if ok) == 2
+    assert tracker.get_consumption("concurrent_user")["total_tokens"] == 0
+    assert tracker.get_consumption("concurrent_user")["reserved_tokens"] == 800
+    tracker.release_reservation(principal, reserved_tokens=400, reserved_cost_usd=0.01)
+    assert tracker.get_consumption("concurrent_user")["reserved_tokens"] == 400

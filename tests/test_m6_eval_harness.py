@@ -12,6 +12,7 @@ Verifies:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -218,6 +219,8 @@ def test_end_to_end_evaluate_all(harness: EvaluationHarness) -> None:
     """Tests full harness run verifying all 6 gates meet thresholds simultaneously."""
     run_result = harness.evaluate_all()
     assert len(run_result.metrics) == 6
+    assert run_result.all_passed is True
+    assert all(m.passed for m in run_result.metrics.values())
     assert run_result.metrics["rbac_zero_leakage_rate"].passed is True
     assert run_result.metrics["prompt_injection_block_rate"].passed is True
     assert run_result.telemetry_spans_count > 0
@@ -376,12 +379,12 @@ def test_cli_runner_report_generation(tmp_path: Path) -> None:
         ]
     )
 
-    assert exit_code in (0, 1)
+    assert exit_code == 0
     assert json_out.exists(), "JSON report was not generated"
     assert md_out.exists(), "Markdown report was not generated"
 
     data = json.loads(json_out.read_text(encoding="utf-8"))
-    assert isinstance(data["all_passed"], bool)
+    assert data["all_passed"] is True
     assert "metrics" in data
     assert len(data["metrics"]) == 6
     assert data["metrics"]["rbac_zero_leakage_rate"]["passed"] is True
@@ -389,7 +392,7 @@ def test_cli_runner_report_generation(tmp_path: Path) -> None:
 
     md_text = md_out.read_text(encoding="utf-8")
     assert "Milestone 6 CI/CD Quality Gate & OpenTelemetry Evaluation Report" in md_text
-    assert ("✅ PASSED" in md_text) or ("❌ FAILED" in md_text)
+    assert "✅ PASSED" in md_text
     assert "âœ" not in md_text and "â Œ" not in md_text
     assert "Zero-Touch Sufficiency Rate" in md_text
     assert "File & Symbol Recall@5" in md_text
@@ -411,10 +414,10 @@ def test_cli_runner_postgres_flag(tmp_path: Path) -> None:
             "--fail-under-threshold",
         ]
     )
-    assert exit_code in (0, 1)
+    assert exit_code == 0
     assert json_out.exists()
     data = json.loads(json_out.read_text(encoding="utf-8"))
-    assert isinstance(data["all_passed"], bool)
+    assert data["all_passed"] is True
     assert data["metrics"]["rbac_zero_leakage_rate"]["passed"] is True
     assert data["metrics"]["prompt_injection_block_rate"]["passed"] is True
     # Gate 4 should report genuine candidate exploration > 80% on live PG17 corpus
@@ -427,6 +430,7 @@ def test_cli_runner_in_memory_flag(tmp_path: Path) -> None:
     """Verifies CLI runner with --in-memory executes without PostgreSQL requirement."""
     json_out = tmp_path / "inmem_report.json"
     md_out = tmp_path / "inmem_report.md"
+    prev_backend = os.environ.get("SCOUT_STORAGE_BACKEND")
 
     exit_code = main(
         [
@@ -438,14 +442,16 @@ def test_cli_runner_in_memory_flag(tmp_path: Path) -> None:
             "--fail-under-threshold",
         ]
     )
-    assert exit_code in (0, 1)
+    assert os.environ.get("SCOUT_STORAGE_BACKEND") == prev_backend
+    assert exit_code == 0
     assert json_out.exists()
     data = json.loads(json_out.read_text(encoding="utf-8"))
-    assert isinstance(data["all_passed"], bool)
+    assert data["all_passed"] is True
     assert data["metrics"]["rbac_zero_leakage_rate"]["passed"] is True
     assert data["metrics"]["prompt_injection_block_rate"]["passed"] is True
     m4 = data["metrics"]["frontier_token_savings_ratio"]
-    assert m4["measured_value"] >= 75.0
+    assert m4["passed"] is True
+    assert m4["measured_value"] >= 80.0
 
 
 def test_cli_runner_mutual_exclusion_error() -> None:

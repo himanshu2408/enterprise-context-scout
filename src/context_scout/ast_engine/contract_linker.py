@@ -227,14 +227,20 @@ class CrossBoundaryContractLinker:
 
             for method, raw_route in _RE_ROUTE_TAG.findall(text):
                 norm_route = normalize_route_template(raw_route)
+                stripped_route = re.sub(r"^/api/v\d+(?=/|$)", "", norm_route) or "/"
+                route_variants = [norm_route]
+                if stripped_route != norm_route:
+                    route_variants.append(stripped_route)
                 is_fe = lang in _FRONTEND_LANGUAGES or "builder." in sym.signature_skeleton
                 if is_spec:
-                    spec_routes.setdefault((method, norm_route), []).append(sym)
-                    backend_routes.setdefault((method, norm_route), []).append(sym)
+                    for rv in route_variants:
+                        spec_routes.setdefault((method, rv), []).append(sym)
+                        backend_routes.setdefault((method, rv), []).append(sym)
                 elif is_fe and lang not in _BACKEND_LANGUAGES:
                     frontend_routes.append((sym, method, norm_route))
                 else:
-                    backend_routes.setdefault((method, norm_route), []).append(sym)
+                    for rv in route_variants:
+                        backend_routes.setdefault((method, rv), []).append(sym)
 
             for op_type, op_name in _RE_GQL_TAG.findall(text):
                 key = (op_type.lower(), op_name.lower())
@@ -347,9 +353,17 @@ class CrossBoundaryContractLinker:
 
         # 1. Frontend -> Backend & Spec REST routes
         for fe_sym, method, norm_route in frontend_routes:
-            targets = backend_routes.get((method, norm_route), []) + backend_routes.get(
-                ("ANY", norm_route), []
+            stripped_route = re.sub(r"^/api/v\d+(?=/|$)", "", norm_route) or "/"
+            targets = list(
+                backend_routes.get((method, norm_route), [])
+                + backend_routes.get(("ANY", norm_route), [])
             )
+            if stripped_route != norm_route:
+                for cand in backend_routes.get((method, stripped_route), []) + backend_routes.get(
+                    ("ANY", stripped_route), []
+                ):
+                    if cand not in targets:
+                        targets.append(cand)
             for be_sym in targets:
                 emit_edge(fe_sym, be_sym, "CALLS")
 

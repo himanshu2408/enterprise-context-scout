@@ -18,13 +18,17 @@ DEFAULT_FILE_WEIGHT_SECONDS: Final[int] = 6
 # Empirical pure-test durations (in seconds) measured directly via pytest --durations
 # on GitHub Actions ubuntu-latest (4-vCPU x86_64 CPU).
 MEASURED_UBUNTU_CI_SECONDS: Final[dict[str, int]] = {
-    "tests/test_m2_code_engine.py": 1200,
     "tests/test_m6_eval_harness.py": 870,
     "tests/test_m0_02_governance_and_eval_fixes.py": 745,
     "tests/test_release_readiness_and_seed_demo.py": 490,
+    "tests/test_m4_02_specialization_distiller_peft.py": 180,
     "tests/test_zero_spend_abstention.py": 150,
     "tests/test_m2_schemathesis_openapi_fuzz.py": 145,
+    "tests/test_tier5_scale_statistical_adversarial.py": 90,
+    "tests/test_tier5_adversarial_coverage.py": 60,
+    "tests/test_unseen_repo_ab_benchmark.py": 60,
     "tests/test_end_to_end_feature_build.py": 55,
+    "tests/test_m2_code_engine.py": 45,
     "tests/test_backend_middleware_authenticity.py": 45,
     "tests/test_postgres_m2_live.py": 25,
     "tests/test_m7_teacher_distiller.py": 22,

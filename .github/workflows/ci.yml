@@ -37,11 +37,11 @@ jobs:
 
       - name: Run Ruff Linter & Formatter Check
         run: |
-          uv run ruff check src tests scripts
-          uv run ruff format --check src tests scripts
+          uv run ruff check src tests scripts evals examples
+          uv run ruff format --check src tests scripts evals examples
 
       - name: Run Mypy Strict Typechecker
-        run: uv run mypy --strict src tests scripts/ci_pytest_shard.py
+        run: uv run mypy --strict src tests scripts/ci_pytest_shard.py scripts/run_test_batches.py
 
       - name: Lint PostgreSQL 17 Alembic Migrations via Squawk
         run: uv run python -m context_scout.db.migrations_runner --lint-squawk
@@ -51,8 +51,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SCOUT_AUTH_HMAC_SECRET: scout-github-actions-ci-hmac-secret-32-chars!!
-      OMP_NUM_THREADS: "4"
-      MKL_NUM_THREADS: "4"
+      SCOUT_STORAGE_BACKEND: "memory"
+      OMP_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      TOKENIZERS_PARALLELISM: "false"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -76,7 +79,7 @@ jobs:
 
       - name: Run Milestone 6 Evaluation Gate (In-Memory CI Mode)
         run: |
-          uv run python -m context_scout.evals.runner --in-memory \
+          uv run python -m context_scout.evals.runner --in-memory --fail-under-threshold \
             --output-json /tmp/m6_eval_report.json \
             --output-md /tmp/m6_eval_report.md
 
@@ -100,8 +103,10 @@ jobs:
     env:
       SCOUT_DB_ADMIN_URL: postgresql://postgres:postgres_ci_password@127.0.0.1:5432/context_scout
       SCOUT_AUTH_HMAC_SECRET: scout-github-actions-ci-hmac-secret-32-chars!!
-      OMP_NUM_THREADS: "4"
-      MKL_NUM_THREADS: "4"
+      OMP_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      TOKENIZERS_PARALLELISM: "false"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -124,7 +129,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/scout-pg17-seed
-          key: pg17-seed-v2-${{ hashFiles('sql/**', 'alembic.ini', 'pyproject.toml', 'uv.lock', 'src/context_scout/db/**', 'src/context_scout/retrieval/embedder.py', 'src/context_scout/ast_engine/**', 'tests/fixtures/pg_isolation.py', 'examples/quant_dogfood/**') }}
+          key: pg17-seed-v3-${{ hashFiles('sql/**', 'alembic.ini', 'pyproject.toml', 'uv.lock', 'src/context_scout/**', 'tests/fixtures/pg_isolation.py', 'examples/quant_dogfood/**') }}
 
       - name: Install Python dependencies & PostgreSQL client
         run: |
@@ -200,8 +205,10 @@ jobs:
     env:
       SCOUT_DB_ADMIN_URL: postgresql://postgres:postgres_ci_password@127.0.0.1:5432/context_scout
       SCOUT_AUTH_HMAC_SECRET: scout-github-actions-ci-hmac-secret-32-chars!!
-      OMP_NUM_THREADS: "4"
-      MKL_NUM_THREADS: "4"
+      OMP_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      TOKENIZERS_PARALLELISM: "false"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7

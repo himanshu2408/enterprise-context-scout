@@ -46,28 +46,95 @@ models:
     output: 0.0
     self_hosted: true
 
-  # Optional cloud handoff models (requires allow_external_cloud_egress: true)
+  # Active Gemini 4 cloud handoff models + legacy compatibility entries
+  # (requires allow_external_cloud_egress: true)
+  "gemini-4-hydrogen":
+    input: 0.75
+    output: 3.75
+    input_low: 0.50
+    input_expected: 0.75
+    input_high: 1.00
+    output_low: 2.50
+    output_expected: 3.75
+    output_high: 5.00
+    self_hosted: false
+  "gemini-4-neon":
+    input: 1.75
+    output: 8.75
+    input_low: 1.25
+    input_expected: 1.75
+    input_high: 2.50
+    output_low: 6.00
+    output_expected: 8.75
+    output_high: 12.50
+    self_hosted: false
+  "gemini-4-carbon":
+    input: 3.50
+    output: 17.50
+    input_low: 2.50
+    input_expected: 3.50
+    input_high: 5.00
+    output_low: 12.00
+    output_expected: 17.50
+    output_high: 25.00
+    self_hosted: false
   "gemini-3.8-flash":
-    input: 0.15
-    output: 0.60
+    input: 1.00
+    output: 5.00
+    input_low: 0.75
+    input_expected: 1.00
+    input_high: 1.50
+    output_low: 3.75
+    output_expected: 5.00
+    output_high: 7.50
     self_hosted: false
   "gemini-4-argon":
-    input: 1.25
-    output: 5.00
+    input: 3.00
+    output: 15.00
+    input_low: 2.00
+    input_expected: 3.00
+    input_high: 4.00
+    output_low: 10.00
+    output_expected: 15.00
+    output_high: 20.00
     self_hosted: false
   "claude-sonnet-5.5":
     input: 3.00
     output: 15.00
+    input_low: 3.00
+    input_expected: 3.00
+    input_high: 3.00
+    output_low: 15.00
+    output_expected: 15.00
+    output_high: 15.00
     self_hosted: false
   "claude-opus-5.5":
     input: 15.00
     output: 75.00
+    input_low: 10.00
+    input_expected: 15.00
+    input_high: 20.00
+    output_low: 50.00
+    output_expected: 75.00
+    output_high: 90.00
     self_hosted: false
   "gpt-5.6-sol":
     input: 2.50
     output: 10.00
+    input_low: 2.00
+    input_expected: 2.50
+    input_high: 3.50
+    output_low: 8.00
+    output_expected: 10.00
+    output_high: 14.00
     self_hosted: false
   "gpt-6-astra":
     input: 10.00
     output: 30.00
+    input_low: 8.00
+    input_expected: 10.00
+    input_high: 12.00
+    output_low: 24.00
+    output_expected: 30.00
+    output_high: 36.00
     self_hosted: false

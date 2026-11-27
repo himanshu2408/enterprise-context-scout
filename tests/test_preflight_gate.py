@@ -913,3 +913,118 @@ class TestPreFlightValidator:
         assert len(errors) == 1
         assert "Nesting depth (12) exceeds maximum limit (10)" in errors[0]
         assert any(m.kind == "syntax" for m in missing)
+
+
+def test_preflight_check3_and_check4_strict_threshold_boundaries(
+    principal: PrincipalContext,
+) -> None:
+    """PR-4 (ECS-100): Verify strict Check 3 (0.65 RRF) and Check 4 (1.0 overlap) fail-closed."""
+    from uuid import uuid4
+
+    from context_scout.db.schema import DocChunkRecord
+    from context_scout.schemas.contracts import DocCitationSpan, DocumentScope
+
+    repo = InMemoryRLSRepository()
+    validator = PreFlightValidator(repo=repo, principal=principal, domain_id=DOMAIN_ID)
+    assert validator.min_rrf_score == pytest.approx(0.65)
+    assert validator.min_citation_overlap == pytest.approx(1.0)
+
+    for score in (0.55, 0.60, 0.6499):
+        ok_rrf, _ = validator.check_rrf_threshold(normalized_rrf_score=score)
+        assert ok_rrf is False, f"Expected RRF score {score} < 0.65 to fail Check 3"
+    ok_pass, _ = validator.check_rrf_threshold(normalized_rrf_score=0.65)
+    assert ok_pass is True
+
+    # Check 4: overlap in [0.98, 1.0) must fail strict min_overlap_ratio=1.0
+    cid = uuid4()
+    words = [f"token{i}" for i in range(60)]
+    chunk_text = " ".join(words)
+    partial_quote = " ".join(words[:59]) + " wrongtoken"
+    repo.insert_doc_chunk(
+        principal,
+        DocChunkRecord(
+            chunk_id=cid,
+            domain_id=DOMAIN_ID,
+            doc_id="doc_thresh",
+            doc_title="Threshold Spec",
+            source_uri="urn:doc_thresh",
+            market_scope=DocumentScope.ENTERPRISE_DOC,
+            published_date=None,
+            authority_weight=1.0,
+            section_heading="Body",
+            contextual_header="Threshold Spec - Body",
+            verbatim_content=chunk_text,
+            metadata_json={},
+            allowed_scopes=list(principal.allowed_scopes),
+            embedding=[0.1] * 768,
+        ),
+    )
+    cit = DocCitationSpan(
+        chunk_id=str(cid),
+        doc_id="doc_thresh",
+        doc_title="Threshold Spec",
+        source_uri="urn:doc_thresh",
+        section_heading="Body",
+        verbatim_quote=partial_quote,
+    )
+    cit_rep = validator.citation_gate.verify_citations(
+        [cit],
+        corpus_chunks={str(cid): chunk_text},
+        require_citations=True,
+    )
+    assert cit_rep.passed is False
+
+
+def test_conflict_detector_distinguishes_qualified_parameters() -> None:
+    """PR-4 (ECS-023): connect_timeout vs read_timeout or l1_ttl vs l2_ttl must not collide."""
+    from dataclasses import replace
+
+    from context_scout.agents.conflict_detector import ConflictDetector
+    from context_scout.db.schema import DocChunkRecord
+    from context_scout.schemas.contracts import DocumentScope
+
+    detector = ConflictDetector()
+    doc = DocChunkRecord(
+        chunk_id=uuid.uuid4(),
+        domain_id=DOMAIN_ID,
+        doc_id="doc_cfg",
+        doc_title="Config Spec",
+        source_uri="urn:doc_cfg",
+        source_type="enterprise_doc",
+        market_scope=DocumentScope.ENTERPRISE_DOC,
+        published_date=None,
+        authority_weight=1.0,
+        section_heading="Configuration",
+        contextual_header="Config Spec - Configuration",
+        verbatim_content=(
+            "Configuration guide:\nread_timeout = 30s\nl2_ttl = 120s\nmetrics_port = 9090\n"
+        ),
+        metadata_json={},
+        allowed_scopes=["public_eng"],
+        embedding=[0.1] * 768,
+    )
+    slc = VerbatimCodeSlice(
+        repo_name=REPO_NAME,
+        file_path="src/cfg.py",
+        start_line=1,
+        end_line=3,
+        qualified_symbol="cfg.settings",
+        selection_reason="Config settings",
+        modification_intent=ModificationIntent.REFERENCE_ONLY,
+        git_commit_sha="abc1234",
+        git_blob_sha="def5678",
+        verbatim_code_with_lines=(
+            "1 | connect_timeout = 5000\n2 | l1_ttl = 10\n3 | admin_port = 8080\n"
+        ),
+    )
+    conflicts = detector.detect_code_vs_doc_conflicts([slc], [doc])
+    assert conflicts == [], f"False parameter collision detected: {conflicts}"
+
+    doc_match = replace(doc, verbatim_content="Configuration guide:\nconnect_timeout = 30s\n")
+    slc_match = slc.model_copy(
+        update={
+            "verbatim_code_with_lines": "1 | connect_timeout_ms = 5000\n2 | l1_ttl = 10\n",
+        }
+    )
+    real_conflicts = detector.detect_code_vs_doc_conflicts([slc_match], [doc_match])
+    assert len(real_conflicts) == 1

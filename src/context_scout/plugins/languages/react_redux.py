@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gc
 import json
 import logging
 import re
@@ -306,18 +305,12 @@ class ReactReduxPlugin:
             self.last_parse_diagnostics = ParseDiagnostics(parser_backend="tree-sitter-typescript")
             return [], []
 
-        was_gc = gc.isenabled()
-        gc.disable()
-        try:
-            return self._extract_ast_impl(
-                code=code,
-                file_path=file_path,
-                repo_name=repo_name,
-                module_prefix=module_prefix,
-            )
-        finally:
-            if was_gc:
-                gc.enable()
+        return self._extract_ast_impl(
+            code=code,
+            file_path=file_path,
+            repo_name=repo_name,
+            module_prefix=module_prefix,
+        )
 
     def _extract_ast_impl(
         self,
@@ -638,6 +631,13 @@ class ReactReduxPlugin:
                                 method = m_txt
                     if url:
                         attach_note(caller_qn, f"@route {method} {url}")
+
+            elif callee_leaf == "EventSource" and scope_stack and args is not None:
+                named_args = [c for c in args.children if c.is_named]
+                if named_args:
+                    url = _extract_ts_url_expr(named_args[0], code_bytes)
+                    if url:
+                        attach_note(caller_qn, f"@route GET {url}")
 
             elif callee.startswith("axios") and scope_stack and args is not None:
                 named_args = [c for c in args.children if c.is_named]

@@ -6,6 +6,7 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import date
+from typing import Final
 
 from context_scout.db.schema import DocChunkRecord
 from context_scout.schemas.contracts import VerbatimCodeSlice
@@ -45,8 +46,6 @@ _CONCEPT_ALIASES: dict[str, str] = {
     "retry_count": "retries",
     "retries": "retries",
     "request_timeout": "timeout",
-    "connect_timeout": "timeout",
-    "read_timeout": "timeout",
     "timeout": "timeout",
     "cache_ttl": "ttl",
     "ttl": "ttl",
@@ -65,6 +64,25 @@ _CONCEPT_ALIASES: dict[str, str] = {
     "availability": "sla",
     "sla": "sla",
 }
+
+_GENERIC_KEY_PREFIXES: Final[frozenset[str]] = frozenset(
+    {
+        "request",
+        "http",
+        "api",
+        "service",
+        "default",
+        "max",
+        "min",
+        "total",
+        "target",
+        "server",
+        "client",
+        "cache",
+        "db",
+        "retry",
+    }
+)
 
 _STOPWORDS: frozenset[str] = frozenset(
     {
@@ -140,8 +158,13 @@ def _normalize_key(raw_key: str) -> str:
             break
     if cleaned in _CONCEPT_ALIASES:
         return _CONCEPT_ALIASES[cleaned]
+    parts = cleaned.split("_")
+    if len(parts) >= 2 and parts[0] in _GENERIC_KEY_PREFIXES:
+        stripped = "_".join(parts[1:])
+        if stripped in _CONCEPT_ALIASES:
+            return _CONCEPT_ALIASES[stripped]
     for alias_key, canonical in _CONCEPT_ALIASES.items():
-        if cleaned.endswith(f"_{alias_key}") or cleaned.startswith(f"{alias_key}_"):
+        if cleaned.startswith(f"{alias_key}_"):
             return canonical
     return cleaned
 
@@ -159,6 +182,12 @@ def _unit_from_key_hint(raw_key: str, raw_unit: str | None) -> str:
     return ""
 
 
+def _is_duration_concept(canonical_key: str) -> bool:
+    return canonical_key in _DURATION_CONCEPTS or canonical_key.endswith(
+        tuple(f"_{c}" for c in _DURATION_CONCEPTS)
+    )
+
+
 def _normalize_numeric(
     canonical_key: str,
     raw_value: str,
@@ -169,7 +198,7 @@ def _normalize_numeric(
     unit = _unit_from_key_hint(raw_key, raw_unit)
     display_unit = raw_unit or unit
 
-    if canonical_key in _DURATION_CONCEPTS and unit in {
+    if _is_duration_concept(canonical_key) and unit in {
         "ms",
         "msec",
         "millisecond",

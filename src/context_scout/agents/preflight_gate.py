@@ -449,12 +449,19 @@ _PG_ALLOWED_EDGE_KINDS: Final[frozenset[str]] = frozenset(
         "DOCUMENTS_COMPONENT",
         "OWNED_BY_TEAM",
         "PART_OF_SYSTEM",
+        "PUBLISHES_EVENT",
+        "SUBSCRIBES_EVENT",
+        "READS_TABLE",
+        "WRITES_TABLE",
+        "RENDERS_TEMPLATE",
+        "IMPLEMENTS_SPEC",
+        "IMPLEMENTS_ISSUE",
+        "BINDS_SERVICE_ACCOUNT",
+        "ACCESSES_SECRET",
     }
 )
 _PG_EDGE_REMAP: Final[dict[str, str]] = {
     "REGISTERS": "PROVISIONED_BY",
-    "BINDS_SERVICE_ACCOUNT": "PROVISIONED_BY",
-    "ACCESSES_SECRET": "PROVISIONED_BY",
 }
 _DOCUMENT_SCOPE_VALUES: Final[frozenset[str]] = frozenset(m.value for m in DocumentScope)
 _PG_ALLOWED_MARKET_SCOPES: Final[frozenset[str]] = frozenset(
@@ -2481,7 +2488,10 @@ class BoundGraphRepository:
                           e.edge_kind IN (
                               'USES_TYPE', 'IMPORTS', 'INHERITS',
                               'PROVISIONED_BY', 'DISPATCHES', 'SELECTS', 'DOCUMENTS_COMPONENT',
-                              'OWNED_BY_TEAM', 'PART_OF_SYSTEM'
+                              'OWNED_BY_TEAM', 'PART_OF_SYSTEM',
+                              'PUBLISHES_EVENT', 'SUBSCRIBES_EVENT', 'READS_TABLE',
+                              'WRITES_TABLE', 'RENDERS_TEMPLATE', 'IMPLEMENTS_SPEC',
+                              'IMPLEMENTS_ISSUE', 'BINDS_SERVICE_ACCOUNT', 'ACCESSES_SECRET'
                           )
                           OR (
                               e.edge_kind = 'CALLS'
@@ -2514,7 +2524,10 @@ class BoundGraphRepository:
                           OR (
                               e.is_cross_repo = TRUE
                               AND e.edge_kind IN (
-                                  'CALLS', 'USES_TYPE', 'PROVISIONED_BY', 'DOCUMENTS_COMPONENT'
+                                  'CALLS', 'USES_TYPE', 'PROVISIONED_BY', 'DOCUMENTS_COMPONENT',
+                                  'PUBLISHES_EVENT', 'SUBSCRIBES_EVENT', 'READS_TABLE',
+                                  'WRITES_TABLE', 'RENDERS_TEMPLATE', 'IMPLEMENTS_SPEC',
+                                  'IMPLEMENTS_ISSUE', 'BINDS_SERVICE_ACCOUNT', 'ACCESSES_SECRET'
                               )
                           )
                       )

@@ -81,7 +81,16 @@ def get_roi_metrics(
                 type(exc).__name__,
                 exc,
             )
-            m7_report = None
+    if m7_report is not None and "is_empirical" not in m7_report:
+        adapter_info = m7_report.get("adapter_pool_verification", {})
+        has_real_lora = isinstance(adapter_info, dict) and any(
+            isinstance(v, dict) and bool(v.get("adapters_present")) for v in adapter_info.values()
+        )
+        m7_report["is_empirical"] = has_real_lora
+        m7_report.setdefault(
+            "benchmark_mode",
+            "empirical_local_inference" if has_real_lora else "simulated_mock_client",
+        )
 
     records: list[ExecutionTelemetryRecord] = []
     total_queries = 0
@@ -133,7 +142,10 @@ def get_roi_metrics(
             ) from None
 
     ratio_pct = round((total_saved / max(1, total_local)) * 100.0, 2) if total_local > 0 else 0.0
-    qlora_eliminated_total = float(total_queries * 1634.0)
+    # Honest ROI telemetry (ECS-098): base open-weights inference has 0.0 QLoRA overhead delta
+    # unless an active specialized LoRA adapter measurement is recorded.
+    qlora_per_query = 0.0
+    qlora_eliminated_total = 0.0
 
     summary = AggregateROISummary(
         total_queries=total_queries,
@@ -142,7 +154,7 @@ def get_roi_metrics(
         total_paid_tokens_saved=total_saved,
         total_estimated_usd_saved=round(total_usd, 4),
         frontier_savings_ratio_pct=ratio_pct,
-        qlora_overhead_eliminated_per_query=1634.0,
+        qlora_overhead_eliminated_per_query=qlora_per_query,
         total_qlora_overhead_eliminated=qlora_eliminated_total,
         telemetry_source=telemetry_source,  # type: ignore[arg-type]
     )

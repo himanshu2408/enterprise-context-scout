@@ -1875,8 +1875,11 @@ class PostgresRLSRepository:
               AND (
                   e.edge_kind IN (
                       'USES_TYPE', 'IMPORTS', 'INHERITS',
-                      'PROVISIONED_BY', 'DOCUMENTS_COMPONENT',
-                      'OWNED_BY_TEAM', 'PART_OF_SYSTEM'
+                      'PROVISIONED_BY', 'DISPATCHES', 'SELECTS', 'DOCUMENTS_COMPONENT',
+                      'OWNED_BY_TEAM', 'PART_OF_SYSTEM',
+                      'PUBLISHES_EVENT', 'SUBSCRIBES_EVENT', 'READS_TABLE',
+                      'WRITES_TABLE', 'RENDERS_TEMPLATE', 'IMPLEMENTS_SPEC',
+                      'IMPLEMENTS_ISSUE', 'BINDS_SERVICE_ACCOUNT', 'ACCESSES_SECRET'
                   )
                   OR (e.edge_kind = 'CALLS' AND EXISTS (
                       SELECT 1 FROM ast_symbols s2
@@ -1913,14 +1916,36 @@ class PostgresRLSRepository:
             FROM ast_edges e
             JOIN focus_family ff ON e.target_symbol_id = ff.symbol_id
             WHERE e.domain_id = %s
-              AND e.edge_kind = 'CALLS'
+              AND (
+                  e.edge_kind = 'CALLS'
+                  OR (
+                      e.is_cross_repo = TRUE
+                      AND e.edge_kind IN (
+                          'USES_TYPE', 'PROVISIONED_BY', 'DOCUMENTS_COMPONENT',
+                          'PUBLISHES_EVENT', 'SUBSCRIBES_EVENT', 'READS_TABLE',
+                          'WRITES_TABLE', 'RENDERS_TEMPLATE', 'IMPLEMENTS_SPEC',
+                          'IMPLEMENTS_ISSUE', 'BINDS_SERVICE_ACCOUNT', 'ACCESSES_SECRET'
+                      )
+                  )
+              )
               AND e.source_symbol_id NOT IN (SELECT symbol_id FROM focus_family)
             UNION
             SELECT e.edge_id, e.edge_kind, e.source_symbol_id
             FROM ast_edges e
             JOIN focus_family ff ON e.target_qualified_name = ff.qualified_name
             WHERE e.domain_id = %s
-              AND e.edge_kind = 'CALLS'
+              AND (
+                  e.edge_kind = 'CALLS'
+                  OR (
+                      e.is_cross_repo = TRUE
+                      AND e.edge_kind IN (
+                          'USES_TYPE', 'PROVISIONED_BY', 'DOCUMENTS_COMPONENT',
+                          'PUBLISHES_EVENT', 'SUBSCRIBES_EVENT', 'READS_TABLE',
+                          'WRITES_TABLE', 'RENDERS_TEMPLATE', 'IMPLEMENTS_SPEC',
+                          'IMPLEMENTS_ISSUE', 'BINDS_SERVICE_ACCOUNT', 'ACCESSES_SECRET'
+                      )
+                  )
+              )
               AND e.source_symbol_id NOT IN (SELECT symbol_id FROM focus_family)
         ),
         inward_callers AS (
@@ -5776,9 +5801,20 @@ class InMemoryRLSRepository:
                             "INHERITS",
                             "IMPORTS",
                             "PROVISIONED_BY",
+                            "DISPATCHES",
+                            "SELECTS",
                             "DOCUMENTS_COMPONENT",
                             "OWNED_BY_TEAM",
                             "PART_OF_SYSTEM",
+                            "PUBLISHES_EVENT",
+                            "SUBSCRIBES_EVENT",
+                            "READS_TABLE",
+                            "WRITES_TABLE",
+                            "RENDERS_TEMPLATE",
+                            "IMPLEMENTS_SPEC",
+                            "IMPLEMENTS_ISSUE",
+                            "BINDS_SERVICE_ACCOUNT",
+                            "ACCESSES_SECRET",
                         ):
                             hop1_type_sym_ids.append(target_sym.symbol_id)
 
@@ -5813,10 +5849,27 @@ class InMemoryRLSRepository:
                                 )
                             )
 
-        # 2. Inward callers (CALLS) with diversity across caller files
+        # 2. Inward callers & cross-repo contract consumers with diversity across caller files
+        _inward_contract_kinds = (
+            "USES_TYPE",
+            "PROVISIONED_BY",
+            "DOCUMENTS_COMPONENT",
+            "PUBLISHES_EVENT",
+            "SUBSCRIBES_EVENT",
+            "READS_TABLE",
+            "WRITES_TABLE",
+            "RENDERS_TEMPLATE",
+            "IMPLEMENTS_SPEC",
+            "IMPLEMENTS_ISSUE",
+            "BINDS_SERVICE_ACCOUNT",
+            "ACCESSES_SECRET",
+        )
         callers_by_file: dict[UUID, tuple[ASTSymbolRecord, CodeFileRecord]] = {}
         for e in self._edges.values():
-            if e.domain_id == domain_id and e.edge_kind == "CALLS":
+            if e.domain_id == domain_id and (
+                e.edge_kind == "CALLS"
+                or (e.is_cross_repo and e.edge_kind in _inward_contract_kinds)
+            ):
                 matches_target = (
                     e.target_symbol_id == focus_sym.symbol_id
                     or e.target_qualified_name == focus_sym.qualified_name

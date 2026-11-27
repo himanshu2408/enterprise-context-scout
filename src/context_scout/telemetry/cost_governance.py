@@ -18,9 +18,11 @@ import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
 from uuid import UUID
 
+import yaml
 from pydantic import BaseModel, Field
 
 from context_scout.schemas.contracts import DEFAULT_TENANT_ID, PrincipalContext
@@ -74,58 +76,67 @@ class ModelPricingRecord:
     is_zero_cost: bool = False
 
 
-OCTOBER_2026_PRICING: Final[dict[str, ModelPricingRecord]] = {
-    "gemini-4-argon": ModelPricingRecord(
-        model_id="gemini-4-argon",
-        input_usd_per_1m_low=2.00,
-        input_usd_per_1m_expected=3.00,
-        input_usd_per_1m_high=4.00,
-        output_usd_per_1m_low=10.00,
-        output_usd_per_1m_expected=15.00,
-        output_usd_per_1m_high=20.00,
-        is_zero_cost=False,
-    ),
-    "claude-opus-5.5": ModelPricingRecord(
-        model_id="claude-opus-5.5",
-        input_usd_per_1m_low=4.00,
-        input_usd_per_1m_expected=4.00,
-        input_usd_per_1m_high=4.00,
-        output_usd_per_1m_low=20.00,
-        output_usd_per_1m_expected=20.00,
-        output_usd_per_1m_high=20.00,
-        is_zero_cost=False,
-    ),
-    "gpt-5.6-sol": ModelPricingRecord(
-        model_id="gpt-5.6-sol",
-        input_usd_per_1m_low=4.00,
-        input_usd_per_1m_expected=4.00,
-        input_usd_per_1m_high=4.00,
-        output_usd_per_1m_low=20.00,
-        output_usd_per_1m_expected=20.00,
-        output_usd_per_1m_high=20.00,
-        is_zero_cost=False,
-    ),
-    "gemini-3.8-flash": ModelPricingRecord(
-        model_id="gemini-3.8-flash",
-        input_usd_per_1m_low=0.75,
-        input_usd_per_1m_expected=1.00,
-        input_usd_per_1m_high=1.50,
-        output_usd_per_1m_low=3.75,
-        output_usd_per_1m_expected=5.00,
-        output_usd_per_1m_high=7.50,
-        is_zero_cost=False,
-    ),
-    "gemma-4-26b-a4b-it": ModelPricingRecord(
-        model_id="gemma-4-26b-a4b-it",
-        input_usd_per_1m_low=0.0,
-        input_usd_per_1m_expected=0.0,
-        input_usd_per_1m_high=0.0,
-        output_usd_per_1m_low=0.0,
-        output_usd_per_1m_expected=0.0,
-        output_usd_per_1m_high=0.0,
-        is_zero_cost=True,
-    ),
-}
+_DEFAULT_PRICING_YAML: Final[Path] = (
+    Path(__file__).resolve().parents[3] / "config" / "model_pricing.yaml"
+)
+
+
+def load_model_pricing_from_yaml(
+    pricing_path: Path | str | None = None,
+) -> dict[str, ModelPricingRecord]:
+    """Loads single-source model pricing records from config/model_pricing.yaml."""
+    path = Path(pricing_path) if pricing_path is not None else _DEFAULT_PRICING_YAML
+    if not path.is_file():
+        raise FileNotFoundError(f"Model pricing configuration not found: {path}")
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    models_raw = raw.get("models", {})
+    if not isinstance(models_raw, dict):
+        raise ValueError(f"Invalid 'models' mapping in {path}")
+
+    table: dict[str, ModelPricingRecord] = {}
+    for raw_model_id, entry in models_raw.items():
+        if not isinstance(raw_model_id, str) or not isinstance(entry, dict):
+            continue
+        model_id = raw_model_id.strip()
+        raw_in_exp = entry.get("input_expected", entry.get("input"))
+        in_exp = float(0.0 if raw_in_exp is None else raw_in_exp)
+        in_low = float(entry.get("input_low", in_exp) or in_exp)
+        in_high = float(entry.get("input_high", in_exp) or in_exp)
+        raw_out_exp = entry.get("output_expected", entry.get("output"))
+        out_exp = float(0.0 if raw_out_exp is None else raw_out_exp)
+        out_low = float(entry.get("output_low", out_exp) or out_exp)
+        out_high = float(entry.get("output_high", out_exp) or out_exp)
+        self_hosted = bool(entry.get("self_hosted", False))
+        is_zero = self_hosted or (in_exp == 0.0 and out_exp == 0.0)
+        rec = ModelPricingRecord(
+            model_id=model_id,
+            input_usd_per_1m_low=in_low,
+            input_usd_per_1m_expected=in_exp,
+            input_usd_per_1m_high=in_high,
+            output_usd_per_1m_low=out_low,
+            output_usd_per_1m_expected=out_exp,
+            output_usd_per_1m_high=out_high,
+            is_zero_cost=is_zero,
+        )
+        table[model_id] = rec
+        if "/" in model_id:
+            short_id = model_id.split("/", 1)[1]
+            for alias in (short_id, short_id.lower()):
+                if alias not in table:
+                    table[alias] = ModelPricingRecord(
+                        model_id=alias,
+                        input_usd_per_1m_low=in_low,
+                        input_usd_per_1m_expected=in_exp,
+                        input_usd_per_1m_high=in_high,
+                        output_usd_per_1m_low=out_low,
+                        output_usd_per_1m_expected=out_exp,
+                        output_usd_per_1m_high=out_high,
+                        is_zero_cost=is_zero,
+                    )
+    return table
+
+
+OCTOBER_2026_PRICING: Final[dict[str, ModelPricingRecord]] = load_model_pricing_from_yaml()
 
 # Default frontier execution target
 DEFAULT_FRONTIER_MODEL: Final[str] = "gemini-3.8-flash"
@@ -191,18 +202,40 @@ class PaidComputeCostEstimator:
         norm_id = model_id.strip().lower()
         if norm_id in self.pricing_table:
             return self.pricing_table[norm_id]
+        for table_key, table_rec in self.pricing_table.items():
+            low_key = table_key.lower()
+            if low_key == norm_id or low_key.rsplit("/", 1)[-1] == norm_id:
+                return table_rec
 
         # Model aliases and prefix matching
-        if "argon" in norm_id or "gemini-4" in norm_id:
-            return self.pricing_table["gemini-4-argon"]
-        if "opus" in norm_id or "claude" in norm_id:
-            return self.pricing_table["claude-opus-5.5"]
-        if "sol" in norm_id or "gpt-5" in norm_id:
-            return self.pricing_table["gpt-5.6-sol"]
-        if "flash" in norm_id or "gemini-3" in norm_id or "gemini" in norm_id:
-            return self.pricing_table["gemini-3.8-flash"]
-        if "gemma" in norm_id:
-            return self.pricing_table["gemma-4-26b-a4b-it"]
+        alias_order = (
+            ("hydrogen", "gemini-4-hydrogen"),
+            ("neon", "gemini-4-neon"),
+            ("carbon", "gemini-4-carbon"),
+            ("argon", "gemini-4-argon"),
+            ("gemini-4", "gemini-4-argon"),
+            ("sonnet", "claude-sonnet-5.5"),
+            ("opus", "claude-opus-5.5"),
+            ("claude", "claude-opus-5.5"),
+            ("sol", "gpt-5.6-sol"),
+            ("gpt-5", "gpt-5.6-sol"),
+            ("astra", "gpt-6-astra"),
+            ("gpt-6", "gpt-6-astra"),
+            ("flash", "gemini-3.8-flash"),
+            ("gemini-3", "gemini-3.8-flash"),
+            ("gemini", "gemini-3.8-flash"),
+            ("gemma", "gemma-4-26b-a4b-it"),
+            ("qwen", "gemma-4-26b-a4b-it"),
+            ("mistral", "gemma-4-26b-a4b-it"),
+            ("deepseek", "gemma-4-26b-a4b-it"),
+            ("llama", "gemma-4-26b-a4b-it"),
+            ("phi", "gemma-4-26b-a4b-it"),
+            ("granite", "gemma-4-26b-a4b-it"),
+            ("bge", "gemma-4-26b-a4b-it"),
+        )
+        for keyword, canonical_id in alias_order:
+            if keyword in norm_id and canonical_id in self.pricing_table:
+                return self.pricing_table[canonical_id]
 
         logger.warning(
             "Unknown model '%s' for cost estimation; using '%s' pricing fallback",
@@ -397,7 +430,9 @@ class SessionBudgetTracker:
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "total_tokens": 0,
+                "reserved_tokens": 0,
                 "cost_usd": 0.0,
+                "reserved_cost_usd": 0.0,
                 "paid_calls_count": 0,
             }
         return self._principal_consumption[key]
@@ -408,7 +443,7 @@ class SessionBudgetTracker:
         projected_tokens: int,
         estimated_cost_usd: float = 0.0,
     ) -> None:
-        """Validates that projected consumption fits within principal's budget cap.
+        """Atomically validates and reserves projected tokens/spend within principal budget.
 
         Raises:
             BudgetExceededException: if projected tokens exceed session budget cap.
@@ -420,20 +455,41 @@ class SessionBudgetTracker:
 
         with self._lock:
             rec = self._get_or_create_record(principal.user_id, principal.tenant_id)
-            projected_total = rec["total_tokens"] + projected_tokens
+            effective_used = rec["total_tokens"] + rec["reserved_tokens"]
+            projected_total = effective_used + projected_tokens
             if projected_total > budget_cap:
+                consumed_tok = rec["total_tokens"]
+                reserved_tok = rec["reserved_tokens"]
                 raise BudgetExceededException(
                     f"Principal '{principal.user_id}' session budget exceeded: "
                     f"projected total tokens {projected_total:,} exceeds cap {budget_cap:,} "
-                    f"(already consumed {rec['total_tokens']:,}, requested {projected_tokens:,})"
+                    f"(consumed {consumed_tok:,}, reserved {reserved_tok:,}, "
+                    f"requested {projected_tokens:,})"
                 )
 
-            projected_spend = rec["cost_usd"] + estimated_cost_usd
+            projected_spend = rec["cost_usd"] + rec["reserved_cost_usd"] + estimated_cost_usd
             if projected_spend > self.spend_ceiling_usd:
                 raise KillSwitchTriggeredException(
                     f"Automated kill-switch triggered: projected spend ${projected_spend:.4f} "
                     f"exceeds safety spend ceiling ${self.spend_ceiling_usd:.2f}"
                 )
+
+            rec["reserved_tokens"] += max(0, projected_tokens)
+            rec["reserved_cost_usd"] += max(0.0, estimated_cost_usd)
+
+    def release_reservation(
+        self,
+        principal: PrincipalContext,
+        reserved_tokens: int,
+        reserved_cost_usd: float = 0.0,
+    ) -> None:
+        """Releases previously reserved tokens and estimated spend (e.g., on aborted call)."""
+        with self._lock:
+            rec = self._get_or_create_record(principal.user_id, principal.tenant_id)
+            rec["reserved_tokens"] = max(0, rec["reserved_tokens"] - max(0, reserved_tokens))
+            rec["reserved_cost_usd"] = max(
+                0.0, rec["reserved_cost_usd"] - max(0.0, reserved_cost_usd)
+            )
 
     def record_consumption(
         self,
@@ -441,13 +497,29 @@ class SessionBudgetTracker:
         input_tokens: int,
         output_tokens: int = 0,
         cost_usd: float = 0.0,
+        *,
+        reserved_tokens: int | None = None,
+        reserved_cost_usd: float | None = None,
     ) -> None:
-        """Records finalized token consumption and dollar spend."""
+        """Records finalized token consumption and dollar spend, settling reservations."""
         with self._lock:
             rec = self._get_or_create_record(principal.user_id, principal.tenant_id)
+            actual_total = input_tokens + output_tokens
+            tok_release = (
+                max(0, reserved_tokens)
+                if reserved_tokens is not None
+                else min(rec["reserved_tokens"], actual_total)
+            )
+            cost_release = (
+                max(0.0, reserved_cost_usd)
+                if reserved_cost_usd is not None
+                else min(rec["reserved_cost_usd"], cost_usd)
+            )
+            rec["reserved_tokens"] = max(0, rec["reserved_tokens"] - tok_release)
+            rec["reserved_cost_usd"] = max(0.0, rec["reserved_cost_usd"] - cost_release)
             rec["input_tokens"] += input_tokens
             rec["output_tokens"] += output_tokens
-            rec["total_tokens"] += input_tokens + output_tokens
+            rec["total_tokens"] += actual_total
             rec["cost_usd"] += cost_usd
             rec["paid_calls_count"] += 1
 
@@ -492,7 +564,9 @@ class SessionBudgetTracker:
                     "input_tokens": 0,
                     "output_tokens": 0,
                     "total_tokens": 0,
+                    "reserved_tokens": 0,
                     "cost_usd": 0.0,
+                    "reserved_cost_usd": 0.0,
                     "paid_calls_count": 0,
                 }
             return dict(rec)

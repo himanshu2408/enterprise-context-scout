@@ -26,10 +26,12 @@ interface FrontierRateCard {
 }
 
 const OCT_2026_FRONTIER_RATES: FrontierRateCard[] = [
-  { name: "Gemini 3.8 Flash", inputUsdPer1M: 0.75 },
-  { name: "Gemini 4 Argon", inputUsdPer1M: 2.0 },
-  { name: "Claude Opus 5.5", inputUsdPer1M: 4.0 },
-  { name: "GPT-5.6 Sol", inputUsdPer1M: 4.0 },
+  { name: "Gemini 4 Hydrogen", inputUsdPer1M: 0.75 },
+  { name: "Gemini 4 Neon", inputUsdPer1M: 1.75 },
+  { name: "Gemini 4 Carbon", inputUsdPer1M: 3.5 },
+  { name: "Claude Sonnet 5.5", inputUsdPer1M: 3.0 },
+  { name: "Claude Opus 5.5", inputUsdPer1M: 15.0 },
+  { name: "GPT-5.6 Sol", inputUsdPer1M: 2.5 },
 ];
 
 export const TokenSavingsMeter: React.FC<TokenSavingsMeterProps> = ({

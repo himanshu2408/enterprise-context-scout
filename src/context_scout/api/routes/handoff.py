@@ -408,9 +408,11 @@ def preview_handoff(
 
     pack_tokens = request.pack.pack_token_count
     local_tokens = request.pack.local_tokens_consumed
-    cost_report = PaidComputeCostEstimator().calculate_cost_estimate(validated_model, pack_tokens)
+    cost_estimator = PaidComputeCostEstimator()
+    cost_report = cost_estimator.calculate_cost_estimate(validated_model, pack_tokens)
     cost_usd = cost_report.cost_expected_usd
-    savings_usd = round(max(0.0, (local_tokens / 1_000_000.0) * 4.00 - cost_usd), 4)
+    frontier_rate = cost_estimator.get_pricing_record("gemini-4-carbon").input_usd_per_1m_expected
+    savings_usd = round(max(0.0, (local_tokens / 1_000_000.0) * frontier_rate - cost_usd), 4)
 
     token = f"tok_{uuid.uuid4().hex}"
     token_store.save(

@@ -896,21 +896,21 @@ class TestCostGovernanceAdversarial:
 
         # 3. claude-opus-5.5
         opus = OCTOBER_2026_PRICING["claude-opus-5.5"]
-        assert opus.input_usd_per_1m_low == 4.00
-        assert opus.input_usd_per_1m_expected == 4.00
-        assert opus.input_usd_per_1m_high == 4.00
-        assert opus.output_usd_per_1m_low == 20.00
-        assert opus.output_usd_per_1m_expected == 20.00
-        assert opus.output_usd_per_1m_high == 20.00
+        assert opus.input_usd_per_1m_low == 10.00
+        assert opus.input_usd_per_1m_expected == 15.00
+        assert opus.input_usd_per_1m_high == 20.00
+        assert opus.output_usd_per_1m_low == 50.00
+        assert opus.output_usd_per_1m_expected == 75.00
+        assert opus.output_usd_per_1m_high == 90.00
 
         # 4. gpt-5.6-sol
         sol = OCTOBER_2026_PRICING["gpt-5.6-sol"]
-        assert sol.input_usd_per_1m_low == 4.00
-        assert sol.input_usd_per_1m_expected == 4.00
-        assert sol.input_usd_per_1m_high == 4.00
-        assert sol.output_usd_per_1m_low == 20.00
-        assert sol.output_usd_per_1m_expected == 20.00
-        assert sol.output_usd_per_1m_high == 20.00
+        assert sol.input_usd_per_1m_low == 2.00
+        assert sol.input_usd_per_1m_expected == 2.50
+        assert sol.input_usd_per_1m_high == 3.50
+        assert sol.output_usd_per_1m_low == 8.00
+        assert sol.output_usd_per_1m_expected == 10.00
+        assert sol.output_usd_per_1m_high == 14.00
 
         # 5. Local Gemma 4 MoE ($0 cost)
         gemma = OCTOBER_2026_PRICING["gemma-4-26b-a4b-it"]
@@ -919,7 +919,7 @@ class TestCostGovernanceAdversarial:
         assert gemma.output_usd_per_1m_expected == 0.0
 
     def test_session_budget_tracker_kill_switch_boundaries(self) -> None:
-        """250k token exploration cap and $25 spend ceiling trigger KillSwitchTriggeredException."""
+        """1M exploration cap and $25 spend ceiling trigger KillSwitchTriggeredException."""
         tracker = SessionBudgetTracker(spend_ceiling_usd=DEFAULT_SESSION_SPEND_CEILING_USD)
         session_id = f"sess_{uuid.uuid4().hex[:6]}"
 

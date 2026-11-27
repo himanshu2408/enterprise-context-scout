@@ -500,4 +500,64 @@ describe("WCAG 2.2 AA Accessibility Audit Suite", () => {
       );
     }
   });
+
+  it("PR-4 (ECS-079/ECS-080): Tabpanels match aria-controls, DomainSelector avoids keyboard hijack, and CSV neutralizes formulas", () => {
+    const { container } = render(
+      <CitationInspector
+        contextPack={TEST_CODE_PACK}
+        tokenSavings={TEST_TOKEN_SAVINGS}
+        principalRole="engineer"
+        onOpenDiffModal={vi.fn()}
+      />
+    );
+    const tabs = Array.from(container.querySelectorAll('[role="tab"]'));
+    expect(tabs.length).toBe(4);
+    for (const tab of tabs) {
+      const ctrl = tab.getAttribute("aria-controls");
+      expect(ctrl).toBeTruthy();
+      if (tab.getAttribute("aria-selected") === "true" && ctrl) {
+        expect(container.querySelector(`#${ctrl}[role="tabpanel"]`)).not.toBeNull();
+      }
+    }
+
+    // CWE-1236 formula injection neutralization in ProductTruthView CSV export
+    const formulaPack = {
+      ...TEST_CODE_PACK,
+      code_slices: [
+        {
+          ...TEST_CODE_PACK.code_slices[0],
+          qualified_symbol: "=CMD|'/C calc'!A0",
+          selection_reason: "+1+1@SUM(A1)",
+        },
+      ],
+    };
+    const truthRender = render(
+      <ProductTruthView
+        contextPack={formulaPack}
+        principalRole="product_manager"
+        selectedDomain={TEST_CODE_PACK.domain_id}
+      />
+    );
+    fireEvent.click(truthRender.getByTestId("export-truth-csv-btn"));
+    const preview = truthRender.getByTestId("truth-export-preview").textContent ?? "";
+    expect(preview).toContain('"\'=CMD|\'/C calc\'!A0"');
+    expect(preview).not.toMatch(/,"[=+\-@]/);
+
+    // DomainSelector card wrapper must not hijack Enter inside nested buttons
+    const onSelect = vi.fn();
+    const selRender = render(
+      <DomainSelector
+        domains={TEST_DOMAINS}
+        selectedDomain={TEST_DOMAINS[0].domain_id}
+        onSelectDomain={onSelect}
+      />
+    );
+    const card = selRender.getByTestId(`domain-card-${TEST_DOMAINS[1].domain_id}`);
+    const selectBtn = card.querySelector("button");
+    expect(selectBtn).not.toBeNull();
+    if (selectBtn) {
+      fireEvent.keyDown(selectBtn, { key: "Enter", code: "Enter" });
+    }
+    expect(onSelect).not.toHaveBeenCalled();
+  });
 });

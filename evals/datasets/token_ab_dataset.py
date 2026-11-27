@@ -27,7 +27,7 @@ from evals.datasets.answerable_dataset import StackType
 
 MIN_TOKEN_AB_TASKS_PER_STACK: Final[int] = 30
 TOTAL_MIN_TOKEN_AB_TASKS: Final[int] = MIN_TOKEN_AB_TASKS_PER_STACK * 4  # 120
-DEFAULT_BPE_MODEL_ID: Final[str] = "mlx-community/gemma-4-26b-a4b-it-4bit"
+DEFAULT_BPE_MODEL_ID: Final[str] = "deterministic-offline-bytelevel-bpe-v1"
 
 _BPE_BOOTSTRAP_CORPUS: Final[list[str]] = [
     (
@@ -66,10 +66,17 @@ _BPE_BOOTSTRAP_CORPUS: Final[list[str]] = [
 
 @functools.lru_cache(maxsize=4)
 def get_bpe_tokenizer(model_id: str = DEFAULT_BPE_MODEL_ID) -> Any:
-    """Resolves a cached HuggingFace BPE tokenizer without network egress."""
-    from tokenizers import Tokenizer
+    """Resolves a deterministic offline BPE tokenizer or explicitly requested cached HF model."""
+    from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 
-    candidates = list(dict.fromkeys([model_id, DEFAULT_BPE_MODEL_ID, "google/embeddinggemma-2"]))
+    if model_id == DEFAULT_BPE_MODEL_ID:
+        tok = Tokenizer(models.BPE())
+        tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+        trainer = trainers.BpeTrainer(vocab_size=2048, min_frequency=2, show_progress=False)
+        tok.train_from_iterator(_BPE_BOOTSTRAP_CORPUS, trainer=trainer)
+        return tok
+
+    candidates = list(dict.fromkeys([model_id, "google/embeddinggemma-2"]))
     try:
         import huggingface_hub
 
@@ -94,9 +101,6 @@ def get_bpe_tokenizer(model_id: str = DEFAULT_BPE_MODEL_ID) -> Any:
                 continue
     except Exception:
         pass
-
-    # Air-gapped CI fallback without local HF snapshot cache: train deterministic Rust BPE
-    from tokenizers import models, pre_tokenizers, trainers
 
     tok = Tokenizer(models.BPE())
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)

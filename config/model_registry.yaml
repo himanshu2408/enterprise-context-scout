@@ -124,6 +124,12 @@ byo_open_weights:
 cloud_handoff:
   enabled_by_default: false
   models:
+    - id: "gemini-4-hydrogen"
+      provider: "google"
+    - id: "gemini-4-neon"
+      provider: "google"
+    - id: "gemini-4-carbon"
+      provider: "google"
     - id: "gemini-3.8-flash"
       provider: "google"
     - id: "gemini-4-argon"

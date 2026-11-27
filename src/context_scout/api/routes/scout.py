@@ -152,12 +152,20 @@ def _resolve_federated_doc_chunks(
     return chunks_map
 
 
-def _build_token_savings(pack: ImplementationContextPack) -> ScoutTokenSavingsBreakdown:
+def _build_token_savings(
+    pack: ImplementationContextPack,
+    *,
+    registry: DomainRegistry | None = None,
+) -> ScoutTokenSavingsBreakdown:
     """Computes frontier token & USD savings breakdown from a verified context pack."""
+    from context_scout.telemetry.cost_governance import PaidComputeCostEstimator
+
     local_explored = pack.local_tokens_consumed
     pack_sent = pack.pack_token_count
     saved = max(0, local_explored - pack_sent)
-    usd_saved = round((saved / 1_000_000.0) * 4.00, 4)
+    estimator = PaidComputeCostEstimator()
+    frontier_rate = estimator.get_pricing_record("gemini-4-carbon").input_usd_per_1m_expected
+    usd_saved = round((saved / 1_000_000.0) * frontier_rate, 4)
     ratio = round((saved / max(1, local_explored)) * 100.0, 2)
     return ScoutTokenSavingsBreakdown(
         local_tokens_explored=local_explored,
@@ -165,7 +173,7 @@ def _build_token_savings(pack: ImplementationContextPack) -> ScoutTokenSavingsBr
         tokens_saved=saved,
         estimated_usd_saved=usd_saved,
         frontier_savings_ratio_pct=ratio,
-        qlora_overhead_eliminated_tokens=1634.0,
+        qlora_overhead_eliminated_tokens=0.0,
     )
 
 
@@ -177,7 +185,7 @@ def _record_live_scout_telemetry(
     latency_ms: int,
 ) -> None:
     """Persists verified scout query ROI telemetry into PostgreSQL or InMemory ledger."""
-    savings = _build_token_savings(pack)
+    savings = _build_token_savings(pack, registry=registry)
     registered_domains = list(registry.load_all().keys())
     target_domain = (
         pack.domain_id

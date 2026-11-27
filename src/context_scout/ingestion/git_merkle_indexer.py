@@ -1,7 +1,6 @@
 """Git Blob-SHA Merkle incremental indexer with Tree-Sitter AST extraction and RLS persistence."""
 
 import functools
-import gc
 import hashlib
 import logging
 import os
@@ -389,132 +388,126 @@ class GitMerkleIndexer:
         include_working_tree: bool | None = None,
     ) -> tuple[str, dict[str, str]]:
         """Extracts current commit SHA and mapping of {file_path: blob_sha} via git ls-tree."""
-        was_gc = gc.isenabled()
-        gc.disable()
-        try:
-            commit_sha = _resolve_commit_sha(repo_dir, ref)
-            cache_key = (str(repo_dir.resolve()), commit_sha)
-            cached_base = _lru_get(_COMMIT_TREE_CACHE, cache_key)
-            if cached_base is not None:
-                tree: dict[str, str] = dict(cached_base)
-            else:
-                ls_cmd = subprocess.run(
-                    [
-                        _resolve_git_executable(),
-                        "--no-optional-locks",
-                        "-C",
-                        str(repo_dir),
-                        "ls-tree",
-                        "-r",
-                        ref,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    close_fds=(os.name != "posix"),
-                )
-
-                tree = {}
-                for line in ls_cmd.stdout.strip().splitlines():
-                    if not line:
-                        continue
-                    parts = line.split("\t", 1)
-                    if len(parts) != 2:
-                        continue
-                    meta, file_path = parts
-                    if not self._is_indexable_text_path(file_path):
-                        continue
-                    meta_parts = meta.split()
-                    if len(meta_parts) >= 3:
-                        blob_sha = meta_parts[2]
-                        tree[file_path] = blob_sha
-                _lru_set(
-                    _COMMIT_TREE_CACHE,
-                    cache_key,
-                    dict(tree),
-                    _COMMIT_TREE_CACHE_MAX_ENTRIES,
-                )
-
-            overlay_wt = (
-                self.include_working_tree if include_working_tree is None else include_working_tree
+        commit_sha = _resolve_commit_sha(repo_dir, ref)
+        cache_key = (str(repo_dir.resolve()), commit_sha)
+        cached_base = _lru_get(_COMMIT_TREE_CACHE, cache_key)
+        if cached_base is not None:
+            tree: dict[str, str] = dict(cached_base)
+        else:
+            ls_cmd = subprocess.run(
+                [
+                    _resolve_git_executable(),
+                    "--no-optional-locks",
+                    "-C",
+                    str(repo_dir),
+                    "ls-tree",
+                    "-r",
+                    ref,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                close_fds=(os.name != "posix"),
             )
-            if overlay_wt and ref == "HEAD":
-                st_cmd = subprocess.run(
-                    [
-                        _resolve_git_executable(),
-                        "--no-optional-locks",
-                        "-C",
-                        str(repo_dir),
-                        "status",
-                        "--porcelain",
-                        "-unormal",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    close_fds=(os.name != "posix"),
-                )
-                if st_cmd.returncode == 0 and st_cmd.stdout.strip():
-                    dirty_mutations: list[str] = []
-                    for raw_ln in st_cmd.stdout.splitlines():
-                        if len(raw_ln) < 4:
-                            continue
-                        xy = raw_ln[:2]
-                        rel_part = raw_ln[3:].strip().strip('"')
-                        if " -> " in rel_part:
-                            old_rel, new_rel = rel_part.split(" -> ", 1)
-                            old_rel = old_rel.strip().strip('"')
-                            new_rel = new_rel.strip().strip('"')
-                            tree.pop(old_rel, None)
-                            dirty_mutations.append(f"D:{old_rel}")
-                            rel_part = new_rel
-                        if not self._is_indexable_text_path(rel_part):
-                            continue
-                        disk_f = repo_dir / rel_part
-                        if "D" in xy:
-                            if rel_part in tree:
-                                tree.pop(rel_part, None)
-                                dirty_mutations.append(f"D:{rel_part}")
-                            continue
-                        try:
-                            st_res = disk_f.stat()
-                        except OSError:
-                            if rel_part in tree:
-                                tree.pop(rel_part, None)
-                                dirty_mutations.append(f"D:{rel_part}")
-                            continue
-                        if stat.S_ISREG(st_res.st_mode):
-                            try:
-                                wt_key = (str(disk_f), st_res.st_mtime_ns, st_res.st_size)
-                                wt_blob = _lru_get(_WT_BLOB_CACHE, wt_key)
-                                if wt_blob is None:
-                                    wt_blob = compute_git_blob_sha(disk_f.read_bytes())
-                                    _lru_set(
-                                        _WT_BLOB_CACHE,
-                                        wt_key,
-                                        wt_blob,
-                                        _WT_BLOB_CACHE_MAX_ENTRIES,
-                                    )
-                                if tree.get(rel_part) != wt_blob:
-                                    tree[rel_part] = wt_blob
-                                    dirty_mutations.append(f"M:{rel_part}:{wt_blob}")
-                            except Exception as exc:
-                                logger.warning(
-                                    "Failed to hash working-tree file %s (%s): %s",
-                                    rel_part,
-                                    type(exc).__name__,
-                                    exc,
-                                )
-                    if dirty_mutations:
-                        wt_digest = hashlib.sha1(
-                            "|".join(sorted(dirty_mutations)).encode("utf-8")
-                        ).hexdigest()
-                        commit_sha = f"{commit_sha[:32]}dddd{wt_digest[:4]}"
 
-            return commit_sha, tree
-        finally:
-            if was_gc:
-                gc.enable()
+            tree = {}
+            for line in ls_cmd.stdout.strip().splitlines():
+                if not line:
+                    continue
+                parts = line.split("\t", 1)
+                if len(parts) != 2:
+                    continue
+                meta, file_path = parts
+                if not self._is_indexable_text_path(file_path):
+                    continue
+                meta_parts = meta.split()
+                if len(meta_parts) >= 3:
+                    blob_sha = meta_parts[2]
+                    tree[file_path] = blob_sha
+            _lru_set(
+                _COMMIT_TREE_CACHE,
+                cache_key,
+                dict(tree),
+                _COMMIT_TREE_CACHE_MAX_ENTRIES,
+            )
+
+        overlay_wt = (
+            self.include_working_tree if include_working_tree is None else include_working_tree
+        )
+        if overlay_wt and ref == "HEAD":
+            st_cmd = subprocess.run(
+                [
+                    _resolve_git_executable(),
+                    "--no-optional-locks",
+                    "-C",
+                    str(repo_dir),
+                    "status",
+                    "--porcelain",
+                    "-unormal",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                close_fds=(os.name != "posix"),
+            )
+            if st_cmd.returncode == 0 and st_cmd.stdout.strip():
+                dirty_mutations: list[str] = []
+                for raw_ln in st_cmd.stdout.splitlines():
+                    if len(raw_ln) < 4:
+                        continue
+                    xy = raw_ln[:2]
+                    rel_part = raw_ln[3:].strip().strip('"')
+                    if " -> " in rel_part:
+                        old_rel, new_rel = rel_part.split(" -> ", 1)
+                        old_rel = old_rel.strip().strip('"')
+                        new_rel = new_rel.strip().strip('"')
+                        tree.pop(old_rel, None)
+                        dirty_mutations.append(f"D:{old_rel}")
+                        rel_part = new_rel
+                    if not self._is_indexable_text_path(rel_part):
+                        continue
+                    disk_f = repo_dir / rel_part
+                    if "D" in xy:
+                        if rel_part in tree:
+                            tree.pop(rel_part, None)
+                            dirty_mutations.append(f"D:{rel_part}")
+                        continue
+                    try:
+                        st_res = disk_f.stat()
+                    except OSError:
+                        if rel_part in tree:
+                            tree.pop(rel_part, None)
+                            dirty_mutations.append(f"D:{rel_part}")
+                        continue
+                    if stat.S_ISREG(st_res.st_mode):
+                        try:
+                            wt_key = (str(disk_f), st_res.st_mtime_ns, st_res.st_size)
+                            wt_blob = _lru_get(_WT_BLOB_CACHE, wt_key)
+                            if wt_blob is None:
+                                wt_blob = compute_git_blob_sha(disk_f.read_bytes())
+                                _lru_set(
+                                    _WT_BLOB_CACHE,
+                                    wt_key,
+                                    wt_blob,
+                                    _WT_BLOB_CACHE_MAX_ENTRIES,
+                                )
+                            if tree.get(rel_part) != wt_blob:
+                                tree[rel_part] = wt_blob
+                                dirty_mutations.append(f"M:{rel_part}:{wt_blob}")
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to hash working-tree file %s (%s): %s",
+                                rel_part,
+                                type(exc).__name__,
+                                exc,
+                            )
+                if dirty_mutations:
+                    wt_digest = hashlib.sha1(
+                        "|".join(sorted(dirty_mutations)).encode("utf-8")
+                    ).hexdigest()
+                    commit_sha = f"{commit_sha[:32]}dddd{wt_digest[:4]}"
+
+        return commit_sha, tree
 
     def diff_merkle_tree(
         self, current: dict[str, str], existing: dict[str, str]
@@ -570,65 +563,57 @@ class GitMerkleIndexer:
             cmd.append("-M")
         cmd.extend(["--raw", effective_before, after_sha])
 
-        was_gc = gc.isenabled()
-        gc.disable()
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-                close_fds=(os.name != "posix"),
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            close_fds=(os.name != "posix"),
+        )
+
+        added: dict[str, str] = {}
+        modified: dict[str, tuple[str, str]] = {}
+        deleted: dict[str, str] = {}
+        renamed: list[tuple[str, str, str, str]] = []
+
+        for line in proc.stdout.splitlines():
+            if not line.startswith(":"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            meta = parts[0]
+            file_path = parts[1]
+            meta_tokens = meta[1:].split()
+            if len(meta_tokens) < 5:
+                continue
+            old_blob = meta_tokens[2]
+            new_blob = meta_tokens[3]
+            status = meta_tokens[4]
+
+            if not self._is_indexable_text_path(file_path):
+                continue
+
+            if status == "A":
+                added[file_path] = new_blob
+            elif status == "M":
+                modified[file_path] = (old_blob, new_blob)
+            elif status == "D":
+                deleted[file_path] = old_blob
+            elif status.startswith("R"):
+                old_path = file_path
+                new_path = parts[2] if len(parts) > 2 else file_path
+                renamed.append((old_path, new_path, old_blob, new_blob))
+
+        result = MerkleBlobDiff(added=added, modified=modified, deleted=deleted, renamed=renamed)
+        if use_cache and is_immutable_sha:
+            _lru_set(
+                _DIFF_TREE_CACHE,
+                diff_cache_key,
+                result,
+                _DIFF_TREE_CACHE_MAX_ENTRIES,
             )
-
-            added: dict[str, str] = {}
-            modified: dict[str, tuple[str, str]] = {}
-            deleted: dict[str, str] = {}
-            renamed: list[tuple[str, str, str, str]] = []
-
-            for line in proc.stdout.splitlines():
-                if not line.startswith(":"):
-                    continue
-                parts = line.split("\t")
-                if len(parts) < 2:
-                    continue
-                meta = parts[0]
-                file_path = parts[1]
-                meta_tokens = meta[1:].split()
-                if len(meta_tokens) < 5:
-                    continue
-                old_blob = meta_tokens[2]
-                new_blob = meta_tokens[3]
-                status = meta_tokens[4]
-
-                if not self._is_indexable_text_path(file_path):
-                    continue
-
-                if status == "A":
-                    added[file_path] = new_blob
-                elif status == "M":
-                    modified[file_path] = (old_blob, new_blob)
-                elif status == "D":
-                    deleted[file_path] = old_blob
-                elif status.startswith("R"):
-                    old_path = file_path
-                    new_path = parts[2] if len(parts) > 2 else file_path
-                    renamed.append((old_path, new_path, old_blob, new_blob))
-
-            result = MerkleBlobDiff(
-                added=added, modified=modified, deleted=deleted, renamed=renamed
-            )
-            if use_cache and is_immutable_sha:
-                _lru_set(
-                    _DIFF_TREE_CACHE,
-                    diff_cache_key,
-                    result,
-                    _DIFF_TREE_CACHE_MAX_ENTRIES,
-                )
-            return result
-        finally:
-            if was_gc:
-                gc.enable()
+        return result
 
     def _detect_language(self, file_path: str) -> str | None:
         for ext, lang in LANG_MAP.items():
@@ -785,44 +770,36 @@ class GitMerkleIndexer:
             and ref == "HEAD"
             and not isolate_by_commit
         )
-        was_gc = gc.isenabled()
-        gc.disable()
-        try:
-            commit_sha, current_tree = self.get_git_tree(repo_dir, ref, include_working_tree=use_wt)
-            effective_repo_name = (
-                f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
+        commit_sha, current_tree = self.get_git_tree(repo_dir, ref, include_working_tree=use_wt)
+        effective_repo_name = f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
+        effective_scopes = list(allowed_scopes or principal.allowed_scopes)
+        if ref == "HEAD" and not isolate_by_commit:
+            _TRACKED_IN_MEMORY_REPOS[(id(repo), domain_id, effective_repo_name)] = (
+                weakref.ref(repo),
+                repo_dir.resolve(),
+                effective_scopes,
+                commit_sha,
             )
-            effective_scopes = list(allowed_scopes or principal.allowed_scopes)
-            if ref == "HEAD" and not isolate_by_commit:
-                _TRACKED_IN_MEMORY_REPOS[(id(repo), domain_id, effective_repo_name)] = (
-                    weakref.ref(repo),
-                    repo_dir.resolve(),
-                    effective_scopes,
-                    commit_sha,
-                )
-            existing_hashes = repo.get_file_blob_hashes(principal, domain_id, effective_repo_name)
-            existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
+        existing_hashes = repo.get_file_blob_hashes(principal, domain_id, effective_repo_name)
+        existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
 
-            unchanged, new, modified, deleted = self.diff_merkle_tree(current_tree, existing_map)
+        unchanged, new, modified, deleted = self.diff_merkle_tree(current_tree, existing_map)
 
-            # Fast-exit cache hit (<50ms)
-            if not new and not modified and not deleted:
-                duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
-                return MerkleSyncStats(
-                    total_files_scanned=len(current_tree),
-                    unchanged_files_skipped=len(unchanged),
-                    new_files_indexed=0,
-                    modified_files_reindexed=0,
-                    deleted_files_removed=0,
-                    total_symbols_stored=0,
-                    total_edges_stored=0,
-                    duration_ms=duration_ms,
-                    commit_sha=commit_sha,
-                    cache_hit=True,
-                )
-        finally:
-            if was_gc:
-                gc.enable()
+        # Fast-exit cache hit (<50ms)
+        if not new and not modified and not deleted:
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            return MerkleSyncStats(
+                total_files_scanned=len(current_tree),
+                unchanged_files_skipped=len(unchanged),
+                new_files_indexed=0,
+                modified_files_reindexed=0,
+                deleted_files_removed=0,
+                total_symbols_stored=0,
+                total_edges_stored=0,
+                duration_ms=duration_ms,
+                commit_sha=commit_sha,
+                cache_hit=True,
+            )
 
         # 1. Remove deleted files
         for d in deleted:
@@ -1041,36 +1018,28 @@ class GitMerkleIndexer:
             and ref == "HEAD"
             and not isolate_by_commit
         )
-        was_gc = gc.isenabled()
-        gc.disable()
-        try:
-            commit_sha, current_tree = self.get_git_tree(repo_dir, ref, include_working_tree=use_wt)
-            effective_repo_name = (
-                f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
+        commit_sha, current_tree = self.get_git_tree(repo_dir, ref, include_working_tree=use_wt)
+        effective_repo_name = f"{repo_name}@{commit_sha[:12]}" if isolate_by_commit else repo_name
+        existing_hashes = repo.get_file_blob_hashes(conn, domain_id, effective_repo_name)
+        existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
+
+        unchanged, new, modified, deleted = self.diff_merkle_tree(current_tree, existing_map)
+
+        # Fast-exit cache hit (<50ms)
+        if not new and not modified and not deleted:
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            return MerkleSyncStats(
+                total_files_scanned=len(current_tree),
+                unchanged_files_skipped=len(unchanged),
+                new_files_indexed=0,
+                modified_files_reindexed=0,
+                deleted_files_removed=0,
+                total_symbols_stored=0,
+                total_edges_stored=0,
+                duration_ms=duration_ms,
+                commit_sha=commit_sha,
+                cache_hit=True,
             )
-            existing_hashes = repo.get_file_blob_hashes(conn, domain_id, effective_repo_name)
-            existing_map = {path: blob_sha for path, (_, blob_sha) in existing_hashes.items()}
-
-            unchanged, new, modified, deleted = self.diff_merkle_tree(current_tree, existing_map)
-
-            # Fast-exit cache hit (<50ms)
-            if not new and not modified and not deleted:
-                duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
-                return MerkleSyncStats(
-                    total_files_scanned=len(current_tree),
-                    unchanged_files_skipped=len(unchanged),
-                    new_files_indexed=0,
-                    modified_files_reindexed=0,
-                    deleted_files_removed=0,
-                    total_symbols_stored=0,
-                    total_edges_stored=0,
-                    duration_ms=duration_ms,
-                    commit_sha=commit_sha,
-                    cache_hit=True,
-                )
-        finally:
-            if was_gc:
-                gc.enable()
 
         # 1. Remove deleted files
         for d in deleted:

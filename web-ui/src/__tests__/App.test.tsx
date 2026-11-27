@@ -247,7 +247,7 @@ describe("App Integration", () => {
     fireEvent.click(screen.getByTestId("toggle-telemetry-strip-btn"));
     expect(screen.getByTestId("frontier-rates-drawer")).toBeInTheDocument();
     expect(screen.getByTestId("frontier-rates-drawer")).toHaveTextContent(
-      "Gemini 4 Argon"
+      "Gemini 4 Carbon"
     );
   });
 

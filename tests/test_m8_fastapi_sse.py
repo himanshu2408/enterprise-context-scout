@@ -430,7 +430,8 @@ def test_scout_query_single_domain_success(client: TestClient) -> None:
     assert savings["pack_tokens_sent"] > 0
     assert savings["tokens_saved"] > 0
     assert savings["frontier_savings_ratio_pct"] > 0.0
-    assert savings["qlora_overhead_eliminated_tokens"] == 1634.0
+    # PR-4 (ECS-098): Base open-weights inference without LoRA reports 0.0 QLoRA delta
+    assert savings["qlora_overhead_eliminated_tokens"] == 0.0
 
     # Trace attributes
     attrs = data["trace_attributes"]
@@ -524,7 +525,8 @@ def test_scout_sse_stream_stages_and_completion(client: TestClient) -> None:
         pack_ready = next(ev[1] for ev in events if ev[0] == "context_pack_ready")
         assert pack_ready["status"] == "ready"
         assert pack_ready["token_savings"]["frontier_savings_ratio_pct"] > 0
-        assert pack_ready["token_savings"]["qlora_overhead_eliminated_tokens"] == 1634.0
+        # PR-4 (ECS-098): Base open-weights without active LoRA reports 0.0 QLoRA overhead delta
+        assert pack_ready["token_savings"]["qlora_overhead_eliminated_tokens"] == 0.0
 
 
 def test_scout_sse_stream_bounce_back_zero_cost(client: TestClient) -> None:
@@ -865,8 +867,9 @@ def test_telemetry_roi_metrics_and_eval_reports(client: TestClient) -> None:
         assert summary["total_paid_tokens_saved"] == 8_800
         assert summary["total_estimated_usd_saved"] == pytest.approx(0.044)
         assert summary["frontier_savings_ratio_pct"] == 88.0
-        assert summary["qlora_overhead_eliminated_per_query"] == 1634.0
-        assert summary["total_qlora_overhead_eliminated"] == 1634.0
+        # PR-4 (ECS-098): Without LoRA overhead savings, ROI reports 0.0 instead of 1634.0
+        assert summary["qlora_overhead_eliminated_per_query"] == 0.0
+        assert summary["total_qlora_overhead_eliminated"] == 0.0
 
         # Milestone 6 evaluation report
         m6 = data["m6_evaluation_report"]
@@ -874,10 +877,12 @@ def test_telemetry_roi_metrics_and_eval_reports(client: TestClient) -> None:
         assert "metrics" in m6
         assert m6.get("all_passed") is True
 
-        # Milestone 7 QLoRA benchmark report
+        # Milestone 7 QLoRA benchmark report (tagged honestly when simulated)
         m7 = data["m7_qlora_benchmark_report"]
         assert m7 is not None
         assert "metrics" in m7 or "results" in m7 or "benchmarks" in m7
+        assert m7.get("benchmark_mode") == "simulated_mock_client"
+        assert m7.get("is_empirical") is False
     finally:
         if is_in_memory:
             repo._telemetry.pop(trace_id, None)
