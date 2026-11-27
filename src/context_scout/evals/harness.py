@@ -539,7 +539,7 @@ class EvaluationHarness:
                     principal=task_principal,
                     repo_root=self.repo_root,
                     missing_context_requests=missing_reqs or None,
-                    auto_confirm=True,
+                    auto_confirm=False,
                     lint_cmd=lint_cmd,
                     test_cmd=test_cmd,
                 )

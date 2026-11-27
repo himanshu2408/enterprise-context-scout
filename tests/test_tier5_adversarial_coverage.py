@@ -35,7 +35,6 @@ Adversarial stress verification across 5 core components:
 from __future__ import annotations
 
 import concurrent.futures
-import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -748,7 +747,11 @@ class TestGeminiExecutorSandboxAdversarial:
             assert "base_rate = 0.0050" in updated_content
             assert "return amount * base_rate * 1.1" in updated_content
 
-    def test_environment_sanitization_strips_sensitive_keys(self, temp_git_repo: Path) -> None:
+    def test_environment_sanitization_strips_sensitive_keys(
+        self,
+        temp_git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Verification commands use strict allowlist so secrets/tokens never leak (ECS-105)."""
         injected_env = {
             "SCOUT_SUPER_SECRET_API_KEY": "compromised_token_12345",
@@ -759,51 +762,48 @@ class TestGeminiExecutorSandboxAdversarial:
             "CI_JOB_TOKEN": "glcbt-dummy-job-token",
             "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/fake-sa.json",
         }
-        os.environ.update(injected_env)
+        for key, value in injected_env.items():
+            monkeypatch.setenv(key, value)
 
-        try:
-            with GitWorktreeSandbox(repo_root=temp_git_repo, require_confirmation=False) as sandbox:
-                test_cmd = [
-                    "python3",
-                    "-c",
-                    (
-                        "import os, sys\n"
-                        "forbidden_exact = [\n"
-                        "    'SCOUT_SUPER_SECRET_API_KEY',\n"
-                        "    'SECRET_ADMIN_PASSWORD',\n"
-                        "    'SCOUT_DB_APP_URL',\n"
-                        "    'SCOUT_REDIS_URL',\n"
-                        "    'GITHUB_TOKEN',\n"
-                        "    'CI_JOB_TOKEN',\n"
-                        "    'GOOGLE_APPLICATION_CREDENTIALS',\n"
-                        "]\n"
-                        "leaked = [k for k in forbidden_exact if k in os.environ]\n"
-                        "if leaked:\n"
-                        "    sys.stderr.write(f'Leaked env keys: {leaked}')\n"
-                        "    sys.exit(1)\n"
-                        "sys.exit(0)\n"
-                    ),
-                ]
-                lint_cmd = ["python3", "-c", "import sys; sys.exit(0)"]
-                lint_ok, test_ok, details = sandbox.run_verification(
-                    lint_cmd=lint_cmd, test_cmd=test_cmd
-                )
-                assert lint_ok is True
-                assert test_ok is True, f"Sanitization failed: {details}"
+        with GitWorktreeSandbox(repo_root=temp_git_repo, require_confirmation=False) as sandbox:
+            test_cmd = [
+                "python3",
+                "-c",
+                (
+                    "import os, sys\n"
+                    "forbidden_exact = [\n"
+                    "    'SCOUT_SUPER_SECRET_API_KEY',\n"
+                    "    'SECRET_ADMIN_PASSWORD',\n"
+                    "    'SCOUT_DB_APP_URL',\n"
+                    "    'SCOUT_REDIS_URL',\n"
+                    "    'GITHUB_TOKEN',\n"
+                    "    'CI_JOB_TOKEN',\n"
+                    "    'GOOGLE_APPLICATION_CREDENTIALS',\n"
+                    "]\n"
+                    "leaked = [k for k in forbidden_exact if k in os.environ]\n"
+                    "if leaked:\n"
+                    "    sys.stderr.write(f'Leaked env keys: {leaked}')\n"
+                    "    sys.exit(1)\n"
+                    "sys.exit(0)\n"
+                ),
+            ]
+            lint_cmd = ["python3", "-c", "import sys; sys.exit(0)"]
+            lint_ok, test_ok, details = sandbox.run_verification(
+                lint_cmd=lint_cmd, test_cmd=test_cmd
+            )
+            assert lint_ok is True
+            assert test_ok is True, f"Sanitization failed: {details}"
 
-                # unittest & shell wrapper bypasses must also be blocked fail-closed (ECS-017)
-                for blocked_cmd in (
-                    ["python3", "-m", "unittest"],
-                    ["python3", "-munittest", "discover"],
-                    ["python3", "-c", "import unittest; unittest.main()"],
-                    ["sh", "-c", "pytest tests/"],
-                    ["/bin/bash", "-lc", "python -m unittest"],
-                ):
-                    with pytest.raises(PermissionError):
-                        sandbox.run_verification(lint_cmd=lint_cmd, test_cmd=blocked_cmd)
-        finally:
-            for key in injected_env:
-                os.environ.pop(key, None)
+            # unittest & shell wrapper bypasses must also be blocked fail-closed (ECS-017)
+            for blocked_cmd in (
+                ["python3", "-m", "unittest"],
+                ["python3", "-munittest", "discover"],
+                ["python3", "-c", "import unittest; unittest.main()"],
+                ["sh", "-c", "pytest tests/"],
+                ["/bin/bash", "-lc", "python -m unittest"],
+            ):
+                with pytest.raises(PermissionError):
+                    sandbox.run_verification(lint_cmd=lint_cmd, test_cmd=blocked_cmd)
 
     def test_confirmation_gate_blocks_unconfirmed_commit(self, temp_git_repo: Path) -> None:
         """confirm_and_merge(confirmed=False) must block commit and leave branch uncommitted."""

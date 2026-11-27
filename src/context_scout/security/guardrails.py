@@ -652,6 +652,25 @@ def _strip_tokens_linear(
                     push_str("<!--")
                     advance_cur(4)
                     continue
+                if head_pos >= len(head_str):
+                    m_close = _COMMENT_CLOSER_RE.search(text, pos + 4)
+                    if m_close is None:
+                        no_closer_in_text = True
+                        push_str("<!--")
+                        advance_cur(4)
+                        continue
+                    if (
+                        check_adversarial_comments
+                        and not has_adversarial_comment
+                        and (m_close.start() - (pos + 4)) >= 4
+                        and _ADVERSARIAL_COMMENT_KEYWORD_RE.search(
+                            _fold_homoglyphs(text[pos + 4 : m_close.start()])
+                        )
+                    ):
+                        has_adversarial_comment = True
+                    pos = m_close.end()
+                    rollback_seam()
+                    continue
                 start_idx = len(out)
                 push_str("<!--")
                 openers.append(("comment", start_idx))
@@ -1367,17 +1386,29 @@ class PromptInjectionSanitizer:
     @classmethod
     def sanitize(cls, text: str) -> tuple[str, bool, list[str]]:
         """Sanitizes text and reports whether prompt injection signatures were present."""
-        _, pre_comment_sigs = cls.scan_injection_signatures(text)
+        candidates = cls._folded_scan_candidates(text)
+        matched: list[str] = []
+        for folded in candidates:
+            for pattern, sig_name in cls.INJECTION_SIGNATURES:
+                if pattern.search(folded):
+                    matched.append(sig_name)
+
         no_invis = cls.strip_invisible_unicode(text)
-        cleaned, _ = _strip_tokens_linear(
+        cleaned, has_adv = _strip_tokens_linear(
             no_invis,
             strip_comments=True,
             strip_scripts=True,
+            check_adversarial_comments=True,
         )
-        if cleaned == text:
-            return cleaned, len(pre_comment_sigs) > 0, list(dict.fromkeys(pre_comment_sigs))
-        _, post_comment_sigs = cls.scan_injection_signatures(cleaned)
-        signatures = list(dict.fromkeys([*pre_comment_sigs, *post_comment_sigs]))
+        if has_adv or (len(candidates) > 1 and _has_adversarial_html_comment_linear(candidates[1])):
+            matched.append("html_comment_directive_injection")
+
+        if cleaned != no_invis:
+            post_folded = _fold_homoglyphs(cleaned)
+            for pattern, sig_name in cls.INJECTION_SIGNATURES:
+                if pattern.search(post_folded):
+                    matched.append(sig_name)
+        signatures = list(dict.fromkeys(matched))
         return cleaned, len(signatures) > 0, signatures
 
 
@@ -1667,16 +1698,24 @@ class DeterministicRuleGuardrailProvider:
 
         raw_no_invis = PromptInjectionSanitizer.strip_invisible_unicode(scan_text)
         eval_text = _mask_benign_inline_code_quotes(scan_text)
-        no_invis = PromptInjectionSanitizer.strip_invisible_unicode(eval_text)
+        no_invis = (
+            raw_no_invis
+            if eval_text == scan_text
+            else PromptInjectionSanitizer.strip_invisible_unicode(eval_text)
+        )
         post_comment_text = PromptInjectionSanitizer.strip_html_comments(no_invis)
         _, pre_malicious_sigs = PromptInjectionSanitizer.scan_malicious_input(eval_text)
-        _, post_comment_malicious_sigs = PromptInjectionSanitizer.scan_malicious_input(
-            post_comment_text
-        )
+        post_comment_malicious_sigs: list[str] = []
+        if post_comment_text != no_invis:
+            _, post_comment_malicious_sigs = PromptInjectionSanitizer.scan_malicious_input(
+                post_comment_text
+            )
         sanitized_text, is_injection, injection_sigs = PromptInjectionSanitizer.sanitize(eval_text)
-        _, post_sanitize_malicious_sigs = PromptInjectionSanitizer.scan_malicious_input(
-            sanitized_text
-        )
+        post_sanitize_malicious_sigs: list[str] = []
+        if sanitized_text not in {eval_text, no_invis, post_comment_text}:
+            _, post_sanitize_malicious_sigs = PromptInjectionSanitizer.scan_malicious_input(
+                sanitized_text
+            )
         malicious_sigs = list(
             dict.fromkeys(
                 [*pre_malicious_sigs, *post_comment_malicious_sigs, *post_sanitize_malicious_sigs]
@@ -1692,9 +1731,12 @@ class DeterministicRuleGuardrailProvider:
             violated_categories.append(SafetyCategory.MALICIOUS_INPUT)
             reasons.append(f"Malicious active input patterns detected: {malicious_sigs}")
 
-        redacted_text, redacted_tokens = SecretRedactor.redact(
-            PromptInjectionSanitizer.strip_comment_payloads(raw_no_invis)
+        redacted_input = (
+            sanitized_text
+            if eval_text == scan_text
+            else PromptInjectionSanitizer.strip_comment_payloads(raw_no_invis)
         )
+        redacted_text, redacted_tokens = SecretRedactor.redact(redacted_input)
         if redacted_tokens:
             violated_categories.append(SafetyCategory.SECRET_LEAKAGE)
             reasons.append(f"Credentials or sensitive tokens detected: {redacted_tokens}")

@@ -132,60 +132,133 @@ def _synthesize_in_memory_pack_diff(pack: ImplementationContextPack) -> str:
     return diff_text
 
 
-def _validate_python_hunk_syntax(patch_diff: str) -> tuple[bool, str]:
-    """Parses added/context hunks for .py files purely in memory with ast.parse."""
-    current_target = ""
-    hunk_lines: list[str] = []
-    hunk_idx = 0
+_HUNK_HEADER_RE = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@")
 
-    def _check_hunk() -> tuple[bool, str] | None:
-        if not current_target.endswith(".py") or not hunk_lines:
-            return None
-        snippet = textwrap.dedent("\n".join(hunk_lines))
-        if not snippet.strip():
-            return None
-        try:
-            ast.parse(snippet, filename=f"{current_target}#hunk{hunk_idx}")
-        except SyntaxError as exc:
-            return (
-                False,
-                f"Python syntax error in {current_target} hunk {hunk_idx} "
-                f"(line {exc.lineno}): {exc.msg}",
+
+def _apply_hunks_to_lines(
+    orig_lines: list[str],
+    hunks: list[tuple[int, list[str]]],
+) -> list[str]:
+    """Applies parsed unified-diff hunks onto in-memory source lines."""
+    lines = list(orig_lines)
+    delta = 0
+    for old_start, raw_hunk in hunks:
+        pos = max(0, (old_start - 1 if old_start > 0 else 0) + delta)
+        pos = min(pos, len(lines))
+        old_count = 0
+        new_chunk: list[str] = []
+        for h_ln in raw_hunk:
+            if h_ln.startswith("-"):
+                old_count += 1
+            elif h_ln.startswith("+"):
+                new_chunk.append(f"{h_ln[1:]}\n")
+            elif h_ln.startswith(" "):
+                old_count += 1
+                new_chunk.append(f"{h_ln[1:]}\n")
+        end_pos = min(len(lines), pos + old_count)
+        lines[pos:end_pos] = new_chunk
+        delta += len(new_chunk) - (end_pos - pos)
+    return lines
+
+
+def _dedent_code_lines(lines: list[str]) -> str:
+    """Dedents uniformly indented slice lines while tolerating col-0 `#` comments."""
+    non_empty_code = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith("#")]
+    min_indent = min((len(ln) - len(ln.lstrip(" ")) for ln in non_empty_code), default=0)
+    if min_indent <= 0:
+        return "".join(lines)
+    prefix = " " * min_indent
+    return "".join(ln[min_indent:] if ln.startswith(prefix) else ln for ln in lines)
+
+
+def _validate_python_hunk_syntax(
+    patch_diff: str,
+    pack: ImplementationContextPack | None = None,
+) -> tuple[bool, str]:
+    """Parses patched Python slices or added lines in memory with ast.parse."""
+    slice_lines_by_target: dict[str, list[str]] = {}
+    if pack is not None:
+        for sl in pack.code_slices:
+            rel = _sanitize_relative_path(sl.file_path, fallback="src/target.py")
+            if rel not in slice_lines_by_target and sl.verbatim_code_with_lines.strip():
+                slice_lines_by_target[rel] = _strip_numbered_slice_lines(
+                    sl.verbatim_code_with_lines
+                )
+
+    file_hunks: dict[str, list[tuple[int, list[str]]]] = {}
+    current_target = ""
+    current_hunk_start: int | None = None
+    current_hunk_lines: list[str] = []
+
+    def _flush_hunk() -> None:
+        nonlocal current_hunk_start, current_hunk_lines
+        if current_target and current_hunk_start is not None:
+            file_hunks.setdefault(current_target, []).append(
+                (current_hunk_start, list(current_hunk_lines))
             )
-        return None
+        current_hunk_start = None
+        current_hunk_lines = []
 
     for raw_line in patch_diff.splitlines():
         if raw_line.startswith("+++ b/"):
-            err = _check_hunk()
-            if err is not None:
-                return err
+            _flush_hunk()
             current_target = raw_line[6:].strip()
-            hunk_lines = []
             continue
         if raw_line.startswith("--- a/"):
-            err = _check_hunk()
-            if err is not None:
-                return err
-            hunk_lines = []
+            _flush_hunk()
             continue
-        if raw_line.startswith("@@ "):
-            err = _check_hunk()
-            if err is not None:
-                return err
-            hunk_idx += 1
-            hunk_lines = []
+        m_hunk = _HUNK_HEADER_RE.match(raw_line)
+        if m_hunk is not None:
+            _flush_hunk()
+            current_hunk_start = int(m_hunk.group(1))
             continue
-        if raw_line.startswith("+") or raw_line.startswith(" "):
-            hunk_lines.append(raw_line[1:])
+        if current_hunk_start is not None and raw_line.startswith(("+", "-", " ")):
+            current_hunk_lines.append(raw_line)
+    _flush_hunk()
 
-    err = _check_hunk()
-    if err is not None:
-        return err
+    for target, hunks in file_hunks.items():
+        if not target.endswith(".py"):
+            continue
+        if target in slice_lines_by_target:
+            orig_lines = slice_lines_by_target[target]
+            patched = _apply_hunks_to_lines(orig_lines, hunks)
+            snippet = _dedent_code_lines(patched)
+            if snippet.strip():
+                try:
+                    ast.parse(snippet, filename=target)
+                    continue
+                except SyntaxError as exc:
+                    orig_snippet = _dedent_code_lines(orig_lines)
+                    try:
+                        ast.parse(orig_snippet, filename=target)
+                        orig_valid = True
+                    except SyntaxError:
+                        orig_valid = False
+                    if orig_valid:
+                        return (
+                            False,
+                            f"Python syntax error in {target} (line {exc.lineno}): {exc.msg}",
+                        )
+        for hunk_idx, (_start, raw_hunk) in enumerate(hunks, start=1):
+            added_only = [ln[1:] for ln in raw_hunk if ln.startswith("+")]
+            snippet = textwrap.dedent("\n".join(added_only))
+            if not snippet.strip():
+                continue
+            try:
+                ast.parse(snippet, filename=f"{target}#hunk{hunk_idx}")
+            except SyntaxError as exc:
+                return (
+                    False,
+                    f"Python syntax error in {target} hunk {hunk_idx} "
+                    f"(line {exc.lineno}): {exc.msg}",
+                )
     return (True, "In-memory Python AST hunk syntax check passed.")
 
 
 def _verify_diff_structure_in_memory(
-    patch_diff: str, expected_targets: list[str]
+    patch_diff: str,
+    expected_targets: list[str],
+    pack: ImplementationContextPack | None = None,
 ) -> tuple[bool, bool, str]:
     """Validates unified diff headers, path traversal, and Python syntax in memory (ASI05)."""
     if not patch_diff or not patch_diff.strip():
@@ -213,7 +286,7 @@ def _verify_diff_structure_in_memory(
         if expected_targets and cleaned not in expected_targets:
             return (False, False, f"Diff target '{cleaned}' not in previewed target_files.")
 
-    syntax_ok, syntax_msg = _validate_python_hunk_syntax(patch_diff)
+    syntax_ok, syntax_msg = _validate_python_hunk_syntax(patch_diff, pack=pack)
     if not syntax_ok:
         return (False, False, syntax_msg)
 
@@ -481,7 +554,7 @@ def apply_handoff(
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
     struct_ok, syntax_ok, details = _verify_diff_structure_in_memory(
-        record.patch_diff, record.target_files
+        record.patch_diff, record.target_files, pack=record.pack
     )
     executor = GeminiImplementationExecutor(
         model_id=record.model_id,

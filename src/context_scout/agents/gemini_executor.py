@@ -585,7 +585,7 @@ class GitWorktreeSandbox:
         target_desc = self._target_branch or "HEAD"
         return (
             True,
-            f"Changes approved, committed on {self.branch_name}, and merged onto {target_desc}",
+            f"Changes approved and committed on {self.branch_name} and merged onto {target_desc}",
         )
 
     def __exit__(

@@ -55,18 +55,15 @@ def create_doc_corpus_mcp_server(
     effective_repo = repo
     if effective_repo is None:
         try:
+            import psycopg
+
             from context_scout.db.session import get_query_pool
             from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
-            from context_scout.schemas.contracts import PrincipalContext, RoleType
 
-            pool_mgr = get_query_pool(st)
-            probe = PrincipalContext(
-                user_id="doc_mcp_probe",
-                role=RoleType.ENGINEER,
-                allowed_scopes=["public"],
-            )
-            with pool_mgr.scoped_transaction(probe, enable_hnsw_iterative_scan=False) as conn:
+            # Fast 1s connect probe so unreachable PG never stalls import for 30s pool timeout
+            with psycopg.connect(st.db_app_url, connect_timeout=1) as conn:
                 conn.execute("SELECT 1;")
+            pool_mgr = get_query_pool(st)
             effective_repo = PostgresScoutGraphAdapter(pool_mgr, st)
         except Exception as exc:
             logger.debug(

@@ -722,18 +722,26 @@ def test_handoff_apply_rejects_broken_python_hunk_syntax(
     sample_pack: ImplementationContextPack,
 ) -> None:
     """In-memory Python AST validation catches broken Python syntax without disk I/O (ECS-043)."""
-    broken_pack = sample_pack.model_copy(deep=True)
-    broken_pack.code_slices[0].verbatim_code_with_lines = "1: def broken_fn(:\n2:     pass\n"
+    from context_scout.api.dependencies import get_confirmation_token_store
 
     preview_res = client.post(
         "/api/v1/handoff/preview",
         json={
-            "pack": broken_pack.model_dump(),
+            "pack": sample_pack.model_dump(),
             "model_id": "gemini-3.8-flash",
         },
     )
     assert preview_res.status_code == 200
     token = preview_res.json()["confirmation_token"]
+    target = sample_pack.code_slices[0].file_path.lstrip("/")
+    rec = get_confirmation_token_store()._records[token]
+    rec.patch_diff = (
+        f"--- a/{target}\n+++ b/{target}\n"
+        "@@ -1,2 +1,3 @@\n"
+        " def valid_prefix():\n"
+        "+def broken_fn(:\n"
+        "     return 1\n"
+    )
 
     apply_res = client.post(
         "/api/v1/handoff/apply",
@@ -748,6 +756,37 @@ def test_handoff_apply_rejects_broken_python_hunk_syntax(
     assert data["server_files_mutated"] is False
     assert data["execution_mode"] == "client_side_git_apply"
     assert data["confirmed_patch_diff"] == ""
+
+
+def test_handoff_apply_accepts_indented_slice_with_multiline_closing_paren(
+    client: TestClient,
+    sample_pack: ImplementationContextPack,
+) -> None:
+    """Indented class method slice ending in multi-line closing `)` passes AST check."""
+    indented_pack = sample_pack.model_copy(deep=True)
+    indented_pack.code_slices[0].verbatim_code_with_lines = (
+        "10 |     def build_mgr(self) -> object:\n"
+        "11 |         return dict(\n"
+        "12 |             alpha=1,\n"
+        "13 |             beta=2,\n"
+        "14 |         )\n"
+    )
+    preview_res = client.post(
+        "/api/v1/handoff/preview",
+        json={"pack": indented_pack.model_dump(), "model_id": "gemini-3.8-flash"},
+    )
+    assert preview_res.status_code == 200
+    token = preview_res.json()["confirmation_token"]
+
+    apply_res = client.post(
+        "/api/v1/handoff/apply",
+        json={"confirmation_token": token, "confirmed": True},
+    )
+    assert apply_res.status_code == 200
+    data = apply_res.json()
+    assert data["success"] is True
+    assert data["syntax_valid"] is True
+    assert data["server_files_mutated"] is False
 
 
 # =============================================================================
