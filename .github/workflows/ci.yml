@@ -52,9 +52,9 @@ jobs:
     env:
       SCOUT_AUTH_HMAC_SECRET: scout-github-actions-ci-hmac-secret-32-chars!!
       SCOUT_STORAGE_BACKEND: "memory"
-      OMP_NUM_THREADS: "2"
-      OPENBLAS_NUM_THREADS: "2"
-      MKL_NUM_THREADS: "2"
+      OMP_NUM_THREADS: "4"
+      OPENBLAS_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
       TOKENIZERS_PARALLELISM: "false"
     steps:
       - name: Checkout repository
@@ -103,9 +103,9 @@ jobs:
     env:
       SCOUT_DB_ADMIN_URL: postgresql://postgres:postgres_ci_password@127.0.0.1:5432/context_scout
       SCOUT_AUTH_HMAC_SECRET: scout-github-actions-ci-hmac-secret-32-chars!!
-      OMP_NUM_THREADS: "2"
-      OPENBLAS_NUM_THREADS: "2"
-      MKL_NUM_THREADS: "2"
+      OMP_NUM_THREADS: "4"
+      OPENBLAS_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
       TOKENIZERS_PARALLELISM: "false"
     steps:
       - name: Checkout repository
@@ -205,9 +205,9 @@ jobs:
     env:
       SCOUT_DB_ADMIN_URL: postgresql://postgres:postgres_ci_password@127.0.0.1:5432/context_scout
       SCOUT_AUTH_HMAC_SECRET: scout-github-actions-ci-hmac-secret-32-chars!!
-      OMP_NUM_THREADS: "2"
-      OPENBLAS_NUM_THREADS: "2"
-      MKL_NUM_THREADS: "2"
+      OMP_NUM_THREADS: "4"
+      OPENBLAS_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
       TOKENIZERS_PARALLELISM: "false"
     steps:
       - name: Checkout repository
