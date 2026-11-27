@@ -8629,17 +8629,13 @@ class FederatedScoutCoordinator:
                 reverse=True,
             )
             if selected_ids:
-                q_tokens = {
-                    t.lower()
-                    for t in re.findall(r"[A-Za-z0-9_]{3,}", user_prompt)
-                    if t.lower() not in PROMPT_STOPWORDS
-                }
+                raw_words = re.findall(r"[A-Za-z0-9_]{3,}", user_prompt)
+                q_tokens = {w.lower() for w in raw_words if w.lower() not in PROMPT_STOPWORDS}
                 explicit_ident_tokens = {
-                    t.lower()
-                    for t in re.findall(
-                        r"\b(?:[A-Za-z0-9]+_[A-Za-z0-9_]+|[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*)\b",
-                        user_prompt,
-                    )
+                    w.lower()
+                    for w in raw_words
+                    if "_" in w
+                    or (any("a" <= c <= "z" for c in w) and any("A" <= c <= "Z" for c in w[1:]))
                 }
                 direct_code_tokens: dict[str, set[str]] = {}
                 for dom_id in selected_ids:
