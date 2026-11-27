@@ -7,6 +7,7 @@ PostgreSQL tests never mutate seeded benchmark corpora (``code_architecture_scou
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -340,6 +341,7 @@ def _seed_code_architecture_scout(
     global_symbol_map: dict[str, UUID] = {}
     short_name_map: dict[str, list[UUID]] = defaultdict(list)
     parsed_files: list[tuple[list[Any], dict[str, UUID]]] = []
+    pending_sym_records: list[tuple[ASTSymbolRecord, str]] = []
 
     for py_file in all_files:
         rel_path = py_file.relative_to(repo_root).as_posix()
@@ -370,7 +372,10 @@ def _seed_code_architecture_scout(
             )
             if sym_id in file_sym_map.values():
                 sym_id = uuid4()
-            emb = _embed_fixture_text(f"{parsed_sym.signature_skeleton} {parsed_sym.docstring}")
+            embed_input = (
+                f"{parsed_sym.qualified_name} {parsed_sym.signature_skeleton} "
+                f"{parsed_sym.contextual_summary or parsed_sym.docstring}"
+            ).strip()
             sym_rec = ASTSymbolRecord(
                 symbol_id=sym_id,
                 file_id=file_id,
@@ -382,14 +387,21 @@ def _seed_code_architecture_scout(
                 signature_skeleton=parsed_sym.signature_skeleton,
                 contextual_summary=parsed_sym.contextual_summary,
                 allowed_scopes=scopes,
-                embedding=emb,
+                embedding=[],
             )
-            repo.insert_ast_symbol(conn, sym_rec)
+            pending_sym_records.append((sym_rec, embed_input))
             file_sym_map[parsed_sym.qualified_name] = sym_id
             global_symbol_map[parsed_sym.qualified_name] = sym_id
             short_name_map[parsed_sym.name].append(sym_id)
 
         parsed_files.append((edges, file_sym_map))
+
+    # Batch embeddings (chunks of 64) for consistent semantic space and fast CI bootstrap.
+    for start in range(0, len(pending_sym_records), 64):
+        batch_items = pending_sym_records[start : start + 64]
+        batch_vecs = _embed_fixture_texts([txt for _, txt in batch_items])
+        for (sym_rec, _), emb in zip(batch_items, batch_vecs, strict=True):
+            repo.insert_ast_symbol(conn, dataclasses.replace(sym_rec, embedding=emb))
 
     for edges, file_sym_map in parsed_files:
         for edge in edges:
