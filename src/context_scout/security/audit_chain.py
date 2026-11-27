@@ -327,7 +327,11 @@ class WebhookSIEMExporter:
         http_client: httpx.Client | None = None,
         timeout_seconds: float = 5.0,
     ) -> None:
+        from context_scout.security.ssrf_guard import validate_url_target
+
         self.webhook_url = _validate_siem_webhook_url(webhook_url)
+        if self.webhook_url:
+            validate_url_target(self.webhook_url, allow_private_networks=False)
         self.webhook_secret = (webhook_secret or "").strip()
         self.gcp_project = gcp_project
         self._http_client = http_client
@@ -347,33 +351,18 @@ class WebhookSIEMExporter:
     def export_record(self, record: AuditEventRecord) -> bool:
         if not self.webhook_url:
             return False
+        from context_scout.security.ssrf_guard import send_ssrf_safe_post
+
         body_bytes, headers = self.build_signed_payload(record)
         try:
-            if self._http_client is not None:
-                resp = self._http_client.post(
-                    self.webhook_url, content=body_bytes, headers=headers, timeout=self._timeout
-                )
-            else:
-                parsed = urlparse(self.webhook_url)
-                host = (parsed.hostname or "").strip().lower().rstrip(".")
-                port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-                try:
-                    ip_literal: ipaddress.IPv4Address | ipaddress.IPv6Address | None = (
-                        ipaddress.ip_address(host)
-                    )
-                except ValueError:
-                    ip_literal = None
-                if ip_literal is not None:
-                    _assert_safe_siem_ip(ip_literal, raw_host=host)
-                else:
-                    addr_infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-                    if not addr_infos:
-                        raise ValueError(f"SIEM webhook host {host!r} failed DNS resolution.")
-                    for info in addr_infos:
-                        raw_addr = str(info[4][0]).split("%", 1)[0]
-                        _assert_safe_siem_ip(ipaddress.ip_address(raw_addr), raw_host=host)
-                with httpx.Client(timeout=self._timeout, follow_redirects=False) as client:
-                    resp = client.post(self.webhook_url, content=body_bytes, headers=headers)
+            resp = send_ssrf_safe_post(
+                self.webhook_url,
+                content=body_bytes,
+                headers=headers,
+                timeout_seconds=self._timeout,
+                allow_private_networks=False,
+                http_client=self._http_client,
+            )
             resp.raise_for_status()
             return True
         except Exception as exc:

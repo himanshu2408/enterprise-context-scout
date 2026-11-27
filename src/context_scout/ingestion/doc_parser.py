@@ -937,10 +937,44 @@ def _unescape_sgml_text(raw: str) -> str:
     return re.sub(r"&([a-zA-Z][a-zA-Z0-9._-]{1,30});", r"\1", text)
 
 
+_XML_UNSAFE_DECL_RE: Final[re.Pattern[str]] = re.compile(
+    r"<!\s*(?:ENTITY|ELEMENT|ATTLIST|NOTATION)\b",
+    re.IGNORECASE,
+)
+_XML_DOCTYPE_RE: Final[re.Pattern[str]] = re.compile(
+    r"<!\s*DOCTYPE\b([^>]{0,512})>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def assert_safe_xml_sgml_declarations(raw_text: str, *, strict_xml: bool = False) -> None:
+    """Rejects XML ENTITY/DTD declarations to prevent XXE/billion-laughs expansion (ECS-040)."""
+    if not raw_text:
+        return
+    if _XML_UNSAFE_DECL_RE.search(raw_text):
+        raise ValueError(
+            "Blocked document containing forbidden <!ENTITY/<!ELEMENT/<!ATTLIST declaration."
+        )
+    stripped_l = raw_text.lstrip()
+    is_xml = strict_xml or stripped_l.startswith("<?xml")
+    for m in _XML_DOCTYPE_RE.finditer(raw_text):
+        if is_xml:
+            raise ValueError("Blocked XML document containing forbidden <!DOCTYPE declaration.")
+        body = m.group(1)
+        if (
+            "[" in body
+            or '"' in body
+            or "'" in body
+            or re.search(r"\b(?:SYSTEM|PUBLIC)\b", body, re.IGNORECASE)
+        ):
+            raise ValueError("Blocked document containing external/subset <!DOCTYPE declaration.")
+
+
 def extract_sgml_docbook_text(raw_text: str) -> str:
     """Converts DocBook/SGML documentation to clean Markdown prose with fenced SQL blocks."""
     if not raw_text.strip():
         return ""
+    assert_safe_xml_sgml_declarations(raw_text, strict_xml=False)
     text = re.sub(r"<!--.*?-->", " ", raw_text, flags=re.DOTALL)
 
     code_blocks: list[str] = []
@@ -1154,6 +1188,10 @@ def chunk_custom_domain_document(
 ) -> list[DocumentChunk]:
     """Splits any supported custom knowledge document into bounded 400-800 token DocumentChunks."""
     suffix = file_path.suffix.lower()
+    if suffix in (".xml", ".xhtml", ".svg", ".drawio", ".html", ".htm", ".sgml", ".docbook"):
+        assert_safe_xml_sgml_declarations(
+            text, strict_xml=suffix in (".xml", ".xhtml", ".svg", ".drawio")
+        )
     safe_slug = re.sub(r"[^A-Za-z0-9_.:/-]+", "_", rel_path)
     doc_id = f"{domain_id}:{safe_slug}"
     source_uri = f"urn:{domain_id}:{rel_path}"

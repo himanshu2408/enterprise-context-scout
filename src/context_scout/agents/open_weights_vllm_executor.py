@@ -21,6 +21,7 @@ Enforces:
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -883,7 +884,20 @@ class OpenWeightsVLLMExecutor:
         self._mlx_loader_fn = mlx_loader_fn
         self._mlx_generate_fn = mlx_generate_fn
         self._auto_discover_max_len = auto_discover_max_len
-        self.last_completion: ParsedModelCompletion | None = None
+        self._last_completion_var: contextvars.ContextVar[ParsedModelCompletion | None] = (
+            contextvars.ContextVar(
+                f"open_weights_last_completion_{id(self)}",
+                default=None,
+            )
+        )
+
+    @property
+    def last_completion(self) -> ParsedModelCompletion | None:
+        return self._last_completion_var.get()
+
+    @last_completion.setter
+    def last_completion(self, value: ParsedModelCompletion | None) -> None:
+        self._last_completion_var.set(value)
 
     @property
     def model_id(self) -> str:

@@ -76,7 +76,10 @@ describe("FrontierHandoffModal (and GeminiDiffModal alias)", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("apply-success-view")).toHaveTextContent(
-        "Patch Applied & Verified in Sandbox"
+        "Verified for Client-Side git apply"
+      );
+      expect(screen.getByTestId("apply-success-view")).toHaveTextContent(
+        "No host files mutated"
       );
     });
 
@@ -273,5 +276,93 @@ describe("FrontierHandoffModal (and GeminiDiffModal alias)", () => {
       String(url).endsWith("/api/v1/handoff/apply")
     );
     expect(applyCalls).toHaveLength(0);
+  });
+
+  it("excludes excluded slices from /api/v1/handoff/preview requests (ECS-079)", async () => {
+    const fetchMock = installMockApiFetch();
+
+    render(
+      <FrontierHandoffModal
+        isOpen={true}
+        onClose={vi.fn()}
+        contextPack={TEST_CODE_PACK}
+        principal={TEST_ENGINEER_PRINCIPAL}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("unified-diff-view")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("exclude-slice-btn-1"));
+
+    await waitFor(() => {
+      const previewCalls = fetchMock.mock.calls.filter(([url]) =>
+        String(url).endsWith("/api/v1/handoff/preview")
+      );
+      expect(previewCalls.length).toBeGreaterThanOrEqual(2);
+      const latestBody = JSON.parse(
+        String(previewCalls[previewCalls.length - 1]?.[1]?.body)
+      ) as {
+        pack: { code_slices: Array<{ file_path: string }> };
+      };
+      const filePaths = latestBody.pack.code_slices.map((s) => s.file_path);
+      expect(filePaths).toContain("slicer/bounds.py");
+      expect(filePaths).not.toContain("slicer/budget.py");
+    });
+  });
+
+  it("closes on Escape key and falls back to execCommand when navigator.clipboard is unavailable (ECS-063)", async () => {
+    installMockApiFetch();
+    const onClose = vi.fn();
+
+    const originalClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, "clipboard", {
+      value: undefined,
+      configurable: true,
+    });
+    const execCommandMock = vi.fn(() => true);
+    Object.defineProperty(document, "execCommand", {
+      value: execCommandMock,
+      configurable: true,
+    });
+
+    try {
+      render(
+        <FrontierHandoffModal
+          isOpen={true}
+          onClose={onClose}
+          contextPack={TEST_CODE_PACK}
+          principal={TEST_ENGINEER_PRINCIPAL}
+        />
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId("unified-diff-view")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByTestId("copy-handoff-pack-btn"));
+      await waitFor(() => {
+        expect(screen.getByTestId("copy-handoff-pack-btn")).toHaveTextContent(
+          "Copied Pack"
+        );
+      });
+
+      fireEvent.click(screen.getByTestId("copy-git-apply-btn"));
+      await waitFor(() => {
+        expect(screen.getByTestId("copy-git-apply-btn")).toHaveTextContent(
+          "Copied git apply Patch"
+        );
+      });
+      expect(execCommandMock).toHaveBeenCalledWith("copy");
+
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.defineProperty(navigator, "clipboard", {
+        value: originalClipboard,
+        configurable: true,
+      });
+    }
   });
 });

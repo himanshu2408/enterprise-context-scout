@@ -405,7 +405,9 @@ class ConfluenceConnectorPlugin(SourceConnectorPlugin):
         noise_policy: ConfluenceNoisePolicy | None = None,
         scrubber: PreIndexScrubber | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        from context_scout.security.ssrf_guard import validate_url_target
+
+        self.base_url = validate_url_target(base_url, allow_private_networks=True).rstrip("/")
         self.freshness_half_life_days = freshness_half_life_days
         self.noise_policy = noise_policy or ConfluenceNoisePolicy()
         self.scrubber = scrubber or PreIndexScrubber()
@@ -434,6 +436,23 @@ class ConfluenceConnectorPlugin(SourceConnectorPlugin):
     @property
     def source_type(self) -> str:
         return "confluence"
+
+    def validate_webhook_origin(self, payload: Mapping[str, Any]) -> None:
+        """Validates Confluence webhook `_links.base` / URLs match configured base_url origin."""
+        from context_scout.security.ssrf_guard import validate_same_origin_url
+
+        links = payload.get("_links")
+        if isinstance(links, Mapping):
+            base_val = links.get("base")
+            if isinstance(base_val, str) and base_val.strip():
+                validate_same_origin_url(
+                    base_val.strip(), self.base_url, allow_private_networks=True
+                )
+        page_obj = payload.get("page")
+        if isinstance(page_obj, Mapping) and isinstance(page_obj.get("_links"), Mapping):
+            pbase = page_obj["_links"].get("base")
+            if isinstance(pbase, str) and pbase.strip():
+                validate_same_origin_url(pbase.strip(), self.base_url, allow_private_networks=True)
 
     def mirror_permissions(self, container_key: str) -> list[str]:
         """Maps Confluence space key to RLS allowed_scopes."""

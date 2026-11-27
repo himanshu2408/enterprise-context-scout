@@ -377,6 +377,10 @@ class HandoffApplyResponse(BaseModel):
     verification_passed: bool
     details: str
     telemetry: ExecutionTelemetryRecord
+    execution_mode: Literal["client_side_git_apply"] = "client_side_git_apply"
+    server_files_mutated: bool = False
+    confirmed_patch_diff: str = ""
+    syntax_valid: bool = True
 
 
 class AggregateROISummary(BaseModel):

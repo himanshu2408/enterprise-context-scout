@@ -402,6 +402,10 @@ export interface HandoffApplyResponse {
   tests_passed: boolean;
   verification_passed: boolean;
   details: string;
+  execution_mode?: "client_side_git_apply" | string;
+  server_files_mutated?: boolean;
+  confirmed_patch_diff?: string;
+  syntax_valid?: boolean;
 }
 
 export type TelemetrySource =

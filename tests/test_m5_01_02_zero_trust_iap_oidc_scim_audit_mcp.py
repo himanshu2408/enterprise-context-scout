@@ -1283,7 +1283,9 @@ def test_hardened_webhooks_admin_purge_and_openapi_schema_fuzzing(
 
 
 @pytest.mark.postgres
-async def test_stateless_mcp_2026_07_28_sep_compliance_traceparent_and_cow_mr_tools() -> None:
+async def test_stateless_mcp_2026_07_28_sep_compliance_traceparent_and_cow_mr_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Verifies SEP-2243, SEP-2575, SEP-2663, zero identity args, & live PG17 CoW MR tools."""
     settings = ScoutSettings()
     tenant_a = uuid.uuid4()
@@ -1291,17 +1293,37 @@ async def test_stateless_mcp_2026_07_28_sep_compliance_traceparent_and_cow_mr_to
     app_mgr = RLSConnectionManager(settings.db_app_url, pool_role=PoolRole.QUERY)
     ingestion_mgr = RLSConnectionManager(settings.db_app_url, pool_role=PoolRole.INGESTION)
 
-    # 1. SEP-2243 /.well-known/mcp discovery on app + standalone MCP ASGI mounts
+    tok_a = create_signed_principal_token(
+        user_id="mcp_eng_a",
+        role=RoleType.ENGINEER,
+        allowed_scopes=DEFAULT_ROLE_SCOPES[RoleType.ENGINEER],
+        tenant_id=tenant_a,
+    )
+
+    # 1. SEP-2243 /.well-known/mcp discovery (schemas redacted unauth, full when authed) & RFC 9728
     api_client = TestClient(app)
+    prm_res = api_client.get("/.well-known/oauth-protected-resource")
+    assert prm_res.status_code == 200
+    prm_body = prm_res.json()
+    assert "resource" in prm_body and prm_body["bearer_methods_supported"] == ["header"]
+
     for wk_path in ("/.well-known/mcp", "/api/v1/.well-known/mcp"):
-        wk_res = api_client.get(wk_path)
+        wk_unauth = api_client.get(wk_path).json()
+        assert wk_unauth["protocolVersion"] == MCP_PROTOCOL_VERSION_2026_07_28
+        assert wk_unauth["schemasRedacted"] is True
+        assert wk_unauth["tools"] == []
+        assert wk_unauth["toolCount"] >= 3
+
+        wk_res = api_client.get(wk_path, headers={"Authorization": f"Bearer {tok_a}"})
         assert wk_res.status_code == 200
         wk = wk_res.json()
+        assert wk["schemasRedacted"] is False
         assert wk["protocolVersion"] == MCP_PROTOCOL_VERSION_2026_07_28
         assert wk["transport"]["stateless"] is True
         assert wk["transport"]["sep"] == "SEP-2575"
         assert wk["discovery"]["sep"] == "SEP-2243"
         assert wk["capabilities"]["tracing"]["sep"] == "SEP-2663"
+        assert len(wk["tools"]) >= 3
         for tool in wk["tools"]:
             props = tool["inputSchema"]["properties"]
             assert not (set(props.keys()) & FORBIDDEN_TOOL_ARGUMENTS)
@@ -1320,12 +1342,6 @@ async def test_stateless_mcp_2026_07_28_sep_compliance_traceparent_and_cow_mr_to
 
     repo_a = "repo-alpha-m5"
     repo_b = "repo-beta-m5"
-    tok_a = create_signed_principal_token(
-        user_id="mcp_eng_a",
-        role=RoleType.ENGINEER,
-        allowed_scopes=DEFAULT_ROLE_SCOPES[RoleType.ENGINEER],
-        tenant_id=tenant_a,
-    )
     tok_b = create_signed_principal_token(
         user_id="mcp_eng_b",
         role=RoleType.ENGINEER,
@@ -1456,18 +1472,57 @@ async def test_stateless_mcp_2026_07_28_sep_compliance_traceparent_and_cow_mr_to
                 base_url="http://127.0.0.1",
             ) as cli_b,
         ):
-            # Discovery on mounted MCP HTTP app
+            # Discovery on mounted MCP HTTP app & RFC 9728 + Host allowlist (ECS-001, ECS-045)
             wk_mcp = await cli_a.get("/.well-known/mcp")
             assert wk_mcp.status_code == 200
             assert wk_mcp.json()["protocolVersion"] == MCP_PROTOCOL_VERSION_2026_07_28
+            assert wk_mcp.json()["schemasRedacted"] is True
 
-            # Unauthenticated -> 401
+            prm_mcp = await cli_a.get("/.well-known/oauth-protected-resource")
+            assert prm_mcp.status_code == 200
+            assert "authorization_servers" in prm_mcp.json()
+
+            # Unapproved external Host header rejected with 421; K8s service Host allowed
+            bad_host_res = await cli_a.post(
+                "/mcp",
+                headers=_mcp_headers(
+                    tok_a,
+                    method="tools/list",
+                    extra={"Host": "evil.attacker.example"},
+                ),
+                json=_mcp_payload(91, "tools/list"),
+            )
+            assert bad_host_res.status_code == 421
+
+            k8s_host_res = await cli_a.post(
+                "/mcp",
+                headers=_mcp_headers(
+                    tok_a,
+                    method="tools/list",
+                    extra={"Host": "context-scout-api:8080"},
+                ),
+                json=_mcp_payload(92, "tools/list"),
+            )
+            assert k8s_host_res.status_code == 200
+
+            # Unauthenticated -> 401 with RFC 9728 WWW-Authenticate resource_metadata
             unauth_mcp = await cli_a.post(
                 "/mcp",
                 headers={"Accept": "application/json, text/event-stream"},
                 json=_mcp_payload(1, "tools/list"),
             )
             assert unauth_mcp.status_code == 401
+            assert "resource_metadata=" in unauth_mcp.headers.get("www-authenticate", "")
+
+            # RFC 8707 expected resource enforcement via SCOUT_MCP_EXPECTED_RESOURCE
+            monkeypatch.setenv("SCOUT_MCP_EXPECTED_RESOURCE", "https://mcp.corp.local/mcp")
+            mismatch_res = await cli_a.post(
+                "/mcp",
+                headers=_mcp_headers(tok_a, method="tools/list"),
+                json=_mcp_payload(93, "tools/list"),
+            )
+            assert mismatch_res.status_code == 401
+            monkeypatch.delenv("SCOUT_MCP_EXPECTED_RESOURCE", raising=False)
 
             # Sticky Mcp-Session-Id rejected -> 400 (SEP-2575)
             sticky_res = await cli_a.post(
@@ -1591,7 +1646,7 @@ async def test_stateless_mcp_2026_07_28_sep_compliance_traceparent_and_cow_mr_to
             cross_data = json.loads(_extract_mcp_result(cross_diff)["result"]["content"][0]["text"])
             assert cross_data["found"] is False
 
-            # Fail-closed injection of forbidden allowed_scopes argument
+            # Fail-closed injection of forbidden allowed_scopes argument (ECS-096)
             inject_res = await cli_a.post(
                 "/mcp",
                 headers=_mcp_headers(
@@ -1606,11 +1661,17 @@ async def test_stateless_mcp_2026_07_28_sep_compliance_traceparent_and_cow_mr_to
                     },
                 ),
             )
-            if inject_res.status_code < 400:
+            assert inject_res.status_code < 500, (
+                f"Expected controlled JSON-RPC/HTTP rejection, got {inject_res.status_code}"
+            )
+            if inject_res.status_code == 200:
                 inj_body = _extract_mcp_result(inject_res)
                 assert (
-                    inj_body.get("error") is not None or inj_body["result"].get("isError") is True
+                    inj_body.get("error") is not None
+                    or inj_body.get("result", {}).get("isError") is True
                 )
+            else:
+                assert inject_res.status_code in {400, 422}
 
         recorded_trace_ids = {
             f"{sp.context.trace_id:032x}" for sp in tracer.exporter.get_finished_spans()

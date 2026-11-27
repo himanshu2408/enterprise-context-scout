@@ -1569,6 +1569,69 @@ class GuardrailProviderSPI(Protocol):
     ) -> ShieldGemmaDecision: ...
 
 
+_INLINE_CODE_SPAN_RE: Final[re.Pattern[str]] = re.compile(r"`([^`\r\n]{1,64})`")
+_BENIGN_TECH_QUERY_FRAMING_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:\?|\b(?:how|why|what|where|when|does|do|explain|describe|handle|handles|sanitize|"
+    r"sanitizer|strip|strips|escape|escapes|parse|parser|block|blocks|prevent|detect|test|"
+    r"audit|fix|review)\b)",
+    re.IGNORECASE,
+)
+_UNQUOTED_IMPERATIVE_RISK_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:<!--|</\s*untrusted_(?:data|retrieved_data)|"
+    r"\b(?:ignore|disregard|override|forget|bypass|reveal|dump|exfiltrate|leak|"
+    r"jailbreak|unrestricted|pretend|roleplay|dan\s+mode|developer\s+mode|sudo\s+mode|"
+    r"god\s+mode|do\s+not\s+mention|never\s+tell\s+the\s+user)\b)",
+    re.IGNORECASE,
+)
+_ACTIVE_QUOTED_SPAN_DISALLOWED_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:[();]|//|https?:|javascript:|vbscript:|data:|<!--|</\s*untrusted_|"
+    r"\b(?:ignore|disregard|override|bypass|reveal|dump|exfiltrate|secret|password|"
+    r"token|cookie|document\.|window\.|eval|alert|fetch|src=|href=)\b)",
+    re.IGNORECASE,
+)
+
+
+def _mask_benign_inline_code_quotes(text: str) -> str:
+    """Masks passive syntax tokens inside inline backticks for O(n) benign dev queries (ECS-006)."""
+    if "`" not in text or len(text) > 4096:
+        return text
+    if not _BENIGN_TECH_QUERY_FRAMING_RE.search(text):
+        return text
+    spans = list(_INLINE_CODE_SPAN_RE.finditer(text))
+    if not spans or len(spans) > 8:
+        return text
+
+    # Build unquoted outside prose first and abort if prose carries injection cues
+    outside_parts: list[str] = []
+    cursor = 0
+    for m in spans:
+        outside_parts.append(text[cursor : m.start()])
+        outside_parts.append(" CODE_TOKEN ")
+        cursor = m.end()
+    outside_parts.append(text[cursor:])
+    outside_prose = "".join(outside_parts)
+    if _UNQUOTED_IMPERATIVE_RISK_RE.search(outside_prose):
+        return text
+
+    # Verify each individual quoted token is passive syntax (not an active script/exfil/override)
+    out_parts: list[str] = []
+    pos = 0
+    changed = False
+    for m in spans:
+        inner = m.group(1)
+        out_parts.append(text[pos : m.start()])
+        if _ACTIVE_QUOTED_SPAN_DISALLOWED_RE.search(inner):
+            out_parts.append(m.group(0))
+        else:
+            out_parts.append(" CODE_TOKEN ")
+            changed = True
+        pos = m.end()
+    if not changed:
+        return text
+    out_parts.append(text[pos:])
+    return "".join(out_parts)
+
+
 class DeterministicRuleGuardrailProvider:
     """Stage A (<2ms) deterministic rule gate verifying size, injections, XSS, and secrets."""
 
@@ -1602,13 +1665,15 @@ class DeterministicRuleGuardrailProvider:
             )
             scan_text = text[: self.MAX_PAYLOAD_BYTES]
 
-        no_invis = PromptInjectionSanitizer.strip_invisible_unicode(scan_text)
+        raw_no_invis = PromptInjectionSanitizer.strip_invisible_unicode(scan_text)
+        eval_text = _mask_benign_inline_code_quotes(scan_text)
+        no_invis = PromptInjectionSanitizer.strip_invisible_unicode(eval_text)
         post_comment_text = PromptInjectionSanitizer.strip_html_comments(no_invis)
-        _, pre_malicious_sigs = PromptInjectionSanitizer.scan_malicious_input(scan_text)
+        _, pre_malicious_sigs = PromptInjectionSanitizer.scan_malicious_input(eval_text)
         _, post_comment_malicious_sigs = PromptInjectionSanitizer.scan_malicious_input(
             post_comment_text
         )
-        sanitized_text, is_injection, injection_sigs = PromptInjectionSanitizer.sanitize(scan_text)
+        sanitized_text, is_injection, injection_sigs = PromptInjectionSanitizer.sanitize(eval_text)
         _, post_sanitize_malicious_sigs = PromptInjectionSanitizer.scan_malicious_input(
             sanitized_text
         )
@@ -1627,7 +1692,9 @@ class DeterministicRuleGuardrailProvider:
             violated_categories.append(SafetyCategory.MALICIOUS_INPUT)
             reasons.append(f"Malicious active input patterns detected: {malicious_sigs}")
 
-        redacted_text, redacted_tokens = SecretRedactor.redact(sanitized_text)
+        redacted_text, redacted_tokens = SecretRedactor.redact(
+            PromptInjectionSanitizer.strip_comment_payloads(raw_no_invis)
+        )
         if redacted_tokens:
             violated_categories.append(SafetyCategory.SECRET_LEAKAGE)
             reasons.append(f"Credentials or sensitive tokens detected: {redacted_tokens}")
@@ -1877,12 +1944,13 @@ def _score_local_neural_risk(text: str) -> tuple[bool, float, list[SafetyCategor
     reasons: list[str] = []
     categories: list[SafetyCategory] = []
     max_risk = 0.0
-    no_invis = PromptInjectionSanitizer.strip_invisible_unicode(text)
+    eval_text = _mask_benign_inline_code_quotes(text)
+    no_invis = PromptInjectionSanitizer.strip_invisible_unicode(eval_text)
     raw_folded = _fold_homoglyphs(no_invis)
-    has_ff_or_vt = "\x0c" in text or "\x0b" in text
+    has_ff_or_vt = "\x0c" in eval_text or "\x0b" in eval_text
     ws_no_invis = (
         PromptInjectionSanitizer.strip_invisible_unicode(
-            text.replace("\x0c", " ").replace("\x0b", " ")
+            eval_text.replace("\x0c", " ").replace("\x0b", " ")
         )
         if has_ff_or_vt
         else no_invis
@@ -1897,7 +1965,7 @@ def _score_local_neural_risk(text: str) -> tuple[bool, float, list[SafetyCategor
     decommented = PromptInjectionSanitizer.strip_html_comments(no_invis)
     folded = _fold_homoglyphs(decommented) if decommented != no_invis else raw_folded
 
-    has_sig, sigs = PromptInjectionSanitizer.scan_injection_signatures(text)
+    has_sig, sigs = PromptInjectionSanitizer.scan_injection_signatures(eval_text)
     if decommented != no_invis:
         has_sig_dec, sigs_dec = PromptInjectionSanitizer.scan_injection_signatures(decommented)
         if has_sig_dec:
@@ -1909,7 +1977,7 @@ def _score_local_neural_risk(text: str) -> tuple[bool, float, list[SafetyCategor
         if SafetyCategory.PROMPT_INJECTION not in categories:
             categories.append(SafetyCategory.PROMPT_INJECTION)
 
-    has_mal, mal_sigs = PromptInjectionSanitizer.scan_malicious_input(text)
+    has_mal, mal_sigs = PromptInjectionSanitizer.scan_malicious_input(eval_text)
     if decommented != no_invis:
         has_mal_dec, mal_sigs_dec = PromptInjectionSanitizer.scan_malicious_input(decommented)
         if has_mal_dec:

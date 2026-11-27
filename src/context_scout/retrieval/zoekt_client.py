@@ -1782,6 +1782,8 @@ class ZoektGrpcJsonClient:
         transport: httpx.BaseTransport | None = None,
         http_client: httpx.Client | None = None,
         weight_resolver: Callable[[str, str, str], tuple[float, bool, bool]] | None = None,
+        repository: Any | None = None,
+        connection_manager: Any | None = None,
     ) -> None:
         cleaned = endpoint_url.strip().rstrip("/")
         if not cleaned:
@@ -1791,11 +1793,79 @@ class ZoektGrpcJsonClient:
         self.protocol = protocol
         self.timeout_seconds = timeout_seconds
         self._weight_resolver = weight_resolver
+        self._repository = repository
+        self._connection_manager = connection_manager
         self._owns_client = http_client is None
         self._client = http_client or httpx.Client(
             timeout=timeout_seconds,
             transport=transport,
         )
+
+    def _hydrate_acl_registry_from_db(
+        self,
+        principal: PrincipalContext,
+        *,
+        domain_id: str | None = None,
+    ) -> int:
+        """Hydrates RepoACLBitmapRegistry from PG17 `repositories` (or InMemory) under RLS."""
+        hydrated = 0
+        if self._repository is not None and hasattr(self._repository, "_repos"):
+            repos_map = getattr(self._repository, "_repos", {})
+            for rec in repos_map.values():
+                if rec.tenant_id != principal.tenant_id:
+                    continue
+                if domain_id is not None and rec.domain_id != domain_id:
+                    continue
+                if not getattr(rec, "is_active", True):
+                    continue
+                if principal.allowed_scopes and not (
+                    set(rec.allowed_scopes) & set(principal.allowed_scopes)
+                ):
+                    continue
+                self.acl_registry.register_repo(
+                    rec.tenant_id,
+                    rec.domain_id,
+                    rec.repo_name,
+                    rec.allowed_scopes,
+                )
+                hydrated += 1
+            return hydrated
+
+        if self._connection_manager is None:
+            return 0
+
+        from context_scout.security.rbac import scoped_db_session
+
+        with scoped_db_session(self._connection_manager, principal) as conn:
+            if domain_id is not None:
+                rows = conn.execute(
+                    """
+                    SELECT tenant_id, domain_id, repo_name, allowed_scopes
+                    FROM repositories
+                    WHERE is_active = TRUE
+                      AND domain_id = %s;
+                    """,
+                    (domain_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT tenant_id, domain_id, repo_name, allowed_scopes
+                    FROM repositories
+                    WHERE is_active = TRUE;
+                    """
+                ).fetchall()
+            for r in rows:
+                t_id = r[0] if isinstance(r[0], UUID) else UUID(str(r[0]))
+                d_id = str(r[1])
+                r_name = str(r[2])
+                scopes_raw = r[3]
+                scopes = (
+                    [str(s) for s in scopes_raw] if isinstance(scopes_raw, (list, tuple)) else []
+                )
+                self.acl_registry.register_repo(t_id, d_id, r_name, scopes)
+                hydrated += 1
+        return hydrated
 
     def close(self) -> None:
         if self._owns_client:
@@ -2051,6 +2121,15 @@ class ZoektGrpcJsonClient:
         acl = self.acl_registry.compute_authorized_bitmap(
             principal, domain_id=domain_id, repo_names=repo_names
         )
+        missing_requested = bool(
+            repo_names and any(r not in acl.repo_names for r in repo_names if r)
+        )
+        if (acl.popcount == 0 or missing_requested) and self._hydrate_acl_registry_from_db(
+            principal, domain_id=domain_id
+        ) > 0:
+            acl = self.acl_registry.compute_authorized_bitmap(
+                principal, domain_id=domain_id, repo_names=repo_names
+            )
         if acl.popcount == 0:
             duration_ms = round((time.perf_counter() - t0) * 1000.0, 3)
             return ZoektSearchResponse(

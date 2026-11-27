@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 
@@ -643,9 +644,17 @@ def test_terraform_big_hcl_under_250ms_with_gc_pressure() -> None:
 
     # 3. < 250.0 ms under 500,000+ live GC-tracked container objects without caller gc.disable()
     arena: list[list[int]] = [[i] for i in range(520_000)]
+    gc_phases: list[str] = []
+
+    def _gc_spy(phase: str, _info: dict[str, int]) -> None:
+        gc_phases.append(phase)
+        assert gc.isenabled() is True
+
     try:
+        assert "gc.disable" not in inspect.getsource(TerraformPlugin.extract_ast)
         assert len(arena) == 520_000
         assert gc.isenabled() is True
+        gc.callbacks.append(_gc_spy)
         t_start = time.perf_counter()
         syms_big, edges_big = plugin.extract_ast(tf_100k, file_path="infra/big.tf")
         elapsed_ms = (time.perf_counter() - t_start) * 1000.0
@@ -654,7 +663,7 @@ def test_terraform_big_hcl_under_250ms_with_gc_pressure() -> None:
         assert edges_big == []
         assert gc.isenabled() is True
 
-        # Syntax error (abstained) path must also restore gc.isenabled() == True
+        # Syntax error (abstained) path must also preserve gc.isenabled() == True
         bad_syms, bad_edges = plugin.extract_ast(
             'resource "google_storage_bucket" "broken" { =', file_path="infra/bad.tf"
         )
@@ -671,4 +680,6 @@ def test_terraform_big_hcl_under_250ms_with_gc_pressure() -> None:
         finally:
             gc.enable()
     finally:
+        if _gc_spy in gc.callbacks:
+            gc.callbacks.remove(_gc_spy)
         arena.clear()

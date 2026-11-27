@@ -749,25 +749,37 @@ class TestGeminiExecutorSandboxAdversarial:
             assert "return amount * base_rate * 1.1" in updated_content
 
     def test_environment_sanitization_strips_sensitive_keys(self, temp_git_repo: Path) -> None:
-        """Verification commands in sandbox execute without API keys or credentials in env."""
-        sensitive_key = "SCOUT_SUPER_SECRET_API_KEY"
-        os.environ[sensitive_key] = "compromised_token_12345"
-        os.environ["SECRET_ADMIN_PASSWORD"] = "hunter2"
+        """Verification commands use strict allowlist so secrets/tokens never leak (ECS-105)."""
+        injected_env = {
+            "SCOUT_SUPER_SECRET_API_KEY": "compromised_token_12345",
+            "SECRET_ADMIN_PASSWORD": "hunter2",
+            "SCOUT_DB_APP_URL": "postgresql://user:pass@localhost/db",
+            "SCOUT_REDIS_URL": "rediss://:redis-pass@localhost:6379/0",
+            "GITHUB_TOKEN": "ghp_dummy_secret_token",
+            "CI_JOB_TOKEN": "glcbt-dummy-job-token",
+            "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/fake-sa.json",
+        }
+        os.environ.update(injected_env)
 
         try:
             with GitWorktreeSandbox(repo_root=temp_git_repo, require_confirmation=False) as sandbox:
-                # Custom test command asserting sensitive environment variables are absent
                 test_cmd = [
                     "python3",
                     "-c",
                     (
                         "import os, sys\n"
-                        "forbidden = ['API_KEY', 'SECRET', 'PASSWORD', 'ADMIN_URL']\n"
-                        "leaked = [\n"
-                        "    k for k in os.environ\n"
-                        "    if any(f in k.upper() for f in forbidden)\n"
+                        "forbidden_exact = [\n"
+                        "    'SCOUT_SUPER_SECRET_API_KEY',\n"
+                        "    'SECRET_ADMIN_PASSWORD',\n"
+                        "    'SCOUT_DB_APP_URL',\n"
+                        "    'SCOUT_REDIS_URL',\n"
+                        "    'GITHUB_TOKEN',\n"
+                        "    'CI_JOB_TOKEN',\n"
+                        "    'GOOGLE_APPLICATION_CREDENTIALS',\n"
                         "]\n"
+                        "leaked = [k for k in forbidden_exact if k in os.environ]\n"
                         "if leaked:\n"
+                        "    sys.stderr.write(f'Leaked env keys: {leaked}')\n"
                         "    sys.exit(1)\n"
                         "sys.exit(0)\n"
                     ),
@@ -778,9 +790,20 @@ class TestGeminiExecutorSandboxAdversarial:
                 )
                 assert lint_ok is True
                 assert test_ok is True, f"Sanitization failed: {details}"
+
+                # unittest & shell wrapper bypasses must also be blocked fail-closed (ECS-017)
+                for blocked_cmd in (
+                    ["python3", "-m", "unittest"],
+                    ["python3", "-munittest", "discover"],
+                    ["python3", "-c", "import unittest; unittest.main()"],
+                    ["sh", "-c", "pytest tests/"],
+                    ["/bin/bash", "-lc", "python -m unittest"],
+                ):
+                    with pytest.raises(PermissionError):
+                        sandbox.run_verification(lint_cmd=lint_cmd, test_cmd=blocked_cmd)
         finally:
-            os.environ.pop(sensitive_key, None)
-            os.environ.pop("SECRET_ADMIN_PASSWORD", None)
+            for key in injected_env:
+                os.environ.pop(key, None)
 
     def test_confirmation_gate_blocks_unconfirmed_commit(self, temp_git_repo: Path) -> None:
         """confirm_and_merge(confirmed=False) must block commit and leave branch uncommitted."""

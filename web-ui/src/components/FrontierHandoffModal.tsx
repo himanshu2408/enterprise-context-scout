@@ -78,6 +78,40 @@ function escapeXml(value: string): string {
     .replace(/'/g, "&apos;");
 }
 
+async function copyTextWithFallback(text: string): Promise<boolean> {
+  if (
+    typeof navigator !== "undefined" &&
+    navigator.clipboard &&
+    typeof navigator.clipboard.writeText === "function"
+  ) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall through to execCommand textarea fallback
+    }
+  }
+  if (typeof document === "undefined" || !document.body) {
+    return false;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  try {
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
 function buildOrderedSlices(
   slices: VerbatimCodeSlice[],
   feedback: SliceFeedbackMap
@@ -227,6 +261,7 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
     useState<HandoffExportFormat>("claude_xml");
   const [sliceFeedback, setSliceFeedback] = useState<SliceFeedbackMap>({});
   const [copiedPack, setCopiedPack] = useState<boolean>(false);
+  const [copiedPatch, setCopiedPatch] = useState<boolean>(false);
 
   const [preview, setPreview] = useState<HandoffPreviewResponse | null>(null);
   const [previewLoading, setPreviewLoading] = useState<boolean>(false);
@@ -238,6 +273,32 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
   );
   const [applyError, setApplyError] = useState<string | null>(null);
 
+  const orderedSlices = useMemo(
+    () => buildOrderedSlices(contextPack.code_slices, sliceFeedback),
+    [contextPack.code_slices, sliceFeedback]
+  );
+
+  const filteredContextPack = useMemo<ContextPack>(() => {
+    const filteredCodeSlices = orderedSlices.map((item) => item.slice);
+    return {
+      ...contextPack,
+      code_slices: filteredCodeSlices,
+    };
+  }, [contextPack, orderedSlices]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isOpen, onClose]);
+
   useEffect(() => {
     if (!isOpen) return;
 
@@ -248,7 +309,7 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
     setApplyError(null);
     setConfirmed(false);
 
-    void previewHandoff(contextPack, selectedModel, principal)
+    void previewHandoff(filteredContextPack, selectedModel, principal)
       .then((res) => {
         if (cancelled) return;
         setPreview(res);
@@ -266,17 +327,13 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, contextPack, selectedModel, principal]);
+  }, [isOpen, filteredContextPack, selectedModel, principal]);
 
   useEffect(() => {
     setSliceFeedback({});
     setCopiedPack(false);
+    setCopiedPatch(false);
   }, [contextPack.trace_id]);
-
-  const orderedSlices = useMemo(
-    () => buildOrderedSlices(contextPack.code_slices, sliceFeedback),
-    [contextPack.code_slices, sliceFeedback]
-  );
 
   const feedbackCounts = useMemo(() => {
     let pinned = 0;
@@ -320,14 +377,24 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
   };
 
   const handleCopyExport = async (): Promise<void> => {
-    try {
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-        await navigator.clipboard.writeText(exportText);
-      }
+    const ok = await copyTextWithFallback(exportText);
+    if (ok) {
       setCopiedPack(true);
       setTimeout(() => setCopiedPack(false), 1800);
-    } catch {
+    } else {
       setCopiedPack(false);
+    }
+  };
+
+  const handleCopyGitApplyPatch = async (): Promise<void> => {
+    const patchText = applyResult?.confirmed_patch_diff || preview?.patch_diff || "";
+    if (!patchText) return;
+    const ok = await copyTextWithFallback(patchText);
+    if (ok) {
+      setCopiedPatch(true);
+      setTimeout(() => setCopiedPatch(false), 1800);
+    } else {
+      setCopiedPatch(false);
     }
   };
 
@@ -607,6 +674,22 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
                     <code>{preview.confirmation_token.slice(0, 14)}...</code> ·
                     TTL {preview.expires_in_seconds}s
                   </span>
+                  <button
+                    type="button"
+                    className="btn-secondary btn-compact"
+                    onClick={() => void handleCopyGitApplyPatch()}
+                    data-testid="copy-git-apply-btn"
+                  >
+                    {copiedPatch ? (
+                      <>
+                        <Check size={13} aria-hidden="true" /> Copied git apply Patch
+                      </>
+                    ) : (
+                      <>
+                        <Copy size={13} aria-hidden="true" /> Copy git apply Patch
+                      </>
+                    )}
+                  </button>
                 </div>
 
                 <pre className="unified-diff-pre" data-testid="unified-diff-view">
@@ -633,19 +716,22 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
                   >
                     <div className="alert-banner-header">
                       <CheckCircle2 size={17} aria-hidden="true" />
-                      <strong>Patch Applied &amp; Verified in Sandbox</strong>
+                      <strong>
+                        Verified for Client-Side git apply (No host files mutated)
+                      </strong>
                     </div>
                     <p className="alert-banner-body">{applyResult.details}</p>
                     <div className="apply-checks-row">
                       <span>
-                        Lint: {applyResult.lint_passed ? "Passed" : "Failed"}
+                        Syntax/Lint: {applyResult.lint_passed ? "Passed" : "Failed"}
                       </span>
                       <span>
-                        Tests: {applyResult.tests_passed ? "Passed" : "Failed"}
+                        Diff Validation:{" "}
+                        {applyResult.tests_passed ? "Passed" : "Failed"}
                       </span>
                       <span>
-                        Verification:{" "}
-                        {applyResult.verification_passed ? "Passed" : "Failed"}
+                        Server Files Mutated:{" "}
+                        {applyResult.server_files_mutated ? "Yes" : "No"}
                       </span>
                     </div>
                   </div>
@@ -659,7 +745,7 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
                   >
                     <div className="alert-banner-header">
                       <XCircle size={17} aria-hidden="true" />
-                      <strong>Sandbox Patch Rejected / Failed</strong>
+                      <strong>Patch Validation Rejected / Failed</strong>
                     </div>
                     <p className="alert-banner-body">
                       {applyError ?? applyResult?.details}
@@ -683,8 +769,8 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
               data-testid="confirm-apply-checkbox"
             />
             <span>
-              I reviewed the unified diff &amp; target files and explicitly
-              approve sandbox execution.
+              I reviewed the unified diff &amp; target files and approve
+              generating a client-side git apply patch (no host files mutated).
             </span>
           </label>
 
@@ -711,11 +797,11 @@ export const FrontierHandoffModal: React.FC<FrontierHandoffModalProps> = ({
             >
               {applying ? (
                 <>
-                  <Loader2 size={15} className="spin" aria-hidden="true" /> Applying in Sandbox...
+                  <Loader2 size={15} className="spin" aria-hidden="true" /> Validating Patch...
                 </>
               ) : (
                 <>
-                  <ShieldCheck size={15} aria-hidden="true" /> Approve &amp; Apply Patch
+                  <ShieldCheck size={15} aria-hidden="true" /> Approve &amp; Generate Patch
                 </>
               )}
             </button>

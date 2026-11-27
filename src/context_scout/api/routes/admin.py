@@ -122,9 +122,21 @@ def get_admin_purge_coordinator(
         return ArtifactPurgeCoordinator(repository=repo)
     settings = getattr(repo, "settings", None) or ScoutSettings()
     ingestion_mgr = get_ingestion_pool(settings)
+    zoekt_client: Any = None
+    zoekt_ep = (settings.zoekt_endpoint or "").strip()
+    if zoekt_ep:
+        from context_scout.retrieval.zoekt_client import ZoektGrpcJsonClient
+
+        zoekt_client = ZoektGrpcJsonClient(
+            zoekt_ep,
+            protocol=settings.zoekt_protocol,
+            timeout_seconds=settings.zoekt_timeout_seconds,
+            connection_manager=ingestion_mgr,
+        )
     return ArtifactPurgeCoordinator(
         repository=PostgresRLSRepository(),
         connection_manager=ingestion_mgr,
+        zoekt_index=zoekt_client,
     )
 
 

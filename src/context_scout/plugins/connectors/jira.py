@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -182,7 +182,9 @@ class JiraConnectorPlugin(SourceConnectorPlugin):
         client: httpx.Client | None = None,
         scrubber: PreIndexScrubber | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        from context_scout.security.ssrf_guard import validate_url_target
+
+        self.base_url = validate_url_target(base_url, allow_private_networks=True).rstrip("/")
         self.scrubber = scrubber or PreIndexScrubber()
 
         headers = {
@@ -209,6 +211,21 @@ class JiraConnectorPlugin(SourceConnectorPlugin):
     @property
     def source_type(self) -> str:
         return "jira"
+
+    def validate_webhook_origin(self, payload: Mapping[str, Any]) -> None:
+        """Validates Jira webhook `issue.self` URLs match configured Jira base_url origin."""
+        from context_scout.security.ssrf_guard import validate_same_origin_url
+
+        cand = payload.get("self")
+        if isinstance(cand, str) and cand.strip():
+            validate_same_origin_url(cand.strip(), self.base_url, allow_private_networks=True)
+        issue_obj = payload.get("issue")
+        if isinstance(issue_obj, Mapping):
+            self_url = issue_obj.get("self")
+            if isinstance(self_url, str) and self_url.strip():
+                validate_same_origin_url(
+                    self_url.strip(), self.base_url, allow_private_networks=True
+                )
 
     def mirror_permissions(self, container_key: str) -> list[str]:
         """Maps Jira project key to RLS allowed_scopes."""

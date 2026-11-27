@@ -256,8 +256,6 @@ class QuantRelevanceClassifier:
                 score=0.0,
                 rejection_reason=f"Rejected: Matched negative blocking keyword(s): {neg_desc}",
             )
-            if pattern.search(full_text):
-                matched_pos.append(concept)
 
         if len(matched_pos) < self.min_positive_matches:
             return RelevanceVerdict(
@@ -616,6 +614,10 @@ def parse_arxiv_atom_feed(xml_text: str, market_scope: MarketRegime) -> list[Har
     """Parses arXiv Atom XML feed into HarvestedPaper records."""
     if not xml_text.strip():
         return []
+    if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", xml_text, re.IGNORECASE):
+        raise ValueError(
+            "Blocked arXiv Atom XML feed containing <!DOCTYPE or <!ENTITY declaration."
+        )
 
     root = ET.fromstring(xml_text)
     entries = root.findall("atom:entry", ARXIV_XML_NS)

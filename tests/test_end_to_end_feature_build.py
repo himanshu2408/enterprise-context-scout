@@ -118,10 +118,16 @@ def test_build_real_feature_from_context_pack_in_worktree_sandbox(
 
     # Synthesize a real feature diff grounded on the Context Pack's slice
     target_rel = "src/context_scout/config.py"
+    cfg_lines = (repo_root / target_rel).read_text(encoding="utf-8").splitlines()
+    anchor_line = next(
+        idx
+        for idx, line in enumerate(cfg_lines, start=1)
+        if '"lora_slots_allocated": lora_slots_allocated,' in line
+    )
     patch_diff = (
         f"--- a/{target_rel}\n"
         f"+++ b/{target_rel}\n"
-        "@@ -651,4 +651,10 @@\n"
+        f"@@ -{anchor_line},4 +{anchor_line},10 @@\n"
         '         "lora_slots_allocated": lora_slots_allocated,\n'
         '         "lora_slots_capacity": cfg.lora_slots_capacity,\n'
         "     }\n"

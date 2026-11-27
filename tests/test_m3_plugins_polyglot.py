@@ -12,18 +12,22 @@ from context_scout.plugins.registry import PluginRegistry
 
 def test_plugin_registry_dispatch_priority() -> None:
     """Verifies priority-ordered dispatch between Storybook, React, and TypeScript."""
-    PluginRegistry.reset()
-    PluginRegistry.register_language(StorybookPlugin(), priority=10)
-    PluginRegistry.register_language(ReactReduxPlugin(), priority=20)
+    with PluginRegistry.temporary_registry():
+        PluginRegistry.register_language(StorybookPlugin(), priority=10)
+        PluginRegistry.register_language(ReactReduxPlugin(), priority=20)
 
-    p_sb = PluginRegistry.get_plugin_for_file("components/Button.stories.tsx")
-    assert isinstance(p_sb, StorybookPlugin)
+        p_sb = PluginRegistry.get_plugin_for_file("components/Button.stories.tsx")
+        assert isinstance(p_sb, StorybookPlugin)
 
-    p_react = PluginRegistry.get_plugin_for_file("components/Button.tsx")
-    assert isinstance(p_react, ReactReduxPlugin)
+        p_react = PluginRegistry.get_plugin_for_file("components/Button.tsx")
+        assert isinstance(p_react, ReactReduxPlugin)
 
-    p_mdx = PluginRegistry.get_plugin_for_file("docs/Intro.mdx")
-    assert isinstance(p_mdx, StorybookPlugin)
+        p_mdx = PluginRegistry.get_plugin_for_file("docs/Intro.mdx")
+        assert isinstance(p_mdx, StorybookPlugin)
+
+    # Built-in plugins MUST be intact after temporary_registry() exit (ECS-021, ECS-100)
+    assert isinstance(PluginRegistry.get_plugin_for_file("infra/main.tf"), TerraformPlugin)
+    assert isinstance(PluginRegistry.get_plugin_for_file("OrderService.cs"), CSharpPlugin)
 
 
 def test_csharp_plugin_extraction() -> None:

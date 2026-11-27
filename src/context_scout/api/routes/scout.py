@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
+import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator
 from typing import Annotated, Any
 
+import anyio
 import psycopg.errors
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from context_scout.agents.domain_registry import DomainRegistry
@@ -60,6 +63,8 @@ from context_scout.telemetry import ScoutTelemetryTracer
 from context_scout.telemetry.prometheus_metrics import get_prometheus_registry
 
 logger = logging.getLogger(__name__)
+
+SSE_HEARTBEAT_INTERVAL_SECONDS: float = 15.0
 
 router = APIRouter(tags=["Scout"])
 
@@ -474,6 +479,7 @@ def query_scout(
 )
 async def stream_scout(
     request: ScoutStreamRequest,
+    http_request: Request,
     principal: Annotated[PrincipalContext, Depends(get_principal_context)],
     registry: Annotated[DomainRegistry, Depends(get_domain_registry)],
     repo: Annotated[Any, Depends(get_repository)],
@@ -485,9 +491,11 @@ async def stream_scout(
         active_trace_id = request.trace_id or f"trace_{uuid.uuid4().hex[:12]}"
         t0 = time.perf_counter()
 
-        # Step 1: Configured guardrail prompt-injection evaluation
+        # Step 1: Configured guardrail prompt-injection evaluation (offloaded from event loop)
         guardrail = get_guardrail_provider()
-        decision = guardrail.evaluate(request.query, principal=principal)
+        decision = await anyio.to_thread.run_sync(
+            lambda: guardrail.evaluate(request.query, principal=principal)
+        )
         if not decision.passed:
             get_prometheus_registry().record_query_outcome(
                 tenant_id=principal.tenant_id,
@@ -495,14 +503,16 @@ async def stream_scout(
                 outcome="blocked",
                 reason_code="prompt_injection",
             )
-            get_audit_chain_service().record_event(
-                principal=principal,
-                domain_id=request.domain_id,
-                event_type="scout.guardrail.block",
-                severity="WARNING",
-                resource_uri="/api/v1/scout/stream",
-                outcome="deny",
-                payload={"trace_id": active_trace_id},
+            await anyio.to_thread.run_sync(
+                lambda: get_audit_chain_service().record_event(
+                    principal=principal,
+                    domain_id=request.domain_id,
+                    event_type="scout.guardrail.block",
+                    severity="WARNING",
+                    resource_uri="/api/v1/scout/stream",
+                    outcome="deny",
+                    payload={"trace_id": active_trace_id},
+                )
             )
             s1_diag = InsufficientContextDiagnostic(
                 trace_id=active_trace_id,
@@ -553,9 +563,15 @@ async def stream_scout(
 
         loop = asyncio.get_running_loop()
         event_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        cancel_event = threading.Event()
 
         def push_stage_event(ev: dict[str, Any]) -> None:
-            loop.call_soon_threadsafe(event_queue.put_nowait, ev)
+            if cancel_event.is_set() or loop.is_closed():
+                return
+            try:
+                loop.call_soon_threadsafe(event_queue.put_nowait, ev)
+            except RuntimeError:
+                return
 
         async def run_worker() -> ImplementationContextPack | InsufficientContextDiagnostic:
             try:
@@ -607,134 +623,159 @@ async def stream_scout(
                     graph_mode=request.graph_mode,
                 )
             finally:
-                loop.call_soon_threadsafe(event_queue.put_nowait, None)
+                if not loop.is_closed():
+                    with contextlib.suppress(RuntimeError):
+                        loop.call_soon_threadsafe(event_queue.put_nowait, None)
 
         worker_task = asyncio.create_task(run_worker())
         completed_stages: set[int] = set()
         failed_stages: set[int] = set()
         bounce_emitted = False
 
-        while True:
-            ev = await event_queue.get()
-            if ev is None:
-                break
-
-            ev_type = str(ev.get("event_type", ""))
-            if ev_type == "stage_update":
-                stage_num = int(ev.get("stage", 1))
-                raw_status = str(ev.get("status", "completed"))
-                if raw_status == "in_progress":
-                    continue
-                stage_status = "failed" if raw_status == "failed" else "completed"
-
-                # Backfill omitted lower stages before emitting later stages (e.g. federated_all)
-                scopes_label = (
-                    ", ".join(principal.allowed_scopes) if principal.allowed_scopes else "none"
-                )
-                for req_stage in range(1, min(stage_num, 4)):
-                    if req_stage not in completed_stages and req_stage not in failed_stages:
-                        elapsed_ms = max(1, int((time.perf_counter() - t0) * 1000))
-                        if req_stage == 1:
-                            fill_detail = (
-                                f"Screened domain '{request.domain_id}' under PostgreSQL 17 RLS "
-                                f"(scopes: {scopes_label}) in {elapsed_ms} ms"
-                            )
-                        elif req_stage == 2:
-                            fill_detail = (
-                                f"Local Gemma 4 synthesis completed for '{request.domain_id}' "
-                                f"at $0 paid tokens in {elapsed_ms} ms"
-                            )
-                        else:
-                            fill_detail = (
-                                f"Evaluated AST closure and citation grounding for "
-                                f"'{request.domain_id}' in {elapsed_ms} ms"
-                            )
-                        fill_ev = SSEStageEvent(
-                            stage=req_stage,
-                            stage_name=stage_titles[req_stage],
-                            status="completed",
-                            details=fill_detail,
-                            elapsed_ms=float(elapsed_ms),
-                        )
-                        yield f"event: stage_update\ndata: {fill_ev.model_dump_json()}\n\n"
-                        completed_stages.add(req_stage)
-
-                if stage_num in completed_stages or stage_num in failed_stages:
-                    continue
-
-                resolved_name = (
-                    stage_titles.get(stage_num, f"Stage {stage_num}")
-                    if is_federated
-                    else str(
-                        ev.get("stage_name") or stage_titles.get(stage_num, f"Stage {stage_num}")
+        try:
+            while True:
+                if await http_request.is_disconnected():
+                    cancel_event.set()
+                    worker_task.cancel()
+                    return
+                try:
+                    ev = await asyncio.wait_for(
+                        event_queue.get(),
+                        timeout=max(0.01, float(SSE_HEARTBEAT_INTERVAL_SECONDS)),
                     )
-                )
-                live_elapsed = round((time.perf_counter() - t0) * 1000, 2)
-                raw_conf = ev.get("confidence")
-                stage_conf: StageConfidence | None = (
-                    StageConfidence.model_validate(raw_conf) if isinstance(raw_conf, dict) else None
-                )
-                if stage_conf is None and stage_num == 1:
-                    parsed_plan = decompose_query_facets(request.query)
-                    rls_count = len(principal.allowed_scopes)
-                    stage_conf = StageConfidence.from_score(
-                        stage=1,
-                        stage_name="Stage 1: Security, Auth & Intent",
-                        score=1.0 if rls_count > 0 else 0.65,
-                        signals={
-                            "rls_scopes_count": rls_count,
-                            "injection_threat_score": 0.0,
-                            "facet_count": len(parsed_plan.facets),
-                            "requested_cardinality": parsed_plan.requested_cardinality or 0,
-                        },
-                        summary=(
-                            f"RLS enforced ({rls_count} scopes), "
-                            f"{len(parsed_plan.facets)} facet(s) parsed."
+                except TimeoutError:
+                    if await http_request.is_disconnected():
+                        cancel_event.set()
+                        worker_task.cancel()
+                        return
+                    yield ": keep-alive\n\n"
+                    continue
+                if ev is None:
+                    break
+
+                ev_type = str(ev.get("event_type", ""))
+                if ev_type == "stage_update":
+                    stage_num = int(ev.get("stage", 1))
+                    raw_status = str(ev.get("status", "completed"))
+                    if raw_status == "in_progress":
+                        continue
+                    stage_status = "failed" if raw_status == "failed" else "completed"
+
+                    # Backfill omitted lower stages before emitting later stages
+                    scopes_label = (
+                        ", ".join(principal.allowed_scopes) if principal.allowed_scopes else "none"
+                    )
+                    for req_stage in range(1, min(stage_num, 4)):
+                        if req_stage not in completed_stages and req_stage not in failed_stages:
+                            elapsed_ms = max(1, int((time.perf_counter() - t0) * 1000))
+                            if req_stage == 1:
+                                fill_detail = (
+                                    f"Screened '{request.domain_id}' under PostgreSQL 17 RLS "
+                                    f"(scopes: {scopes_label}) in {elapsed_ms} ms"
+                                )
+                            elif req_stage == 2:
+                                fill_detail = (
+                                    f"Local Gemma 4 synthesis completed for '{request.domain_id}' "
+                                    f"at $0 paid tokens in {elapsed_ms} ms"
+                                )
+                            else:
+                                fill_detail = (
+                                    f"Evaluated AST closure and citation grounding for "
+                                    f"'{request.domain_id}' in {elapsed_ms} ms"
+                                )
+                            fill_ev = SSEStageEvent(
+                                stage=req_stage,
+                                stage_name=stage_titles[req_stage],
+                                status="completed",
+                                details=fill_detail,
+                                elapsed_ms=float(elapsed_ms),
+                            )
+                            yield f"event: stage_update\ndata: {fill_ev.model_dump_json()}\n\n"
+                            completed_stages.add(req_stage)
+
+                    if stage_num in completed_stages or stage_num in failed_stages:
+                        continue
+
+                    resolved_name = (
+                        stage_titles.get(stage_num, f"Stage {stage_num}")
+                        if is_federated
+                        else str(
+                            ev.get("stage_name")
+                            or stage_titles.get(stage_num, f"Stage {stage_num}")
+                        )
+                    )
+                    live_elapsed = round((time.perf_counter() - t0) * 1000, 2)
+                    raw_conf = ev.get("confidence")
+                    stage_conf: StageConfidence | None = (
+                        StageConfidence.model_validate(raw_conf)
+                        if isinstance(raw_conf, dict)
+                        else None
+                    )
+                    if stage_conf is None and stage_num == 1:
+                        parsed_plan = decompose_query_facets(request.query)
+                        rls_count = len(principal.allowed_scopes)
+                        stage_conf = StageConfidence.from_score(
+                            stage=1,
+                            stage_name="Stage 1: Security, Auth & Intent",
+                            score=1.0 if rls_count > 0 else 0.65,
+                            signals={
+                                "rls_scopes_count": rls_count,
+                                "injection_threat_score": 0.0,
+                                "facet_count": len(parsed_plan.facets),
+                                "requested_cardinality": parsed_plan.requested_cardinality or 0,
+                            },
+                            summary=(
+                                f"RLS enforced ({rls_count} scopes), "
+                                f"{len(parsed_plan.facets)} facet(s) parsed."
+                            ),
+                        )
+                    raw_trace = ev.get("stage_trace")
+                    stage_trace: StageExecutionTrace | None = (
+                        StageExecutionTrace.model_validate(raw_trace)
+                        if isinstance(raw_trace, dict)
+                        else None
+                    )
+                    stage_ev = SSEStageEvent(
+                        stage=stage_num,
+                        stage_name=resolved_name,
+                        status=stage_status,  # type: ignore[arg-type]
+                        details=str(ev.get("details") or ""),
+                        confidence=stage_conf,
+                        stage_trace=stage_trace,
+                        elapsed_ms=live_elapsed,
+                    )
+                    yield f"event: stage_update\ndata: {stage_ev.model_dump_json()}\n\n"
+
+                    if stage_status == "completed":
+                        completed_stages.add(stage_num)
+                    else:
+                        failed_stages.add(stage_num)
+
+                elif ev_type == "bounce_back":
+                    bounce_emitted = True
+                    fb = str(
+                        ev.get("feedback") or "Pre-flight check triggered $0 local self-correction"
+                    )
+                    bb = SSEBounceBackEvent(
+                        stage=int(ev.get("stage", 3)),
+                        status="bounce_back_triggered",
+                        feedback=fb,
+                        bounce_count=1,
+                        remediation_action=(
+                            "Re-querying local model with deterministic pre-flight symbol feedback"
+                        ),
+                        paid_tokens_spent=0,
+                        cost_usd=0.0,
+                        details=str(
+                            ev.get("details")
+                            or "$0 local bounce-back loop triggered to resolve missing symbols"
                         ),
                     )
-                raw_trace = ev.get("stage_trace")
-                stage_trace: StageExecutionTrace | None = (
-                    StageExecutionTrace.model_validate(raw_trace)
-                    if isinstance(raw_trace, dict)
-                    else None
-                )
-                stage_ev = SSEStageEvent(
-                    stage=stage_num,
-                    stage_name=resolved_name,
-                    status=stage_status,  # type: ignore[arg-type]
-                    details=str(ev.get("details") or ""),
-                    confidence=stage_conf,
-                    stage_trace=stage_trace,
-                    elapsed_ms=live_elapsed,
-                )
-                yield f"event: stage_update\ndata: {stage_ev.model_dump_json()}\n\n"
-
-                if stage_status == "completed":
-                    completed_stages.add(stage_num)
-                else:
-                    failed_stages.add(stage_num)
-
-            elif ev_type == "bounce_back":
-                bounce_emitted = True
-                fb = str(
-                    ev.get("feedback") or "Pre-flight check triggered $0 local self-correction"
-                )
-                bb = SSEBounceBackEvent(
-                    stage=int(ev.get("stage", 3)),
-                    status="bounce_back_triggered",
-                    feedback=fb,
-                    bounce_count=1,
-                    remediation_action=(
-                        "Re-querying local model with deterministic pre-flight symbol feedback"
-                    ),
-                    paid_tokens_spent=0,
-                    cost_usd=0.0,
-                    details=str(
-                        ev.get("details")
-                        or "$0 local bounce-back loop triggered to resolve missing symbols"
-                    ),
-                )
-                yield f"event: bounce_back\ndata: {bb.model_dump_json()}\n\n"
+                    yield f"event: bounce_back\ndata: {bb.model_dump_json()}\n\n"
+        finally:
+            cancel_event.set()
+            if not worker_task.done():
+                worker_task.cancel()
 
         try:
             result = await worker_task
@@ -860,12 +901,16 @@ async def stream_scout(
                 yield f"event: stage_update\ndata: {s4.model_dump_json()}\n\n"
 
             savings = _build_token_savings(result)
-            _record_live_scout_telemetry(repo, registry, principal, result, latency_ms)
-            _record_scout_metrics_and_audit(
-                principal=principal,
-                domain_id=request.domain_id,
-                result=result,
-                endpoint="/api/v1/scout/stream",
+            await anyio.to_thread.run_sync(
+                _record_live_scout_telemetry, repo, registry, principal, result, latency_ms
+            )
+            await anyio.to_thread.run_sync(
+                lambda: _record_scout_metrics_and_audit(
+                    principal=principal,
+                    domain_id=request.domain_id,
+                    result=result,
+                    endpoint="/api/v1/scout/stream",
+                )
             )
 
             ready_event = SSEContextPackReadyEvent(
@@ -876,11 +921,13 @@ async def stream_scout(
             )
             yield f"event: context_pack_ready\ndata: {ready_event.model_dump_json()}\n\n"
         else:
-            _record_scout_metrics_and_audit(
-                principal=principal,
-                domain_id=request.domain_id,
-                result=result,
-                endpoint="/api/v1/scout/stream",
+            await anyio.to_thread.run_sync(
+                lambda: _record_scout_metrics_and_audit(
+                    principal=principal,
+                    domain_id=request.domain_id,
+                    result=result,
+                    endpoint="/api/v1/scout/stream",
+                )
             )
             if 4 not in failed_stages and 4 not in completed_stages:
                 s4_fail = SSEStageEvent(

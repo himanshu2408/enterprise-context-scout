@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import difflib
 import logging
 import re
@@ -131,18 +132,70 @@ def _synthesize_in_memory_pack_diff(pack: ImplementationContextPack) -> str:
     return diff_text
 
 
+def _validate_python_hunk_syntax(patch_diff: str) -> tuple[bool, str]:
+    """Parses added/context hunks for .py files purely in memory with ast.parse."""
+    current_target = ""
+    hunk_lines: list[str] = []
+    hunk_idx = 0
+
+    def _check_hunk() -> tuple[bool, str] | None:
+        if not current_target.endswith(".py") or not hunk_lines:
+            return None
+        snippet = textwrap.dedent("\n".join(hunk_lines))
+        if not snippet.strip():
+            return None
+        try:
+            ast.parse(snippet, filename=f"{current_target}#hunk{hunk_idx}")
+        except SyntaxError as exc:
+            return (
+                False,
+                f"Python syntax error in {current_target} hunk {hunk_idx} "
+                f"(line {exc.lineno}): {exc.msg}",
+            )
+        return None
+
+    for raw_line in patch_diff.splitlines():
+        if raw_line.startswith("+++ b/"):
+            err = _check_hunk()
+            if err is not None:
+                return err
+            current_target = raw_line[6:].strip()
+            hunk_lines = []
+            continue
+        if raw_line.startswith("--- a/"):
+            err = _check_hunk()
+            if err is not None:
+                return err
+            hunk_lines = []
+            continue
+        if raw_line.startswith("@@ "):
+            err = _check_hunk()
+            if err is not None:
+                return err
+            hunk_idx += 1
+            hunk_lines = []
+            continue
+        if raw_line.startswith("+") or raw_line.startswith(" "):
+            hunk_lines.append(raw_line[1:])
+
+    err = _check_hunk()
+    if err is not None:
+        return err
+    return (True, "In-memory Python AST hunk syntax check passed.")
+
+
 def _verify_diff_structure_in_memory(
     patch_diff: str, expected_targets: list[str]
-) -> tuple[bool, str]:
-    """Validates unified diff headers and path traversal purely in memory (zero host execution)."""
+) -> tuple[bool, bool, str]:
+    """Validates unified diff headers, path traversal, and Python syntax in memory (ASI05)."""
     if not patch_diff or not patch_diff.strip():
-        return (False, "Empty handoff diff rejected.")
+        return (False, False, "Empty handoff diff rejected.")
     if "--- a/" not in patch_diff or "+++ b/" not in patch_diff or "@@ " not in patch_diff:
-        return (False, "Malformed unified diff structure.")
+        return (False, False, "Malformed unified diff structure.")
 
     plus_targets = re.findall(r"^\+\+\+ b/(.+)$", patch_diff, flags=re.MULTILINE)
     if not plus_targets:
-        return (False, "Unified diff lacks '+++ b/<file>' target header.")
+        return (False, False, "Unified diff lacks '+++ b/<file>' target header.")
 
     for raw_target in plus_targets:
         cleaned = raw_target.strip()
@@ -153,16 +206,22 @@ def _verify_diff_structure_in_memory(
             or "\r" in cleaned
             or "\n" in cleaned
         ):
-            return (False, f"Unsafe target path rejected in diff: {cleaned!r}")
+            return (False, False, f"Unsafe target path rejected in diff: {cleaned!r}")
         parts = PurePosixPath(cleaned).parts
         if any(part in {".", ".."} for part in parts):
-            return (False, f"Path traversal rejected in diff target: {cleaned!r}")
+            return (False, False, f"Path traversal rejected in diff target: {cleaned!r}")
         if expected_targets and cleaned not in expected_targets:
-            return (False, f"Diff target '{cleaned}' not in previewed target_files.")
+            return (False, False, f"Diff target '{cleaned}' not in previewed target_files.")
+
+    syntax_ok, syntax_msg = _validate_python_hunk_syntax(patch_diff)
+    if not syntax_ok:
+        return (False, False, syntax_msg)
 
     return (
         True,
-        "Verified unified diff structure in memory (host patching and pytest disabled per ASI05).",
+        True,
+        "Confirmed diff structure & Python AST syntax verified for client-side git apply "
+        "(host working tree unchanged; pytest disabled per OWASP ASI05).",
     )
 
 
@@ -421,7 +480,9 @@ def apply_handoff(
         )
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
-    struct_ok, details = _verify_diff_structure_in_memory(record.patch_diff, record.target_files)
+    struct_ok, syntax_ok, details = _verify_diff_structure_in_memory(
+        record.patch_diff, record.target_files
+    )
     executor = GeminiImplementationExecutor(
         model_id=record.model_id,
         require_confirmation=False,
@@ -446,6 +507,9 @@ def apply_handoff(
             "model_id": record.model_id,
             "target_files_count": len(record.target_files),
             "verification_passed": struct_ok,
+            "syntax_valid": syntax_ok,
+            "execution_mode": "client_side_git_apply",
+            "server_files_mutated": False,
         },
     )
 
@@ -453,9 +517,13 @@ def apply_handoff(
         success=struct_ok,
         confirmed=True,
         target_files=record.target_files,
-        lint_passed=struct_ok,
+        lint_passed=syntax_ok,
         tests_passed=struct_ok,
         verification_passed=struct_ok,
         details=details,
         telemetry=telemetry,
+        execution_mode="client_side_git_apply",
+        server_files_mutated=False,
+        confirmed_patch_diff=record.patch_diff if struct_ok else "",
+        syntax_valid=syntax_ok,
     )

@@ -662,7 +662,20 @@ class VLLMRerankerProvider:
         self.provider_mode = provider_mode
         self.timeout_seconds = timeout_seconds
         self.instruction = instruction or self._spec.default_instruction
-        self._http_client = http_client
+        self._owns_client = http_client is None
+        self._http_client: httpx.Client = (
+            http_client if http_client is not None else httpx.Client(timeout=self.timeout_seconds)
+        )
+
+    def close(self) -> None:
+        if self._owns_client and not self._http_client.is_closed:
+            self._http_client.close()
+
+    def __enter__(self) -> VLLMRerankerProvider:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
 
     @property
     def model_id(self) -> str:
@@ -699,12 +712,9 @@ class VLLMRerankerProvider:
         return headers
 
     def _post_json(self, url: str, payload: dict[str, Any]) -> httpx.Response:
-        if self._http_client is not None:
-            return self._http_client.post(
-                url, json=payload, headers=self._headers(), timeout=self.timeout_seconds
-            )
-        with httpx.Client(timeout=self.timeout_seconds) as client:
-            return client.post(url, json=payload, headers=self._headers())
+        return self._http_client.post(
+            url, json=payload, headers=self._headers(), timeout=self.timeout_seconds
+        )
 
     def _request_rerank(self, formatted_query: str, documents: list[str]) -> list[float]:
         urls = self._build_candidate_urls("rerank")

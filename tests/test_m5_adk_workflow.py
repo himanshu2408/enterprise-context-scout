@@ -1054,7 +1054,7 @@ def test_git_worktree_sandbox_lifecycle_and_human_confirmation(temp_git_repo: Pa
     base_file = temp_git_repo / "src" / "service_core" / "order_flow_imbalance.py"
     assert "Human confirmation verified" not in base_file.read_text(encoding="utf-8")
 
-    # 2. Confirmed execution merges patch into active branch
+    # 2. Confirmed execution merges patch into active branch and persists after sandbox exit
     with GitWorktreeSandbox(repo_root=temp_git_repo, require_confirmation=True) as sandbox:
         ok, _msg = sandbox.apply_patch(patch)
         assert ok is True
@@ -1066,6 +1066,9 @@ def test_git_worktree_sandbox_lifecycle_and_human_confirmation(temp_git_repo: Pa
         assert sandbox.worktree_dir is not None
         wt_file = sandbox.worktree_dir / "src" / "service_core" / "order_flow_imbalance.py"
         assert "Human confirmation verified" in wt_file.read_text(encoding="utf-8")
+
+    # After __exit__, merged changes must persist on temp_git_repo's active branch
+    assert "Human confirmation verified" in base_file.read_text(encoding="utf-8")
 
 
 # =============================================================================
