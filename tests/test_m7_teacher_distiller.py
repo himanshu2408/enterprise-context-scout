@@ -365,3 +365,56 @@ class TestTeacherDistillerPipeline:
             valid_split, is_research=False
         )
         assert len(single_mod_a) == len(valid_split) and single_mod_b == []
+
+    def test_distill_code_domain_excludes_colliding_canonical_stems(
+        self, distiller: TeacherDistiller, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression test for ECS-172.
+
+        When a non-holdout module shares a canonical file stem with a holdout
+        module (e.g. api/routes/scim.py vs security/scim.py),
+        distill_code_domain must exclude the colliding train file so
+        verify_zero_leakage never fails on stem:<repo>:<name> overlap.
+        """
+        all_files = distiller.get_all_code_files("code_architecture_scout")
+        all_symbols = distiller.get_all_ast_symbols("code_architecture_scout")
+        target_paths = {
+            "src/context_scout/security/scim.py",
+            "src/context_scout/api/routes/scim.py",
+            "src/context_scout/retrieval/zoekt/client.py",
+            "src/context_scout/ops/state_reconciler.py",
+            "src/context_scout/db/repos/postgres_repo.py",
+        }
+        code_files = [f for f in all_files if f.file_path in target_paths]
+        found_paths = {f.file_path for f in code_files}
+        assert "src/context_scout/security/scim.py" in found_paths
+        assert "src/context_scout/api/routes/scim.py" in found_paths
+        target_file_ids = {f.file_id for f in code_files}
+        ast_symbols = [s for s in all_symbols if s.file_id in target_file_ids]
+
+        monkeypatch.setattr(distiller, "get_all_code_files", lambda _d: code_files)
+        monkeypatch.setattr(distiller, "get_all_ast_symbols", lambda _d: ast_symbols)
+        monkeypatch.setattr(distiller, "get_execution_telemetry_misses", lambda _d: [])
+
+        train_items, holdout_items = distiller.distill_code_domain(
+            domain_id="code_architecture_scout", num_samples=12
+        )
+        valid_items, eval_items = TeacherDistiller._split_holdout_into_valid_and_eval(
+            holdout_items, is_research=False
+        )
+        assert len(train_items) > 0 and len(valid_items) > 0
+        train_text = json.dumps(train_items)
+        assert "api/routes/scim.py" not in train_text
+
+        p_train = tmp_path / "train.jsonl"
+        p_valid = tmp_path / "valid.jsonl"
+        p_eval = tmp_path / "eval.jsonl"
+        TeacherDistiller._write_jsonl(p_train, train_items)
+        TeacherDistiller._write_jsonl(p_valid, valid_items)
+        TeacherDistiller._write_jsonl(p_eval, eval_items)
+        assert (
+            TeacherDistiller.verify_zero_leakage(
+                p_train, p_valid, eval_path=p_eval, domain_id="code_architecture_scout"
+            )
+            is True
+        )
