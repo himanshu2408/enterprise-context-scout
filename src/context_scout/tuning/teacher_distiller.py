@@ -955,7 +955,7 @@ class TeacherDistiller:
         if not valid_symbols:
             raise RuntimeError("Zero valid Python AST symbols found in database")
 
-        # Partition symbols upfront strictly by module prefix
+        # Partition symbols upfront strictly by module prefix and canonical file stem
         eval_symbols = [
             s
             for s in valid_symbols
@@ -963,12 +963,28 @@ class TeacherDistiller:
                 files_by_id[s.file_id].file_path.startswith(p) for p in CODE_EVAL_MODULE_PREFIXES
             )
         ]
+        eval_stems = {
+            stem
+            for s in eval_symbols
+            if (
+                stem := self._canonical_file_stem(
+                    files_by_id[s.file_id].file_path,
+                    repo_name=files_by_id[s.file_id].repo_name,
+                )
+            )
+            is not None
+        }
         train_symbols = [
             s
             for s in valid_symbols
             if not any(
                 files_by_id[s.file_id].file_path.startswith(p) for p in CODE_EVAL_MODULE_PREFIXES
             )
+            and self._canonical_file_stem(
+                files_by_id[s.file_id].file_path,
+                repo_name=files_by_id[s.file_id].repo_name,
+            )
+            not in eval_stems
         ]
 
         valid_target_count = max(1, round(num_samples * (1.0 - self.train_split_ratio)))

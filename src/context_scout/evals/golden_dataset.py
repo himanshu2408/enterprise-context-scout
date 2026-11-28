@@ -163,10 +163,13 @@ def get_default_golden_suite() -> GoldenBenchmarkSuite:
                 "prompt injection and secret egress?"
             ),
             domain_id="code_architecture_scout",
-            ground_truth_files=["src/context_scout/security/guardrails.py"],
+            ground_truth_files=[
+                "src/context_scout/security/guardrails_pkg/injection_rules.py",
+                "src/context_scout/security/guardrails_pkg/secret_redactor.py",
+            ],
             ground_truth_symbols=[
-                "context_scout.security.guardrails.PromptInjectionSanitizer",
-                "context_scout.security.guardrails.SecretRedactor",
+                "context_scout.security.guardrails_pkg.injection_rules.PromptInjectionSanitizer",
+                "context_scout.security.guardrails_pkg.secret_redactor.SecretRedactor",
             ],
             ast_1hop_reference_files=[],
             ast_1hop_reference_symbols=[],

@@ -2656,6 +2656,10 @@ def cmd_seed_demo(
     target_code_paths: list[Path] = []
     src_pkg = root / "src" / "context_scout"
     if quick:
+        for top_py in ("__init__.py", "config.py"):
+            top_path = src_pkg / top_py
+            if top_path.is_file():
+                target_code_paths.append(top_path)
         for sub in (
             "api",
             "security",
