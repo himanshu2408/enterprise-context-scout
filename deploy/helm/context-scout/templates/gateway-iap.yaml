@@ -51,6 +51,9 @@ spec:
         - path:
             type: PathPrefix
             value: /.well-known/mcp
+        - path:
+            type: PathPrefix
+            value: /.well-known/oauth-protected-resource
       backendRefs:
         - name: {{ include "context-scout.fullname" . }}-api
           port: {{ int .Values.api.service.port }}

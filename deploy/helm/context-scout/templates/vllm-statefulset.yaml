@@ -58,8 +58,13 @@ spec:
             - {{ printf "%d" (int .Values.vllm.maxLoras) | quote }}
             - "--max-model-len"
             - {{ printf "%d" (int .Values.vllm.maxModelLen) | quote }}
-            - "--guided-decoding-backend"
-            - "xgrammar"
+            - "--structured-outputs-config.backend"
+            - {{ .Values.vllm.structuredOutputsBackend | default "xgrammar" | quote }}
+            {{- if .Values.vllm.reasoningParser }}
+            - "--reasoning-parser"
+            - {{ .Values.vllm.reasoningParser | quote }}
+            - "--structured-outputs-config.enable_in_reasoning=True"
+            {{- end }}
             - "--enable-prefix-caching"
             - "--gpu-memory-utilization"
             - {{ .Values.vllm.gpuMemoryUtilization | quote }}

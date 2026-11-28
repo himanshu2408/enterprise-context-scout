@@ -138,7 +138,7 @@ services:
       - "--enable-lora"
       - "--max-lora-rank"
       - "32"
-      - "--guided-decoding-backend"
+      - "--structured-outputs-config.backend"
       - "xgrammar"
       - "--enable-prefix-caching"
     healthcheck:

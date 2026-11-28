@@ -1,17 +1,17 @@
 {
-  "timestamp": "2026-11-23T00:33:08.035914+00:00",
+  "timestamp": "2026-11-28T04:03:22.511885+00:00",
   "all_passed": true,
   "metrics": {
     "zero_touch_sufficiency_rate": {
       "metric_id": "zero_touch_sufficiency_rate",
       "display_name": "Zero-Touch Sufficiency Rate",
-      "measured_value": 85.71,
+      "measured_value": 100.0,
       "target_threshold": 85.0,
       "comparator": ">=",
       "passed": true,
       "details": {
         "total_tasks": 7,
-        "successful_tasks": 6,
+        "successful_tasks": 7,
         "task_results": [
           {
             "task_id": "CODE-01",
@@ -22,7 +22,6 @@
               "src/context_scout/agents/citation_gate.py",
               "src/context_scout/agents/preflight_gate.py",
               "src/context_scout/ast_engine/extractor.py",
-              "src/context_scout/config.py",
               "src/context_scout/db/schema.py",
               "src/context_scout/schemas/contracts.py"
             ]
@@ -33,9 +32,9 @@
             "missing_requests": 0,
             "patch_applied": true,
             "target_files": [
+              "src/context_scout/agents/scout_workflow.py",
               "src/context_scout/ast_engine/dependency_expander.py",
               "src/context_scout/ast_engine/deterministic_slicer.py",
-              "src/context_scout/cli.py",
               "src/context_scout/schemas/contracts.py"
             ]
           },
@@ -47,9 +46,7 @@
             "target_files": [
               "src/context_scout/api/dependencies.py",
               "src/context_scout/api/routes/health.py",
-              "src/context_scout/cli.py",
               "src/context_scout/db/session.py",
-              "src/context_scout/mcp_servers/doc_corpus_mcp.py",
               "src/context_scout/schemas/contracts.py",
               "src/context_scout/security/rbac.py"
             ]
@@ -60,12 +57,9 @@
             "missing_requests": 0,
             "patch_applied": true,
             "target_files": [
-              "src/context_scout/evals/harness.py",
               "src/context_scout/security/guardrails.py",
               "src/context_scout/security/mutation_gate.py",
-              "src/context_scout/security/pre_index_scrubber.py",
-              "tests/test_adversarial_security.py",
-              "tests/test_m4_security.py"
+              "src/context_scout/security/pre_index_scrubber.py"
             ]
           },
           {
@@ -75,32 +69,22 @@
             "patch_applied": true,
             "target_files": [
               "src/context_scout/agents/llm_backend.py",
-              "src/context_scout/api/dependencies.py",
               "src/context_scout/api/routes/scout.py",
-              "src/context_scout/plugins/base.py",
-              "src/context_scout/schemas/contracts.py",
-              "src/context_scout/telemetry/otel.py",
-              "tests/test_gemini_executor.py"
+              "src/context_scout/api/schemas.py",
+              "src/context_scout/security/guardrails.py",
+              "src/context_scout/telemetry/otel.py"
             ]
           },
           {
             "task_id": "FED-01",
-            "success": false,
+            "success": true,
             "missing_requests": 0,
-            "patch_applied": false,
+            "patch_applied": true,
             "target_files": [
-              "src/context_scout/agents/domain_registry.py",
               "src/context_scout/api/routes/health.py",
-              "src/context_scout/cli.py",
+              "src/context_scout/db/repositories.py",
               "src/context_scout/db/session.py",
-              "src/context_scout/mcp_servers/doc_corpus_mcp.py",
-              "src/context_scout/queue/task_queue.py",
-              "src/context_scout/schemas/contracts.py",
-              "src/context_scout/serving/adapter_sync_sidecar.py",
-              "tests/fixtures/mock_generators.py",
-              "tests/test_l9_mixed_tenant_50_sse_mcp_concurrency.py",
-              "tests/test_m2_01_zoekt_overlays_ownership.py",
-              "tests/test_m2_03_side_effects_contracts_wiki.py"
+              "src/context_scout/schemas/contracts.py"
             ]
           },
           {
@@ -113,6 +97,7 @@
               "src/context_scout/agents/claim_verifier.py",
               "src/context_scout/agents/open_weights_vllm_executor.py",
               "src/context_scout/agents/preflight_gate.py",
+              "src/context_scout/agents/scout_workflow.py",
               "src/context_scout/api/routes/scout.py",
               "src/context_scout/schemas/contracts.py"
             ]
@@ -171,24 +156,24 @@
       "comparator": "==",
       "passed": true,
       "details": {
-        "total_code_slices": 96,
-        "valid_code_slices": 96,
-        "total_doc_citations": 64,
-        "valid_doc_citations": 64,
+        "total_code_slices": 99,
+        "valid_code_slices": 99,
+        "total_doc_citations": 48,
+        "valid_doc_citations": 48,
         "failures": []
       }
     },
     "frontier_token_savings_ratio": {
       "metric_id": "frontier_token_savings_ratio",
       "display_name": "Frontier Token Savings Ratio",
-      "measured_value": 92.24,
+      "measured_value": 91.36,
       "target_threshold": 80.0,
       "comparator": ">=",
       "passed": true,
       "details": {
-        "total_context_pack_tokens_sent": 77365,
-        "total_local_tokens_explored": 996609,
-        "tokens_saved": 919244
+        "total_context_pack_tokens_sent": 81234,
+        "total_local_tokens_explored": 939784,
+        "tokens_saved": 858550
       }
     },
     "rbac_zero_leakage_rate": {
@@ -633,7 +618,7 @@
       }
     }
   },
-  "summary": "Milestone 6 Evaluation Pipeline: ALL GATES PASSED\nZero-Touch Sufficiency Rate: 85.71% (Target: 85.0%) -> PASS\nFile & Symbol Recall@5: 100.0% (Target: 90.0%) -> PASS\nVerbatim Citation Faithfulness: 100.0% (Target: 100.0%) -> PASS\nFrontier Token Savings Ratio: 92.24% (Target: 80.0%) -> PASS\nRBAC Zero-Leakage Rate: 100.0% (Target: 100.0%) -> PASS\nPrompt-Injection Block Rate: 100.0% (Target: 95.0%) -> PASS\nTotal duration: 27615ms, OpenTelemetry spans captured: 33",
-  "total_duration_ms": 27615,
+  "summary": "Milestone 6 Evaluation Pipeline: ALL GATES PASSED\nZero-Touch Sufficiency Rate: 100.0% (Target: 85.0%) -> PASS\nFile & Symbol Recall@5: 100.0% (Target: 90.0%) -> PASS\nVerbatim Citation Faithfulness: 100.0% (Target: 100.0%) -> PASS\nFrontier Token Savings Ratio: 91.36% (Target: 80.0%) -> PASS\nRBAC Zero-Leakage Rate: 100.0% (Target: 100.0%) -> PASS\nPrompt-Injection Block Rate: 100.0% (Target: 95.0%) -> PASS\nTotal duration: 18473ms, OpenTelemetry spans captured: 33",
+  "total_duration_ms": 18473,
   "telemetry_spans_count": 33
 }

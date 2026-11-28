@@ -1,8 +1,8 @@
-# Dual-Track E2E Test Infrastructure & Statistical Evaluation Specification (`v1.0.0`)
+# Dual-Track E2E Test Infrastructure & Statistical Evaluation Specification (`v1.0.1`)
 
-> **Document Version:** `1.0.0`  
-> **Target System:** Enterprise Context Scout (`v1.0.0`)  
-> **Last Updated:** 2026-11-24  
+> **Document Version:** `1.0.1`  
+> **Target System:** Enterprise Context Scout (`v1.0.1`)  
+> **Last Updated:** 2026-11-28  
 > **Standard:** Zero-skip verification (`0 failed, 0 skipped`) with exact Wilson / Clopper-Pearson confidence bounds and zero synthetic-as-production misrepresentation
 
 ---
@@ -16,13 +16,13 @@ Enterprise Context Scout enforces a zero-skip, multi-layer verification pyramid 
 1. **Zero-Skip & Zero-Fake-Fallback Integrity:** Tests never bypass PostgreSQL RLS via mocks in live database gates, never skip suites via `-k "not ..."`, and never weaken assertions to turn CI green.
 2. **Strict Tenant Isolation in Shared-State Tests:** Every database integration test provisions unique per-test `tenant_id` UUIDs (never mutating `DEFAULT_TENANT_ID`) and runs canary checks confirming cleanup leaves unrelated rows untouched.
 3. **Dual-Track Methodology:**
-   - **Deterministic Engineering Track:** `84` Python `pytest` modules (`1045` tests) + `10` TypeScript `vitest` suites (`75` tests) covering `23/23` PG17 `FORCE RLS` tables (`0001`–`0023`), 12-language AST/SCIP parsers, transitive connector ACLs, `<60s` artifact purge, 3-graph ADK orchestration, BYO-LLM/multi-LoRA safety, 60-case headless backend & Stateless HTTP MCP middleware authenticity, `OWASP ASI01`–`ASI10`, Schemathesis OpenAPI fuzzing, and PITR DR.
+   - **Deterministic Engineering Track:** `85` Python `pytest` modules (`1099` `-m "not live"` tests + `2` live Metal GPU MLX semantic evals) + `11` TypeScript `vitest` suites (`83` tests) covering `23/23` PG17 `FORCE RLS` tables (`0001`–`0024`), 12-language AST/SCIP parsers, transitive connector ACLs, `<60s` artifact purge, 3-graph ADK orchestration, BYO-LLM/multi-LoRA safety, 60-case headless backend & Stateless HTTP MCP middleware authenticity, `OWASP ASI01`–`ASI10`, Schemathesis OpenAPI fuzzing, live 4-container E2E stack (`scripts/smoke_e2e_live_stack.py`), and PITR DR.
    - **Statistical Evaluation Track:** Exact 95% Wilson and Clopper-Pearson confidence bounds across retrieval recall, citation faithfulness, 10K-page wiki freshness/conflict resolution, token economics, and mutation kill rates.
 4. **Claim Hygiene:** Every reported rate includes raw counts ($k / N$), confidence interval, execution environment, and explicit disclosure of synthetic vs. real public corpora.
 
 ---
 
-## 2. Verification Pyramid & Suite Layout (`v1.0.0`)
+## 2. Verification Pyramid & Suite Layout (`v1.0.1`)
 
 ```text
 enterprise-context-scout/
@@ -34,22 +34,25 @@ enterprise-context-scout/
 │   ├── harnesses/statistical_evaluator.py         # Clopper-Pearson, Rule of Three, Wilcoxon, Cohen's d
 │   ├── datasets/                                  # EVAL-01..EVAL-05 (unanswerable, stale, collision, answerable, BPE token A/B)
 │   └── scale_ladder/fixtures.py                   # Scale Ladder Tiers 1–3 (10 / 100 / 500 repos)
-├── tests/                                         # 84 Python test modules (1045 tests)
+├── scripts/
+│   ├── run_test_batches.py                        # Parallel 15-batch full pytest orchestrator
+│   └── smoke_e2e_live_stack.py                    # 4-image Docker + live Nginx->Uvicorn->Redis->PG17 E2E smoke
+├── tests/                                         # 85 Python test modules (1099 `-m "not live"` + live MLX tests)
 │   ├── test_backend_middleware_authenticity.py    # 60-case 5-category backend & Stateless HTTP MCP middleware suite
-│   ├── test_m1_alembic_rls_pools.py               # Alembic 0001–0023, Squawk PG17, 23/23 FORCE RLS
+│   ├── test_m1_alembic_rls_pools.py               # Alembic 0001–0024, Squawk PG17, 23/23 FORCE RLS
 │   ├── test_postgres_rls_live.py                  # Live PG17 cross-tenant isolation & HNSW iterative scan
 │   ├── test_m2_01..04_*.py                        # Zoekt CoW overlays, 12-lang AST/SCIP, connectors, <60s purge
 │   ├── test_m3_01_02_reranker_and_three_graph_adk.py # Cross-encoder reranker & 3-graph ADK orchestrator
-│   ├── test_m4_01_vllm_sidecar_and_asi05.py       # BYO vLLM, AdapterSyncSidecar, OWASP ASI05 zero host RCE
+│   ├── test_m4_01_vllm_sidecar_and_asi05.py       # BYO vLLM v0.34.0, AdapterSyncSidecar, OWASP ASI05 zero host RCE
 │   ├── test_m4_02_specialization_distiller_peft.py # 5-archetype specialization, rsLoRA, 0/10 CanaryGate
 │   ├── test_m5_01_02_zero_trust_iap_oidc_scim_audit_mcp.py # Cloud IAP/OIDC/SCIM 2.0, WORM audit, stateless MCP
 │   ├── test_owasp_asi01_to_asi10_matrix.py        # Unified OWASP ASI01–ASI10 adversarial security matrix
 │   ├── test_m2_schemathesis_openapi_fuzz.py       # Schemathesis OpenAPI fuzzing (31 ops / 62 subtests)
 │   ├── test_l9_mixed_tenant_50_sse_mcp_concurrency.py # 50 concurrent mixed-tenant SSE + MCP sessions
-│   ├── test_m6_01_containers_helm_tf_aibom.py     # Containers, Helm, Terraform multi-cloud parity, AI-BOM
+│   ├── test_m6_01_containers_helm_tf_aibom.py     # Containers, Helm, 4-cloud Terraform parity, 544-component AI-BOM
 │   ├── test_m6_02_pitr_reconciler_and_chaos_dr.py # Redis quota failover, vLLM outage fallback, PITR DR
-│   └── test_release_readiness_and_seed_demo.py    # 1.0.0 version alignment, seed-demo, tracked-file hygiene
-└── web-ui/src/__tests__/                          # 10 Vitest suites (75 tests, incl. WCAG 2.2 AA axe audit)
+│   └── test_release_readiness_and_seed_demo.py    # 1.0.1 version alignment, seed-demo, tracked-file hygiene
+└── web-ui/src/__tests__/                          # 11 Vitest suites (83 tests, incl. WCAG 2.2 AA axe audit)
 ```
 
 ---
@@ -57,7 +60,9 @@ enterprise-context-scout/
 ## 3. Primary Verification Commands
 
 ```bash
-# 1. Full zero-skip verification gate (ruff, mypy --strict, Squawk PG17, all pytest, web-ui lint/tsc/vitest/build)
+# 1. Full zero-skip verification gate (ruff, mypy --strict, Squawk PG17, 15-batch pytest, web-ui)
+uv run python scripts/run_test_batches.py --mode full --workers 4
+uv run python scripts/smoke_e2e_live_stack.py
 bash .agents/skills/gate-verify/scripts/run_compact_gates.sh --scope all
 
 # 2. Headless backend & Stateless HTTP MCP middleware authenticity suite (60 cases, 5 categories)
@@ -116,7 +121,7 @@ npm --prefix web-ui run lint && npm --prefix web-ui run typecheck && npm --prefi
 ## 6. Quality & Release Gates
 
 All release candidates must pass [`reports/v1_ga_release_scorecard.md`](reports/v1_ga_release_scorecard.md) gates `L1`–`L12`:
-1. `uv run ruff check . && uv run ruff format --check . && uv run mypy --strict src tests` (`0` errors).
-2. `squawk --pg-version=17.0` (`0` DDL lock violations across Alembic `0002`–`0023`) and `23/23` PG17 `FORCE RLS` catalog verification.
-3. Full zero-skip `pytest` + `vitest` via `bash .agents/skills/gate-verify/scripts/run_compact_gates.sh --scope all`.
+1. `uv run ruff check src tests scripts evals examples && uv run ruff format --check src tests scripts evals examples && uv run mypy --strict src tests scripts/ci_pytest_shard.py scripts/run_test_batches.py scripts/generate_aibom.py scripts/clean_and_enrich_corpus.py scripts/smoke_e2e_live_stack.py` (`0` errors).
+2. `squawk --pg-version=17.0` (`0` DDL lock violations across Alembic `0002`–`0024`) and `23/23` PG17 `FORCE RLS` catalog verification.
+3. Full zero-skip 15-batch `pytest` (`uv run python scripts/run_test_batches.py --mode full --workers 4`) + `web-ui` lint/typecheck/vitest/build + live container smoke (`scripts/smoke_e2e_live_stack.py`).
 4. Zero internal build-scaffolding identifiers across all tracked files (`tests/test_release_readiness_and_seed_demo.py::test_tracked_files_contain_zero_internal_build_scaffolding_identifiers`).

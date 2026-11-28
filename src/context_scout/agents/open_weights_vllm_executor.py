@@ -706,9 +706,7 @@ class ModelArchitectureAdapter:
             ],
             "triggers": effective_triggers,
         }
-        extra_body: dict[str, Any] = {
-            "guided_decoding_backend": "xgrammar",
-        }
+        extra_body: dict[str, Any] = {}
         return response_format, extra_body
 
     @staticmethod
@@ -823,7 +821,7 @@ class ModelArchitectureAdapter:
             self.model_id,
             "--load-format",
             "safetensors",
-            "--guided-decoding-backend",
+            "--structured-outputs-config.backend",
             "xgrammar",
             "--enable-prefix-caching",
             "--enable-lora",
@@ -833,7 +831,13 @@ class ModelArchitectureAdapter:
             str(max_loras),
         ]
         if self._profile.reasoning_parser:
-            args.extend(["--reasoning-parser", self._profile.reasoning_parser])
+            args.extend(
+                [
+                    "--reasoning-parser",
+                    self._profile.reasoning_parser,
+                    "--structured-outputs-config.enable_in_reasoning=True",
+                ]
+            )
         return args
 
 

@@ -117,7 +117,7 @@ api:
   terminationGracePeriodSeconds: 310
   image:
     repository: ghcr.io/enterprise-context-scout/api
-    tag: "1.0.0"
+    tag: "1.0.1"
   port: 8080
   service:
     type: ClusterIP
@@ -139,7 +139,7 @@ worker:
   terminationGracePeriodSeconds: 60
   image:
     repository: ghcr.io/enterprise-context-scout/worker
-    tag: "1.0.0"
+    tag: "1.0.1"
   command: ["/usr/bin/python3", "-m", "context_scout.cli"]
   args: ["worker"]
   resources:
@@ -158,7 +158,7 @@ webui:
   terminationGracePeriodSeconds: 60
   image:
     repository: ghcr.io/enterprise-context-scout/webui
-    tag: "1.0.0"
+    tag: "1.0.1"
   port: 8080
   service:
     type: ClusterIP
@@ -183,6 +183,8 @@ vllm:
   maxLoraRank: 32
   maxLoras: 4
   maxModelLen: 32768
+  structuredOutputsBackend: "xgrammar"
+  reasoningParser: ""
   gpuMemoryUtilization: "0.90"
   gpu:
     vendor: nvidia # nvidia | amd
@@ -218,7 +220,7 @@ vllm:
     enabled: false
     image:
       repository: ghcr.io/enterprise-context-scout/adapter-sidecar
-      tag: "1.0.0"
+      tag: "1.0.1"
     stagingDir: "/var/run/scout/adapters"
     baseModelRevisionSha256: ""
     maxLoraRank: 32
@@ -271,6 +273,7 @@ ingress:
         - /api
         - /mcp
         - /.well-known/mcp
+        - /.well-known/oauth-protected-resource
       webuiPaths:
         - /
   tls: []

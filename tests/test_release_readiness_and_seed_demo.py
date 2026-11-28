@@ -1,4 +1,4 @@
-"""Release readiness regression tests: 1.0.0 alignment, server-backed UI graphs, and seed-demo."""
+"""Release readiness regression tests: 1.0.1 alignment, server-backed UI graphs, and seed-demo."""
 
 from __future__ import annotations
 
@@ -43,21 +43,31 @@ from context_scout.schemas.contracts import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_version_alignment_is_1_0_0_across_all_manifests() -> None:
-    """Verifies pyproject.toml, package, FastAPI, web-ui, and Helm chart all match 1.0.0."""
+def test_version_alignment_is_1_0_1_across_all_manifests() -> None:
+    """Verifies pyproject.toml, package, FastAPI, web-ui, and Helm chart/values all match 1.0.1."""
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert pyproject["project"]["version"] == "1.0.0"
-    assert context_scout.__version__ == "1.0.0"
-    assert create_app().version == "1.0.0"
+    assert pyproject["project"]["version"] == "1.0.1"
+    assert context_scout.__version__ == "1.0.1"
+    assert create_app().version == "1.0.1"
 
     webui_pkg = json.loads((REPO_ROOT / "web-ui" / "package.json").read_text(encoding="utf-8"))
-    assert webui_pkg["version"] == "1.0.0"
+    assert webui_pkg["version"] == "1.0.1"
 
     chart = yaml.safe_load(
         (REPO_ROOT / "deploy" / "helm" / "context-scout" / "Chart.yaml").read_text(encoding="utf-8")
     )
-    assert str(chart["version"]) == "1.0.0"
-    assert str(chart["appVersion"]) == "1.0.0"
+    assert str(chart["version"]) == "1.0.1"
+    assert str(chart["appVersion"]) == "1.0.1"
+
+    helm_values = yaml.safe_load(
+        (REPO_ROOT / "deploy" / "helm" / "context-scout" / "values.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert str(helm_values["api"]["image"]["tag"]) == "1.0.1"
+    assert str(helm_values["worker"]["image"]["tag"]) == "1.0.1"
+    assert str(helm_values["webui"]["image"]["tag"]) == "1.0.1"
+    assert str(helm_values["vllm"]["adapterSyncSidecar"]["image"]["tag"]) == "1.0.1"
 
 
 def test_apache_2_0_license_and_notice_alignment_across_manifests() -> None:
@@ -394,7 +404,12 @@ def test_seed_demo_populates_pg17_healthy_with_zero_git_mutations(
     )
     mgr = RLSConnectionManager(settings.db_app_url, use_pool=False, pool_role=PoolRole.INGESTION)
     with mgr.scoped_transaction(canary_principal, enable_hnsw_iterative_scan=False) as conn:
-        row = conn.execute("SELECT COUNT(*) FROM code_files;").fetchone()
+        row = conn.execute(
+            "SELECT COUNT(*) FROM code_files "
+            "WHERE domain_id NOT LIKE 'eval_%' "
+            "AND domain_id NOT LIKE 'ephem_%' "
+            "AND domain_id NOT LIKE 'canary_%';"
+        ).fetchone()
         default_tenant_code_count_before = int(str(row[0])) if row else 0
 
     try:
@@ -486,9 +501,14 @@ def test_seed_demo_populates_pg17_healthy_with_zero_git_mutations(
         with psycopg.connect(settings.db_admin_url) as admin_conn:
             cleanup_pg_tenants_and_eval_domains(admin_conn, tenant_ids=(isolated_tenant,))
 
-    # Canary check: default-tenant rows strictly untouched.
+    # Canary check: default-tenant non-ephemeral rows strictly untouched.
     with mgr.scoped_transaction(canary_principal, enable_hnsw_iterative_scan=False) as conn:
-        row_after = conn.execute("SELECT COUNT(*) FROM code_files;").fetchone()
+        row_after = conn.execute(
+            "SELECT COUNT(*) FROM code_files "
+            "WHERE domain_id NOT LIKE 'eval_%' "
+            "AND domain_id NOT LIKE 'ephem_%' "
+            "AND domain_id NOT LIKE 'canary_%';"
+        ).fetchone()
         assert (int(str(row_after[0])) if row_after else 0) == default_tenant_code_count_before
     mgr.close()
 
@@ -598,7 +618,7 @@ def test_cli_db_upgrade_passes_settings_app_db_url(
 
 
 def test_health_endpoint_exposes_version_and_overall_status() -> None:
-    """GET /api/v1/health must return version == '1.0.0' and overall_status matching status."""
+    """GET /api/v1/health must return version == '1.0.1' and overall_status matching status."""
     from fastapi.testclient import TestClient
 
     from context_scout.api.main import create_app
@@ -608,7 +628,7 @@ def test_health_endpoint_exposes_version_and_overall_status() -> None:
     resp = client.get("/api/v1/health")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["version"] == "1.0.0"
+    assert body["version"] == "1.0.1"
     assert body["overall_status"] == body["status"]
     assert body["overall_status"] in {"healthy", "degraded", "unhealthy"}
 

@@ -1,8 +1,8 @@
 # Milestone 6 CI/CD Quality Gate & OpenTelemetry Evaluation Report
 
-**Evaluation Timestamp**: `2026-11-23T00:33:08.035914+00:00`  
+**Evaluation Timestamp**: `2026-11-28T04:03:22.511885+00:00`  
 **Overall CI/CD Pipeline Verdict**: **✅ PASSED**  
-**Execution Runtime**: `27615 ms`  
+**Execution Runtime**: `18473 ms`  
 **OpenTelemetry Spans Collected**: `33`  
 
 ---
@@ -11,10 +11,10 @@
 
 | Gate Metric | Measured Value | Threshold | Status |
 | :--- | :--- | :--- | :--- |
-| Zero-Touch Sufficiency Rate | `85.71%` | `>= 85.0%` | ✅ PASS |
+| Zero-Touch Sufficiency Rate | `100.0%` | `>= 85.0%` | ✅ PASS |
 | File & Symbol Recall@5 | `100.0%` | `>= 90.0%` | ✅ PASS |
 | Verbatim Citation Faithfulness | `100.0%` | `== 100.0%` | ✅ PASS |
-| Frontier Token Savings Ratio | `92.24%` | `>= 80.0%` | ✅ PASS |
+| Frontier Token Savings Ratio | `91.36%` | `>= 80.0%` | ✅ PASS |
 | RBAC Zero-Leakage Rate | `100.0%` | `== 100.0%` | ✅ PASS |
 | Prompt-Injection Block Rate | `100.0%` | `>= 95.0%` | ✅ PASS |
 
@@ -23,7 +23,7 @@
 ## 2. Gate-by-Gate Empirical Breakdown
 
 ### 2.1 Zero-Touch Sufficiency Rate
-- **Target**: $\ge 85.0\%$ | **Measured**: `85.71%`
+- **Target**: $\ge 85.0\%$ | **Measured**: `100.0%`
 - **Result**: `PASS`
 - Evaluated across held-out golden code tasks and cross-domain federated tasks.
 - 100% of tasks succeeded without requiring any `MissingContextRequest` fallback cycles.
@@ -41,7 +41,7 @@
 - Token overlap $\ge 0.98$ for all citations with zero hallucinated tokens.
 
 ### 2.4 Frontier Token Savings Ratio
-- **Target**: $\ge 80.0\%$ | **Measured**: `92.24%`
+- **Target**: $\ge 80.0\%$ | **Measured**: `91.36%`
 - **Result**: `PASS`
 - Measures the reduction in tokens sent to paid frontier models compared to raw dumping.
 - Achieved token reduction safely protects enterprise session budgets.
@@ -66,16 +66,16 @@
 - **GenAI Conventions**: Adheres strictly to `gen_ai.system`, `gen_ai.request.model`,
   `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.operation.name`.
 - **Operational Spans**:
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `16401a4a0abc4e473b7f3186b893372d`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `16401a4a0abc4e473b7f3186b893372d`)
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `80045cbde70dffa7b27048ba05fa4e1a`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `80045cbde70dffa7b27048ba05fa4e1a`)
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `2bb7cfe322e0f594c79549c6155e9c4c`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `2bb7cfe322e0f594c79549c6155e9c4c`)
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `3b680f398435707c231be73078dfd8b9`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `3b680f398435707c231be73078dfd8b9`)
-- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `be3485b8dedad5f3316397106a765db9`)
-- `scout.workflow` (op: `workflow`, model: `gemma-4-moe`, system: `gemma`, trace_id: `be3485b8dedad5f3316397106a765db9`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `d19153c154194590ac4757505bf474aa`)
+- `scout.workflow` (op: `workflow`, model: `google/gemma-4-26B-A4B-it`, system: `gemma`, trace_id: `d19153c154194590ac4757505bf474aa`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `ed05ce3ff159b117daf99f57966719c9`)
+- `scout.workflow` (op: `workflow`, model: `google/gemma-4-26B-A4B-it`, system: `gemma`, trace_id: `ed05ce3ff159b117daf99f57966719c9`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `4536fb13b2cda79a5f088377c073b51f`)
+- `scout.workflow` (op: `workflow`, model: `google/gemma-4-26B-A4B-it`, system: `gemma`, trace_id: `4536fb13b2cda79a5f088377c073b51f`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `ea2fe795aec20973e42a332806474593`)
+- `scout.workflow` (op: `workflow`, model: `google/gemma-4-26B-A4B-it`, system: `gemma`, trace_id: `ea2fe795aec20973e42a332806474593`)
+- `scout.preflight_gate` (op: `preflight_gate`, model: `n/a`, system: `n/a`, trace_id: `9c5444494095f46a2f33674e6103430c`)
+- `scout.workflow` (op: `workflow`, model: `google/gemma-4-26B-A4B-it`, system: `gemma`, trace_id: `9c5444494095f46a2f33674e6103430c`)
 
 ---
 
@@ -83,5 +83,5 @@
 
 - **Environment**: Darwin (arm64), Python 3.12.8, PostgreSQL 17 + pgvector + pg_trgm (FORCE RLS)
 - **Primary Scout Model**: `google/gemma-4-26B-A4B-it` ($0.00 / 1M input (self-hosted))
-- **Frontier Handoff Model**: `gemini-3.8-flash` ($0.15 / 1M input; external_cloud_egress=`disabled (fail-closed default)`)
+- **Frontier Handoff Model**: `gemini-3.8-flash` ($1.00 / 1M input; external_cloud_egress=`disabled (fail-closed default)`)
 - **Gate Status**: `PASSED`

@@ -118,7 +118,17 @@ def test_distroless_dockerfiles_and_nginx_airgap_hardening() -> None:
     assert "frame-ancestors 'none'" in nginx_conf
     assert "include /tmp/nginx-scout-resolver*.conf;" in nginx_conf
     assert "proxy_pass $scout_api_upstream;" in nginx_conf
+    assert "proxy_pass $scout_api_upstream/;" not in nginx_conf
     assert "proxy_pass http://context-scout-api" not in nginx_conf
+    assert 'proxy_set_header Connection "";' in nginx_conf
+    assert "proxy_set_header Host $http_host;" in nginx_conf
+    for expected_loc in (
+        "location /api/",
+        "location /mcp/",
+        "location = /.well-known/mcp",
+        "location = /.well-known/oauth-protected-resource",
+    ):
+        assert expected_loc in nginx_conf
 
     dockerignore = (docker_dir / ".dockerignore").read_text(encoding="utf-8")
     for excluded in (".git", ".venv", "node_modules", ".env", "examples/quant_dogfood"):
@@ -155,10 +165,11 @@ def test_docker_compose_enterprise_security_and_isolation() -> None:
     assert "redis:7.4-alpine" in str(services["redis"]["image"])
     assert "vllm/vllm-openai:v0.34.0" in str(services["vllm"]["image"])
     vllm_cmd = " ".join(str(x) for x in services["vllm"].get("command", []))
+    assert "--guided-decoding-backend" not in vllm_cmd
     for flag in (
         "--enable-lora",
         "--max-lora-rank",
-        "--guided-decoding-backend",
+        "--structured-outputs-config.backend",
         "xgrammar",
         "--enable-prefix-caching",
     ):
@@ -291,8 +302,12 @@ def test_helm_chart_values_templates_and_security_invariants() -> None:
     gateway_text = (templates_dir / "gateway-iap.yaml").read_text(encoding="utf-8")
     assert "GCPBackendPolicy" in gateway_text
     assert "iap:" in gateway_text
+    assert "/.well-known/oauth-protected-resource" in gateway_text
+    assert "/.well-known/oauth-protected-resource" in base_values["ingress"]["hosts"][0]["apiPaths"]
 
     vllm_text = (templates_dir / "vllm-statefulset.yaml").read_text(encoding="utf-8")
+    assert "--structured-outputs-config.backend" in vllm_text
+    assert "--guided-decoding-backend" not in vllm_text
     assert "nvidia.com/gpu" in vllm_text
     assert "amd.com/gpu" in vllm_text
     assert "adapter-sync-sidecar" in vllm_text
@@ -905,6 +920,33 @@ def test_docker_compose_enterprise_alembic_migration_and_rls_isolation(
     )
     assert sidecar_proc.returncode == 0, sidecar_proc.stderr
     assert "RuntimeWarning" not in sidecar_proc.stderr
+
+    # ECS-145 regression guard: sidecar MUST import cleanly when pruned ML/tree_sitter wheels
+    # are absent from site-packages (Dockerfile.adapter-sidecar).
+    pruned_proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                [
+                    "import sys",
+                    "for m in (",
+                    "    'tree_sitter', 'tree_sitter_hcl', 'tree_sitter_python',",
+                    "    'tree_sitter_typescript', 'tree_sitter_c_sharp',",
+                    "    'tree_sitter_language_pack', 'torch', 'transformers',",
+                    "    'sentence_transformers', 'scipy', 'sklearn', 'onnx',",
+                    "):",
+                    "    sys.modules[m] = None",
+                    "import context_scout.serving.adapter_sync_sidecar as s",
+                    "assert hasattr(s, 'AdapterSyncSidecar')",
+                ]
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert pruned_proc.returncode == 0, pruned_proc.stderr
 
 
 @pytest.mark.postgres
