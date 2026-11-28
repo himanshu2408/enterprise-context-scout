@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
-FROM python:3.12-slim-bookworm AS builder
+ARG PYTHON_BUILDER_IMAGE=python:3.12-slim-bookworm
+ARG DISTROLESS_PYTHON_IMAGE=gcr.io/distroless/python3-debian12:nonroot
+
+FROM ${PYTHON_BUILDER_IMAGE} AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -16,14 +19,22 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
 RUN uv sync --frozen --no-dev --extra api --no-editable \
-    && uv pip install --python /app/.venv/bin/python --no-cache "google-cloud-storage>=2.18.0,<3.0.0" \
+    && rm -rf /app/.venv/lib/python3.12/site-packages/torch* \
+              /app/.venv/lib/python3.12/site-packages/sentence_transformers* \
+              /app/.venv/lib/python3.12/site-packages/transformers* \
+              /app/.venv/lib/python3.12/site-packages/scipy* \
+              /app/.venv/lib/python3.12/site-packages/scikit_learn* \
+              /app/.venv/lib/python3.12/site-packages/tree_sitter* \
+              /app/.venv/lib/python3.12/site-packages/onnx* \
+              /app/.venv/lib/python3.12/site-packages/triton* \
+              /app/.venv/lib/python3.12/site-packages/nvidia* \
     && pip uninstall -y uv \
     && find /app /usr/local/lib/python3.12 -type d -name '__pycache__' -exec rm -rf {} + \
     && mkdir -p /var/run/scout/adapters \
     && chown -R 65532:65532 /var/run/scout/adapters
 
 
-FROM gcr.io/distroless/python3-debian12:nonroot AS runtime
+FROM ${DISTROLESS_PYTHON_IMAGE} AS runtime
 
 WORKDIR /app
 

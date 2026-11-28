@@ -18,7 +18,7 @@ spec:
   triggers:
     - type: redis
       metadata:
-        address: {{ .Values.keda.worker.redisAddress | quote }}
+        address: {{ default (printf "%s-redis:6379" (include "context-scout.fullname" .)) .Values.keda.worker.redisAddress | quote }}
         listName: {{ .Values.keda.worker.redisListName | quote }}
         listLength: {{ .Values.keda.worker.listLength | quote }}
 ---

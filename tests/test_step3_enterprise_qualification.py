@@ -851,6 +851,7 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
             assert code == 200
             if role_name == "domain_researcher":
                 # DOMAIN_RESEARCHER lacks ["audit:compliance"] -> must fail closed with 0 leaks
+                assert '"final_decision":"abstain_zero_paid"' in body
                 assert '"category":"insufficient_context"' in body
                 blocked_researcher_count += 1
             else:
@@ -858,9 +859,15 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
                     f"Expected context_pack_ready for authorized role={role_name}: {body[:200]}"
                 )
                 ready_count += 1
-            if role_name != "compliance_officer":
+            if role_name == "engineer":
+                assert "stream_scout" in body
+            if role_name == "compliance_officer":
+                assert "S3_CANARY_COMPLIANCE_ONLY" in body
+            else:
                 assert "S3_CANARY_COMPLIANCE_ONLY" not in body
-            if role_name != "product_manager":
+            if role_name == "product_manager":
+                assert "S3_CANARY_PM_ONLY" in body
+            else:
                 assert "S3_CANARY_PM_ONLY" not in body
         assert ready_count == 15
         assert blocked_researcher_count == 5

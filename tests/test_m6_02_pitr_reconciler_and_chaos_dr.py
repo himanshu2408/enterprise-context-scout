@@ -160,6 +160,10 @@ class ChaosTestcontainersOrchestrator:
 
     def __enter__(self) -> ChaosTestcontainersOrchestrator:
         if self.use_containers:
+            from urllib.parse import quote, urlparse, urlunparse
+
+            from context_scout.db.migrations_runner import run_alembic_upgrade
+
             pg, redis = self.build_containers()
             pg.start()
             redis.start()
@@ -169,7 +173,13 @@ class ChaosTestcontainersOrchestrator:
             if raw_pg.startswith("postgresql+"):
                 raw_pg = "postgresql://" + raw_pg.split("://", 1)[1]
             self.admin_db_url = raw_pg
-            self.app_db_url = raw_pg
+            app_pw = f"ChaosApp_{uuid.uuid4().hex[:12]}!"
+            run_alembic_upgrade(self.admin_db_url, app_role_password=app_pw)
+            parsed = urlparse(self.admin_db_url)
+            host_port = parsed.netloc.rsplit("@", 1)[-1]
+            self.app_db_url = urlunparse(
+                parsed._replace(netloc=f"scout_app_user:{quote(app_pw, safe='')}@{host_port}")
+            )
             host = redis.get_container_host_ip()
             port = redis.get_exposed_port(6379)
             self.redis_url = f"redis://{host}:{port}/0"
@@ -2767,3 +2777,67 @@ def test_connectors_propagate_non_default_tenant_id_under_pg17_force_rls() -> No
         gl_plugin.client.close()
         gh_plugin.client.close()
         _cleanup_pg_tenants_and_domains([tenant_a, tenant_b], [dom])
+
+
+def test_pr5_resilience_guards_reconciler_sidecar_and_object_store(
+    tmp_path: Path,
+) -> None:
+    """Verifies batched reconciler, sidecar disk/stale-dir guards, and ObjectStore size cap."""
+    from context_scout.serving.adapter_sync_sidecar import (
+        AdapterStagingCapacityError,
+        AdapterSyncSidecar,
+        CosignBlobVerifier,
+    )
+    from context_scout.storage.object_store import InMemoryObjectStore, ObjectTooLargeError
+
+    # 1. ObjectStore max_object_bytes enforcement
+    store = InMemoryObjectStore(max_object_bytes=16)
+    key = f"tenants/{uuid.uuid4()}/domains/code_architecture_scout/small.bin"
+    store.put_bytes(key, b"1234567890")
+    assert store.get_bytes(key) == b"1234567890"
+    with pytest.raises(ObjectTooLargeError):
+        store.put_bytes(key, b"x" * 32)
+
+    # 2. AdapterSyncSidecar stale .staging_* sweep + disk_usage fail-closed guard
+    staging_root = tmp_path / "adapters"
+    domain_parent = staging_root / str(DEFAULT_TENANT_ID) / "code_architecture_scout"
+    domain_parent.mkdir(parents=True)
+    stale_dir = domain_parent / ".staging_old_1234"
+    stale_dir.mkdir()
+    old_ts = time.time() - 3600
+    os.utime(stale_dir, (old_ts, old_ts))
+
+    sidecar = AdapterSyncSidecar(
+        expected_base_model_id="google/gemma-4-26B-A4B-it",
+        expected_base_model_revision_sha256="a" * 64,
+        staging_root=staging_root,
+        cosign_verifier=CosignBlobVerifier(),
+        in_memory_repo=InMemoryRLSRepository(),
+        min_staging_free_bytes=1024 * 1024,
+        stale_staging_ttl_seconds=60.0,
+    )
+    assert sidecar._sweep_stale_staging_dirs(domain_parent) == 1
+    assert not stale_dir.exists()
+    sidecar.close()
+    assert issubclass(AdapterStagingCapacityError, RuntimeError)
+
+
+def test_chaos_testcontainers_live_alembic_and_nobypassrls_reconciler() -> None:
+    """Exercises ChaosTestcontainersOrchestrator(use_containers=True) when Docker is running."""
+    assert _docker_daemon_available(), "Docker daemon must be running for live Testcontainers gate"
+    with ChaosTestcontainersOrchestrator(use_containers=True) as orch:
+        assert "scout_app_user" in orch.app_db_url
+        assert orch.app_db_url != orch.admin_db_url
+        with psycopg.connect(orch.app_db_url) as conn:
+            row = conn.execute(
+                "SELECT current_user, r.rolbypassrls "
+                "FROM pg_roles r WHERE r.rolname = current_user;"
+            ).fetchone()
+            assert row is not None
+            assert row[0] == "scout_app_user"
+            assert row[1] is False
+            rls_row = conn.execute(
+                "SELECT relrowsecurity, relforcerowsecurity "
+                "FROM pg_class WHERE relname = 'doc_chunks';"
+            ).fetchone()
+            assert rls_row == (True, True)

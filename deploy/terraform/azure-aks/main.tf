@@ -1,6 +1,11 @@
 data "azurerm_client_config" "current" {}
 
 locals {
+  name_hash    = substr(md5("${var.resource_group_name}-${var.cluster_name}"), 0, 6)
+  clean_prefix = substr(replace(lower(var.cluster_name), "/[^a-z0-9]/", ""), 0, 12)
+  kv_name      = substr("${local.clean_prefix}kv${local.name_hash}", 0, 24)
+  storage_name = substr("${local.clean_prefix}art${local.name_hash}", 0, 24)
+  acr_name     = substr("${local.clean_prefix}acr${local.name_hash}", 0, 50)
   common_tags = {
     app        = "enterprise-context-scout"
     managed_by = "terraform"
@@ -25,7 +30,7 @@ resource "azurerm_user_assigned_identity" "scout_app" {
 }
 
 resource "azurerm_key_vault" "cmk" {
-  name                       = replace("${var.cluster_name}-kv", "-", "")
+  name                       = local.kv_name
   location                   = azurerm_resource_group.scout.location
   resource_group_name        = azurerm_resource_group.scout.name
   tenant_id                  = data.azurerm_client_config.current.tenant_id
@@ -36,12 +41,26 @@ resource "azurerm_key_vault" "cmk" {
   tags                       = local.common_tags
 }
 
+resource "azurerm_role_assignment" "kv_crypto_officer" {
+  scope                = azurerm_key_vault.cmk.id
+  role_definition_name = "Key Vault Crypto Officer"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+resource "azurerm_role_assignment" "kv_storage_cmek" {
+  scope                = azurerm_key_vault.cmk.id
+  role_definition_name = "Key Vault Crypto Service Encryption User"
+  principal_id         = azurerm_user_assigned_identity.scout_app.principal_id
+}
+
 resource "azurerm_key_vault_key" "cmek" {
   name         = "${var.cluster_name}-cmek"
   key_vault_id = azurerm_key_vault.cmk.id
   key_type     = "RSA-HSM"
   key_size     = 2048
   key_opts     = ["decrypt", "encrypt", "sign", "unwrapKey", "verify", "wrapKey"]
+
+  depends_on = [azurerm_role_assignment.kv_crypto_officer]
 }
 
 # -----------------------------------------------------------------------------
@@ -153,6 +172,15 @@ resource "azurerm_postgresql_flexible_server_database" "scout_db" {
   collation = "en_US.utf8"
 }
 
+resource "azurerm_postgresql_flexible_server_active_directory_administrator" "pg_entra_admin" {
+  server_name         = azurerm_postgresql_flexible_server.postgres17.name
+  resource_group_name = azurerm_resource_group.scout.name
+  tenant_id           = data.azurerm_client_config.current.tenant_id
+  object_id           = var.entra_postgres_admin_object_id
+  principal_name      = var.entra_postgres_admin_principal_name
+  principal_type      = "Group"
+}
+
 # -----------------------------------------------------------------------------
 # 4. Azure Managed Redis (TLS 1.2+)
 # -----------------------------------------------------------------------------
@@ -180,7 +208,7 @@ resource "azurerm_managed_redis" "cache" {
 # -----------------------------------------------------------------------------
 
 resource "azurerm_storage_account" "artifacts" {
-  name                          = replace("${var.cluster_name}art", "-", "")
+  name                          = local.storage_name
   resource_group_name           = azurerm_resource_group.scout.name
   location                      = azurerm_resource_group.scout.location
   account_tier                  = "Standard"
@@ -204,6 +232,8 @@ resource "azurerm_storage_account" "artifacts" {
   }
 
   tags = local.common_tags
+
+  depends_on = [azurerm_role_assignment.kv_storage_cmek]
 }
 
 resource "azurerm_storage_container" "artifacts" {
@@ -219,11 +249,17 @@ resource "azurerm_role_assignment" "scout_blob_contributor" {
 }
 
 resource "azurerm_container_registry" "containers" {
-  name                          = replace("${var.cluster_name}acr", "-", "")
+  name                          = local.acr_name
   resource_group_name           = azurerm_resource_group.scout.name
   location                      = azurerm_resource_group.scout.location
   sku                           = "Premium"
   admin_enabled                 = false
   public_network_access_enabled = false
   tags                          = local.common_tags
+}
+
+resource "azurerm_role_assignment" "aks_acr_pull" {
+  scope                = azurerm_container_registry.containers.id
+  role_definition_name = "AcrPull"
+  principal_id         = azurerm_kubernetes_cluster.primary.kubelet_identity[0].object_id
 }

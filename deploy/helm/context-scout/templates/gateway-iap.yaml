@@ -13,6 +13,12 @@ spec:
     - name: https
       protocol: HTTPS
       port: 443
+      {{- with .Values.gateway.tls }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          {{- toYaml .certificateRefs | nindent 10 }}
+      {{- end }}
       allowedRoutes:
         namespaces:
           from: Same

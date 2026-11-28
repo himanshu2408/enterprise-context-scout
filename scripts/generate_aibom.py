@@ -9,9 +9,11 @@ models (`config/model_registry.yaml`), and domain LoRA cartridges
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import struct
@@ -111,7 +113,7 @@ def _run_modelscan(target_dir: Path) -> str:
         return "modelscan-cli-passed"
 
     if importlib.util.find_spec("modelscan") is not None:
-        from modelscan.modelscan import ModelScan
+        from modelscan.modelscan import ModelScan  # type: ignore[import-not-found]
 
         scanner = ModelScan()
         results = scanner.scan(target_dir)
@@ -122,10 +124,58 @@ def _run_modelscan(target_dir: Path) -> str:
             )
         return "modelscan-lib-passed"
 
-    return "safetensors-header-verified"
+    return "native-safetensors-header-inspector"
 
 
 def _parse_python_dependencies(pyproject_path: Path) -> list[dict[str, Any]]:
+    uv_lock_path = pyproject_path.parent / "uv.lock"
+    if uv_lock_path.is_file():
+        lock_data = tomllib.loads(uv_lock_path.read_text(encoding="utf-8"))
+        components: list[dict[str, Any]] = []
+        seen_locked: set[tuple[str, str]] = set()
+        for pkg in lock_data.get("package") or []:
+            if not isinstance(pkg, dict):
+                continue
+            source = pkg.get("source") or {}
+            if isinstance(source, dict) and source.get("editable") == ".":
+                continue
+            pkg_name = str(pkg.get("name") or "").strip().lower()
+            pkg_ver = str(pkg.get("version") or "").strip()
+            if not pkg_name or not pkg_ver or (pkg_name, pkg_ver) in seen_locked:
+                continue
+            seen_locked.add((pkg_name, pkg_ver))
+            hashes: list[dict[str, str]] = []
+            seen_digests: set[str] = set()
+            sdist = pkg.get("sdist")
+            if isinstance(sdist, dict) and isinstance(sdist.get("hash"), str):
+                h_str = str(sdist["hash"])
+                if h_str.startswith("sha256:"):
+                    digest = h_str.split(":", 1)[1].lower()
+                    seen_digests.add(digest)
+                    hashes.append({"alg": "SHA-256", "content": digest})
+            for wheel in pkg.get("wheels") or []:
+                if isinstance(wheel, dict) and isinstance(wheel.get("hash"), str):
+                    h_str = str(wheel["hash"])
+                    if h_str.startswith("sha256:"):
+                        digest = h_str.split(":", 1)[1].lower()
+                        if digest not in seen_digests:
+                            seen_digests.add(digest)
+                            hashes.append({"alg": "SHA-256", "content": digest})
+            comp: dict[str, Any] = {
+                "type": "library",
+                "bom-ref": f"pkg:pypi/{pkg_name}@{pkg_ver}",
+                "name": pkg_name,
+                "version": pkg_ver,
+                "purl": f"pkg:pypi/{pkg_name}@{pkg_ver}",
+                "scope": "required",
+                "properties": [{"name": "scout:dependency_source", "value": "uv.lock"}],
+            }
+            if hashes:
+                comp["hashes"] = hashes
+            components.append(comp)
+        if components:
+            return components
+
     data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
     project = data.get("project") or {}
     raw_deps: list[tuple[str, str]] = []
@@ -136,7 +186,7 @@ def _parse_python_dependencies(pyproject_path: Path) -> list[dict[str, Any]]:
             raw_deps.append((f"optional:{group}", str(dep)))
 
     seen: set[str] = set()
-    components: list[dict[str, Any]] = []
+    components = []
     for scope, spec in raw_deps:
         spec_no_marker = spec.split(";", 1)[0].strip()
         match = _PEP508_SPLIT_RE.match(spec_no_marker)
@@ -161,11 +211,65 @@ def _parse_python_dependencies(pyproject_path: Path) -> list[dict[str, Any]]:
     return components
 
 
+def _decode_sri_hash(integrity: str) -> list[dict[str, str]]:
+    hashes: list[dict[str, str]] = []
+    for part in integrity.split():
+        if "-" not in part:
+            continue
+        alg_raw, b64_val = part.split("-", 1)
+        alg_map = {"sha256": "SHA-256", "sha384": "SHA-384", "sha512": "SHA-512"}
+        alg = alg_map.get(alg_raw.lower())
+        if not alg:
+            continue
+        try:
+            hex_digest = base64.b64decode(b64_val, validate=True).hex()
+        except Exception:
+            continue
+        hashes.append({"alg": alg, "content": hex_digest})
+    return hashes
+
+
 def _parse_frontend_dependencies(package_json_path: Path) -> list[dict[str, Any]]:
+    lock_path = package_json_path.parent / "package-lock.json"
+    if lock_path.is_file():
+        lock_data = json.loads(lock_path.read_text(encoding="utf-8"))
+        packages = lock_data.get("packages") or {}
+        components: list[dict[str, Any]] = []
+        seen_npm: set[tuple[str, str]] = set()
+        for pkg_path, meta in sorted(packages.items()):
+            if not pkg_path or not isinstance(meta, dict):
+                continue
+            name = str(meta.get("name") or pkg_path.rsplit("node_modules/", 1)[-1]).strip()
+            version = str(meta.get("version") or "").strip()
+            if not name or not version or (name, version) in seen_npm:
+                continue
+            seen_npm.add((name, version))
+            scope = "optional" if bool(meta.get("dev")) else "required"
+            comp: dict[str, Any] = {
+                "type": "library",
+                "bom-ref": f"pkg:npm/{name}@{version}",
+                "name": name,
+                "version": version,
+                "purl": f"pkg:npm/{name}@{version}",
+                "scope": scope,
+                "properties": [
+                    {"name": "scout:ecosystem", "value": "npm"},
+                    {"name": "scout:dependency_source", "value": "package-lock.json"},
+                ],
+            }
+            integrity = str(meta.get("integrity") or "").strip()
+            if integrity:
+                decoded = _decode_sri_hash(integrity)
+                if decoded:
+                    comp["hashes"] = decoded
+            components.append(comp)
+        if components:
+            return components
+
     if not package_json_path.is_file():
         return []
     data = json.loads(package_json_path.read_text(encoding="utf-8"))
-    components: list[dict[str, Any]] = []
+    components = []
     for section, scope in (("dependencies", "required"), ("devDependencies", "optional")):
         for name, version in sorted((data.get(section) or {}).items()):
             components.append(
@@ -473,6 +577,12 @@ def build_aibom(repo_root: Path) -> dict[str, Any]:
                 {"name": "scout:trust_remote_code", "value": "false"},
                 {"name": "scout:require_safetensors_only", "value": "true"},
                 {"name": "scout:cartridges_audited", "value": str(len(cartridges))},
+                {
+                    "name": "scout:scanner_backend",
+                    "value": "modelscan-cli"
+                    if shutil.which("modelscan")
+                    else "native-safetensors-header-inspector",
+                },
             ],
         },
         "components": components,
@@ -484,25 +594,45 @@ def sign_and_verify_aibom(
     output_path: Path,
     *,
     signing_key_path: Path | None = None,
-) -> Path:
+    signing_key_pem: str | None = None,
+    require_signing_key: bool = False,
+    public_key_out: Path | None = None,
+) -> tuple[Path, Path, bool]:
     """Signs `bom_bytes` as a Sigstore-compatible bundle and verifies it fail-closed."""
+    env_pem = os.environ.get("SCOUT_AIBOM_SIGNING_KEY_PEM", "").strip()
+    ephemeral = False
     if signing_key_path is not None:
         raw_key = signing_key_path.read_bytes()
         private_key = serialization.load_pem_private_key(raw_key, password=None)
+    elif signing_key_pem and signing_key_pem.strip():
+        private_key = serialization.load_pem_private_key(
+            signing_key_pem.encode("utf-8"), password=None
+        )
+    elif env_pem:
+        private_key = serialization.load_pem_private_key(env_pem.encode("utf-8"), password=None)
     else:
+        if require_signing_key:
+            raise SupplyChainGateError(
+                "--require-signing-key set but no signing key provided via "
+                "--signing-key, --signing-key-pem, or SCOUT_AIBOM_SIGNING_KEY_PEM."
+            )
+        ephemeral = True
         private_key = ec.generate_private_key(ec.SECP256R1())
 
     pub_pem = private_key.public_key().public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
+    pub_path = public_key_out or Path(f"{output_path}.pub")
+    pub_path.write_bytes(pub_pem)
+
     bundle_json = sign_blob_for_cosign(private_key, bom_bytes, as_sigstore_bundle=True)
     bundle_path = Path(f"{output_path}.sigstore.json")
     bundle_path.write_text(bundle_json + "\n", encoding="utf-8")
 
     verifier = CosignBlobVerifier(trusted_public_keys_pem={"aibom-key": pub_pem})
     verifier.verify(bom_bytes, bundle_json, key_id="aibom-key")
-    return bundle_path
+    return bundle_path, pub_path, ephemeral
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -512,10 +642,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-root", type=Path, default=Path("."))
     parser.add_argument("--output", type=Path, default=Path("dist/aibom.cdx.json"))
     parser.add_argument("--signing-key", type=Path, default=None)
+    parser.add_argument("--signing-key-pem", type=str, default=None)
+    parser.add_argument("--public-key-out", type=Path, default=None)
+    parser.add_argument("--require-signing-key", action="store_true")
     parser.add_argument("--no-sign", action="store_true")
     args = parser.parse_args(argv)
 
     bom = build_aibom(args.repo_root.resolve())
+    ephemeral_key = (
+        args.signing_key is None
+        and not (args.signing_key_pem and args.signing_key_pem.strip())
+        and not os.environ.get("SCOUT_AIBOM_SIGNING_KEY_PEM", "").strip()
+    )
+    if not args.no_sign:
+        bom["metadata"]["properties"].append(
+            {"name": "scout:signing_key_ephemeral", "value": str(ephemeral_key).lower()}
+        )
     bom_bytes = (json.dumps(bom, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
     if str(args.output) == "-":
@@ -527,10 +669,15 @@ def main(argv: list[str] | None = None) -> int:
 
     sig_info = "unsigned"
     if not args.no_sign:
-        bundle_path = sign_and_verify_aibom(
-            bom_bytes, args.output, signing_key_path=args.signing_key
+        bundle_path, pub_path, _ = sign_and_verify_aibom(
+            bom_bytes,
+            args.output,
+            signing_key_path=args.signing_key,
+            signing_key_pem=args.signing_key_pem,
+            require_signing_key=args.require_signing_key,
+            public_key_out=args.public_key_out,
         )
-        sig_info = f"signed+verified:{bundle_path}"
+        sig_info = f"signed+verified:{bundle_path} pub:{pub_path}"
 
     print(
         f"Generated CycloneDX {bom['specVersion']} AI-BOM: {args.output} "

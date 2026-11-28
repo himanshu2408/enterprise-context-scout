@@ -60,6 +60,12 @@ resource "google_compute_global_address" "private_service_range" {
   network       = google_compute_network.vpc.id
 }
 
+resource "google_service_networking_connection" "private_vpc_connection" {
+  network                 = google_compute_network.vpc.id
+  service                 = "servicenetworking.googleapis.com"
+  reserved_peering_ranges = [google_compute_global_address.private_service_range.name]
+}
+
 resource "google_compute_forwarding_rule" "psc_google_apis" {
   name                  = "${var.cluster_name}-psc-apis"
   region                = var.region
@@ -146,6 +152,17 @@ resource "google_service_account" "scout_vllm" {
 resource "google_service_account" "scout_node" {
   account_id   = "scout-gke-node-sa"
   display_name = "Enterprise Context Scout GKE Node SA"
+}
+
+resource "google_project_iam_member" "scout_node_roles" {
+  for_each = toset([
+    "roles/artifactregistry.reader",
+    "roles/logging.logWriter",
+    "roles/monitoring.metricWriter",
+  ])
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.scout_node.email}"
 }
 
 resource "google_service_account_iam_member" "workload_identity_api" {
@@ -461,7 +478,10 @@ resource "google_sql_database_instance" "postgres17" {
     user_labels = local.common_labels
   }
 
-  depends_on = [google_kms_crypto_key_iam_member.sql_cmek]
+  depends_on = [
+    google_kms_crypto_key_iam_member.sql_cmek,
+    google_service_networking_connection.private_vpc_connection,
+  ]
 }
 
 resource "google_sql_database" "scout_db" {
@@ -504,7 +524,10 @@ resource "google_redis_instance" "cache" {
   customer_managed_key    = google_kms_crypto_key.cmek.id
   labels                  = local.common_labels
 
-  depends_on = [google_kms_crypto_key_iam_member.redis_cmek]
+  depends_on = [
+    google_kms_crypto_key_iam_member.redis_cmek,
+    google_service_networking_connection.private_vpc_connection,
+  ]
 }
 
 # -----------------------------------------------------------------------------
@@ -520,6 +543,11 @@ resource "google_storage_bucket" "artifacts" {
 
   versioning {
     enabled = true
+  }
+
+  retention_policy {
+    retention_period = var.worm_retention_seconds
+    is_locked        = var.worm_retention_locked
   }
 
   encryption {
@@ -605,11 +633,26 @@ resource "google_compute_health_check" "api_health" {
   }
 }
 
+resource "google_compute_network_endpoint_group" "api_neg" {
+  name                  = "${var.cluster_name}-api-neg"
+  network_endpoint_type = "GCE_VM_IP_PORT"
+  network               = google_compute_network.vpc.id
+  subnetwork            = google_compute_subnetwork.gke_subnet.id
+  zone                  = "${var.region}-a"
+  default_port          = 8080
+}
+
 resource "google_compute_backend_service" "api_backend" {
   name            = "${var.cluster_name}-api-backend"
   protocol        = "HTTP"
   security_policy = google_compute_security_policy.edge_armor.id
   health_checks   = [google_compute_health_check.api_health.id]
+
+  backend {
+    group                 = google_compute_network_endpoint_group.api_neg.id
+    balancing_mode        = "RATE"
+    max_rate_per_endpoint = 100
+  }
 
   dynamic "iap" {
     for_each = var.iap_enabled && var.iap_oauth2_client_id != "" && var.iap_oauth2_client_secret != "" ? [1] : []
@@ -619,6 +662,11 @@ resource "google_compute_backend_service" "api_backend" {
       oauth2_client_secret = var.iap_oauth2_client_secret
     }
   }
+}
+
+resource "google_compute_url_map" "api_url_map" {
+  name            = "${var.cluster_name}-api-url-map"
+  default_service = google_compute_backend_service.api_backend.id
 }
 
 resource "google_iap_web_backend_service_iam_binding" "iap_access" {

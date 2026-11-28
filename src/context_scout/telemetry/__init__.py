@@ -34,6 +34,7 @@ from context_scout.telemetry.otel import (
     ATTR_SCOUT_MISSING_ITEMS_COUNT,
     ATTR_SCOUT_MODEL_ID,
     ATTR_SCOUT_NORMALIZED_RRF_SCORE,
+    ATTR_SCOUT_PACK_TOKENS,
     ATTR_SCOUT_PAID_TOKENS_SPENT,
     ATTR_SCOUT_PATCH_APPLIED,
     ATTR_SCOUT_PHASE,
@@ -49,6 +50,7 @@ from context_scout.telemetry.otel import (
     ATTR_TRACE_ID,
     ATTR_ZERO_TOUCH_SUFFICIENT,
     GEN_AI_OPERATION_NAME,
+    GEN_AI_PROVIDER_NAME,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_SYSTEM,
     GEN_AI_USAGE_INPUT_TOKENS,
@@ -73,6 +75,7 @@ from context_scout.telemetry.otel import (
     get_tracer,
     inject_trace_context,
     reset_tracer,
+    resolve_otel_model_and_provider,
 )
 from context_scout.telemetry.prometheus_metrics import (
     ScoutPrometheusRegistry,
@@ -100,6 +103,7 @@ __all__ = [
     "ATTR_SCOUT_MISSING_ITEMS_COUNT",
     "ATTR_SCOUT_MODEL_ID",
     "ATTR_SCOUT_NORMALIZED_RRF_SCORE",
+    "ATTR_SCOUT_PACK_TOKENS",
     "ATTR_SCOUT_PAID_TOKENS_SPENT",
     "ATTR_SCOUT_PATCH_APPLIED",
     "ATTR_SCOUT_PHASE",
@@ -118,6 +122,7 @@ __all__ = [
     "DEFAULT_FRONTIER_MODEL",
     "DEFAULT_SESSION_SPEND_CEILING_USD",
     "GEN_AI_OPERATION_NAME",
+    "GEN_AI_PROVIDER_NAME",
     "GEN_AI_REQUEST_MODEL",
     "GEN_AI_SYSTEM",
     "GEN_AI_USAGE_INPUT_TOKENS",
@@ -154,4 +159,5 @@ __all__ = [
     "inject_trace_context",
     "reset_prometheus_registry",
     "reset_tracer",
+    "resolve_otel_model_and_provider",
 ]

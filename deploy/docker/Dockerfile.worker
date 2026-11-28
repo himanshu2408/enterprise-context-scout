@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
-FROM python:3.12-slim-bookworm AS builder
+ARG PYTHON_BUILDER_IMAGE=python:3.12-slim-bookworm
+ARG DISTROLESS_PYTHON_IMAGE=gcr.io/distroless/python3-debian12:nonroot
+
+FROM ${PYTHON_BUILDER_IMAGE} AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -20,7 +23,7 @@ RUN uv sync --frozen --no-dev --extra worker --no-editable \
     && find /app /usr/local/lib/python3.12 -type d -name '__pycache__' -exec rm -rf {} +
 
 
-FROM gcr.io/distroless/python3-debian12:nonroot AS runtime
+FROM ${DISTROLESS_PYTHON_IMAGE} AS runtime
 
 WORKDIR /app
 

@@ -44,6 +44,10 @@ spec:
             matchLabels:
               {{- toYaml .Values.networkPolicy.ingressControllerNamespaceSelector | nindent 14 }}
         {{- end }}
+        {{- range .Values.networkPolicy.ingressHealthCheckCidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
       ports:
         - protocol: TCP
           port: {{ int .Values.api.port }}
@@ -166,6 +170,10 @@ spec:
         - namespaceSelector:
             matchLabels:
               {{- toYaml .Values.networkPolicy.ingressControllerNamespaceSelector | nindent 14 }}
+        {{- range .Values.networkPolicy.ingressHealthCheckCidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
       ports:
         - protocol: TCP
           port: {{ int .Values.webui.port }}

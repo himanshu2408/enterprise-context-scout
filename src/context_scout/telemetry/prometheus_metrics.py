@@ -64,10 +64,14 @@ class ScoutPrometheusRegistry:
         *,
         drift_ewma_alpha: float = 0.2,
         drift_alert_threshold: float = 0.15,
+        max_tracked_tenants: int = 500,
     ) -> None:
         self._lock = threading.RLock()
         self.drift_ewma_alpha = float(drift_ewma_alpha)
         self.drift_alert_threshold = float(drift_alert_threshold)
+        self.max_tracked_tenants = max(1, int(max_tracked_tenants))
+        self._known_tenants: set[str] = set()
+        self._tenant_overflow_total: float = 0.0
 
         self._queries_total: dict[tuple[tuple[str, str], ...], float] = {}
         self._abstention_total: dict[tuple[tuple[str, str], ...], float] = {}
@@ -81,14 +85,24 @@ class ScoutPrometheusRegistry:
         self._drift_states: dict[tuple[str, str], _DriftState] = {}
         self._explicit_baselines: dict[tuple[str, str], float] = {}
 
+    def _normalize_tenant_label(self, tenant_id: UUID | str) -> str:
+        tid = str(tenant_id)
+        if tid in self._known_tenants:
+            return tid
+        if len(self._known_tenants) < self.max_tracked_tenants:
+            self._known_tenants.add(tid)
+            return tid
+        self._tenant_overflow_total += 1.0
+        return "_overflow"
+
     def set_baseline_confidence(
         self, tenant_id: UUID | str, domain_id: str, baseline: float
     ) -> None:
         """Sets an explicit confidence baseline for (tenant_id, domain_id) drift detection."""
-        tid = str(tenant_id)
         did = domain_id.strip() or "default"
         clamped = min(max(float(baseline), 0.0), 1.0)
         with self._lock:
+            tid = self._normalize_tenant_label(tenant_id)
             self._explicit_baselines[(tid, did)] = clamped
             state = self._drift_states.get((tid, did))
             if state is not None:
@@ -108,12 +122,12 @@ class ScoutPrometheusRegistry:
         commit_drift: bool = False,
     ) -> None:
         """Records low-cardinality query outcome and updates EWMA retrieval-drift gauges."""
-        tid = str(tenant_id)
         did = domain_id.strip() or "default"
         out_label = outcome.strip() or "unknown"
-        base_labels = (("domain_id", did), ("tenant_id", tid))
 
         with self._lock:
+            tid = self._normalize_tenant_label(tenant_id)
+            base_labels = (("domain_id", did), ("tenant_id", tid))
             q_labels = (("domain_id", did), ("outcome", out_label), ("tenant_id", tid))
             self._queries_total[q_labels] = self._queries_total.get(q_labels, 0.0) + 1.0
 
@@ -181,12 +195,13 @@ class ScoutPrometheusRegistry:
         severity: str,
     ) -> None:
         """Records low-cardinality audit event counter."""
-        labels = (
-            ("event_type", event_type.strip() or "unknown"),
-            ("severity", severity.strip().upper() or "INFO"),
-            ("tenant_id", str(tenant_id)),
-        )
         with self._lock:
+            tid = self._normalize_tenant_label(tenant_id)
+            labels = (
+                ("event_type", event_type.strip() or "unknown"),
+                ("severity", severity.strip().upper() or "INFO"),
+                ("tenant_id", tid),
+            )
             self._audit_events_total[labels] = self._audit_events_total.get(labels, 0.0) + 1.0
 
     def get_drift_snapshot(
@@ -294,6 +309,12 @@ class ScoutPrometheusRegistry:
                 "Binary gauge (1.0 when drift_score >= threshold, else 0.0).",
                 alert_series,
             )
+            lines.append(
+                "# HELP scout_prometheus_tenant_overflow_total Total events bucketed "
+                "into _overflow due to max_tracked_tenants cap."
+            )
+            lines.append("# TYPE scout_prometheus_tenant_overflow_total counter")
+            lines.append(f"scout_prometheus_tenant_overflow_total {self._tenant_overflow_total:g}")
 
         return "\n".join(lines) + "\n"
 
@@ -351,6 +372,8 @@ class ScoutPrometheusRegistry:
             self._reranker_hist.clear()
             self._drift_states.clear()
             self._explicit_baselines.clear()
+            self._known_tenants.clear()
+            self._tenant_overflow_total = 0.0
 
 
 _PROM_LOCK = threading.Lock()

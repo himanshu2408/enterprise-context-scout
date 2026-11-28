@@ -337,12 +337,15 @@ def query_scout(
             ) from None
 
     # Step 3: Execute appropriate workflow
+    from context_scout.telemetry.otel import resolve_otel_model_and_provider
+
+    api_model_id, api_provider = resolve_otel_model_and_provider()
     with tracer.trace_workflow(
         span_name="api.scout.query",
         domain_id=request.domain_id,
         trace_id=active_trace_id,
-        model_id="gemma-4-moe",
-        system="gemma",
+        model_id=api_model_id,
+        system=api_provider,
     ) as span:
         if request.normalized_rrf_score is not None:
             logger.debug(

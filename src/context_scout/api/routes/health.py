@@ -6,11 +6,13 @@ import logging
 import os
 import platform
 import subprocess
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response, status
 
 from context_scout import __version__
 from context_scout.agents.domain_registry import DomainRegistry
@@ -20,12 +22,42 @@ from context_scout.api.dependencies import (
 )
 from context_scout.api.schemas import HealthResponse
 from context_scout.config import ScoutSettings, detect_hardware_profile
-from context_scout.db.session import RLSConnectionManager
+from context_scout.db.session import PoolRole, RLSConnectionManager
 from context_scout.schemas.contracts import PrincipalContext, RoleType
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Health"])
+
+_READINESS_TTL_SECONDS = 2.0
+_HEALTH_LOCK = threading.Lock()
+_POOLED_MANAGERS: dict[str, RLSConnectionManager] = {}
+_READINESS_CACHE: tuple[float, int, dict[str, Any]] | None = None
+
+
+def reset_health_probe_cache() -> None:
+    """Clear cached readiness state and pooled health managers (for isolated tests)."""
+    global _READINESS_CACHE
+    with _HEALTH_LOCK:
+        _READINESS_CACHE = None
+        for mgr in _POOLED_MANAGERS.values():
+            mgr.close()
+        _POOLED_MANAGERS.clear()
+
+
+def _get_pooled_health_manager(db_app_url: str) -> RLSConnectionManager:
+    with _HEALTH_LOCK:
+        mgr = _POOLED_MANAGERS.get(db_app_url)
+        if mgr is None:
+            mgr = RLSConnectionManager(
+                db_app_url,
+                pool_role=PoolRole.QUERY,
+                use_pool=True,
+                min_size=1,
+                max_size=2,
+            )
+            _POOLED_MANAGERS[db_app_url] = mgr
+        return mgr
 
 
 def _detect_cpu_brand_fallback() -> str | None:
@@ -174,6 +206,82 @@ def probe_runtime_environment(
         "runtime_models": runtime_models,
         "runtime_mode": runtime_mode,
     }
+
+
+@router.get("/health/live")
+def get_health_live() -> dict[str, str]:
+    """Zero-DB process liveness probe for Kubernetes livenessProbe."""
+    return {
+        "status": "alive",
+        "version": __version__,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+
+@router.get("/health/ready")
+def get_health_ready(
+    response: Response,
+    registry: Annotated[DomainRegistry, Depends(get_domain_registry)],
+) -> dict[str, Any]:
+    """2s TTL cached readiness probe using pooled PG17 checks when backend=postgres."""
+    global _READINESS_CACHE
+    settings = ScoutSettings()
+    repo_root = get_repo_root()
+    now = time.monotonic()
+
+    with _HEALTH_LOCK:
+        cached = _READINESS_CACHE
+    if cached is not None and (now - cached[0]) < _READINESS_TTL_SECONDS:
+        response.status_code = cached[1]
+        return cached[2]
+
+    manifests = registry.load_all()
+    adapter_status: dict[str, Any] = registry.adapter_pool.verify_all_adapters(base_dir=repo_root)
+    adapter_integrity_ok = True
+    for domain_id, manifest in manifests.items():
+        info = adapter_status.get(domain_id, {})
+        if isinstance(info, dict):
+            is_valid = bool(info.get("is_valid", False))
+            present = bool(info.get("adapter_present", is_valid))
+            if manifest.lora_enabled and present and not is_valid:
+                adapter_integrity_ok = False
+                break
+
+    db_reachable = False
+    db_status = "in_memory"
+    if settings.storage_backend == "postgres":
+        try:
+            conn_mgr = _get_pooled_health_manager(settings.db_app_url)
+            probe = PrincipalContext(
+                user_id="health_ready_probe",
+                role=RoleType.ENGINEER,
+                allowed_scopes=["public_eng"],
+            )
+            with conn_mgr.scoped_transaction(probe, enable_hnsw_iterative_scan=False) as conn:
+                conn.execute("SET LOCAL statement_timeout = '1500ms';")
+                conn.execute("SELECT 1;").fetchone()
+            db_reachable = True
+            db_status = "connected"
+        except Exception as exc:
+            logger.warning("Readiness PG17 probe failed (%s): %s", type(exc).__name__, exc)
+            db_reachable = False
+            db_status = "unreachable"
+
+    ready = adapter_integrity_ok and (settings.storage_backend != "postgres" or db_reachable)
+    http_code = status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE
+    payload: dict[str, Any] = {
+        "status": "ok" if ready else "not_ready",
+        "version": __version__,
+        "storage_backend": settings.storage_backend,
+        "database_connected": db_reachable,
+        "database_status": db_status,
+        "adapter_integrity_ok": adapter_integrity_ok,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    response.status_code = http_code
+    with _HEALTH_LOCK:
+        _READINESS_CACHE = (now, http_code, payload)
+    return payload
 
 
 @router.get("/health", response_model=HealthResponse)

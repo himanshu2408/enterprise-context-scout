@@ -41,8 +41,10 @@ from context_scout.schemas.contracts import (
 from context_scout.security.guardrails import SafetyCategory
 from context_scout.telemetry import (
     ATTR_DOMAIN_ID,
+    ATTR_SCOUT_PACK_TOKENS,
     ATTR_TRACE_ID,
     GEN_AI_OPERATION_NAME,
+    GEN_AI_PROVIDER_NAME,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_SYSTEM,
 )
@@ -305,7 +307,10 @@ def test_opentelemetry_span_capture_and_genai_conventions(harness: EvaluationHar
 
     attrs = wf_span.attributes or {}
     assert attrs.get(GEN_AI_SYSTEM) == "gemma"
-    assert attrs.get(GEN_AI_REQUEST_MODEL) == "gemma-4-moe"
+    assert attrs.get(GEN_AI_PROVIDER_NAME) == "gemma"
+    assert attrs.get(GEN_AI_REQUEST_MODEL) == ScoutSettings().primary_model_id
+    pack_tokens = attrs.get(ATTR_SCOUT_PACK_TOKENS)
+    assert isinstance(pack_tokens, int) and pack_tokens > 0
     assert attrs.get(ATTR_DOMAIN_ID) == "code_architecture_scout"
     assert ATTR_TRACE_ID in attrs
 

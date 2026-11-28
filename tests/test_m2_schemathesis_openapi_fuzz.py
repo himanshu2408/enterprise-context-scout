@@ -202,7 +202,12 @@ def test_schemathesis_unauthenticated_zero_5xx_and_zero_auth_bypass(
     assert response.status_code < 500, (
         f"5xx on unauth {case.method} {case.path}: {response.status_code} {response.text}"
     )
-    if case.path not in {"/api/v1/health", "/api/v1/auth/session"}:
+    if case.path not in {
+        "/api/v1/health",
+        "/api/v1/health/live",
+        "/api/v1/health/ready",
+        "/api/v1/auth/session",
+    }:
         assert not (200 <= response.status_code < 300), (
             f"Auth bypass on {case.method} {case.path}: {response.status_code}"
         )

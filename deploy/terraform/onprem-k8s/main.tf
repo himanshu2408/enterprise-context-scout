@@ -101,6 +101,8 @@ resource "kubernetes_service_account_v1" "scout_vllm" {
 # -----------------------------------------------------------------------------
 
 resource "kubernetes_manifest" "cnpg_postgres17" {
+  count = var.enable_cnpg_manifest ? 1 : 0
+
   manifest = {
     apiVersion = "postgresql.cnpg.io/v1"
     kind       = "Cluster"
@@ -196,12 +198,64 @@ resource "kubernetes_stateful_set_v1" "redis_ha" {
       }
 
       spec {
+        automount_service_account_token = false
+
+        security_context {
+          run_as_non_root = true
+          run_as_user     = 65532
+          run_as_group    = 65532
+          fs_group        = 65532
+          seccomp_profile {
+            type = "RuntimeDefault"
+          }
+        }
+
         container {
           name  = "redis"
           image = "redis:7.4-alpine"
+          args  = ["redis-server", "--requirepass", "$(REDIS_PASSWORD)", "--dir", "/data"]
+
+          env {
+            name = "REDIS_PASSWORD"
+            value_from {
+              secret_key_ref {
+                name = var.redis_password_secret_name
+                key  = "password"
+              }
+            }
+          }
+
           port {
             container_port = 6379
           }
+
+          security_context {
+            allow_privilege_escalation = false
+            read_only_root_filesystem  = true
+            capabilities {
+              drop = ["ALL"]
+            }
+          }
+
+          volume_mount {
+            name       = "redis-data"
+            mount_path = "/data"
+          }
+
+          volume_mount {
+            name       = "redis-tmp"
+            mount_path = "/tmp"
+          }
+        }
+
+        volume {
+          name = "redis-data"
+          empty_dir {}
+        }
+
+        volume {
+          name = "redis-tmp"
+          empty_dir {}
         }
       }
     }

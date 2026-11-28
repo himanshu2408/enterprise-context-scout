@@ -21,10 +21,10 @@ jobs:
       SCOUT_AUTH_HMAC_SECRET: scout-github-actions-ci-hmac-secret-32-chars!!
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install uv and Python 3.12
-        uses: astral-sh/setup-uv@v10.4.0
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: "3.12"
           enable-cache: true
@@ -41,10 +41,39 @@ jobs:
           uv run ruff format --check src tests scripts evals examples
 
       - name: Run Mypy Strict Typechecker
-        run: uv run mypy --strict src tests scripts/ci_pytest_shard.py scripts/run_test_batches.py
+        run: uv run mypy --strict src tests scripts/ci_pytest_shard.py scripts/run_test_batches.py scripts/generate_aibom.py scripts/clean_and_enrich_corpus.py
 
       - name: Lint PostgreSQL 17 Alembic Migrations via Squawk
         run: uv run python -m context_scout.db.migrations_runner --lint-squawk
+
+      - name: Install Helm and Terraform (SHA-256 Verified)
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://get.helm.sh/helm-v3.17.1-linux-amd64.tar.gz" -o /tmp/helm.tar.gz
+          echo "3b66f3cd28409f29832b1b35b43d9922959a32d795003149707fea84cbcd4469  /tmp/helm.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/helm.tar.gz -C /tmp && mv /tmp/linux-amd64/helm "$HOME/.local/bin/helm" && chmod +x "$HOME/.local/bin/helm"
+          curl -fsSL "https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip" -o /tmp/terraform.zip
+          echo "186e0145f5e5f2eb97cbd785bc78f21bae4ef15119349f6ad4fa535b83b10df8  /tmp/terraform.zip" | sha256sum -c -
+          unzip -o /tmp/terraform.zip terraform -d "$HOME/.local/bin" && chmod +x "$HOME/.local/bin/terraform"
+          rm -rf /tmp/helm.tar.gz /tmp/linux-amd64 /tmp/terraform.zip
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Helm, Multi-Cloud Terraform, Compose & CycloneDX AI-BOM
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          helm lint deploy/helm/context-scout
+          helm lint deploy/helm/context-scout -f deploy/helm/context-scout/values-gcp-gke.yaml
+          helm template context-scout deploy/helm/context-scout >/dev/null
+          helm template prod-scout deploy/helm/context-scout -f deploy/helm/context-scout/values-gcp-gke.yaml >/dev/null
+          for mod in gcp-gke aws-eks azure-aks onprem-k8s; do
+            terraform -chdir="deploy/terraform/$mod" fmt -check
+            rm -rf "/tmp/tf-mod-$mod"
+            cp -R "deploy/terraform/$mod" "/tmp/tf-mod-$mod"
+            TF_DATA_DIR="/tmp/tf-ci-$mod" terraform -chdir="/tmp/tf-mod-$mod" init -backend=false -input=false >/dev/null
+            TF_DATA_DIR="/tmp/tf-ci-$mod" terraform -chdir="/tmp/tf-mod-$mod" validate
+          done
+          POSTGRES_ADMIN_PASSWORD=ci-dummy REDIS_PASSWORD=ci-dummy MINIO_ROOT_USER=ci-dummy MINIO_ROOT_PASSWORD=ci-dummy POSTGRES_APP_PASSWORD=ci-dummy SCOUT_DB_APP_URL=postgresql://u:p@postgres/db SCOUT_AUTH_HMAC_SECRET=ci-dummy-secret-32-chars-minimum!! docker compose -f docker-compose.enterprise.yml config --quiet
+          uv run python scripts/generate_aibom.py --output /tmp/ci-aibom.cdx.json
 
   backend-eval:
     name: Backend Milestone 6 Evaluation Gate (In-Memory)
@@ -58,16 +87,16 @@ jobs:
       TOKENIZERS_PARALLELISM: "false"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install uv and Python 3.12
-        uses: astral-sh/setup-uv@v10.4.0
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: "3.12"
           enable-cache: true
 
       - name: Cache HuggingFace Model Weights
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/huggingface/hub
           key: hf-hub-embeddinggemma-v2-${{ runner.os }}
@@ -109,16 +138,16 @@ jobs:
       TOKENIZERS_PARALLELISM: "false"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install uv and Python 3.12
-        uses: astral-sh/setup-uv@v10.4.0
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: "3.12"
           enable-cache: true
 
       - name: Cache HuggingFace Model Weights
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/huggingface/hub
           key: hf-hub-embeddinggemma-v2-${{ runner.os }}
@@ -126,7 +155,7 @@ jobs:
             hf-hub-embeddinggemma-v2-
 
       - name: Cache Seeded PostgreSQL 17 Snapshot
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/scout-pg17-seed
           key: pg17-seed-v3-${{ hashFiles('sql/**', 'alembic.ini', 'pyproject.toml', 'uv.lock', 'src/context_scout/**', 'tests/fixtures/pg_isolation.py', 'examples/quant_dogfood/**') }}
@@ -173,7 +202,7 @@ jobs:
           ls -lh "$DUMP_PATH"
 
       - name: Upload Seeded PG17 Snapshot Artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: pg17-seeded-dump
           path: ~/.cache/scout-pg17-seed/context_scout.dump
@@ -211,16 +240,16 @@ jobs:
       TOKENIZERS_PARALLELISM: "false"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install uv and Python 3.12
-        uses: astral-sh/setup-uv@v10.4.0
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: "3.12"
           enable-cache: true
 
       - name: Restore HuggingFace Model Weights Cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/huggingface/hub
           key: hf-hub-embeddinggemma-v2-${{ runner.os }}
@@ -228,7 +257,7 @@ jobs:
             hf-hub-embeddinggemma-v2-
 
       - name: Download Seeded PG17 Snapshot Artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: pg17-seeded-dump
           path: /tmp/pg17-seed
@@ -261,12 +290,26 @@ jobs:
           uv run python .agents/skills/rls-pgtap-audit/scripts/check_rls_catalog.py
           git update-index -q --refresh || true
 
+      - name: Install Helm and Terraform for IaC Tests (SHA-256 Verified)
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://get.helm.sh/helm-v3.17.1-linux-amd64.tar.gz" -o /tmp/helm.tar.gz
+          echo "3b66f3cd28409f29832b1b35b43d9922959a32d795003149707fea84cbcd4469  /tmp/helm.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/helm.tar.gz -C /tmp && mv /tmp/linux-amd64/helm "$HOME/.local/bin/helm" && chmod +x "$HOME/.local/bin/helm"
+          curl -fsSL "https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip" -o /tmp/terraform.zip
+          echo "186e0145f5e5f2eb97cbd785bc78f21bae4ef15119349f6ad4fa535b83b10df8  /tmp/terraform.zip" | sha256sum -c -
+          unzip -o /tmp/terraform.zip terraform -d "$HOME/.local/bin" && chmod +x "$HOME/.local/bin/terraform"
+          rm -rf /tmp/helm.tar.gz /tmp/linux-amd64 /tmp/terraform.zip
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Run Pytest Shard ${{ matrix.shard }}/6
         run: |
+          export PATH="$HOME/.local/bin:$PATH"
           SHARD_FILES="$(uv run python scripts/ci_pytest_shard.py --shard "${{ matrix.shard }}" --total-shards 6)"
           echo "Running shard ${{ matrix.shard }}/6 modules: ${SHARD_FILES}"
           # shellcheck disable=SC2086
-          uv run pytest -q ${SHARD_FILES} --durations=10
+          uv run pytest -q ${SHARD_FILES} --durations=10 --junitxml="/tmp/pytest-shard-${{ matrix.shard }}.xml"
+          uv run python -c "import xml.etree.ElementTree as ET; root = ET.parse('/tmp/pytest-shard-${{ matrix.shard }}.xml').getroot(); suites = [root] if root.tag == 'testsuite' else list(root.findall('testsuite')); skipped = sum(int(s.attrib.get('skipped', 0)) for s in suites); assert skipped == 0, f'Unexpected skipped tests in shard: {skipped}'"
 
   frontend-verify:
     name: Frontend Strict TypeScript, ESLint, Vitest & Build
@@ -276,10 +319,10 @@ jobs:
         working-directory: web-ui
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Node.js 22
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "22"
           cache: "npm"

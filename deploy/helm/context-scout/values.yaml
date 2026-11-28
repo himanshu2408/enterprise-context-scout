@@ -74,8 +74,8 @@ config:
   embeddingDimensions: "768"
   localMaxKvTokens: "32768"
   loraSlotsCapacity: "4"
-  redisUrl: "redis://context-scout-redis:6379/0"
-  zoektEndpointUrl: "http://context-scout-zoekt:6070"
+  redisUrl: ""
+  zoektEndpointUrl: ""
   zoektProtocol: "grpc_json"
   objectStoreScheme: "s3" # gs | s3
   gcsBucket: ""
@@ -114,6 +114,7 @@ cloudSqlAuthProxy:
 
 api:
   replicaCount: 2
+  terminationGracePeriodSeconds: 310
   image:
     repository: ghcr.io/enterprise-context-scout/api
     tag: "1.0.0"
@@ -135,6 +136,7 @@ api:
 
 worker:
   replicaCount: 2
+  terminationGracePeriodSeconds: 60
   image:
     repository: ghcr.io/enterprise-context-scout/worker
     tag: "1.0.0"
@@ -153,6 +155,7 @@ worker:
 
 webui:
   replicaCount: 2
+  terminationGracePeriodSeconds: 60
   image:
     repository: ghcr.io/enterprise-context-scout/webui
     tag: "1.0.0"
@@ -188,10 +191,17 @@ vllm:
     nodeSelectorEnabled: false
   nvidiaImage:
     repository: vllm/vllm-openai
-    tag: "v0.8.5"
+    tag: "v0.34.0"
   amdImage:
     repository: rocm/vllm
     tag: "latest"
+  modelCache:
+    persistence:
+      enabled: false
+      existingClaim: ""
+      storageClass: ""
+      size: "120Gi"
+    emptyDirSizeLimit: "80Gi"
   service:
     type: ClusterIP
     port: 8001
@@ -205,7 +215,7 @@ vllm:
       memory: 32Gi
   tolerations: []
   adapterSyncSidecar:
-    enabled: true
+    enabled: false
     image:
       repository: ghcr.io/enterprise-context-scout/adapter-sidecar
       tag: "1.0.0"
@@ -274,6 +284,9 @@ gateway:
   gatewayNamespace: ""
   hostnames:
     - "context-scout.example.com"
+  tls:
+    certificateRefs:
+      - name: "context-scout-gateway-tls"
   iap:
     enabled: true
     oauth2ClientSecretName: "context-scout-iap-oauth"
@@ -289,7 +302,7 @@ keda:
   worker:
     minReplicas: 1
     maxReplicas: 10
-    redisAddress: "context-scout-redis:6379"
+    redisAddress: ""
     redisListName: "scout:ingestion:queue"
     listLength: "5"
   api:
@@ -315,3 +328,6 @@ networkPolicy:
     - "192.168.0.0/16"
   ingressControllerNamespaceSelector:
     kubernetes.io/metadata.name: ingress-nginx
+  ingressHealthCheckCidrs:
+    - "130.211.0.0/22"
+    - "35.191.0.0/16"

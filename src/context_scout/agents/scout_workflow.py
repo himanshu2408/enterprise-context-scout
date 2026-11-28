@@ -4876,8 +4876,10 @@ class ScoutWorkflow:
             ):
                 raise
             is_default_local = self.llm_backend is self.local_client
-            span_model_id = "gemma-4-moe" if is_default_local else self.llm_backend.model_id
-            span_system = "gemma" if is_default_local else "open_weights"
+            from context_scout.telemetry.otel import resolve_otel_model_and_provider
+
+            raw_model = None if is_default_local else self.llm_backend.model_id
+            span_model_id, span_system = resolve_otel_model_and_provider(raw_model)
             missing_list: list[Any] = (
                 list(ext_diag.missing_items)
                 if isinstance(ext_diag, InsufficientContextDiagnostic) and ext_diag.missing_items
@@ -4938,12 +4940,20 @@ class ScoutWorkflow:
         domain_id = _resolve_default_domain(domain_id, role="code")
         active_trace_id = trace_id or f"trace_{uuid.uuid4().hex[:12]}"
         tracer = ScoutTelemetryTracer.get_instance()
+        from context_scout.telemetry.otel import resolve_otel_model_and_provider
+
+        raw_model = (
+            None
+            if getattr(self, "llm_backend", None) is getattr(self, "local_client", None)
+            else getattr(self.llm_backend, "model_id", None)
+        )
+        wf_model_id, wf_provider = resolve_otel_model_and_provider(raw_model)
         with tracer.trace_workflow(
             span_name="scout.workflow",
             domain_id=domain_id,
             trace_id=active_trace_id,
-            model_id="gemma-4-moe",
-            system="gemma",
+            model_id=wf_model_id,
+            system=wf_provider,
         ) as wf_span:
             try:
                 result = self._run_dag(
@@ -8184,12 +8194,15 @@ class FederatedScoutCoordinator:
         """Executes the multi-domain federated DAG with OpenTelemetry instrumentation."""
         active_trace_id = trace_id or f"fed_trace_{uuid.uuid4().hex[:12]}"
         tracer = ScoutTelemetryTracer.get_instance()
+        from context_scout.telemetry.otel import resolve_otel_model_and_provider
+
+        fed_model_id, fed_provider = resolve_otel_model_and_provider()
         with tracer.trace_workflow(
             span_name="scout.federated_workflow",
             domain_id=self.federated_domain_id,
             trace_id=active_trace_id,
-            model_id="gemma-4-moe",
-            system="gemma",
+            model_id=fed_model_id,
+            system=fed_provider,
         ) as fed_span:
             result = self._run_federated_dag(
                 user_prompt=user_prompt,

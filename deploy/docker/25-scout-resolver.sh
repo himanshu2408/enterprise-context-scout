@@ -1,14 +1,24 @@
 #!/bin/sh
 set -eu
 
-NAMESERVERS=$(awk 'BEGIN{ORS=" "} $1=="nameserver" {if ($2 ~ ":") {print "["$2"]"} else {print $2}}' /etc/resolv.conf 2>/dev/null || true)
+SCOUT_NGINX_CONF_DIR="${SCOUT_NGINX_CONF_DIR:-/tmp}"
+SCOUT_RESOLV_CONF="${SCOUT_RESOLV_CONF:-/etc/resolv.conf}"
+
+NAMESERVERS=$(awk 'BEGIN{ORS=" "} $1=="nameserver" {
+    addr=$2
+    if (addr ~ ":" && addr !~ /^\[.*\]$/) {
+        print "[" addr "]"
+    } else {
+        print addr
+    }
+}' "$SCOUT_RESOLV_CONF" 2>/dev/null || true)
 NAMESERVERS=$(printf '%s' "$NAMESERVERS" | sed 's/[[:space:]]*$//')
 if [ -z "$NAMESERVERS" ]; then
     NAMESERVERS="127.0.0.11"
 fi
-printf 'resolver %s valid=10s;\n' "$NAMESERVERS" > /tmp/nginx-scout-resolver.conf
+printf 'resolver %s valid=10s;\n' "$NAMESERVERS" > "${SCOUT_NGINX_CONF_DIR}/nginx-scout-resolver.conf"
 
-rm -f /tmp/nginx-scout-api-override.conf
+rm -f "${SCOUT_NGINX_CONF_DIR}/nginx-scout-api-override.conf"
 
 if [ -n "${SCOUT_API_UPSTREAM:-}" ]; then
     if ! (
@@ -37,7 +47,7 @@ if [ -n "${SCOUT_API_UPSTREAM:-}" ]; then
         NR != 1 { ok = 0 }
         END { if (NR != 1 || !ok) exit 1 }
     '; then
-        printf 'set $scout_api_upstream "%s";\n' "$SCOUT_API_UPSTREAM" > /tmp/nginx-scout-api-override.conf
+        printf 'set $scout_api_upstream "%s";\n' "$SCOUT_API_UPSTREAM" > "${SCOUT_NGINX_CONF_DIR}/nginx-scout-api-override.conf"
     else
         echo "Invalid SCOUT_API_UPSTREAM value" >&2
         exit 1

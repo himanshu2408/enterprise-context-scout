@@ -39,3 +39,15 @@ variable "redis_replicas" {
   type        = number
   default     = 3
 }
+
+variable "enable_cnpg_manifest" {
+  description = "Enable CloudNativePG CRD manifest when applying against a cluster with CNPG CRDs installed."
+  type        = bool
+  default     = false
+}
+
+variable "redis_password_secret_name" {
+  description = "Pre-created Kubernetes Secret name holding the Redis AUTH password key."
+  type        = string
+  default     = "context-scout-redis-auth"
+}

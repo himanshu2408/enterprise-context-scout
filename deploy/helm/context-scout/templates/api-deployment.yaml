@@ -6,7 +6,9 @@ metadata:
     {{- include "context-scout.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
 spec:
+  {{- if not .Values.keda.enabled }}
   replicas: {{ .Values.api.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "context-scout.selectorLabels" . | nindent 6 }}
@@ -19,6 +21,7 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      terminationGracePeriodSeconds: {{ int (.Values.api.terminationGracePeriodSeconds | default 310) }}
       serviceAccountName: {{ include "context-scout.serviceAccountName" (list . "api") }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       {{- with .Values.global.imagePullSecrets }}
@@ -65,15 +68,19 @@ spec:
                   name: {{ .Values.secrets.existingSecret | quote }}
                   key: {{ .Values.secrets.scimBearerTokenKey | quote }}
                   optional: true
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/usr/bin/python3", "-c", "import time; time.sleep(5)"]
           livenessProbe:
             httpGet:
-              path: /api/v1/health
+              path: /api/v1/health/live
               port: http
             initialDelaySeconds: 15
             periodSeconds: 15
           readinessProbe:
             httpGet:
-              path: /api/v1/health
+              path: /api/v1/health/ready
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10

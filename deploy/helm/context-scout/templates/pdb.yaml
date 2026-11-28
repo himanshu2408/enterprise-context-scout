@@ -1,4 +1,5 @@
 {{- if .Values.api.pdb.enabled }}
+{{- $apiMin := ternary (int .Values.keda.api.minReplicas) (int .Values.api.replicaCount) .Values.keda.enabled }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -8,13 +9,18 @@ metadata:
     {{- include "context-scout.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
 spec:
+  {{- if le $apiMin 1 }}
+  maxUnavailable: 1
+  {{- else }}
   minAvailable: {{ int .Values.api.pdb.minAvailable }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "context-scout.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: api
 {{- end }}
 {{- if .Values.worker.pdb.enabled }}
+{{- $workerMin := ternary (int .Values.keda.worker.minReplicas) (int .Values.worker.replicaCount) .Values.keda.enabled }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -24,7 +30,11 @@ metadata:
     {{- include "context-scout.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker
 spec:
+  {{- if le $workerMin 1 }}
+  maxUnavailable: 1
+  {{- else }}
   minAvailable: {{ int .Values.worker.pdb.minAvailable }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "context-scout.selectorLabels" . | nindent 6 }}
@@ -40,13 +50,18 @@ metadata:
     {{- include "context-scout.labels" . | nindent 4 }}
     app.kubernetes.io/component: webui
 spec:
+  {{- if le (int .Values.webui.replicaCount) 1 }}
+  maxUnavailable: 1
+  {{- else }}
   minAvailable: {{ int .Values.webui.pdb.minAvailable }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "context-scout.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: webui
 {{- end }}
 {{- if and .Values.vllm.enabled .Values.vllm.pdb.enabled }}
+{{- $vllmMin := ternary (int .Values.keda.vllm.minReplicas) (int .Values.vllm.replicaCount) (and .Values.keda.enabled .Values.keda.vllm.enabled) }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -56,7 +71,11 @@ metadata:
     {{- include "context-scout.labels" . | nindent 4 }}
     app.kubernetes.io/component: vllm
 spec:
+  {{- if le $vllmMin 1 }}
+  maxUnavailable: 1
+  {{- else }}
   minAvailable: {{ int .Values.vllm.pdb.minAvailable }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "context-scout.selectorLabels" . | nindent 6 }}
@@ -72,7 +91,11 @@ metadata:
     {{- include "context-scout.labels" . | nindent 4 }}
     app.kubernetes.io/component: zoekt
 spec:
+  {{- if le (int .Values.zoekt.replicaCount) 1 }}
+  maxUnavailable: 1
+  {{- else }}
   minAvailable: {{ int .Values.zoekt.pdb.minAvailable }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "context-scout.selectorLabels" . | nindent 6 }}

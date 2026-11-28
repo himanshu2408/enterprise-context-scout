@@ -132,3 +132,15 @@ variable "enable_vertex_ai" {
   type        = bool
   default     = true
 }
+
+variable "worm_retention_seconds" {
+  description = "WORM retention policy duration in seconds for the GCS artifact bucket."
+  type        = number
+  default     = 31536000
+}
+
+variable "worm_retention_locked" {
+  description = "Lock WORM retention policy on GCS artifact bucket (irreversible when true)."
+  type        = bool
+  default     = false
+}

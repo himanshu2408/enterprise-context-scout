@@ -116,6 +116,8 @@ spec:
               mountPath: /tmp
             - name: adapters
               mountPath: {{ .Values.vllm.adapterSyncSidecar.stagingDir | quote }}
+            - name: model-cache
+              mountPath: /root/.cache/huggingface
         {{- if .Values.vllm.adapterSyncSidecar.enabled }}
         - name: adapter-sync-sidecar
           image: {{ printf "%s:%s" .Values.vllm.adapterSyncSidecar.image.repository .Values.vllm.adapterSyncSidecar.image.tag | quote }}
@@ -184,6 +186,8 @@ spec:
               mountPath: /tmp
             - name: adapters
               mountPath: {{ .Values.vllm.adapterSyncSidecar.stagingDir | quote }}
+            - name: model-cache
+              mountPath: /root/.cache/huggingface
         {{- end }}
         {{- if .Values.cloudSqlAuthProxy.enabled }}
         {{- include "context-scout.cloudSqlAuthProxyContainer" . | nindent 8 }}
@@ -195,4 +199,26 @@ spec:
         - name: adapters
           emptyDir:
             sizeLimit: 10Gi
+        {{- if not .Values.vllm.modelCache.persistence.enabled }}
+        - name: model-cache
+          emptyDir:
+            sizeLimit: {{ .Values.vllm.modelCache.emptyDirSizeLimit | default "80Gi" | quote }}
+        {{- else if .Values.vllm.modelCache.persistence.existingClaim }}
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: {{ .Values.vllm.modelCache.persistence.existingClaim | quote }}
+        {{- end }}
+  {{- if and .Values.vllm.modelCache.persistence.enabled (not .Values.vllm.modelCache.persistence.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: model-cache
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.vllm.modelCache.persistence.storageClass }}
+        storageClassName: {{ .Values.vllm.modelCache.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.vllm.modelCache.persistence.size | default "120Gi" | quote }}
+  {{- end }}
 {{- end }}
