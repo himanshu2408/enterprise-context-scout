@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "enterprise-context-scout"
-version = "1.0.0"
+version = "1.0.1"
 description = "Enterprise Dual-Engine Context Scout & Multi-Domain Knowledge Platform (Gemma 4 MoE, Google ADK 2.12, MCP 2.3, PostgreSQL 17 RLS + pgvector)"
 readme = "README.md"
 requires-python = ">=3.11"

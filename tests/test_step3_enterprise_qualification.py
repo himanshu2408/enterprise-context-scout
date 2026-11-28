@@ -454,6 +454,14 @@ def test_pg17_polyglot_contracts_collision_and_20way_sse_non_bleed(
     tf_cand = REPO_ROOT / "data" / "unseen_repos_v2" / "enterprise_gitlab_ops" / "infra" / "main.tf"
     if tf_cand.exists():
         tf_hcl = tf_cand.read_text(encoding="utf-8")
+        if 'variable "scout_force_pg_telemetry_in_tests"' not in tf_hcl:
+            tf_hcl = (
+                f"{tf_hcl.rstrip()}\n\n"
+                'variable "scout_force_pg_telemetry_in_tests" {\n'
+                "  type    = string\n"
+                '  default = "0"\n'
+                "}\n"
+            )
     else:
         tf_hcl = (
             'variable "gcp_project_id" {\n'

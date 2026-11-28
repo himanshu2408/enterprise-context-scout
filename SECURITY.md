@@ -4,7 +4,7 @@
 
 | Version | Supported |
 | --- | --- |
-| `1.0.x` | Yes |
+| `1.0.x` (`v1.0.1`) | Yes |
 | `< 1.0` | No |
 
 ## Reporting a Vulnerability
@@ -17,8 +17,10 @@ Please report suspected security vulnerabilities privately via GitHub Security A
 
 Target acknowledgment SLA is 2 business days, with remediation prioritized by severity (`SEV-0` critical isolation/RCE flaws immediately).
 
-## Supply-Chain & AI-BOM Verification
+## Supply-Chain, Kernel Isolation & AI-BOM Verification
 
+- PostgreSQL 17 kernel isolation spans all `23/23` public tables across Alembic migrations `0001`–`0024` (`ENABLE` + `FORCE ROW LEVEL SECURITY` under `NOBYPASSRLS` role `scout_app_user`).
+- Kubernetes runtime containers expose split liveness (`/api/v1/health/live`) and pooled DB readiness (`/api/v1/health/ready`) probes as `uid=65532` read-only non-root processes.
 - GitHub Actions workflows pin third-party actions to immutable 40-character commit SHAs.
-- Releases ship a CycloneDX v1.6 AI-BOM (`aibom.cdx.json`) backed by `uv.lock` and `web-ui/package-lock.json` hashes, signed as a Sigstore bundle (`aibom.cdx.json.sigstore.json`) with accompanying public key (`aibom.cdx.json.pub`).
+- Releases ship a `544`-component CycloneDX v1.6 AI-BOM (`aibom.cdx.json`) backed by `uv.lock` and `web-ui/package-lock.json` hashes, signed as a Sigstore bundle (`aibom.cdx.json.sigstore.json`) with accompanying public key (`aibom.cdx.json.pub`).
 - LoRA adapters are restricted to `.safetensors` weights (`trust_remote_code=false`) verified by `CosignBlobVerifier` before loading into `vLLM`.

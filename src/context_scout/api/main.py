@@ -78,7 +78,7 @@ def create_app() -> FastAPI:
             "FastAPI SSE Streaming Backend & OpenTelemetry "
             "instrumentation for Enterprise Context Scout"
         ),
-        version="1.0.0",
+        version="1.0.1",
         docs_url="/docs",
         redoc_url="/redoc",
         lifespan=lifespan,

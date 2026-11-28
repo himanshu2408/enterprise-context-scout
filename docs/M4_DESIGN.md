@@ -11,7 +11,7 @@
 
 ## 1. Executive Summary & Core Objective
 
-In enterprise production environments, an AI context scout cannot be permitted to guess when data is missing, ambiguous, or superseded. When a frontier implementation model (e.g., `gemini-4-argon`, `claude-opus-5.5`, or `gpt-5.6-sol` costing $2.00–$4.00 / 1M input tokens) receives hallucinated or speculative context, it implements invalid code, generates phantom method calls, or writes breaking migrations.
+In enterprise production environments, an AI context scout cannot be permitted to guess when data is missing, ambiguous, or superseded. When a frontier implementation model (e.g., `gemini-4-hydrogen`, `gemini-4-carbon`, `claude-sonnet-5.5`, `claude-opus-5.5`, or `gpt-5.6-sol`) receives hallucinated or speculative context, it implements invalid code, generates phantom method calls, or writes breaking migrations.
 
 **The Golden Principle of Milestone 4: ABSTENTION IS THE CORE REQUIREMENT.**
 - If the best evidence is missing, contradictory, or weak, the system must deterministically output an explicit `InsufficientContextDiagnostic(paid_tokens_spent=0)` naming exactly what was not found.
@@ -21,15 +21,15 @@ In enterprise production environments, an AI context scout cannot be permitted t
 
 ---
 
-## 2. October 2026 Live Model Verification & Pricing Standards
+## 2. Canonical Model Catalog & Pricing Standards (`config/model_pricing.yaml`)
 
-All model references and telemetry estimators in this design are verified against current October 2026 official vendor rates:
-- **Local Discovery Engine:** Google `gemma-4-26B-A4B-it` (3.8B active MoE parameters) — **$0.00 API Spend / 0 Cloud Egress**.
-- **Fast Cloud Implementation Sandbox:** Google `gemini-3.8-flash` (`gemini-3.8-flash`) — **$0.75–$1.50 / 1M input, $3.75–$7.50 / 1M output**.
-- **Frontier Cloud Reasoning Models:**
-  - Google `gemini-4-argon` (`gemini-4-argon`): **$2.00–$4.00 / 1M input, $10.00–$20.00 / 1M output**.
-  - Anthropic `claude-opus-5.5`: **$4.00 / 1M input, $20.00 / 1M output**.
-  - OpenAI `gpt-5.6-sol`: **$4.00 / 1M input, $20.00 / 1M output**.
+All model references and telemetry estimators resolve dynamically from `config/model_pricing.yaml` and `config/model_registry.yaml`:
+- **Local Discovery Engine:** Google `gemma-4-26B-A4B-it` (3.8B active MoE parameters) and governed BYO open-weights — **$0.00 API Spend / 0 Cloud Egress**.
+- **Active Cloud Handoff Tiers (`config/model_pricing.yaml`, per 1M tokens):**
+  - Google `gemini-4-hydrogen`: **$0.75 input / $3.75 output** (`gemini-3.8-flash` legacy compat: **$1.00 / $5.00**).
+  - Google `gemini-4-neon`: **$1.75 input / $8.75 output**; Google `gemini-4-carbon`: **$3.50 input / $17.50 output** (`gemini-4-argon` alias: **$3.00 / $15.00**).
+  - Anthropic `claude-sonnet-5.5`: **$3.00 input / $15.00 output**; Anthropic `claude-opus-5.5`: **$15.00 input / $75.00 output**.
+  - OpenAI `gpt-5.6-sol`: **$2.50 input / $10.00 output**; `gpt-6-astra`: **$10.00 input / $30.00 output**.
 *(Legacy 2025 models such as `gemini-2.5-pro` and `gemini-2.5-flash` are retired and strictly prohibited.)*
 
 ---

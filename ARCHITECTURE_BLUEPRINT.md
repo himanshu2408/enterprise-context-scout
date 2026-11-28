@@ -1,9 +1,9 @@
-# Enterprise Context Scout (`v1.0.0`)
+# Enterprise Context Scout (`v1.0.1`)
 ## Principal Architecture Blueprint, Trade-Off Defense & Implementation Specification
 
 **Project Repository:** `enterprise-context-scout`  
-**Release Version:** `1.0.0` (Apache-2.0)  
-**Last Updated:** 2026-11-23  
+**Release Version:** `1.0.1` (Apache-2.0)  
+**Last Updated:** 2026-11-28  
 **Deployment Model:** 100% self-hosted, cloud- and model-agnostic Enterprise Context Control Plane for private VPCs and air-gapped Kubernetes clusters  
 **Default Model Stack (`$0` API Cost) + Governed BYO Open-Weights:** `google/gemma-4-26B-A4B-it` (`mlx-community/gemma-4-26b-a4b-it-4bit` on Apple Silicon), `google/embeddinggemma-2`, `google/shieldgemma-2-2b-it` as defaults, plus governed enterprise BYO open-weights (`Qwen3`/`Qwen3-Coder`, `Mistral`/`Devstral`, `DeepSeek-V3`/`R1`, `Llama 4`, `Phi-4`, `IBM Granite`, `BAAI/bge-m3`) via `vLLM`/`SGLang`/`mlx-lm`  
 **Core Runtime Stack:** Python `3.12+`, FastAPI + SSE, `google-adk`, stateless Streamable HTTP MCP (`2026-07-28`), PostgreSQL 17 (`23/23` tables `FORCE ROW LEVEL SECURITY` + `pgvector` `halfvec(D)` + `pg_trgm` + FTS), Zoekt RE2, Redis, Air-Gapped React/TypeScript Workbench (`web-ui/`).
@@ -29,7 +29,8 @@ Enterprise Context Scout decouples **local `$0` context discovery, ACL enforceme
 | **Embeddings (Blue/Green `halfvec(D)`)** | `google/embeddinggemma-2` (`768d`) | `BAAI/bge-m3` (`1024d`), `Qwen3-Embedding` (`1024d`/`2560d`), Vertex AI embeddings via zero-downtime `embedding_spaces` |
 | **Input & Content Guardrails** | Deterministic WHATWG HTML5 $O(n)$ + `SecretRedactor` + `google/shieldgemma-2-2b-it` | Google Cloud Model Armor, `Prompt-Guard-2`, `Qwen3Guard`, `Granite-Guardian` via `GuardrailProviderSPI` |
 | **Storage Kernel & ACL Isolation** | PostgreSQL 17 (`23/23` `FORCE RLS`, `NOBYPASSRLS`) + Zoekt RE2 + Redis | Cloud SQL PG17 (Private Service Connect + IAM Auth) / AlloyDB + Memorystore + CMEK GCS (`gs://`) or S3 (`s3://`) |
-| **Optional Cloud Handoff** | Disabled by default (`allow_external_cloud_egress: false`) | Opt-in keyless Vertex AI ADC (`vertexai=True`) or approved IDE/MCP export—never host RCE (`OWASP ASI05`) |
+| **Zero-Trust Edge & Health** | Nginx air-gapped SPA proxy (`proxy_pass $scout_api_upstream;` for `/api/`, `/mcp/`, `/.well-known/*`) | Split `/api/v1/health/live` + `/api/v1/health/ready`, Cloud IAP (`ES256`), Cloud Armor WAF |
+| **Optional Cloud Handoff** | Disabled by default (`allow_external_cloud_egress: false`) | Opt-in keyless Vertex AI ADC (`vertexai=True`) with YAML-governed tiers (`gemini-4-hydrogen`, `gemini-4-neon`, `gemini-4-carbon`, `config/model_pricing.yaml`) or approved IDE/MCP export—never host RCE (`OWASP ASI05`) |
 
 ---
 
@@ -65,7 +66,7 @@ flowchart TD
     subgraph Serving["4. Model & Multi-LoRA Serving Plane"]
         Router["AdapterRouter (OWASP ASI06 training_scope_ceiling subset check)\n+ RedisGPUQuotaManager (P0/P1/P2 fair-share)"]
         Sidecar["Per-Pod AdapterSyncSidecar (gs:// & s3://, CosignBlobVerifier, vllm#12174)"]
-        LLM["vLLM / SGLang / mlx-lm (Frozen Base or Verified rsLoRA Cartridge)\nDegrades cleanly to degraded_extractive_reranked on GPU outage"]
+        LLM["vLLM v0.34.0 (--structured-outputs-config.backend xgrammar) / SGLang / mlx-lm\nFrozen Base or Verified rsLoRA; degrades cleanly to degraded_extractive_reranked"]
     end
 
     User --> Auth --> GuardIn --> G0 --> G1 --> G2
@@ -110,9 +111,9 @@ flowchart LR
 
 ---
 
-## 3. PostgreSQL 17 Schema (`23/23` Tables, Alembic `0001`–`0023`)
+## 3. PostgreSQL 17 Schema (`23/23` Tables, Alembic `0001`–`0024`)
 
-All database DDL is managed via Alembic (`src/context_scout/db/migrations/versions/0001_legacy_baseline.py` through `0023_m5_force_rls_audit_and_scim.py`), linted with `squawk --pg-version=17.0` (`0` lock-safety violations across all `22` forward revisions `0002`–`0023`), and verified against live `pg_class`/`pg_roles` catalogs by `.agents/skills/rls-pgtap-audit/scripts/check_rls_catalog.py`.
+All database DDL is managed via Alembic (`src/context_scout/db/migrations/versions/0001_legacy_baseline.py` through `0024_m5_scim_indexes_and_connector_rls.py`, head `0024_m5_scim_idx_conn_rls`), linted with `squawk --pg-version=17.0` (`0` lock-safety violations across all `23` forward revisions `0002`–`0024`), and verified against live `pg_class`/`pg_roles` catalogs by `.agents/skills/rls-pgtap-audit/scripts/check_rls_catalog.py`.
 
 ### 3.1 Complete 23-Table Inventory (`ENABLE` + `FORCE ROW LEVEL SECURITY`)
 
@@ -122,9 +123,9 @@ All database DDL is managed via Alembic (`src/context_scout/db/migrations/versio
 | **Code Graph & Overlays (7)** | `repositories`, `repo_commits`, `code_files`, `ast_symbols`, `ast_edges`, `ref_snapshots`, `overlay_file_deltas` | `0001`, `0007`–`0010` |
 | **Side-Effects & Vectors (2)** | `side_effects`, `embedding_spaces` | `0002`, `0011`–`0014` |
 | **Enterprise Docs & Trackers (3)** | `doc_chunks`, `confluence_pages`, `jira_issues` | `0001` |
-| **Sync & Worker Queues (3)** | `indexing_queue`, `indexing_dead_letter`, `connector_sync_watermarks` | `0001`, `0011`–`0014` |
+| **Sync & Worker Queues (3)** | `indexing_queue`, `indexing_dead_letter`, `connector_sync_watermarks` | `0001`, `0011`–`0014`, `0024` |
 | **Sessions & Telemetry (2)** | `scout_sessions`, `execution_telemetry` | `0001`, `0015`–`0017` |
-| **Zero-Trust Audit & SCIM (3)** | `audit_events` (WORM hash-chained), `scim_users`, `scim_groups` | `0021`–`0023` |
+| **Zero-Trust Audit & SCIM (3)** | `audit_events` (WORM hash-chained), `scim_users`, `scim_groups` | `0021`–`0024` |
 
 ### 3.2 Kernel Security Invariants (No Hardcoded Passwords)
 
@@ -250,21 +251,22 @@ enterprise-context-scout/
 │   └── airgap/                         # Air-gapped bundle packager
 ├── domains/                            # 4 domain-neutral DomainPacks (code, data eng, enterprise docs, polyglot)
 ├── examples/quant_dogfood/             # Isolated finance dogfooding example (zero core coupling)
-├── reports/v1_ga_release_scorecard.md  # Authoritative v1.0.0 L1–L12 release verification scorecard
-├── scripts/generate_aibom.py           # CycloneDX 1.6 AI-BOM generator + safetensors/Cosign checks
+├── reports/v1_ga_release_scorecard.md  # Authoritative v1.0.1 L1–L12 release verification scorecard
+├── scripts/generate_aibom.py           # 544-component CycloneDX 1.6 AI-BOM + Sigstore Cosign signing
+├── scripts/smoke_e2e_live_stack.py     # 4-image Docker + live Nginx->Uvicorn->Redis->PG17 E2E smoke
 ├── src/context_scout/
-│   ├── agents/                         # 3-graph ADK workflow, PreFlightValidator, ClaimVerifier, vLLM/MLX backends
-│   ├── api/                            # FastAPI SSE, IAP/OIDC/SCIM, stateless MCP HTTP, admin purge
-│   ├── ast_engine/                     # 12-lang Tree-sitter/SCIP, cross-boundary linker, deterministic slicer
+│   ├── agents/                         # 3-graph ADK workflow, PreFlightValidator, ClaimVerifier, vLLM v0.34/MLX
+│   ├── api/                            # FastAPI SSE, IAP/OIDC/SCIM, stateless MCP HTTP, /health/{live,ready}
+│   ├── ast_engine/                     # 12-lang Tree-sitter/SCIP (PEP 562 lazy package exports), slicer
 │   ├── connectors/                     # GitLab 18.7+, GitHub App, Confluence, Jira, air-gap bundle, 3-tier sync
-│   ├── db/                             # Alembic migrations 0001–0023, RLSConnectionManager, PG17 repositories
+│   ├── db/                             # Alembic migrations 0001–0024, RLSConnectionManager, PG17 repositories
 │   ├── evals/                          # Retrieval, citation faithfulness, RBAC, and wiki-scale harnesses
 │   ├── ops/                            # ArtifactPurgeCoordinator (<60s) & PITR StateReconciler
 │   ├── schemas/                        # Domain-neutral Pydantic v2 contracts
 │   ├── security/                       # OWASP ASI01–ASI10 guardrails, RBAC, IAP/OIDC, WORM audit, mutation gate
-│   ├── serving/                        # Per-pod AdapterSyncSidecar (gs:// & s3://)
+│   ├── serving/                        # Pruned per-pod AdapterSyncSidecar (gs:// & s3://)
 │   ├── storage/                        # Keyless GCS (ADC/WIF) & S3 object stores
 │   └── tuning/                         # SpecializationCompiler, TeacherDistiller v2, PEFTRsLoRATrainer, CanaryGate
-├── tests/                              # 83 top-level + 4 E2E zero-skip Python suites (PG17 FORCE RLS, OWASP, Schemathesis, L9)
-└── web-ui/                             # Air-gapped strict TypeScript + React Workbench (10 Vitest suites / 75 tests, WCAG 2.2 AA)
+├── tests/                              # 85 zero-skip Python suites (PG17 FORCE RLS, OWASP, Schemathesis, L9)
+└── web-ui/                             # Air-gapped strict TypeScript + React Workbench (11 Vitest suites / 83 tests, WCAG 2.2 AA)
 ```

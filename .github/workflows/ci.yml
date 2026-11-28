@@ -41,7 +41,7 @@ jobs:
           uv run ruff format --check src tests scripts evals examples
 
       - name: Run Mypy Strict Typechecker
-        run: uv run mypy --strict src tests scripts/ci_pytest_shard.py scripts/run_test_batches.py scripts/generate_aibom.py scripts/clean_and_enrich_corpus.py
+        run: uv run mypy --strict src tests scripts/ci_pytest_shard.py scripts/run_test_batches.py scripts/generate_aibom.py scripts/clean_and_enrich_corpus.py scripts/smoke_e2e_live_stack.py
 
       - name: Lint PostgreSQL 17 Alembic Migrations via Squawk
         run: uv run python -m context_scout.db.migrations_runner --lint-squawk

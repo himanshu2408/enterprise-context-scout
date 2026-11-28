@@ -358,10 +358,14 @@ def test_multi_family_architecture_profiles_and_serve_args(
 
     serve_args = adapter.recommended_vllm_serve_args(max_lora_rank=32)
     assert "--load-format" in serve_args and "safetensors" in serve_args
-    assert "--guided-decoding-backend" in serve_args and "xgrammar" in serve_args
+    assert "--structured-outputs-config.backend" in serve_args and "xgrammar" in serve_args
+    assert "--guided-decoding-backend" not in serve_args
     assert "--trust-remote-code" not in serve_args
     if expected_parser:
         assert "--reasoning-parser" in serve_args and expected_parser in serve_args
+        assert "--structured-outputs-config.enable_in_reasoning=True" in serve_args
+    else:
+        assert "--structured-outputs-config.enable_in_reasoning=True" not in serve_args
 
 
 def test_open_weights_executor_rejects_retired_and_cloud_models() -> None:
@@ -608,7 +612,8 @@ def test_vllm_executor_discovery_xgrammar_reasoning_and_scope_ceiling_routing(
     expected_salt_1 = compute_prefix_cache_salt(authorized_p)
     assert req_body_1["model"] == "lora_erp_v1"
     assert req_body_1["extra_body"]["cache_salt"] == expected_salt_1
-    assert req_body_1["extra_body"]["guided_decoding_backend"] == "xgrammar"
+    assert "guided_decoding_backend" not in req_body_1
+    assert "guided_decoding_backend" not in req_body_1["extra_body"]
     assert req_headers_1["x-prefix-cache-salt"] == expected_salt_1
     assert req_body_1["response_format"]["type"] == "structural_tag"
     assert req_body_1["response_format"]["triggers"] == ["<json_output>"]
@@ -2047,8 +2052,10 @@ def test_vllm_wire_top_level_fields_structural_prompt_and_mlx_shard_safety(
         enable_thinking=False,
     )
     sent = captured_bodies[-1]
-    # Top-level vLLM ChatCompletionRequest fields MUST be present (not hidden only in extra_body)
-    assert sent["guided_decoding_backend"] == "xgrammar"
+    # Single canonical structural_tag constraint (no guided_decoding_backend on vLLM v0.34.0)
+    assert "guided_decoding_backend" not in sent
+    assert "guided_decoding_backend" not in sent.get("extra_body", {})
+    assert sent["response_format"]["type"] == "structural_tag"
     assert sent["chat_template_kwargs"] == {"enable_thinking": False}
     # Messages MUST instruct the LLM to emit <json_output>...</json_output> so xgrammar triggers!
     combined_msgs = "\n".join(m["content"] for m in sent["messages"])

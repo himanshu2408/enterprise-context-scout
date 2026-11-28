@@ -17,7 +17,7 @@ domain_id: platform_infra_scout
 display_name: "Platform Infrastructure & Terraform Scout"
 description: "Kubernetes manifests, Terraform modules, Helm charts, and SRE runbooks."
 
-# Google-only model policy enforced by validate_google_model_id()
+# Model governance enforced by ModelGovernancePolicy (config/model_registry.yaml: $0 Gemma 4 defaults + BYO open-weights)
 base_model_id: "google/gemma-4-26B-A4B-it"
 contextualizer_model_id: "google/gemma-4-E4B-it"
 embedding_model_id: "google/embeddinggemma-2"
@@ -112,7 +112,7 @@ uv run context-scout init-domain \
 
 ### 3.1 Core Invariants (No Memorization, No Regex Self-Distillation)
 1. **Never Train Weights on Dynamic Facts:** QLoRA adapters (`r=16, alpha=32`) learn **task behavior**—compact `CodeSlicePointer` JSON formatting, AST skeleton localization, and bounce-back recovery—never raw repository contents or static document facts (which live in PostgreSQL 17 under `FORCE RLS`).
-2. **Never Distill from Regex/Template Scrapers:** `TeacherDistiller` (`src/context_scout/tuning/teacher_distiller.py`) generates candidate trajectories using a real reasoning teacher (`gemini-3.8-flash` or `google/gemma-4-31B-it`) grounded in **full `verbatim_content` chunks** across `sufficient`, `partial`, and `insufficient` regimes.
+2. **Never Distill from Regex/Template Scrapers:** `TeacherDistiller` (`src/context_scout/tuning/teacher_distiller.py`) generates candidate trajectories using a real reasoning teacher (`gemini-4-hydrogen`, `gemini-3.8-flash`, or `google/gemma-4-31B-it`) grounded in **full `verbatim_content` chunks** across `sufficient`, `partial`, and `insufficient` regimes.
 3. **Deterministic Rejection Sampling:** Every candidate trajectory must pass `PreFlightValidator` before entering `train.jsonl` / `valid.jsonl`, with 15–20% multi-turn bounce-back recovery examples included.
 4. **Leakage-Free 85/15 Split:** Stratified by module prefix (code) or `doc_id` (documents) so evaluation repositories/documents never appear in training rows.
 5. **When to Enable QLoRA (`lora_enabled`):** Enable QLoRA (`lora_enabled: true`) on **code pointer domains** where strict `CodeSlicePointer` JSON localization cuts prompt overhead by `96.65%`. Keep `lora_enabled: false` on **prose/research synthesis domains** so base `Gemma-4-26B-A4B-it` synthesizes directly from full retrieved chunks without 4-bit adapter JSON looping.

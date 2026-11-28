@@ -1,4 +1,4 @@
-# Enterprise Context Scout (`v1.0.0`)
+# Enterprise Context Scout (`v1.0.1`)
 
 **Enterprise Context Scout** is a 100% self-hosted, cloud- and model-agnostic **Enterprise Context Control Plane** for private VPCs and air-gapped Kubernetes clusters. It sits in front of coding agents, IDE MCP clients, and internal engineering assistants to resolve multi-repository codebases and enterprise wikis locally at `$0` API cost—enforcing tenant and document ACLs inside the PostgreSQL 17 kernel, verifying every citation and symbol deterministically before synthesis, and abstaining at `$0.00` paid tokens when indexed evidence is insufficient.
 
@@ -77,7 +77,7 @@ flowchart TD
 - **3-Graph Orchestration & Reranking:** `Graph 0` (`SessionCompactor`) compacts multi-turn history and detects Git commit drift; `Graph 1` executes federated retrieval and cross-encoder reranking with recency/archival calibration; `Graph 2` runs `PreFlightValidator` (normalized RRF floor, AST symbol resolution, verbatim NFKC quote overlap, `ClaimVerifier`) with `$0` local bounce-back and fail-closed `$0.00` abstention (`InsufficientContextDiagnostic`).
 
 ### 2. PostgreSQL 17 `23/23` `FORCE RLS` & `<60s` Transitive ACL / Purge Engine
-- **Database Kernel Isolation:** All `23 / 23` public tables across Alembic migrations `0001`–`0023` (linted zero-violation by `squawk --pg-version=17.0`) enforce `tenant_id UUID NOT NULL`, `ENABLE ROW LEVEL SECURITY`, and `FORCE ROW LEVEL SECURITY`. Runtime pools (`query_pool`, `ingestion_pool`) connect strictly as `scout_app_user` (`NOSUPERUSER NOBYPASSRLS NOINHERIT`); runtime routes and distillation jobs never receive `db_admin_url`.
+- **Database Kernel Isolation:** All `23 / 23` public tables across Alembic migrations `0001`–`0024` (head `0024_m5_scim_idx_conn_rls`, `23` forward revisions `0002`–`0024` linted zero-violation by `squawk --pg-version=17.0`) enforce `tenant_id UUID NOT NULL`, `ENABLE ROW LEVEL SECURITY`, and `FORCE ROW LEVEL SECURITY`. Runtime pools (`query_pool`, `ingestion_pool`) connect strictly as `scout_app_user` (`NOSUPERUSER NOBYPASSRLS NOINHERIT`); runtime routes and distillation jobs never receive `db_admin_url`.
 - **Transitive ACL Mirroring (`<60s`):** 3-tier sync (webhooks + watermark delta poll + periodic reconcile) with `429` Retry-After backoff across GitLab `18.7+` nested groups, GitHub App installations, Confluence page ancestor restrictions, Jira issue/comment security levels, and offline air-gapped bundles.
 - **Instant Secret Purge & PITR DR:** `ArtifactPurgeCoordinator` (`context-scout purge-artifact` & `POST /api/v1/admin/purge`) deletes artifacts across PostgreSQL 17, derived wiki/overlays/symbols, permission caches, and GCS/S3 object keys in `<60s` with post-purge residue verification; `StateReconciler` heals cross-store watermark drift after PostgreSQL PITR restores.
 
@@ -107,7 +107,7 @@ npm --prefix web-ui install
 cp .env.example .env
 docker compose up -d postgres
 
-# 3. Apply Alembic migrations (0001–0023) and seed the demo corpus under PG17 FORCE RLS
+# 3. Apply Alembic migrations (0001–0024) and seed the demo corpus under PG17 FORCE RLS
 uv run context-scout seed-demo
 
 # 4. Start the FastAPI backend (:8080) and air-gapped React Workbench (:5173)
@@ -115,13 +115,17 @@ uv run uvicorn context_scout.api.main:app --env-file .env --host 127.0.0.1 --por
 npm --prefix web-ui run dev
 ```
 
-**Optional Live Model Runtimes:**
+**Optional Live Model Runtimes & Live Container E2E Smoke:**
 - **Apple Silicon (`mlx-lm`, ~19 GB unified memory for 4-bit Gemma 4 26B-A4B):**
   ```bash
   CONTEXT_SCOUT_USE_LIVE_MLX=1 SCOUT_EMBEDDING_DEVICE=cpu \
     uv run uvicorn context_scout.api.main:app --env-file .env --host 127.0.0.1 --port 8080
   ```
-- **GPU `vLLM` / `SGLang` Endpoint (Gemma 4 or BYO `Qwen3` / `Devstral` / `Llama 4`):** Set `SCOUT_VLLM_BASE_URL` (e.g. `http://127.0.0.1:8000`) and `SCOUT_CHAT_MODEL_ID` in `.env`, or run `uv run context-scout query --domain-id code_architecture_scout --vllm --prompt "..."`.
+- **GPU `vLLM v0.34.0+` / `SGLang` Endpoint (Gemma 4 or BYO `Qwen3` / `Devstral` / `Llama 4`):** Launch `vLLM` with `--structured-outputs-config.backend xgrammar` (plus `--structured-outputs-config.enable_in_reasoning=True` when a reasoning parser is active), set `SCOUT_LOCAL_MLX_ENDPOINT=http://127.0.0.1:8000/v1` and `SCOUT_PRIMARY_MODEL_ID` in `.env`, and run `uv run context-scout query --domain-id code_architecture_scout --prompt "..."`.
+- **Full 4-Image Container & Multi-Process Live Stack Smoke (`Nginx -> Uvicorn -> Redis 7.4 -> PG17`):**
+  ```bash
+  uv run python scripts/smoke_e2e_live_stack.py
+  ```
 
 **Headless Backend & IDE Middleware Verification (`verify-backend`):**
 Enterprise Context Scout operates headless as an IDE Stateless Streamable HTTP MCP (`2026-07-28`) and enterprise chatbot context middleware (`/mcp/code/mcp`, `/mcp/docs/mcp`, `/api/v1/scout/{query,stream}`, `/api/v1/handoff/{preview,apply}`) as well as via the optional reference React workbench (`web-ui/`). Run the permanent **60-case, 5-category** backend & MCP middleware grounding + `$0` out-of-domain abstention suite (`24` grounded, `14` `$0` rejection/decoy, `6` MCP/overlay/multi-turn/handoff middleware flows, `4` security/RBAC/WORM audit, `12` foundational/federated):
@@ -158,18 +162,18 @@ Full empirical evidence, 95% Wilson confidence intervals, environment disclosure
 | Gate | Verification Scope | Measured Result | Status |
 |---|---|---|---|
 | **L1: Static, Types & Neutrality** | `ruff`, `mypy --strict`, `web-ui` lint/tsc/build, domain neutrality | `0` errors across Python & TypeScript; `FINANCE_PLUGIN_ALLOWLIST == frozenset()` | **PASS** |
-| **L2: Zero-Skip Test Suite** | Full `pytest` (incl. live PG17 / Testcontainers) & `vitest` | `1045/1045` `pytest` (`84` modules, `0` failed, `0` skipped); `75/75` `vitest` (`10` suites, `0` skipped) | **PASS** |
-| **L3: Kernel `FORCE RLS` & Alembic** | `squawk` PG17 DDL lint + catalog audit (`pg_class`/`pg_roles`) | `22` migrations (`0002`–`0023`) `0` violations; `23/23` tables `FORCE RLS` (`NOBYPASSRLS`) | **PASS** |
+| **L2: Zero-Skip Test Suite** | Full `pytest` (15 parallel batches, incl. live PG17 / Testcontainers) & `vitest` | `1099/1099` `-m "not live"` `pytest` (`85` modules, `0` failed, `0` skipped) + `2/2` live Metal MLX eval; `83/83` `vitest` (`11` suites, `0` skipped) | **PASS** |
+| **L3: Kernel `FORCE RLS` & Alembic** | `squawk` PG17 DDL lint + catalog audit (`pg_class`/`pg_roles`) | `23` forward migrations (`0002`–`0024`) `0` violations; `23/23` tables `FORCE RLS` (`NOBYPASSRLS`) | **PASS** |
 | **L4: Transitive ACLs & `<60s` Purge** | GitLab `18.7+`, GitHub App, Confluence, Jira, air-gap bundle, purge | `100%` pass across all connector ACL, `429` backoff, and `<60s` purge suites | **PASS** |
 | **L5: Polyglot AST/SCIP & Overlays** | 12-lang AST/SCIP, anti-ReDoS `<250ms`, CoW MR overlays, Docling | `100%` pass; `100 KB` HCL `~24.7 ms` under heavy GC; syntax errors fail closed | **PASS** |
-| **L6: Retrieval, 10K Wiki & Economics** | PG17 eval harness, 60-case `verify-backend` MCP suite, `10,000`-page wiki (`N=71`) | Recall@5 `5/5 (100%)`, Faithfulness `96/96` code & `64/64` doc (`100%`), Token Savings `92.24%`, 10K Wiki Conflicts `10/10`, Freshness `27/27`, Refusals `0/51`; 60-case `verify-backend` suite regression-verified | **PASS** |
+| **L6: Retrieval, 10K Wiki & Economics** | PG17 eval harness, 60-case `verify-backend` MCP suite, `10,000`-page wiki (`N=71`) | Sufficiency `100.0%` (`7/7`), Recall@5 `100.0%` (`5/5`), Faithfulness `100.0%`, Token Savings `91.36%`, 10K Wiki Conflicts `10/10`, Freshness `27/27`, Refusals `0/51`; 60-case `verify-backend` suite regression-verified | **PASS** |
 | **L7: OWASP `ASI01`–`ASI10` & Fuzzing** | Security matrix, Schemathesis OpenAPI fuzzing, mutation gates | `21/21` OWASP matrix; `62/62` Schemathesis subtests (`0` 5xx); `406/456 (89.04%)` AST mutation kill (`529/529` `mutmut`) | **PASS** |
 | **L8: BYO-LLM & Multi-LoRA Safety** | Multi-family BYO, `rsLoRA`, 3-way splits, `0/10` canary, sidecar | `4/4` shipped domain packs pass `check_splits_and_ceiling.py`; `0/10` canary leak | **PASS** |
 | **L9: Concurrency & Chaos DR** | `50` mixed-tenant SSE+MCP, `P0/P2` preemption, PITR DR | `50/50` (`25` SSE + `25` MCP) `0` leaks; `vLLM` degraded fallback & `StateReconciler` pass | **PASS** |
-| **L10: Air-Gapped UI & WCAG 2.2 AA** | Vitest + axe WCAG 2.2 AA + live browser network/CSP audit | `75/75` Vitest, `5/5` self-hosted `.woff2`, `63/63` local requests (`0` external), `0` CSP errors | **PASS** |
-| **L11a: IaC, AI-BOM & App Scans** | Helm, Terraform, CycloneDX `1.6` AI-BOM, Trivy, Gitleaks | `0` Python-pkg / `webui` / secret CVEs; `0` Gitleaks findings; `97`-component signed AI-BOM | **PASS** |
+| **L10: Air-Gapped UI & WCAG 2.2 AA** | Vitest + axe WCAG 2.2 AA + live Nginx/Chrome DevTools network/CSP audit | `83/83` Vitest, `5/5` self-hosted `.woff2`, `22/22` live Nginx local requests (`0` external), `0` console/CSP errors | **PASS** |
+| **L11a: IaC, AI-BOM & App Scans** | Helm, 4-cloud Terraform, 4-image smoke (`v1.0.1`), CycloneDX `1.6` AI-BOM, Trivy, Gitleaks | `0` Python-pkg / `webui` / secret CVEs; `0` Gitleaks findings; `544`-component signed AI-BOM; `/api/v1/health/{live,ready}` | **PASS** |
 | **L11b: Distroless Base OS Image** | Upstream `gcr.io/distroless/python3-debian12:nonroot` OS layer | `0` app/webui CVEs; upstream Debian 12 OS-layer CVEs formally risk-accepted (`v1.1.0` migration tracked) | **DOCUMENTED** |
-| **L12: Release Hygiene & Scorecard** | Tracked-file hygiene, citation parity, GA scorecard | `0` internal scaffolding identifiers across `git ls-files`; `100%` tracked-path citations | **PASS** |
+| **L12: Release Hygiene & Scorecard** | Tracked-file hygiene, citation parity, GA scorecard | `0` internal scaffolding identifiers across `git ls-files`; `100%` tracked-path citations; `v1.0.1` parity | **PASS** |
 
 ---
 
@@ -177,9 +181,9 @@ Full empirical evidence, 95% Wilson confidence intervals, environment disclosure
 
 | Document | Contents |
 |---|---|
-| **[`ARCHITECTURE_BLUEPRINT.md`](ARCHITECTURE_BLUEPRINT.md)** | Full `v1.0.0` system architecture, 23-table Alembic PostgreSQL 17 schema (`0001`–`0023`), Pydantic v2 contracts, 5-pillar retrieval, 3-graph ADK orchestration, and BYO-LLM/rsLoRA design |
+| **[`ARCHITECTURE_BLUEPRINT.md`](ARCHITECTURE_BLUEPRINT.md)** | Full `v1.0.1` system architecture, 23-table Alembic PostgreSQL 17 schema (`0001`–`0024`), Pydantic v2 contracts, 5-pillar retrieval, 3-graph ADK orchestration, and BYO-LLM/rsLoRA design |
 | **[`docs/SECURITY_AND_GOVERNANCE.md`](docs/SECURITY_AND_GOVERNANCE.md)** | Zero-trust Cloud IAP/OIDC/SCIM auth, PG17 `FORCE RLS`, `OWASP ASI01`–`ASI10` controls, zero host RCE, WORM audit chain, and deployment topology |
-| **[`reports/v1_ga_release_scorecard.md`](reports/v1_ga_release_scorecard.md)** | Authoritative `v1.0.0` `L1`–`L12` verification scorecard with Wilson CIs, mutation testing, OpenAPI fuzzing, and environment disclosures |
+| **[`reports/v1_ga_release_scorecard.md`](reports/v1_ga_release_scorecard.md)** | Authoritative `v1.0.1` `L1`–`L12` verification scorecard with Wilson CIs, mutation testing, OpenAPI fuzzing, and environment disclosures |
 | **[`docs/ARCHITECTURE_DEEP_DIVE.md`](docs/ARCHITECTURE_DEEP_DIVE.md)** | Deep dive into internal pipeline stages, AST closure, contextual document indexing, and SSE streaming |
 | **[`docs/CUSTOM_DOMAINS_AND_TRAINING.md`](docs/CUSTOM_DOMAINS_AND_TRAINING.md)** | Authoring declarative `domains/<id>/{domain,specialization,glossary}.yaml` packs, distillation, and `rsLoRA` training |
 | **[`docs/PLUGIN_CONNECTOR_AUTHORING_GUIDE.md`](docs/PLUGIN_CONNECTOR_AUTHORING_GUIDE.md)** | Implementing custom `LanguagePlugin`, `DomainPlugin`, and `SourceConnectorPlugin` extensions |

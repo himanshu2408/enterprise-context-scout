@@ -2,8 +2,8 @@ apiVersion: v2
 name: context-scout
 description: Enterprise Context Scout — self-hosted, cloud- and model-agnostic Enterprise Context Control Plane
 type: application
-version: 1.0.0
-appVersion: "1.0.0"
+version: 1.0.1
+appVersion: "1.0.1"
 keywords:
   - enterprise-context
   - rag

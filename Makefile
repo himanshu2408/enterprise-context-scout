@@ -1,6 +1,7 @@
 .PHONY: install lint format-check typecheck test-fast test-full test-ui iac-verify demo-seed verify-backend ci
 
-PY_DIRS := src tests
+PY_DIRS := src tests scripts evals examples
+STRICT_MYPY_TARGETS := src tests scripts/ci_pytest_shard.py scripts/run_test_batches.py scripts/generate_aibom.py scripts/clean_and_enrich_corpus.py scripts/smoke_e2e_live_stack.py
 PER_FILE_TIMEOUT_S := 120
 
 define _TEST_FULL_PY
@@ -74,7 +75,7 @@ format-check:
 	uv run ruff format --check $(PY_DIRS)
 
 typecheck:
-	uv run mypy --strict $(PY_DIRS)
+	uv run mypy --strict $(STRICT_MYPY_TARGETS)
 	cd web-ui && npm run typecheck
 
 test-fast:
