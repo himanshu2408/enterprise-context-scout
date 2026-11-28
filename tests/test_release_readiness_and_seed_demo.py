@@ -762,3 +762,64 @@ def test_pr7_evals_consolidation_and_bloat_retirement() -> None:
     roadmap = REPO_ROOT / "docs" / "ROADMAP_AND_KNOWN_LIMITS.md"
     assert roadmap.is_file()
     assert roadmap.stat().st_size < 5120
+
+
+def test_pr8_decomposed_modules_stay_under_1200_loc() -> None:
+    """PR-8 (ECS-164..170): Every module in decomposed packages stays <= 1,200 LOC."""
+    src_pkg = REPO_ROOT / "src" / "context_scout"
+    oversized: list[str] = []
+    checked_count = 0
+    for sub in ("db", "security", "ops", "retrieval", "ast_engine"):
+        for py_path in sorted((src_pkg / sub).rglob("*.py")):
+            if "migrations" in py_path.parts and "versions" in py_path.parts:
+                continue
+            if "__pycache__" in py_path.parts:
+                continue
+            checked_count += 1
+            loc = len(py_path.read_text(encoding="utf-8").splitlines())
+            if loc > 1200:
+                oversized.append(f"{py_path.relative_to(REPO_ROOT).as_posix()}: {loc} LOC")
+
+    assert checked_count >= 40
+    assert oversized == [], "Modules exceeding 1,200 LOC cap:\n" + "\n".join(oversized)
+
+    # Verify 100% backward-compatible public imports across all 6 facades
+    from context_scout.ast_engine.extractor import ASTExtractor, ParseDiagnostics
+    from context_scout.db.repositories import InMemoryRLSRepository, PostgresRLSRepository
+    from context_scout.ops.state_reconciler import StateReconciler, StateReconciliationReport
+    from context_scout.retrieval.zoekt_client import (
+        LocalTrigramZoektIndex,
+        RepoACLBitmapRegistry,
+        ZoektGrpcJsonClient,
+    )
+    from context_scout.security.guardrails import (
+        PromptInjectionSanitizer,
+        SecretRedactor,
+        ShieldGemmaGuardrail,
+    )
+    from context_scout.security.mutation_gate import ASTMutationGateRunner
+
+    assert all(
+        sym is not None
+        for sym in (
+            ASTExtractor,
+            ParseDiagnostics,
+            InMemoryRLSRepository,
+            PostgresRLSRepository,
+            StateReconciler,
+            StateReconciliationReport,
+            LocalTrigramZoektIndex,
+            RepoACLBitmapRegistry,
+            ZoektGrpcJsonClient,
+            PromptInjectionSanitizer,
+            SecretRedactor,
+            ShieldGemmaGuardrail,
+            ASTMutationGateRunner,
+        )
+    )
+
+
+def test_pr8_seed_demo_quick_includes_top_level_config_py() -> None:
+    """PR-8 (ECS-171): cmd_seed_demo quick=True must index top-level config.py (DomainConfig)."""
+    cli_src = (REPO_ROOT / "src" / "context_scout" / "cli.py").read_text(encoding="utf-8")
+    assert 'for top_py in ("__init__.py", "config.py"):' in cli_src

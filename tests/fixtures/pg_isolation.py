@@ -452,6 +452,27 @@ def _seed_code_architecture_scout(
             )
             repo.insert_ast_edge(conn, edge_rec)
 
+    # Backfill pre-existing dangling ast_edges (e.g. PreFlightValidator -> DomainConfig)
+    # when incremental seeding adds missing files such as config.py.
+    unresolved_rows = conn.execute(
+        "SELECT edge_id, target_qualified_name FROM ast_edges "
+        "WHERE domain_id = %s AND target_symbol_id IS NULL",
+        (domain_id,),
+    ).fetchall()
+    for raw_eid, raw_tq in unresolved_rows:
+        tq = str(raw_tq)
+        resolved_tid = global_symbol_map.get(tq)
+        if not resolved_tid:
+            t_short = tq.split(".")[-1]
+            matches = short_name_map.get(t_short, [])
+            if len(matches) == 1:
+                resolved_tid = matches[0]
+        if resolved_tid is not None:
+            conn.execute(
+                "UPDATE ast_edges SET target_symbol_id = %s WHERE edge_id = %s",
+                (resolved_tid, raw_eid),
+            )
+
     # Seed the 5 gh-issue:* doc chunks into code_architecture_scout
     existing_docs = {
         str(row[0])
