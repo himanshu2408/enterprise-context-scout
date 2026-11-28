@@ -354,8 +354,23 @@ class TestClopperPearsonStatisticalEngineStress:
         res_tied = compute_token_ab_significance(arm_a_tied, arm_b_tied)
         assert res_tied.median_savings_pct == 80.0
         assert res_tied.is_significant is True
+        assert res_tied.p_value > 0.0
         assert res_tied.target_reduction_met is True
+        assert res_tied.target_reduction_p_value == 1.0
+        assert res_tied.is_target_reduction_significant is False
         assert res_tied.cohens_d > 1.0  # Large effect size
+
+        # 2b. High-savings distribution exceeding 80% target threshold (n=40 -> unrounded p > 0)
+        from evals.datasets.token_ab_dataset import DEFAULT_BPE_MODEL_ID, count_bpe_tokens
+
+        assert DEFAULT_BPE_MODEL_ID == "deterministic-offline-bytelevel-bpe-v1"
+        assert count_bpe_tokens("def verify_tenant_isolation(ctx): return True") > 0
+        arm_a_above = [10_000] * 40
+        arm_b_above = [1_500] * 40  # 85% savings > 80% target
+        res_above = compute_token_ab_significance(arm_a_above, arm_b_above)
+        assert res_above.p_value > 0.0
+        assert res_above.is_target_reduction_significant is True
+        assert res_above.target_reduction_p_value < 0.01
 
         # 2. Partial zero differences: 5 tasks have 0 savings, 25 have 80% reduction
         arm_a_zeros = [500] * 5 + [2500] * 25

@@ -269,48 +269,55 @@ def main(argv: list[str] | None = None) -> int:
     if args.postgres and args.in_memory:
         parser.error("Cannot specify both --postgres and --in-memory simultaneously.")
 
+    prev_storage_backend = os.environ.get("SCOUT_STORAGE_BACKEND")
     if args.in_memory:
         os.environ.setdefault("SCOUT_STORAGE_BACKEND", "memory")
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    logger.info("Starting Milestone 6 Evaluation Harness...")
+    try:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+        logger.info("Starting Milestone 6 Evaluation Harness...")
 
-    harness = EvaluationHarness(
-        require_postgres=args.postgres,
-        force_in_memory=args.in_memory,
-    )
+        harness = EvaluationHarness(
+            require_postgres=args.postgres,
+            force_in_memory=args.in_memory,
+        )
 
-    suite: GoldenBenchmarkSuite | None = None
-    if args.dataset_path:
-        suite_path = Path(args.dataset_path).resolve()
-        suite = GoldenBenchmarkSuite.model_validate_json(suite_path.read_text(encoding="utf-8"))
+        suite: GoldenBenchmarkSuite | None = None
+        if args.dataset_path:
+            suite_path = Path(args.dataset_path).resolve()
+            suite = GoldenBenchmarkSuite.model_validate_json(suite_path.read_text(encoding="utf-8"))
 
-    result = harness.evaluate_all(suite=suite)
+        result = harness.evaluate_all(suite=suite)
 
-    # Create reports directory
-    json_path = Path(args.output_json).resolve()
-    md_path = Path(args.output_md).resolve()
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    md_path.parent.mkdir(parents=True, exist_ok=True)
+        # Create reports directory
+        json_path = Path(args.output_json).resolve()
+        md_path = Path(args.output_md).resolve()
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write JSON report
-    json_content = result.model_dump_json(indent=2)
-    json_path.write_text(json_content, encoding="utf-8")
-    logger.info("Saved JSON report to %s", json_path)
+        # Write JSON report
+        json_content = result.model_dump_json(indent=2)
+        json_path.write_text(json_content, encoding="utf-8")
+        logger.info("Saved JSON report to %s", json_path)
 
-    # Write Markdown report
-    md_content = generate_markdown_report(result, harness)
-    md_path.write_text(md_content, encoding="utf-8")
-    logger.info("Saved Markdown report to %s", md_path)
+        # Write Markdown report
+        md_content = generate_markdown_report(result, harness)
+        md_path.write_text(md_content, encoding="utf-8")
+        logger.info("Saved Markdown report to %s", md_path)
 
-    print("\n" + result.summary + "\n")
+        print("\n" + result.summary + "\n")
 
-    if args.fail_under_threshold and not result.all_passed:
-        logger.error("CI/CD evaluation gate failure detected. Exiting with code 1.")
-        return 1
+        if args.fail_under_threshold and not result.all_passed:
+            logger.error("CI/CD evaluation gate failure detected. Exiting with code 1.")
+            return 1
 
-    logger.info("All 6 evaluation gates passed successfully.")
-    return 0
+        logger.info("All 6 evaluation gates passed successfully.")
+        return 0
+    finally:
+        if prev_storage_backend is None:
+            os.environ.pop("SCOUT_STORAGE_BACKEND", None)
+        else:
+            os.environ["SCOUT_STORAGE_BACKEND"] = prev_storage_backend
 
 
 if __name__ == "__main__":

@@ -580,6 +580,9 @@ class TerraformPlugin:
             tags: list[str] = []
             if block_type == "variable":
                 tags.append(f"@env TF_VAR_{first_label}")
+                upper_env = first_label.upper()
+                if upper_env:
+                    tags.append(f"@env {upper_env}")
                 if body_node is not None:
                     visit_block_body(
                         body_node,

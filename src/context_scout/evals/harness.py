@@ -254,7 +254,7 @@ class EvaluationHarness:
         import dataclasses
         import uuid
 
-        scan_roots = [self.repo_root / "src" / "context_scout", self.repo_root / "tests"]
+        scan_roots = [self.repo_root / "src" / "context_scout"]
         pending_syms: list[tuple[UUID, str, str, int, int, str, str, str]] = []
         for scan_dir in scan_roots:
             if not scan_dir.exists():

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gc
 import logging
 import re
 
@@ -127,18 +126,12 @@ class StorybookPlugin:
             self.last_parse_diagnostics = ParseDiagnostics(parser_backend="tree-sitter-typescript")
             return [], []
 
-        was_gc = gc.isenabled()
-        gc.disable()
-        try:
-            return self._extract_ast_impl(
-                code=code,
-                file_path=file_path,
-                repo_name=repo_name,
-                module_prefix=module_prefix,
-            )
-        finally:
-            if was_gc:
-                gc.enable()
+        return self._extract_ast_impl(
+            code=code,
+            file_path=file_path,
+            repo_name=repo_name,
+            module_prefix=module_prefix,
+        )
 
     def _extract_ast_impl(
         self,

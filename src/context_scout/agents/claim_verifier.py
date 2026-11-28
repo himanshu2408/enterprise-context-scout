@@ -86,6 +86,9 @@ GREEK_LOOKALIKES: Final[set[int]] = {
 }
 
 ALL_LOOKALIKES: Final[set[int]] = CYRILLIC_LOOKALIKES | GREEK_LOOKALIKES
+_NFKC_HOMOGLYPH_RE: Final[re.Pattern[str]] = re.compile(
+    r"[\uFF01-\uFF5E\u2160-\u217F\u2460-\u24FF\U0001D400-\U0001D7FF]"
+)
 
 CandidateSources = (
     Sequence[tuple[str, str]]
@@ -117,6 +120,14 @@ def detect_homoglyph_spoofing(text: str) -> tuple[bool, str]:
     3. Authentic internationalized text (pure Cyrillic Russian, pure Greek, Greek mathematical
        symbols like alpha/beta/lambda, German umlauts, French accents, CJK) is accepted.
     """
+    nf_match = _NFKC_HOMOGLYPH_RE.search(text)
+    if nf_match:
+        ch = nf_match.group(0)
+        return (
+            True,
+            f"NFKC compatibility homoglyph character detected: {ch!r} (U+{ord(ch):04X})",
+        )
+
     tokens = re.findall(r"\b\w+\b", text)
     if not tokens:
         return False, ""
@@ -234,8 +245,7 @@ class ClaimVerifier:
         sources: CandidateSources,
     ) -> ClaimVerificationRecord:
         """Verifies a single claim against candidate sources using exact NFKC substring matching."""
-        norm_claim = self.normalize_text(claim)
-        if not norm_claim:
+        if not claim.strip():
             return ClaimVerificationRecord(
                 claim_text=claim,
                 is_verified=False,
@@ -244,7 +254,7 @@ class ClaimVerifier:
             )
 
         if self.config.reject_homoglyphs:
-            is_hg, hg_reason = detect_homoglyph_spoofing(norm_claim)
+            is_hg, hg_reason = detect_homoglyph_spoofing(claim)
             if is_hg:
                 return ClaimVerificationRecord(
                     claim_text=claim,
@@ -253,6 +263,15 @@ class ClaimVerifier:
                     failure_reason=f"Homoglyph spoofing detected: {hg_reason}",
                     is_homoglyph_attack=True,
                 )
+
+        norm_claim = self.normalize_text(claim)
+        if not norm_claim:
+            return ClaimVerificationRecord(
+                claim_text=claim,
+                is_verified=False,
+                failure_code=ClaimFailureCode.EMPTY_CLAIM,
+                failure_reason="Claim text is empty or whitespace",
+            )
 
         # Normalize candidate sources
         normalized_sources: list[tuple[str, str]] = []

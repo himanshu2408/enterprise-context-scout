@@ -1305,8 +1305,32 @@ class TestPEFTRsLoRATrainerMultiArchAndGates:
                     storage_uri="gs://scout-eu-adapters",
                     register_in_db=True,
                     activate_in_db=True,
+                    allow_synthetic_artifact_registration=True,
                 )
             assert len(gcs_objects) == 0
+
+            # PR-4 (ECS-051): Synthetic tiny-model DB registration fails closed by default
+            with pytest.raises(ValueError, match="allow_synthetic_artifact_registration"):
+                PEFTRsLoRATrainer(
+                    peft_cfg,
+                    tenant_id=tenant_id,
+                    use_gpu_lock=False,
+                    rls_conn_manager=mgr,
+                    object_store=gcs_store,
+                ).train(
+                    train_jsonl=d_report.train_path,
+                    valid_jsonl=d_report.valid_path,
+                    eval_jsonl=d_report.eval_path,
+                    canaries_json=d_report.canaries_path,
+                    compiled=compiled,
+                    output_adapter_dir=tmp_path / "blocked_synth_db",
+                    artifact_id=f"blocked_synth_{domain_id}",
+                    allow_offline_tiny_model=True,
+                    cosign_private_key=priv_key,
+                    cosign_verifier=verifier,
+                    storage_uri="gs://scout-eu-adapters",
+                    register_in_db=True,
+                )
 
             # Clean pass -> sign with cosign Sigstore bundle, upload to gs://, register in PG17
             trainer_gcs = PEFTRsLoRATrainer(
@@ -1326,6 +1350,7 @@ class TestPEFTRsLoRATrainerMultiArchAndGates:
                 output_adapter_dir=tmp_path / "final_adapter",
                 artifact_id=f"qwen3_{domain_id}_v1",
                 allow_offline_tiny_model=True,
+                allow_synthetic_artifact_registration=True,
                 cosign_private_key=priv_key,
                 cosign_verifier=verifier,
                 as_sigstore_bundle=True,
@@ -1622,6 +1647,7 @@ class TestMigrateBaseModelCLIAndDAG:
                     dpo_steps=2,
                     activate=True,
                     register_in_db=True,
+                    allow_synthetic_artifact_registration=True,
                     tenant_id=tenant_id,
                     rls_conn_manager=mgr,
                     object_store=gcs_store,
@@ -1689,3 +1715,62 @@ class TestM402ASTHygieneAndSecurity:
                     and isinstance(node.body[0], (ast.Pass, ast.Continue))
                 ):
                     raise AssertionError(f"Silent except block in {py_path}:{node.lineno}")
+
+
+def test_distiller_stem_normalization_and_label_truncation_guard(tmp_path: Path) -> None:
+    """PR-4 (ECS-070/ECS-071): Cross-split stem leakage fails closed & preserves targets."""
+    from context_scout.agents.open_weights_vllm_executor import ModelArchitectureAdapter
+    from context_scout.tuning.teacher_distiller import TeacherDistiller
+    from context_scout.tuning.train_peft_lora import tokenize_chat_assistant_only
+
+    train_p = tmp_path / "train.jsonl"
+    valid_p = tmp_path / "valid.jsonl"
+    train_p.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"role": "user", "content": '{"file_path": "src/orders/order_manager.py"}'},
+                    {"role": "assistant", "content": "ok"},
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    valid_p.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": '{"file_path": "tests/unit/test_order_manager.py"}',
+                    },
+                    {"role": "assistant", "content": "ok"},
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert TeacherDistiller.verify_zero_leakage(train_p, valid_p) is False
+
+    # Long prompt + assistant reply truncated to small max_seq_length still retains assistant tokens
+    class _SpaceTok:
+        eos_token_id = 2
+
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            _ = add_special_tokens
+            return [10 + (i % 50) for i, _ in enumerate(text.split())]
+
+    arch = ModelArchitectureAdapter("Qwen/Qwen3-Coder-30B-A3B")
+    in_ids, labels = tokenize_chat_assistant_only(
+        [
+            {"role": "user", "content": " ".join(["context"] * 60)},
+            {"role": "assistant", "content": "verified final answer tokens"},
+        ],
+        tokenizer=_SpaceTok(),
+        arch_adapter=arch,
+        max_seq_length=32,
+    )
+    assert len(in_ids) <= 32
+    assert any(lbl != -100 for lbl in labels), "All assistant labels were masked to -100"

@@ -8629,10 +8629,13 @@ class FederatedScoutCoordinator:
                 reverse=True,
             )
             if selected_ids:
-                q_tokens = {
-                    t.lower()
-                    for t in re.findall(r"[A-Za-z0-9_]{3,}", user_prompt)
-                    if t.lower() not in PROMPT_STOPWORDS
+                raw_words = re.findall(r"[A-Za-z0-9_]{3,}", user_prompt)
+                q_tokens = {w.lower() for w in raw_words if w.lower() not in PROMPT_STOPWORDS}
+                explicit_ident_tokens = {
+                    w.lower()
+                    for w in raw_words
+                    if "_" in w
+                    or (any("a" <= c <= "z" for c in w) and any("A" <= c <= "Z" for c in w[1:]))
                 }
                 direct_code_tokens: dict[str, set[str]] = {}
                 for dom_id in selected_ids:
@@ -8642,7 +8645,9 @@ class FederatedScoutCoordinator:
                         qname = str(getattr(h, "qualified_name_or_title", "") or "").lower()
                         parts = [p for p in re.split(r"[.:/]", qname) if p]
                         for tok in q_tokens:
-                            if tok in parts[:2]:
+                            if tok in parts[:2] or (
+                                parts and tok == parts[-1] and tok in explicit_ident_tokens
+                            ):
                                 matched_toks.add(tok)
                     if matched_toks:
                         direct_code_tokens[dom_id] = matched_toks
@@ -8745,7 +8750,7 @@ class FederatedScoutCoordinator:
                         in (QueryIntentMode.HYBRID_CODE_AND_DOCS, QueryIntentMode.PURE_CODE)
                         and sc >= 0.38
                         and (
-                            (dom_id in direct_code_tokens and (top_score - sc) <= 0.45)
+                            (dom_id in direct_code_tokens and (top_score - sc) <= 0.55)
                             or ((top_score - sc) <= 0.18 and (top_joint - j_sc) <= 0.18)
                         )
                     )

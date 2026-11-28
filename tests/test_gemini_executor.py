@@ -482,3 +482,105 @@ def test_worst_case_output_projection_prevents_mid_stream_budget_breach(
         )
     assert "exceeded session token budget" in str(exc_info_exec.value)
     assert "projected 4896 (prompt: 800, max_output: 4096) > cap 1000" in str(exc_info_exec.value)
+
+
+def test_keyless_vertex_handoff_reserves_budget_and_counts_thoughts_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR-4 (ECS-012/ECS-053): Keyless Vertex path reserves worst-case & bills thinking."""
+    from types import SimpleNamespace
+
+    from context_scout.telemetry.cost_governance import PaidComputeCostEstimator
+
+    slice1 = VerbatimCodeSlice(
+        repo_name=REPO_NAME,
+        file_path="src/service_core/order_manager.py",
+        start_line=1,
+        end_line=5,
+        qualified_symbol="OrderManager.submit_order",
+        selection_reason="Target method",
+        modification_intent=ModificationIntent.MODIFY_TARGET,
+        git_commit_sha="abc1234",
+        git_blob_sha="def5678",
+        verbatim_code_with_lines="   1 | class OrderManager:\n",
+    )
+    pack = ImplementationContextPack(
+        trace_id=str(uuid.uuid4()),
+        domain_id=DOMAIN_ID,
+        user_task="Handoff test",
+        architectural_execution_plan=["Plan"],
+        code_slices=[slice1],
+        preflight_report=PreFlightValidationReport(
+            passed=True, normalized_rrf_score=0.9, citations_verified_100_pct=True
+        ),
+        local_tokens_consumed=5000,
+        pack_token_count=600,
+    )
+
+    constrained = PrincipalContext(
+        user_id="vertex_budget_user",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng", "repo:code_architecture_scout"],
+        session_budget_tokens=1000,
+    )
+    executor = GeminiImplementationExecutor(
+        model_id="gemini-4-hydrogen",
+        api_key="vertex-keyless",
+        require_confirmation=False,
+        allow_external_cloud_egress=True,
+    )
+
+    with pytest.raises(BudgetExceededError):
+        executor.synthesize_keyless_vertex_handoff_patch(
+            pack=pack,
+            principal=constrained,
+            max_output_tokens=512,
+        )
+
+    fake_usage = SimpleNamespace(
+        prompt_token_count=200,
+        candidates_token_count=100,
+        thoughts_token_count=50,
+    )
+    fake_resp = SimpleNamespace(
+        text="```diff\n--- a/x.py\n+++ b/x.py\n```",
+        usage_metadata=fake_usage,
+    )
+
+    class _FakeModels:
+        def generate_content(self, **_kwargs: object) -> object:
+            return fake_resp
+
+    class _FakeGenAIClient:
+        def __init__(self, **_kwargs: object) -> None:
+            self.models = _FakeModels()
+
+    import google.genai as genai_mod
+
+    monkeypatch.setattr(genai_mod, "Client", _FakeGenAIClient)
+
+    ok_principal = PrincipalContext(
+        user_id="vertex_ok_user",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng", "repo:code_architecture_scout"],
+        session_budget_tokens=10_000,
+    )
+    monkeypatch.setattr(executor, "resolve_keyless_adc_credentials", lambda: (None, "test-proj"))
+    diff_text = executor.synthesize_keyless_vertex_handoff_patch(
+        pack=pack,
+        principal=ok_principal,
+        max_output_tokens=512,
+    )
+    assert "--- a/x.py" in diff_text
+    assert executor.last_usage_metadata is not None
+    assert executor.last_usage_metadata["thoughts_token_count"] == 50
+    assert executor.last_usage_metadata["total_token_count"] == 350
+    usage = executor.budget_tracker.get_consumption("vertex_ok_user")
+    assert usage["total_tokens"] == 350
+
+    estimator = PaidComputeCostEstimator()
+    target_rate = estimator.get_pricing_record("gemini-4-hydrogen").input_usd_per_1m_expected
+    frontier_rec = estimator.get_pricing_record(FRONTIER_REASONING_MODEL_ID)
+    frontier_rate = frontier_rec.input_usd_per_1m_expected
+    assert target_rate == 0.75
+    assert frontier_rate >= target_rate

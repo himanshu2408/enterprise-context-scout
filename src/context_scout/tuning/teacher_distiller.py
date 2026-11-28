@@ -1748,8 +1748,34 @@ class TeacherDistiller:
     # -------------------------------------------------------------------------
 
     @staticmethod
+    def _canonical_file_stem(file_path: str, repo_name: str = "") -> str | None:
+        raw_name = Path(file_path).name.split(".", 1)[0].lower()
+        for pfx in ("test_", "tests_", "spec_"):
+            if raw_name.startswith(pfx) and len(raw_name) > len(pfx):
+                raw_name = raw_name[len(pfx) :]
+                break
+        for sfx in ("_test", "_tests", "_spec"):
+            if raw_name.endswith(sfx) and len(raw_name) > len(sfx):
+                raw_name = raw_name[: -len(sfx)]
+                break
+        if len(raw_name) < 4 or raw_name in {
+            "__init__",
+            "init",
+            "index",
+            "main",
+            "utils",
+            "types",
+            "schemas",
+        }:
+            return None
+        repo_scope = repo_name.strip().lower()
+        if repo_scope:
+            return f"stem:{repo_scope}:{raw_name}"
+        return f"stem:{raw_name}"
+
+    @staticmethod
     def _extract_item_identifiers(item: dict[str, Any], *, is_research: bool) -> list[str]:
-        """Extracts canonical module prefix, repo, or doc_id identifiers from a tuning item."""
+        """Extracts canonical module prefix, stem, repo, or doc_id from a tuning item."""
         raw_meta = item.get("metadata")
         meta: Mapping[str, Any] = raw_meta if isinstance(raw_meta, Mapping) else {}
         if meta.get("is_general_replay") is True:
@@ -1759,14 +1785,29 @@ class TeacherDistiller:
         split_gid = str(meta.get("split_group_id") or "").strip()
         if split_gid:
             identifiers.append(split_gid)
+        default_repo = str(meta.get("repo_name") or "").strip()
 
         for msg in item.get("messages", []):
             content = str(msg.get("content", ""))
             if not is_research and '"file_path":' in content:
+                inline_repos = {
+                    r.strip() for r in re.findall(r'"repo_name":\s*"([^"]+)"', content) if r.strip()
+                }
+                paired_repos: dict[str, str] = {}
+                for r_match, f_match in re.findall(
+                    r'"repo_name":\s*"([^"]+)"[^{}]*?"file_path":\s*"([^"]+)"',
+                    content,
+                ):
+                    paired_repos[f_match] = r_match.strip()
+                fallback_repo = next(iter(inline_repos)) if len(inline_repos) == 1 else default_repo
                 for match in re.findall(r'"file_path":\s*"([^"]+)"', content):
                     prefix = TeacherDistiller._code_module_group(match)
                     if prefix not in identifiers:
                         identifiers.append(prefix)
+                    eff_repo = paired_repos.get(match, fallback_repo)
+                    stem_id = TeacherDistiller._canonical_file_stem(match, repo_name=eff_repo)
+                    if stem_id is not None and stem_id not in identifiers:
+                        identifiers.append(stem_id)
             else:
                 for match in re.findall(r'"doc_id":\s*"([^"]+)"', content):
                     if match not in identifiers:
@@ -2573,8 +2614,15 @@ def partition_repo_time_disjoint_80_10_10(
     )
     if len(tier2) >= 3:
         return _partition_components_80_10_10(tier2, total=len(items))
+    if len(tier2) == 2:
+        return [dict(it) for it in tier2[0]], [dict(it) for it in tier2[1]], []
+    if len(tier2) == 1 and any(
+        TeacherDistiller._extract_item_identifiers(dict(it), is_research=is_research)
+        for it in items
+    ):
+        return [dict(it) for it in tier2[0]], [], []
 
-    # Tier 3: raw chronological split when fewer than 3 independent groups exist.
+    # Tier 3: raw chronological split only when items share no identifiers.
     ordered = sorted((dict(it) for it in items), key=_item_timestamp_epoch)
     n_train = max(1, min(len(ordered) - 2, round(len(ordered) * 0.80)))
     n_valid = max(1, min(len(ordered) - n_train - 1, round(len(ordered) * 0.10)))

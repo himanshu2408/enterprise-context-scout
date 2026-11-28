@@ -127,7 +127,12 @@ function deriveSideEffectsFromPack(pack: ContextPack): SideEffectMatrixItem[] {
 }
 
 function escapeCsvCell(value: string): string {
-  const escaped = value.replace(/"/g, '""');
+  const trimmedStart = value.replace(/^\s+/, "");
+  const safeValue =
+    /^[=+\-@\t\r]/.test(value) || /^[=+\-@\t\r]/.test(trimmedStart)
+      ? `'${value}`
+      : value;
+  const escaped = safeValue.replace(/"/g, '""');
   return `"${escaped}"`;
 }
 

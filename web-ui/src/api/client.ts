@@ -414,7 +414,7 @@ export async function executeScoutQuery(
 
 export async function previewHandoff(
   contextPack: ContextPack,
-  modelId: "gemini-3.8-flash" | "gemini-4-argon",
+  modelId: string,
   principal: PrincipalContext
 ): Promise<HandoffPreviewResponse> {
   const authHeaders = await resolveAuthHeaders(principal);

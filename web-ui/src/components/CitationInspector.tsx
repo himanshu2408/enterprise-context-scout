@@ -773,10 +773,16 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
 
       {/* Right Column: Complete Un-Truncated Evidence & Frontier Pack */}
       <div className="workbench-evidence-col">
-        <div className="inspector-tabs" role="tablist">
+        <div
+          className="inspector-tabs"
+          role="tablist"
+          aria-label="Evidence inspector views"
+        >
           <button
             type="button"
             role="tab"
+            id="tab-btn-code-slices"
+            aria-controls="tabpanel-code-slices"
             aria-selected={effectiveTab === "code-slices"}
             className={`tab-btn ${
               effectiveTab === "code-slices" ? "tab-btn-active" : ""
@@ -790,6 +796,8 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
           <button
             type="button"
             role="tab"
+            id="tab-btn-documents"
+            aria-controls="tabpanel-documents"
             aria-selected={effectiveTab === "documents"}
             className={`tab-btn ${
               effectiveTab === "documents" ? "tab-btn-active" : ""
@@ -803,6 +811,8 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
           <button
             type="button"
             role="tab"
+            id="tab-btn-preflight-report"
+            aria-controls="tabpanel-preflight-report"
             aria-selected={effectiveTab === "preflight-report"}
             className={`tab-btn ${
               effectiveTab === "preflight-report" ? "tab-btn-active" : ""
@@ -816,6 +826,8 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
           <button
             type="button"
             role="tab"
+            id="tab-btn-telemetry-roi"
+            aria-controls="tabpanel-telemetry-roi"
             aria-selected={effectiveTab === "telemetry-roi"}
             className={`tab-btn ${
               effectiveTab === "telemetry-roi" ? "tab-btn-active" : ""
@@ -827,7 +839,12 @@ export const CitationInspector: React.FC<CitationInspectorProps> = ({
           </button>
         </div>
 
-        <div className="inspector-tab-body">
+        <div
+          className="inspector-tab-body"
+          role="tabpanel"
+          id={`tabpanel-${effectiveTab}`}
+          aria-labelledby={`tab-btn-${effectiveTab}`}
+        >
           {effectiveTab === "code-slices" && (
             <div className="evidence-list" data-testid="code-slices-view">
               {filteredSlices.length === 0 ? (

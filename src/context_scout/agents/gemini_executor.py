@@ -62,8 +62,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_FAST_MODEL_ID: Final[str] = "gemini-3.8-flash"
 FRONTIER_REASONING_MODEL_ID: Final[str] = "gemini-4-argon"
 
-FRONTIER_COST_PER_MILLION_INPUT: Final[float] = 4.00
-FAST_EXEC_COST_PER_MILLION_INPUT: Final[float] = 0.75
+_DEFAULT_YAML_COST_ESTIMATOR: Final[PaidComputeCostEstimator] = PaidComputeCostEstimator()
+FRONTIER_COST_PER_MILLION_INPUT: Final[float] = _DEFAULT_YAML_COST_ESTIMATOR.get_pricing_record(
+    FRONTIER_REASONING_MODEL_ID
+).input_usd_per_1m_expected
+FAST_EXEC_COST_PER_MILLION_INPUT: Final[float] = _DEFAULT_YAML_COST_ESTIMATOR.get_pricing_record(
+    DEFAULT_FAST_MODEL_ID
+).input_usd_per_1m_expected
 
 try:
     from google import genai
@@ -618,6 +623,41 @@ class GitWorktreeSandbox:
             self._is_active = False
 
 
+def _safe_int_metric(value: Any, default: int = 0) -> int:
+    """Safely coerces a numeric SDK usage field without invoking MagicMock.__int__."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return default
+
+
+def _extract_usage_metadata_dict(
+    usage: Any,
+    fallback_prompt_tokens: int = 0,
+) -> dict[str, int]:
+    """Normalizes SDK response usage_metadata including thinking/reasoning tokens."""
+    p_tok = _safe_int_metric(getattr(usage, "prompt_token_count", None), fallback_prompt_tokens)
+    c_tok = _safe_int_metric(getattr(usage, "candidates_token_count", None), 0)
+    thoughts_tok = _safe_int_metric(getattr(usage, "thoughts_token_count", None), 0)
+    if thoughts_tok == 0:
+        thoughts_tok = _safe_int_metric(getattr(usage, "reasoning_tokens", None), 0)
+    billed_output = c_tok + thoughts_tok
+    raw_total = _safe_int_metric(getattr(usage, "total_token_count", None), 0)
+    t_tok = max(raw_total, p_tok + billed_output)
+    result: dict[str, int] = {
+        "prompt_token_count": p_tok,
+        "candidates_token_count": c_tok,
+        "total_token_count": t_tok,
+    }
+    if thoughts_tok > 0:
+        result["thoughts_token_count"] = thoughts_tok
+        result["billed_output_tokens"] = billed_output
+    return result
+
+
 class GeminiImplementationExecutor:
     """Executes code implementation handoff using Google Gemini with Worktree Sandboxing."""
 
@@ -861,31 +901,68 @@ class GeminiImplementationExecutor:
             conn=conn,
             repo=repo,
         )
-        if self._injected_client is None:
-            self.use_keyless_adc = True
-            self.resolve_keyless_adc_credentials()
-
-        assert genai is not None and genai_types is not None
-        client = self._create_genai_client()
-        prompt = self._build_gemini_prompt(pack)
-        response = client.models.generate_content(
-            model=self.model_id,
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(
-                temperature=0.0,
-                max_output_tokens=max_output_tokens,
-            ),
+        projected_tokens = pack.pack_token_count + max_output_tokens
+        est_cost = self.cost_estimator.calculate_cost_estimate(
+            self.model_id,
+            pack.pack_token_count,
+            max_output_tokens,
+        ).cost_expected_usd
+        self.budget_tracker.check_and_reserve(
+            principal,
+            projected_tokens=projected_tokens,
+            estimated_cost_usd=est_cost,
         )
-        usage = getattr(response, "usage_metadata", None)
-        if usage is not None:
-            p_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
-            c_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
-            t_tok = int(getattr(usage, "total_token_count", 0) or (p_tok + c_tok))
-            self.last_usage_metadata = {
-                "prompt_token_count": p_tok,
-                "candidates_token_count": c_tok,
-                "total_token_count": t_tok,
-            }
+        self.last_usage_metadata = None
+        consumed_recorded = False
+        try:
+            if self._injected_client is None:
+                self.use_keyless_adc = True
+                self.resolve_keyless_adc_credentials()
+
+            assert genai is not None and genai_types is not None
+            client = self._create_genai_client()
+            prompt = self._build_gemini_prompt(pack)
+            response = client.models.generate_content(
+                model=self.model_id,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    temperature=0.0,
+                    max_output_tokens=max_output_tokens,
+                ),
+            )
+            usage = getattr(response, "usage_metadata", None)
+            p_tok = pack.pack_token_count
+            c_tok = 0
+            thoughts_tok = 0
+            if usage is not None:
+                usage_dict = _extract_usage_metadata_dict(usage, p_tok)
+                p_tok = usage_dict["prompt_token_count"]
+                c_tok = usage_dict["candidates_token_count"]
+                thoughts_tok = usage_dict.get("thoughts_token_count", 0)
+                self.last_usage_metadata = usage_dict
+            billed_out = c_tok + thoughts_tok
+            actual_cost = self.cost_estimator.calculate_cost_estimate(
+                self.model_id,
+                p_tok,
+                billed_out,
+            ).cost_expected_usd
+            self.budget_tracker.record_consumption(
+                principal,
+                input_tokens=p_tok,
+                output_tokens=billed_out,
+                cost_usd=actual_cost,
+                reserved_tokens=projected_tokens,
+                reserved_cost_usd=est_cost,
+            )
+            consumed_recorded = True
+        except Exception:
+            if not consumed_recorded:
+                self.budget_tracker.release_reservation(
+                    principal,
+                    reserved_tokens=projected_tokens,
+                    reserved_cost_usd=est_cost,
+                )
+            raise
         raw_text = str(getattr(response, "text", "") or "").strip()
         if not raw_text:
             raise RuntimeError("Vertex AI returned empty completion; abstaining fail-closed.")
@@ -1049,10 +1126,12 @@ class GeminiImplementationExecutor:
                 )
 
             # Wire SessionBudgetTracker reservation before paid generation
+            reserved_tokens = pack.pack_token_count + max_output_tokens
+            reserved_cost = cost_report.cost_expected_usd
             self.budget_tracker.check_and_reserve(
                 principal,
-                projected_tokens=pack.pack_token_count + max_output_tokens,
-                estimated_cost_usd=cost_report.cost_expected_usd,
+                projected_tokens=reserved_tokens,
+                estimated_cost_usd=reserved_cost,
             )
 
             # 4. Patch Synthesis (Live API or Deterministic Fallback)
@@ -1060,7 +1139,15 @@ class GeminiImplementationExecutor:
             if custom_patch is not None:
                 patch_diff = custom_patch
             elif self.is_live_configured() and genai is not None:
-                patch_diff = self._generate_gemini_patch(pack, repo_root)
+                try:
+                    patch_diff = self._generate_gemini_patch(pack, repo_root)
+                except Exception:
+                    self.budget_tracker.release_reservation(
+                        principal,
+                        reserved_tokens=reserved_tokens,
+                        reserved_cost_usd=reserved_cost,
+                    )
+                    raise
             else:
                 patch_diff = self._generate_deterministic_patch(pack, repo_root)
 
@@ -1107,7 +1194,14 @@ class GeminiImplementationExecutor:
 
             # 5. ROI & Telemetry Calculation & Persistence
             latency_ms = int((time.perf_counter() - start_time) * 1000)
-            telemetry = self._calculate_telemetry(pack, principal, miss_events, latency_ms)
+            telemetry = self._calculate_telemetry(
+                pack,
+                principal,
+                miss_events,
+                latency_ms,
+                reserved_tokens=reserved_tokens,
+                reserved_cost_usd=reserved_cost,
+            )
             self._persist_execution_telemetry(principal, telemetry, conn=conn, repo=repo)
 
             exec_span.record_result(result, telemetry)
@@ -1300,14 +1394,7 @@ class GeminiImplementationExecutor:
             )
             usage = getattr(response, "usage_metadata", None)
             if usage is not None:
-                p_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
-                c_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
-                t_tok = int(getattr(usage, "total_token_count", 0) or (p_tok + c_tok))
-                self.last_usage_metadata = {
-                    "prompt_token_count": p_tok,
-                    "candidates_token_count": c_tok,
-                    "total_token_count": t_tok,
-                }
+                self.last_usage_metadata = _extract_usage_metadata_dict(usage)
             raw_text = response.text or ""
             diff_match = re.search(r"```diff\n(.*?)\n```", raw_text, re.DOTALL)
             if diff_match:
@@ -1443,17 +1530,32 @@ class GeminiImplementationExecutor:
         latency_ms: int,
         *,
         is_offline_local: bool = False,
+        reserved_tokens: int | None = None,
+        reserved_cost_usd: float | None = None,
     ) -> ExecutionTelemetryRecord:
-        """Calculates exact token savings and dollar ROI against frontier models."""
+        """Calculates exact token savings and dollar ROI against YAML frontier pricing."""
         local_read = pack.local_tokens_consumed
         pack_sent = pack.pack_token_count
 
-        frontier_cost = (local_read / 1_000_000.0) * FRONTIER_COST_PER_MILLION_INPUT
-        paid_cost = (
-            0.0
-            if is_offline_local
-            else (pack_sent / 1_000_000.0) * FAST_EXEC_COST_PER_MILLION_INPUT
+        frontier_rate = self.cost_estimator.get_pricing_record(
+            FRONTIER_REASONING_MODEL_ID
+        ).input_usd_per_1m_expected
+        model_rec = self.cost_estimator.get_pricing_record(self.model_id)
+        usage = self.last_usage_metadata or {}
+        actual_in = int(usage.get("prompt_token_count", pack_sent) or pack_sent)
+        actual_out = int(
+            usage.get("billed_output_tokens", usage.get("candidates_token_count", 0)) or 0
         )
+
+        frontier_cost = (local_read / 1_000_000.0) * frontier_rate
+        if is_offline_local:
+            paid_cost = 0.0
+        elif actual_out > 0:
+            paid_cost = (actual_in / 1_000_000.0) * model_rec.input_usd_per_1m_expected + (
+                actual_out / 1_000_000.0
+            ) * model_rec.output_usd_per_1m_expected
+        else:
+            paid_cost = (pack_sent / 1_000_000.0) * model_rec.input_usd_per_1m_expected
         estimated_usd_saved = round(max(0.0, frontier_cost - paid_cost), 6)
         paid_tokens_saved = max(0, local_read - pack_sent)
         zero_touch = len(miss_events) == 0
@@ -1462,9 +1564,11 @@ class GeminiImplementationExecutor:
             # Wire active paid consumption recording into SessionBudgetTracker
             self.budget_tracker.record_consumption(
                 principal,
-                input_tokens=pack_sent,
-                output_tokens=0,
+                input_tokens=actual_in,
+                output_tokens=actual_out,
                 cost_usd=round(paid_cost, 6),
+                reserved_tokens=reserved_tokens,
+                reserved_cost_usd=reserved_cost_usd,
             )
 
         try:

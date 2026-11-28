@@ -1,5 +1,6 @@
 """Unit tests for M2 Code Engine: AST extraction, Merkle diffing, and <50ms cache hits."""
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -179,13 +180,96 @@ def test_tree_sitter_ast_extractor_typescript(extractor: ASTExtractor) -> None:
     assert "OrderState" in process_types
 
 
+def _create_ephemeral_merkle_repo(tmp_path: Path) -> Path:
+    repo_dir = tmp_path / "merkle_fixture_repo"
+    (repo_dir / "src").mkdir(parents=True)
+    (repo_dir / "tests").mkdir(parents=True)
+    (repo_dir / "infra").mkdir(parents=True)
+
+    (repo_dir / "src" / "__init__.py").write_text("", encoding="utf-8")
+    (repo_dir / "src" / "models.py").write_text(
+        "class BaseEntity:\n"
+        "    id: str = ''\n\n"
+        "class OrderRecord(BaseEntity):\n"
+        "    qty: int = 1\n\n"
+        "class Receipt(BaseEntity):\n"
+        "    accepted: bool = True\n",
+        encoding="utf-8",
+    )
+    (repo_dir / "src" / "service.py").write_text(
+        "from src.models import BaseEntity, OrderRecord, Receipt\n\n"
+        "class BaseService:\n"
+        "    def health(self) -> bool:\n"
+        "        return True\n\n"
+        "class OrderService(BaseService):\n"
+        "    def validate(self, order: OrderRecord) -> bool:\n"
+        "        return order.qty > 0\n\n"
+        "    def submit(self, order: OrderRecord) -> Receipt:\n"
+        "        if self.validate(order):\n"
+        "            return Receipt()\n"
+        "        raise ValueError('invalid order')\n\n"
+        "def inspect_entity(entity: BaseEntity) -> str:\n"
+        "    return entity.id\n",
+        encoding="utf-8",
+    )
+    (repo_dir / "src" / "router.py").write_text(
+        "from src.models import OrderRecord\n"
+        "from src.service import OrderService\n\n"
+        "def dispatch_order(service: OrderService, order: OrderRecord) -> bool:\n"
+        "    if service.validate(order):\n"
+        "        service.submit(order)\n"
+        "        return True\n"
+        "    return False\n",
+        encoding="utf-8",
+    )
+    (repo_dir / "tests" / "test_service.py").write_text(
+        "from src.models import OrderRecord\n"
+        "from src.router import dispatch_order\n"
+        "from src.service import OrderService\n\n"
+        "def test_dispatch_order() -> None:\n"
+        "    svc = OrderService()\n"
+        "    rec = OrderRecord()\n"
+        "    assert dispatch_order(svc, rec) is True\n",
+        encoding="utf-8",
+    )
+    (repo_dir / "infra" / "main.tf").write_text(
+        'resource "google_sql_database_instance" "orders_db" {\n'
+        '  name             = "orders-db"\n'
+        '  database_version = "POSTGRES_17"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "ci@example.com"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "CI Fixture"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "feat: initial fixture repo"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    return repo_dir
+
+
 def test_git_merkle_indexer_diffing_and_unchanged_cache_hit(
-    indexer: GitMerkleIndexer, principal: PrincipalContext
+    indexer: GitMerkleIndexer, principal: PrincipalContext, tmp_path: Path
 ) -> None:
-    repo_dir = Path.cwd()
+    repo_dir = _create_ephemeral_merkle_repo(tmp_path)
     repo = InMemoryRLSRepository()
     domain_id = "code_architecture_scout"
-    repo_name = "enterprise-context-scout"
+    repo_name = "merkle-fixture-repo"
 
     # Run 1: Initial cold index
     stats_cold = indexer.sync_in_memory(
@@ -197,11 +281,11 @@ def test_git_merkle_indexer_diffing_and_unchanged_cache_hit(
     )
 
     assert stats_cold.cache_hit is False
-    assert stats_cold.total_files_scanned > 0
-    assert stats_cold.new_files_indexed > 0
+    assert stats_cold.total_files_scanned == 6
+    assert stats_cold.new_files_indexed == 6
     assert stats_cold.total_symbols_stored > 0
 
-    # Run 2: Unchanged repository warm index (must be <50ms cache hit)
+    # Run 2: Unchanged repository warm index (must be <60ms cache hit)
     stats_warm = indexer.sync_in_memory(
         repo_dir=repo_dir,
         repo=repo,
@@ -215,19 +299,18 @@ def test_git_merkle_indexer_diffing_and_unchanged_cache_hit(
     assert stats_warm.new_files_indexed == 0
     assert stats_warm.modified_files_reindexed == 0
     assert stats_warm.deleted_files_removed == 0
-    # Must strictly satisfy <60ms sync latency
     assert stats_warm.duration_ms < 60.0, (
         f"Cache-hit sync took {stats_warm.duration_ms}ms (expected <60ms)"
     )
 
 
 def test_git_merkle_indexer_two_pass_edge_resolution(
-    indexer: GitMerkleIndexer, principal: PrincipalContext
+    indexer: GitMerkleIndexer, principal: PrincipalContext, tmp_path: Path
 ) -> None:
-    repo_dir = Path.cwd()
+    repo_dir = _create_ephemeral_merkle_repo(tmp_path)
     repo = InMemoryRLSRepository()
     domain_id = "code_architecture_scout"
-    repo_name = "enterprise-context-scout"
+    repo_name = "merkle-fixture-repo"
 
     indexer.sync_in_memory(
         repo_dir=repo_dir,
@@ -238,11 +321,11 @@ def test_git_merkle_indexer_two_pass_edge_resolution(
     )
 
     visible_edges = repo.list_visible_ast_edges(principal, domain_id)
-    assert len(visible_edges) >= 100
+    assert len(visible_edges) >= 12
 
     # Check that internal call/inherits/type edges have target_symbol_id resolved
     resolved_edges = [e for e in visible_edges if e.target_symbol_id is not None]
-    assert len(resolved_edges) >= 10
+    assert len(resolved_edges) >= 6
     assert {e.edge_kind for e in resolved_edges}.issubset(
         {
             "CALLS",

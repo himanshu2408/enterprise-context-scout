@@ -196,12 +196,21 @@ export const DomainSelector: React.FC<DomainSelectorProps> = ({
               key={domain.domain_id}
               className={`domain-row ${active ? "domain-row-active" : ""}`}
               data-testid={`domain-card-${domain.domain_id}`}
-              onClick={() => onSelectDomain(domain.domain_id)}
               onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) {
+                  return;
+                }
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   onSelectDomain(domain.domain_id);
                 }
+              }}
+              onClick={(e) => {
+                const target = e.target as HTMLElement | null;
+                if (target?.closest("button, a, input, select, textarea")) {
+                  return;
+                }
+                onSelectDomain(domain.domain_id);
               }}
             >
               <button

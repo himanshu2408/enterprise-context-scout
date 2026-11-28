@@ -1115,11 +1115,13 @@ def test_e2e_scout_to_gemini_to_worktree_roi_telemetry(
     assert telemetry.context_pack_tokens_sent == pack.pack_token_count
 
     # 3. Mathematical ROI verification:
-    # frontier_cost = (local_tokens_read / 1_000_000) * $4.00
-    # paid_cost = (context_pack_tokens_sent / 1_000_000) * $0.75
-    # estimated_usd_saved = round(max(0.0, frontier_cost - paid_cost), 6)
-    frontier_cost = (telemetry.local_tokens_read / 1_000_000) * 4.00
-    paid_cost = (telemetry.context_pack_tokens_sent / 1_000_000) * 0.75
+    from context_scout.agents.gemini_executor import (
+        FAST_EXEC_COST_PER_MILLION_INPUT,
+        FRONTIER_COST_PER_MILLION_INPUT,
+    )
+
+    frontier_cost = (telemetry.local_tokens_read / 1_000_000) * FRONTIER_COST_PER_MILLION_INPUT
+    paid_cost = (telemetry.context_pack_tokens_sent / 1_000_000) * FAST_EXEC_COST_PER_MILLION_INPUT
     expected_saved = round(max(0.0, frontier_cost - paid_cost), 6)
     assert telemetry.estimated_usd_saved == expected_saved
 

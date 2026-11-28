@@ -242,3 +242,54 @@ def test_doc_citation_handles_english_apostrophes_and_still_rejects_unclosed_quo
         bad_res = slicer.verify_doc_citation(bad_citation, chunk_content)
         assert bad_res.is_valid is False
         assert bad_res.error_code == SlicerErrorCode.TRUNCATED_QUOTE
+
+
+def test_deterministic_slicer_brace_class_skeletonizer(slicer: DeterministicSlicer) -> None:
+    """PR-4 (ECS-022): >100-line brace-delimited TS class is skeletonized with balanced braces."""
+    methods_code = []
+    for idx in range(60):
+        methods_code.append(
+            f"  async handleOperation{idx:02d}(input: string): Promise<string> {{\n"
+            f"    const prefix = 'op_{idx:02d}';\n"
+            f"    if (!input) {{\n"
+            f"      throw new Error('empty input');\n"
+            f"    }}\n"
+            f"    return `${{prefix}}:${{input}}`;\n"
+            f"  }}"
+        )
+    ts_source = (
+        "export class OrderWorkflowController {\n"
+        "  private readonly serviceName = 'ordering';\n\n" + "\n\n".join(methods_code) + "\n}\n"
+    )
+    lines = ts_source.splitlines()
+    assert len(lines) > 100
+
+    f_rec = CodeFileRecord(
+        file_id=uuid.uuid4(),
+        domain_id="code_architecture_scout",
+        repo_name="scout-ui",
+        file_path="web-ui/src/OrderWorkflowController.ts",
+        git_commit_sha="abcdef123456",
+        git_blob_sha="fedcba654321",
+        language="typescript",
+        allowed_scopes=["public_eng"],
+        raw_content=ts_source,
+        line_count=len(lines),
+    )
+    ptr = CodeSlicePointer(
+        repo_name="scout-ui",
+        file_path=f_rec.file_path,
+        start_line=1,
+        end_line=len(lines),
+        qualified_symbol="OrderWorkflowController",
+        selection_reason="Inspect handleOperation12 retry flow",
+        modification_intent=ModificationIntent.MODIFY_TARGET,
+    )
+    sliced = slicer.slice_pointer(ptr, f_rec, query_text="handleOperation12")
+    rendered_lines = sliced.verbatim_code_with_lines.splitlines()
+    assert len(rendered_lines) < len(lines)
+    assert "handleOperation12" in sliced.verbatim_code_with_lines
+    assert "/* ... elided" in sliced.verbatim_code_with_lines
+    assert not slicer._has_unclosed_delimiters(
+        sliced.verbatim_code_with_lines, file_path=f_rec.file_path
+    )

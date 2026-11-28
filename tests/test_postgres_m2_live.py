@@ -1,5 +1,6 @@
 """Live PostgreSQL 17 integration tests for M2 Code Engine (Merkle Indexer, Forced RLS)."""
 
+import subprocess
 from pathlib import Path
 from typing import Any, Final
 from uuid import uuid4
@@ -75,15 +76,75 @@ def cleanup_m2_live_session_domain(
     cleanup_pg_tenants_and_eval_domains(conn, domain_ids=(session_domain,))
 
 
+def _create_ephemeral_pg_merkle_repo(tmp_path: Path) -> Path:
+    repo_dir = tmp_path / "pg_merkle_fixture_repo"
+    (repo_dir / "src").mkdir(parents=True)
+    (repo_dir / "infra").mkdir(parents=True)
+
+    (repo_dir / "src" / "__init__.py").write_text("", encoding="utf-8")
+    (repo_dir / "src" / "models.py").write_text(
+        "class BaseModelEntity:\n"
+        "    id: str = ''\n\n"
+        "class TradeOrder(BaseModelEntity):\n"
+        "    qty: int = 1\n",
+        encoding="utf-8",
+    )
+    (repo_dir / "src" / "service.py").write_text(
+        "from src.models import TradeOrder\n\n"
+        "class OrderExecutor:\n"
+        "    def validate(self, order: TradeOrder) -> bool:\n"
+        "        return order.qty > 0\n\n"
+        "    def execute(self, order: TradeOrder) -> bool:\n"
+        "        return self.validate(order)\n",
+        encoding="utf-8",
+    )
+    (repo_dir / "src" / "router.py").write_text(
+        "from src.models import TradeOrder\n"
+        "from src.service import OrderExecutor\n\n"
+        "def route_order(executor: OrderExecutor, order: TradeOrder) -> bool:\n"
+        "    return executor.execute(order)\n",
+        encoding="utf-8",
+    )
+    (repo_dir / "infra" / "main.tf").write_text(
+        'resource "google_sql_database_instance" "ledger_db" {\n'
+        '  name             = "ledger-db"\n'
+        '  database_version = "POSTGRES_17"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "ci@example.com"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "CI Fixture"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "feat: initial pg merkle fixture"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    return repo_dir
+
+
 def test_live_postgres_merkle_sync_cold_and_warm_cache_hit(
-    settings: ScoutSettings, indexer: GitMerkleIndexer
+    settings: ScoutSettings, indexer: GitMerkleIndexer, tmp_path: Path
 ) -> None:
-    """Verifies sync_postgres cold index populates DB and second run executes in <50ms."""
+    """Verifies sync_postgres cold index populates DB and second run executes in <100ms."""
     mgr = RLSConnectionManager(settings.db_app_url, pool_role=PoolRole.INGESTION)
     repo = PostgresRLSRepository()
     domain_id = f"{M2_LIVE_SESSION_DOMAIN_PREFIX}sync_{uuid4().hex[:8]}"
     repo_name = f"eval-m2-live-sync-{uuid4().hex[:8]}"
-    repo_dir = Path.cwd()
+    repo_dir = _create_ephemeral_pg_merkle_repo(tmp_path)
 
     eng_principal = PrincipalContext(
         user_id="eng_indexer_runner",

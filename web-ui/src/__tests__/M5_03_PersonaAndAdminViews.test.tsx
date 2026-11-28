@@ -281,7 +281,7 @@ describe("M5-03 Persona, Admin, Production OIDC & Air-Gap Suite", () => {
 
     fireEvent.click(screen.getByTestId("run-dryrun-probe-btn"));
     expect(screen.getByTestId("dryrun-probe-result")).toHaveTextContent(
-      "PASS: 1-step vLLM multi-LoRA dry-run verified"
+      "PASS (Simulated UI Metadata Check): 1-step vLLM dry-run schema valid"
     );
 
     expect(screen.getByTestId("admin-purge-rbac-notice")).toBeInTheDocument();
@@ -567,7 +567,9 @@ describe("M5-03 Persona, Admin, Production OIDC & Air-Gap Suite", () => {
 
     fireEvent.click(screen.getByTestId("run-dryrun-probe-btn"));
     const probeResult = screen.getByTestId("dryrun-probe-result");
-    expect(probeResult).toHaveTextContent("FAIL:");
+    expect(probeResult).toHaveTextContent(
+      "FAIL (Simulated UI Metadata Check):"
+    );
     expect(probeResult).toHaveTextContent("safetensors_artifact: 0 B (MISSING)");
     expect(probeResult).toHaveTextContent("rank_bound (r <= 32): 0 (MISSING)");
 

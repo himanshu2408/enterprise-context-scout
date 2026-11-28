@@ -49,6 +49,8 @@ class WilcoxonABResult(BaseModel):
     cohens_d: float
     is_significant: bool
     target_reduction_met: bool
+    target_reduction_p_value: float = 1.0
+    is_target_reduction_significant: bool = False
 
 
 def compute_rule_of_three(n_trials: int, alpha: float = DEFAULT_ALPHA) -> float:
@@ -91,8 +93,8 @@ def compute_clopper_pearson(
         k_failures=k_failures,
         n_trials=n_trials,
         confidence_level=confidence_level,
-        p_lower=round(p_lower, 6),
-        p_upper=round(p_upper, 6),
+        p_lower=p_lower,
+        p_upper=p_upper,
         is_one_sided=one_sided,
     )
 
@@ -133,10 +135,19 @@ def compute_token_ab_significance(
         stat = float(wilc.statistic)
         p_val = float(wilc.pvalue)
 
+    # One-sided test that token consumption reduction exceeds target_reduction_pct
+    threshold_fraction = 1.0 - (target_reduction_pct / 100.0)
+    target_excess = (a_arr * threshold_fraction) - b_arr
+    if np.all(np.isclose(target_excess, 0.0, atol=1e-9)):
+        target_p_val = 1.0
+    else:
+        target_wilc = stats.wilcoxon(target_excess, alternative="greater")
+        target_p_val = float(target_wilc.pvalue)
+
     return WilcoxonABResult(
         n_tasks=n,
         statistic=round(stat, 4),
-        p_value=round(p_val, 6),
+        p_value=p_val,
         median_arm_a_tokens=round(median_a, 1),
         median_arm_b_tokens=round(median_b, 1),
         median_savings_pct=round(median_savings, 2),
@@ -144,4 +155,6 @@ def compute_token_ab_significance(
         cohens_d=round(cohens_d, 4),
         is_significant=bool(p_val < alpha),
         target_reduction_met=bool(median_savings >= target_reduction_pct),
+        target_reduction_p_value=target_p_val,
+        is_target_reduction_significant=bool(target_p_val < alpha),
     )

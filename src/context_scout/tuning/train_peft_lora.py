@@ -580,6 +580,11 @@ def tokenize_chat_assistant_only(
     if len(input_ids) < 2:
         input_ids = [0, *input_ids]
         labels = [-100, *labels]
+        if not any(lbl != -100 for lbl in labels):
+            raise ValueError(
+                "Assistant target tokens were completely masked out under "
+                f"max_seq_length={max_seq_length}."
+            )
     return input_ids, labels
 
 
@@ -1052,9 +1057,9 @@ class PEFTRsLoRATrainer:
         tokenizer: Any | None,
         local_files_only: bool,
         allow_offline_tiny_model: bool,
-    ) -> tuple[nn.Module, Any]:
+    ) -> tuple[nn.Module, Any, bool]:
         if model is not None and tokenizer is not None:
-            return model, tokenizer
+            return model, tokenizer, False
 
         try:
             from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -1069,7 +1074,7 @@ class PEFTRsLoRATrainer:
                 trust_remote_code=False,
                 local_files_only=local_files_only,
             )
-            return loaded_model, loaded_tok
+            return loaded_model, loaded_tok, False
         except Exception as exc:
             if not allow_offline_tiny_model:
                 raise RuntimeError(
@@ -1082,7 +1087,8 @@ class PEFTRsLoRATrainer:
                 type(exc).__name__,
                 detect_architecture_profile(self.config.base_model_id).family,
             )
-            return _build_offline_tiny_model_for_base(self.config.base_model_id)
+            tiny_model, tiny_tok = _build_offline_tiny_model_for_base(self.config.base_model_id)
+            return tiny_model, tiny_tok, True
 
     def _build_adapter_config_dict(
         self,
@@ -1194,6 +1200,19 @@ class PEFTRsLoRATrainer:
         verify_frozen_routers_and_ssm_states(peft_model, base_model_id=self.config.base_model_id)
 
         train_ds = Dataset.from_list([{"messages": r["messages"]} for r in train_records])
+        arch_adapter = ModelArchitectureAdapter(
+            self.config.base_model_id,
+            default_max_model_len=self.config.max_seq_length,
+        )
+        for rec in train_records:
+            msgs = rec.get("messages") or []
+            if len(msgs) >= 2:
+                tokenize_chat_assistant_only(
+                    msgs,
+                    tokenizer=tokenizer,
+                    arch_adapter=arch_adapter,
+                    max_seq_length=self.config.max_seq_length,
+                )
         valid_ds = (
             Dataset.from_list([{"messages": r["messages"]} for r in valid_records])
             if valid_records
@@ -1526,6 +1545,7 @@ class PEFTRsLoRATrainer:
         tokenizer: Any | None = None,
         local_files_only: bool = True,
         allow_offline_tiny_model: bool = False,
+        allow_synthetic_artifact_registration: bool = False,
         probe_live_vllm: bool = False,
         require_canary_gate: bool = True,
         canary_generation_fn: Callable[[str], str] | None = None,
@@ -1566,12 +1586,21 @@ class PEFTRsLoRATrainer:
                 )
 
         def _execute() -> PEFTTrainingRunResult:
-            loaded_model, loaded_tok = self._resolve_model_and_tokenizer(
+            loaded_model, loaded_tok, used_synthetic_tiny_model = self._resolve_model_and_tokenizer(
                 model=model,
                 tokenizer=tokenizer,
                 local_files_only=local_files_only,
                 allow_offline_tiny_model=allow_offline_tiny_model,
             )
+            if (
+                register_in_db
+                and used_synthetic_tiny_model
+                and not allow_synthetic_artifact_registration
+            ):
+                raise ValueError(
+                    "Refusing to register synthetic offline tiny-model artifact in DB "
+                    "(allow_synthetic_artifact_registration=False)."
+                )
             arch_profile = detect_architecture_profile(self.config.base_model_id)
             arch_adapter = ModelArchitectureAdapter(
                 self.config.base_model_id,
@@ -2102,6 +2131,7 @@ class BaseModelMigrationOrchestrator:
         activate: bool = False,
         register_in_db: bool = True,
         allow_offline_tiny_model: bool = True,
+        allow_synthetic_artifact_registration: bool = False,
         redistill: bool = False,
         model_factory: Callable[[str], tuple[nn.Module, Any]] | None = None,
     ) -> BaseModelMigrationReport:
@@ -2210,6 +2240,7 @@ class BaseModelMigrationOrchestrator:
                 model=injected_model,
                 tokenizer=injected_tok,
                 allow_offline_tiny_model=allow_offline_tiny_model,
+                allow_synthetic_artifact_registration=allow_synthetic_artifact_registration,
                 require_canary_gate=True,
                 cosign_private_key=cosign_private_key,
                 cosign_verifier=cosign_verifier,

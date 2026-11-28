@@ -40,6 +40,7 @@ and verified by the canary non-interference regression test.
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import urllib.request
 import uuid
@@ -48,6 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+import httpx
 import psycopg
 import pytest
 from evals.datasets.answerable_dataset import (
@@ -64,6 +66,7 @@ from scipy import stats
 
 from context_scout.agents.domain_registry import DomainRegistry
 from context_scout.agents.gemini_executor import GeminiImplementationExecutor
+from context_scout.agents.open_weights_vllm_executor import OpenWeightsVLLMExecutor
 from context_scout.agents.preflight_gate import PreFlightValidator
 from context_scout.agents.scout_workflow import ScoutWorkflow
 from context_scout.config import ScoutSettings
@@ -76,6 +79,7 @@ from context_scout.db.repositories import (
 )
 from context_scout.db.session import RLSConnectionManager
 from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
+from context_scout.retrieval.embedder import LocalSemanticEmbedder
 from context_scout.schemas.contracts import (
     ImplementationContextPack,
     InsufficientContextDiagnostic,
@@ -149,8 +153,24 @@ def guard_paid_network_and_models(paid_spy: PaidExecutionSpy) -> Iterator[PaidEx
     def spy_patch(self: object, *args: Any, **kwargs: Any) -> None:
         paid_spy.record_call("GeminiImplementationExecutor._generate_gemini_patch", *args, **kwargs)
 
+    def spy_keyless_handoff(self: object, *args: Any, **kwargs: Any) -> None:
+        paid_spy.record_call(
+            "GeminiImplementationExecutor.synthesize_keyless_vertex_handoff_patch",
+            *args,
+            **kwargs,
+        )
+
+    def spy_vllm_complete(self: object, *args: Any, **kwargs: Any) -> None:
+        paid_spy.record_call("OpenWeightsVLLMExecutor.complete", *args, **kwargs)
+
     mp.setattr(GeminiImplementationExecutor, "execute_implementation", spy_execute)
     mp.setattr(GeminiImplementationExecutor, "_generate_gemini_patch", spy_patch)
+    mp.setattr(
+        GeminiImplementationExecutor,
+        "synthesize_keyless_vertex_handoff_patch",
+        spy_keyless_handoff,
+    )
+    mp.setattr(OpenWeightsVLLMExecutor, "complete", spy_vllm_complete)
 
     try:
         from google import genai
@@ -163,17 +183,51 @@ def guard_paid_network_and_models(paid_spy: PaidExecutionSpy) -> Iterator[PaidEx
     except (ImportError, AttributeError):
         pass
 
+    cloud_hosts = (
+        "googleapis.com",
+        "anthropic.com",
+        "openai.com",
+        "generativelanguage",
+        "aiplatform",
+    )
+
     orig_urlopen = urllib.request.urlopen
 
     def spy_urlopen(url_or_req: Any, *args: Any, **kwargs: Any) -> Any:
         target_url = str(getattr(url_or_req, "full_url", url_or_req))
-        if any(cloud in target_url for cloud in ("googleapis.com", "anthropic.com", "openai.com")):
+        if any(cloud in target_url for cloud in cloud_hosts):
             paid_spy.record_call(f"urllib.request.urlopen({target_url})")
         return orig_urlopen(url_or_req, *args, **kwargs)
 
+    orig_httpx_post = httpx.Client.post
+    orig_async_httpx_post = httpx.AsyncClient.post
+
+    def spy_httpx_post(self: httpx.Client, url: Any, *args: Any, **kwargs: Any) -> Any:
+        full_target = f"{getattr(self, 'base_url', '')}{url}"
+        if any(cloud in full_target for cloud in cloud_hosts):
+            paid_spy.record_call(f"httpx.Client.post({full_target})")
+        return orig_httpx_post(self, url, *args, **kwargs)
+
+    async def spy_async_httpx_post(
+        self: httpx.AsyncClient, url: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        full_target = f"{getattr(self, 'base_url', '')}{url}"
+        if any(cloud in full_target for cloud in cloud_hosts):
+            paid_spy.record_call(f"httpx.AsyncClient.post({full_target})")
+        return await orig_async_httpx_post(self, url, *args, **kwargs)
+
     mp.setattr(urllib.request, "urlopen", spy_urlopen)
+    mp.setattr(httpx.Client, "post", spy_httpx_post)
+    mp.setattr(httpx.AsyncClient, "post", spy_async_httpx_post)
     yield paid_spy
     mp.undo()
+
+
+@functools.lru_cache(maxsize=4)
+def _compute_fixture_embeddings(texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+    """Computes genuine normalized 768-dim local semantic embeddings once per module."""
+    vectors = LocalSemanticEmbedder().embed_batch(list(texts))
+    return tuple(tuple(vec) for vec in vectors)
 
 
 @pytest.fixture(scope="module")
@@ -207,6 +261,31 @@ def build_synthetic_fixture_dataset(domain_id: str) -> InMemoryRLSRepository:
     )
 
     domain_ns = uuid.uuid5(uuid.NAMESPACE_DNS, domain_id)
+
+    embed_texts: list[str] = []
+    for i in range(75):
+        embed_texts.append(
+            f"public class OrderCheckoutHandler_{i:02d} — "
+            f"Synthetic eShop order checkout handler {i:02d}"
+        )
+    for i in range(75):
+        embed_texts.append(f"export const cartSlice_{i:02d} — Synthetic Redux cart slice {i:02d}")
+    for i in range(75):
+        embed_texts.append(f"class FastAPIProxy_{i:02d}: — Synthetic gateway proxy service {i:02d}")
+    for i in range(75):
+        embed_texts.append(
+            f'resource "google_sql_database_instance" "postgres_{i:02d}" — '
+            f"Synthetic Terraform Cloud SQL Postgres 17 instance {i:02d}"
+        )
+    embed_texts.append("class BillingManager: — Synthetic billing manager")
+    embed_texts.append(
+        "Orders must enforce Polly exponential backoff policies across database mutations."
+    )
+    embed_texts.append(
+        "Cart item updates must immediately mutate local Redux state before network resolution."
+    )
+    embed_texts.append("Token bucket rate limiter requires strict Redis cluster atomicity.")
+    fixture_vecs = [list(v) for v in _compute_fixture_embeddings(tuple(embed_texts))]
 
     # -------------------------------------------------------------------------
     # 1. Synthetic C# / .NET E-Commerce Ordering API Fixtures (75 Tasks)
@@ -257,7 +336,7 @@ def build_synthetic_fixture_dataset(domain_id: str) -> InMemoryRLSRepository:
                 signature_skeleton=f"public class OrderCheckoutHandler_{i:02d}",
                 contextual_summary=f"Synthetic eShop order checkout handler {i:02d}",
                 allowed_scopes=["public_eng", "repo:dotnet/eShop"],
-                embedding=[0.1] * 768,
+                embedding=fixture_vecs[i],
             ),
         )
 
@@ -310,7 +389,7 @@ def build_synthetic_fixture_dataset(domain_id: str) -> InMemoryRLSRepository:
                 signature_skeleton=f"export const cartSlice_{i:02d} = createSlice({{...}})",
                 contextual_summary=f"Synthetic Redux cart slice {i:02d}",
                 allowed_scopes=["public_eng", "repo:frontend/web-storefront"],
-                embedding=[0.2] * 768,
+                embedding=fixture_vecs[75 + i],
             ),
         )
 
@@ -361,7 +440,7 @@ def build_synthetic_fixture_dataset(domain_id: str) -> InMemoryRLSRepository:
                 signature_skeleton=f"class FastAPIProxy_{i:02d}:",
                 contextual_summary=f"Synthetic gateway proxy service {i:02d}",
                 allowed_scopes=["public_eng", "repo:backend/gateway-service"],
-                embedding=[0.3] * 768,
+                embedding=fixture_vecs[150 + i],
             ),
         )
 
@@ -410,7 +489,7 @@ def build_synthetic_fixture_dataset(domain_id: str) -> InMemoryRLSRepository:
                 signature_skeleton=f'resource "google_sql_database_instance" "postgres_{i:02d}"',
                 contextual_summary=f"Synthetic Terraform Cloud SQL Postgres 17 instance {i:02d}",
                 allowed_scopes=["public_eng", "repo:infra/gcp-workloads"],
-                embedding=[0.4] * 768,
+                embedding=fixture_vecs[225 + i],
             ),
         )
 
@@ -446,7 +525,7 @@ def build_synthetic_fixture_dataset(domain_id: str) -> InMemoryRLSRepository:
             signature_skeleton="class BillingManager:",
             contextual_summary="Synthetic billing manager",
             allowed_scopes=["repo:enterprise/billing-service"],
-            embedding=[0.5] * 768,
+            embedding=fixture_vecs[300],
         ),
     )
 
@@ -492,7 +571,7 @@ def build_synthetic_fixture_dataset(domain_id: str) -> InMemoryRLSRepository:
                 ),
                 metadata_json={"version": str(i), "is_stale": False},
                 allowed_scopes=["public_eng", "repo:dotnet/eShop"],
-                embedding=[0.15] * 768,
+                embedding=fixture_vecs[301],
                 is_stale=False,
             ),
         )
@@ -518,7 +597,7 @@ def build_synthetic_fixture_dataset(domain_id: str) -> InMemoryRLSRepository:
                 ),
                 metadata_json={"version": str(i), "is_stale": False},
                 allowed_scopes=["public_eng", "repo:frontend/web-storefront"],
-                embedding=[0.25] * 768,
+                embedding=fixture_vecs[302],
                 is_stale=False,
             ),
         )
@@ -543,7 +622,7 @@ def build_synthetic_fixture_dataset(domain_id: str) -> InMemoryRLSRepository:
                 ),
                 metadata_json={"resolution": "Resolved", "status": "Closed"},
                 allowed_scopes=["public_eng", "repo:backend/gateway-service"],
-                embedding=[0.35] * 768,
+                embedding=fixture_vecs[303],
                 is_stale=False,
             ),
         )
@@ -777,6 +856,23 @@ class TestSyntheticFixtureZeroSpendAbstentionProof:
         assert error_rate_upper_onesided <= 0.0100, (
             f"Dynamic error rate {error_rate_upper_onesided:.6f} > 1.0%"
         )
+
+    def test_paid_execution_spy_self_test(self, paid_spy: PaidExecutionSpy) -> None:
+        """Self-test proving paid execution interceptors fail closed on cloud/LLM egress."""
+        executor = GeminiImplementationExecutor()
+        test_principal = PrincipalContext(
+            user_id="spy_probe", role=RoleType.ENGINEER, allowed_scopes=["public_eng"]
+        )
+        try:
+            with pytest.raises(ZeroSpendViolationError, match="synthesize_keyless_vertex_handoff"):
+                executor.synthesize_keyless_vertex_handoff_patch(cast(Any, None), test_principal)
+            with (
+                httpx.Client() as client,
+                pytest.raises(ZeroSpendViolationError, match=r"httpx\.Client\.post"),
+            ):
+                client.post("https://generativelanguage.googleapis.com/v1beta/models:generate")
+        finally:
+            paid_spy.reset()
 
 
 class TestSyntheticFixtureAnswerableQueryDiscrimination:

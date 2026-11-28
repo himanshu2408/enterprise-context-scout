@@ -496,7 +496,14 @@ class QLoRABenchmarkRunner:
                 ),
             }
 
+        is_mock_run = type(self.client).__name__ == "MockLocalGemmaClient" or bool(
+            getattr(self.client, "offline_mode", False)
+        )
         report_dict: dict[str, Any] = {
+            "benchmark_mode": (
+                "simulated_mock_client" if is_mock_run else "empirical_local_inference"
+            ),
+            "is_empirical": not is_mock_run,
             "timestamp": datetime.now(UTC).isoformat(),
             "benchmark_suite": "Milestone 7 Before-vs-After QLoRA Distillation Benchmark",
             "hardware": "Apple Silicon M5 Pro 48GB Unified Memory",
@@ -586,8 +593,13 @@ class QLoRABenchmarkRunner:
             "**PASS (All Architectural Gates Met)**" if data["all_passed"] else "**FAILED**"
         )
 
+        report_title = (
+            "# Milestone 7 Empirical QLoRA Benchmark Report: Base Model vs. Tuned Adapters"
+            if data.get("is_empirical", False)
+            else "# Milestone 7 Simulated QLoRA Benchmark Report: Base Model vs. Tuned Adapters"
+        )
         lines: list[str] = [
-            "# Milestone 7 Empirical QLoRA Benchmark Report: Base Model vs. Tuned Adapters",
+            report_title,
             "",
             f"**Evaluation Timestamp**: `{data['timestamp']}`  ",
             f"**Hardware Platform**: `{data['hardware']}`  ",

@@ -526,3 +526,130 @@ def test_repo_wiki_builder_enclave_isolation_and_supersession(
         assert active_rows and all(c.version_str.startswith("commit_v2") for c in active_rows)
         stale_v1 = [c for c in all_rows if c.version_str.startswith("commit_v1")]
         assert stale_v1 and all(c.is_stale for c in stale_v1)
+
+
+@pytest.mark.postgres
+def test_pg17_persists_and_traverses_all_contract_edge_kinds(ephemeral_pg_domain: str) -> None:
+    """PR-4 (ECS-088/ECS-136): PG17 persists & traverses all contract edge kinds."""
+    from context_scout.agents.preflight_gate import BoundGraphRepository
+    from context_scout.ast_engine.dependency_expander import ASTDependencyExpander
+
+    contract_kinds = (
+        "IMPLEMENTS_SPEC",
+        "PUBLISHES_EVENT",
+        "SUBSCRIBES_EVENT",
+        "READS_TABLE",
+        "WRITES_TABLE",
+        "RENDERS_TEMPLATE",
+        "IMPLEMENTS_ISSUE",
+        "BINDS_SERVICE_ACCOUNT",
+        "ACCESSES_SECRET",
+    )
+    domain = ephemeral_pg_domain
+    principal = PrincipalContext(
+        user_id="pg17_contract_tester",
+        role=RoleType.ENGINEER,
+        allowed_scopes=["public_eng", f"domain:{domain}"],
+    )
+    src_file = CodeFileRecord(
+        file_id=uuid.uuid4(),
+        domain_id=domain,
+        repo_name="svc-a",
+        file_path="src/handler.py",
+        git_commit_sha="1111111",
+        git_blob_sha="2222222",
+        language="python",
+        allowed_scopes=["public_eng", f"domain:{domain}"],
+        raw_content="def handle():\n    return 1\n",
+        line_count=2,
+    )
+    tgt_file = CodeFileRecord(
+        file_id=uuid.uuid4(),
+        domain_id=domain,
+        repo_name="svc-b",
+        file_path="src/target.py",
+        git_commit_sha="3333333",
+        git_blob_sha="4444444",
+        language="python",
+        allowed_scopes=["public_eng", f"domain:{domain}"],
+        raw_content="".join(
+            f"def sym_{i}():\n    return {i}\n" for i in range(len(contract_kinds))
+        ),
+        line_count=len(contract_kinds) * 2,
+    )
+    src_sym = ASTSymbolRecord(
+        symbol_id=uuid.uuid4(),
+        file_id=src_file.file_id,
+        domain_id=domain,
+        qualified_name="svc-a::handle",
+        symbol_kind="function",
+        start_line=1,
+        end_line=2,
+        signature_skeleton="def handle():",
+        contextual_summary="@route POST /api/v1/events",
+        allowed_scopes=["public_eng", f"domain:{domain}"],
+        embedding=[0.1] * 768,
+        repo_qualified_id="svc-a::handle",
+        bare_name="handle",
+    )
+    tgt_syms = [
+        ASTSymbolRecord(
+            symbol_id=uuid.uuid4(),
+            file_id=tgt_file.file_id,
+            domain_id=domain,
+            qualified_name=f"svc-b::sym_{idx}",
+            symbol_kind="function",
+            start_line=idx * 2 + 1,
+            end_line=idx * 2 + 2,
+            signature_skeleton=f"def sym_{idx}():",
+            contextual_summary=f"contract target {kind}",
+            allowed_scopes=["public_eng", f"domain:{domain}"],
+            embedding=[0.1] * 768,
+            repo_qualified_id=f"svc-b::sym_{idx}",
+            bare_name=f"sym_{idx}",
+        )
+        for idx, kind in enumerate(contract_kinds)
+    ]
+    edges = [
+        ASTEdgeRecord(
+            edge_id=uuid.uuid4(),
+            domain_id=domain,
+            source_symbol_id=src_sym.symbol_id,
+            target_qualified_name=tgt_syms[idx].qualified_name,
+            target_symbol_id=tgt_syms[idx].symbol_id,
+            edge_kind=kind,
+            allowed_scopes=["public_eng", f"domain:{domain}"],
+            target_repo_qualified_id=tgt_syms[idx].repo_qualified_id,
+            is_cross_repo=True,
+        )
+        for idx, kind in enumerate(contract_kinds)
+    ]
+
+    settings = ScoutSettings()
+    mgr = RLSConnectionManager(settings.db_app_url, use_pool=False)
+    pg_repo = PostgresRLSRepository()
+    with mgr.scoped_transaction(principal) as conn:
+        pg_repo.insert_code_file(conn, src_file)
+        pg_repo.insert_code_file(conn, tgt_file)
+        pg_repo.insert_ast_symbol(conn, src_sym)
+        for ts in tgt_syms:
+            pg_repo.insert_ast_symbol(conn, ts)
+        for edge in edges:
+            pg_repo.insert_ast_edge(conn, edge)
+
+        nbrs = pg_repo.traverse_1hop_neighborhood(conn, domain, src_sym.symbol_id)
+        observed_kinds = {n.edge_kind for n in nbrs}
+        for kind in contract_kinds:
+            assert kind in observed_kinds, f"Missing PG17 1-hop traversal for {kind}"
+
+        exp = ASTDependencyExpander().expand_1hop(
+            focus_symbol=src_sym,
+            repo=BoundGraphRepository(pg_repo, conn),
+            principal=principal,
+            domain_id=domain,
+        )
+        expanded_qns = {p.qualified_symbol for p in (*exp.imported_type_slices, *exp.caller_slices)}
+        for ts in tgt_syms:
+            assert ts.qualified_name in expanded_qns, (
+                f"ASTDependencyExpander dropped cross-repo contract symbol {ts.qualified_name}"
+            )

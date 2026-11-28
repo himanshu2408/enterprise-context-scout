@@ -93,16 +93,35 @@ class DeterministicSlicer:
             end_line=pointer.end_line,
         )
         active_query = f"{query_text or ''} {pointer.selection_reason or ''}".strip()
-        if (
-            pointer.end_line - pointer.start_line
-        ) > self.skeletonize_class_line_threshold and file_record.language == "python":
-            verbatim_code = self._skeletonize_large_python_class(
-                raw_content=file_record.raw_content,
-                start_line=pointer.start_line,
-                end_line=pointer.end_line,
-                query_text=active_query,
-                is_reference_only=(pointer.modification_intent.value == "reference_only"),
-            )
+        lang_lower = (file_record.language or "").lower()
+        if (pointer.end_line - pointer.start_line) > self.skeletonize_class_line_threshold:
+            if lang_lower == "python":
+                verbatim_code = self._skeletonize_large_python_class(
+                    raw_content=file_record.raw_content,
+                    start_line=pointer.start_line,
+                    end_line=pointer.end_line,
+                    query_text=active_query,
+                    is_reference_only=(pointer.modification_intent.value == "reference_only"),
+                )
+            elif lang_lower in {
+                "typescript",
+                "tsx",
+                "javascript",
+                "jsx",
+                "csharp",
+                "java",
+                "kotlin",
+                "go",
+                "rust",
+            }:
+                verbatim_code = self._skeletonize_large_brace_class(
+                    raw_content=file_record.raw_content,
+                    start_line=pointer.start_line,
+                    end_line=pointer.end_line,
+                    query_text=active_query,
+                    file_path=file_record.file_path,
+                    is_reference_only=(pointer.modification_intent.value == "reference_only"),
+                )
         commit_sha = file_record.git_commit_sha or "0000000"
         if len(commit_sha) < 7:
             commit_sha = commit_sha.ljust(7, "0")
@@ -299,6 +318,119 @@ class DeterministicSlicer:
                     output_lines.append(f"{sig_line_no:{line_number_width}d} | {sig_text}")
 
         return "\n".join(output_lines)
+
+    def _skeletonize_large_brace_class(
+        self,
+        raw_content: str,
+        start_line: int,
+        end_line: int,
+        query_text: str,
+        *,
+        file_path: str = "",
+        line_number_width: int = 4,
+        is_reference_only: bool = False,
+    ) -> str:
+        """Preserves brace-class header, ctor, and query-matched methods cleanly."""
+        all_lines = raw_content.splitlines()
+        selected = all_lines[start_line - 1 : end_line]
+        if not selected:
+            return self.slice_lines(raw_content, start_line, end_line, line_number_width)
+
+        def fmt(idx_in_sel: int) -> str:
+            return f"{start_line + idx_in_sel:>{line_number_width}} | {selected[idx_in_sel]}"
+
+        depth = 0
+        class_open_idx: int | None = None
+        for idx, raw_line in enumerate(selected[:15]):
+            cleaned, _ = self._strip_comments_and_strings(raw_line, file_path=file_path)
+            if "{" in cleaned:
+                class_open_idx = idx
+                break
+        if class_open_idx is None:
+            return self.slice_lines(raw_content, start_line, end_line, line_number_width)
+
+        blocks: list[tuple[int, int, str]] = []
+        fields_indices: list[int] = []
+        depth = 0
+        member_start: int | None = None
+        entered_body = False
+        for idx, raw_line in enumerate(selected):
+            cleaned, _ = self._strip_comments_and_strings(raw_line, file_path=file_path)
+            prev_depth = depth
+            depth += cleaned.count("{") - cleaned.count("}")
+            if idx <= class_open_idx:
+                if idx == class_open_idx and depth > 0:
+                    entered_body = True
+                continue
+            if prev_depth <= 1 and depth >= 2 and member_start is None:
+                member_start = idx
+            elif member_start is not None and depth <= 1:
+                blocks.append((member_start, idx, selected[member_start]))
+                member_start = None
+            elif prev_depth == 1 and depth == 1 and member_start is None and entered_body:
+                fields_indices.append(idx)
+
+        if len(blocks) < 3:
+            return self.slice_lines(raw_content, start_line, end_line, line_number_width)
+
+        query_terms = {
+            tok.lower()
+            for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", query_text)
+            if tok.lower() not in {"class", "const", "async", "public", "private", "method"}
+        }
+        keep_indices: set[int] = set(range(class_open_idx + 1))
+        keep_indices.update(fields_indices)
+        keep_indices.add(len(selected) - 1)
+
+        scored: list[tuple[int, int]] = []
+        for b_idx, (b_start, b_end, sig_line) in enumerate(blocks):
+            block_text = "\n".join(selected[b_start : b_end + 1]).lower()
+            is_ctor = bool(re.search(r"\b(constructor|__init__|new)\s*\(", sig_line))
+            hits = sum(1 for qt in query_terms if qt in block_text)
+            if is_ctor:
+                keep_indices.update(range(b_start, b_end + 1))
+            else:
+                scored.append((hits, b_idx))
+
+        max_kept = 2 if is_reference_only else 4
+        matched_blocks: set[int] = set()
+        for hits, b_idx in sorted(scored, key=lambda x: (-x[0], x[1])):
+            if hits > 0 and len(matched_blocks) < max_kept:
+                matched_blocks.add(b_idx)
+        if not matched_blocks and not is_reference_only and scored:
+            matched_blocks.add(scored[0][1])
+
+        output: list[str] = []
+        elided_block_ranges: dict[int, tuple[int, int]] = {}
+        for b_idx, (b_start, b_end, _sig) in enumerate(blocks):
+            if b_idx in matched_blocks:
+                keep_indices.update(range(b_start, b_end + 1))
+            elif b_start not in keep_indices:
+                elided_block_ranges[b_start] = (b_start, b_end)
+
+        i = 0
+        n = len(selected)
+        while i < n:
+            if i in keep_indices:
+                output.append(fmt(i))
+                i += 1
+            elif i in elided_block_ranges:
+                b_start, b_end = elided_block_ranges[i]
+                open_idx = b_start
+                while open_idx <= b_end and "{" not in selected[open_idx]:
+                    output.append(fmt(open_idx))
+                    open_idx += 1
+                if open_idx <= b_end:
+                    output.append(fmt(open_idx))
+                if b_end > open_idx + 1:
+                    output.append("     ... |   /* ... elided ... */")
+                if b_end > open_idx:
+                    output.append(fmt(b_end))
+                i = b_end + 1
+            else:
+                i += 1
+
+        return "\n".join(output)
 
     def normalize_text(self, text: str) -> str:
         """Applies NFKC Unicode normalization and collapses whitespace."""

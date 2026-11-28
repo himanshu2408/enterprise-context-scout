@@ -2078,6 +2078,19 @@ def _probe_claim_verifier(mod: types.ModuleType) -> None:
     assert hg_ru is False
     hg_gr, _ = mod.detect_homoglyph_spoofing("\u0391\u03b2\u03b3 \u03b4\u03b5\u03b6")
     assert hg_gr is False
+    hg_nfkc, _ = mod.detect_homoglyph_spoofing("The \uff21PI")
+    assert hg_nfkc is True
+    assert mod.detect_homoglyph_spoofing("Valid Latin text") == (False, "")
+    assert mod.detect_homoglyph_spoofing(
+        "\u041f\u0440\u0438\u0432\u0435\u0442 \u0430 \u043c\u0438\u0440"
+    ) == (False, "")
+    assert mod.detect_homoglyph_spoofing(
+        "Hello \u041f\u0440\u0438\u0432\u0435\u0442 \u043c\u0438\u0440 \u0430"
+    ) == (False, "")
+    assert mod.detect_homoglyph_spoofing("Hello \u0391\u03b2\u03b3 \u03b4\u03b5\u03b6 \u03bf") == (
+        False,
+        "",
+    )
 
     verifier = mod.ClaimVerifier()
     sources = {"doc1": "PreFlightValidator enforces FORCE RLS and 100% verbatim citations."}

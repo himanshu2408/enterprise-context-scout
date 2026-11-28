@@ -1,6 +1,5 @@
 """Multi-language Tree-Sitter AST extractor for Python, TypeScript/TSX, and HCL."""
 
-import gc
 import logging
 import re
 from dataclasses import dataclass
@@ -573,19 +572,13 @@ class ASTExtractor:
                 bridge_exc,
             )
 
-        was_gc = gc.isenabled()
-        gc.disable()
-        try:
-            return self._parse_source_builtin(
-                code=code,
-                language=language,
-                file_path=file_path,
-                module_prefix=module_prefix,
-                repo_name=repo_name,
-            )
-        finally:
-            if was_gc:
-                gc.enable()
+        return self._parse_source_builtin(
+            code=code,
+            language=language,
+            file_path=file_path,
+            module_prefix=module_prefix,
+            repo_name=repo_name,
+        )
 
     def _parse_source_builtin(
         self,
@@ -764,6 +757,100 @@ class ASTExtractor:
 
         return new_symbols, new_edges
 
+    @staticmethod
+    def _extract_python_contract_tags(
+        outer_node: Node,
+        body: Node | None,
+        code_bytes: bytes,
+        router_prefixes: dict[str, str] | None = None,
+    ) -> list[str]:
+        """Extracts @route and @env cross-boundary tags from Python decorators and body."""
+        tags: list[str] = []
+        prefixes = router_prefixes or {}
+        if outer_node.type == "decorated_definition":
+            for child in outer_node.children:
+                if child.type != "decorator":
+                    continue
+                dec_text = _node_text(child, code_bytes)
+                m = re.match(
+                    r"^@\s*([A-Za-z_][A-Za-z0-9_.]*)\.(get|post|put|delete|patch|api_route)\(\s*['\"]([^'\"]+)['\"]",
+                    dec_text.strip(),
+                )
+                if m:
+                    obj_name, verb, raw_path = m.group(1), m.group(2).lower(), m.group(3)
+                    method = "ANY" if verb == "api_route" else verb.upper()
+                    if verb == "api_route":
+                        m_meth = re.search(
+                            r"methods\s*=\s*[\[\(]\s*['\"]([A-Za-z]+)['\"]", dec_text
+                        )
+                        if m_meth:
+                            method = m_meth.group(1).upper()
+                    prefix = prefixes.get(obj_name.split(".")[-1], "")
+                    if prefix and not raw_path.startswith(prefix):
+                        joined = f"{prefix.rstrip('/')}/{raw_path.lstrip('/')}"
+                    else:
+                        joined = raw_path
+                    if not joined.startswith("/"):
+                        joined = "/" + joined
+                    tag = f"@route {method} {joined}"
+                    if tag not in tags:
+                        tags.append(tag)
+        scan_text = _node_text(body or outer_node, code_bytes)
+        for env_m in re.finditer(
+            r"""(?:os\.environ\.get|os\.getenv)\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]|os\.environ\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\]""",
+            scan_text,
+        ):
+            env_var = env_m.group(1) or env_m.group(2)
+            if env_var:
+                etag = f"@env {env_var}"
+                if etag not in tags:
+                    tags.append(etag)
+        for ac_m in re.finditer(r"AliasChoices\(([^)]+)\)", scan_text):
+            for lit in re.findall(r"""['"]([A-Za-z_][A-Za-z0-9_]*)['"]""", ac_m.group(1)):
+                etag = f"@env {lit}"
+                if etag not in tags:
+                    tags.append(etag)
+        return tags
+
+    @staticmethod
+    def _extract_ts_contract_tags(body_text: str) -> list[str]:
+        """Extracts @route and @env cross-boundary tags from TypeScript/TSX call expressions."""
+        tags: list[str] = []
+        for fm in re.finditer(
+            r"""fetch\(\s*['"`]([^'"`]+)['"`](?:\s*,\s*\{[\s\S]{0,240}?\bmethod\s*:\s*['"]([A-Za-z]+)['"])?""",
+            body_text,
+        ):
+            url = fm.group(1).strip()
+            if url.startswith(("/", "http://", "https://")):
+                method = (fm.group(2) or "GET").upper()
+                tag = f"@route {method} {url}"
+                if tag not in tags:
+                    tags.append(tag)
+        for em in re.finditer(r"""EventSource\(\s*['"`]([^'"`]+)['"`]""", body_text):
+            url = em.group(1).strip()
+            if url.startswith(("/", "http://", "https://")):
+                tag = f"@route GET {url}"
+                if tag not in tags:
+                    tags.append(tag)
+        for am in re.finditer(
+            r"""axios\.(get|post|put|delete|patch)\(\s*['"`]([^'"`]+)['"`]""",
+            body_text,
+            re.IGNORECASE,
+        ):
+            method, url = am.group(1).upper(), am.group(2).strip()
+            if url.startswith(("/", "http://", "https://")):
+                tag = f"@route {method} {url}"
+                if tag not in tags:
+                    tags.append(tag)
+        for evm in re.finditer(
+            r"""\b(?:process\.env|import\.meta\.env)\.([A-Za-z_][A-Za-z0-9_]*)\b""",
+            body_text,
+        ):
+            etag = f"@env {evm.group(1)}"
+            if etag not in tags:
+                tags.append(etag)
+        return tags
+
     def _extract_python(
         self,
         root: Node,
@@ -774,6 +861,27 @@ class ASTExtractor:
         symbols: list[ParsedSymbol] = []
         edges: list[ParsedEdge] = []
         file_imports: list[str] = []
+        router_prefixes: dict[str, str] = {}
+
+        # Detect module-level APIRouter(prefix=...) / Blueprint(..., url_prefix=...)
+        for child in root.children:
+            target_assign: Node | None = None
+            if child.type == "assignment":
+                target_assign = child
+            elif (
+                child.type == "expression_statement"
+                and child.children
+                and child.children[0].type == "assignment"
+            ):
+                target_assign = child.children[0]
+            if target_assign is not None:
+                assign_txt = _node_text(target_assign, code_bytes)
+                rm = re.match(
+                    r"""^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:APIRouter|Blueprint)\([\s\S]*?(?:url_prefix|prefix)\s*=\s*['"]([^'"]+)['"]""",
+                    assign_txt,
+                )
+                if rm:
+                    router_prefixes[rm.group(1)] = rm.group(2)
 
         # 1. Collect imports
         for child in root.children:
@@ -824,6 +932,7 @@ class ASTExtractor:
                     edges,
                     file_imports,
                     is_method=False,
+                    router_prefixes=router_prefixes,
                 )
             elif node.type == "expression_statement" and node.children:
                 first_expr = node.children[0]
@@ -1030,6 +1139,7 @@ class ASTExtractor:
         edges: list[ParsedEdge],
         file_imports: list[str],
         is_method: bool,
+        router_prefixes: dict[str, str] | None = None,
     ) -> None:
         name_node = node.child_by_field_name("name")
         if not name_node:
@@ -1068,6 +1178,11 @@ class ASTExtractor:
             unique_calls = list(dict.fromkeys(c.split(".")[-1] for c in called_targets if c))[:6]
             if unique_calls:
                 summary = f"{summary} [calls: {', '.join(unique_calls)}]"
+        contract_tags = self._extract_python_contract_tags(
+            outer_node, body, code_bytes, router_prefixes=router_prefixes
+        )
+        if contract_tags:
+            summary = f"{summary} {' '.join(contract_tags)}".strip()
 
         symbols.append(
             ParsedSymbol(
@@ -1412,6 +1527,12 @@ class ASTExtractor:
         ret_str = _node_text(ret_node) if ret_node else ""
         sig = f"{m_name}{params_str}{ret_str}"
 
+        body = node.child_by_field_name("body")
+        ts_tags = self._extract_ts_contract_tags(_node_text(body)) if body else []
+        summary = sig
+        if ts_tags:
+            summary = f"{summary} {' '.join(ts_tags)}".strip()
+
         symbols.append(
             ParsedSymbol(
                 name=m_name,
@@ -1424,7 +1545,7 @@ class ASTExtractor:
                 signature=sig,
                 signature_skeleton=sig,
                 docstring="",
-                contextual_summary=sig,
+                contextual_summary=summary,
             )
         )
 
@@ -1447,7 +1568,6 @@ class ASTExtractor:
                     )
                 )
 
-        body = node.child_by_field_name("body")
         if body:
             self._collect_ts_calls(body, qual_name, edges)
 
@@ -1478,6 +1598,12 @@ class ASTExtractor:
         ret_str = _node_text(ret_node) if ret_node else ""
         sig = f"function {fn_name}{params_str}{ret_str}"
 
+        body = node.child_by_field_name("body")
+        ts_tags = self._extract_ts_contract_tags(_node_text(body)) if body else []
+        summary = docstring.split("\n")[0] if docstring else sig
+        if ts_tags:
+            summary = f"{summary} {' '.join(ts_tags)}".strip()
+
         symbols.append(
             ParsedSymbol(
                 name=fn_name,
@@ -1490,7 +1616,7 @@ class ASTExtractor:
                 signature=sig,
                 signature_skeleton=sig,
                 docstring=docstring,
-                contextual_summary=docstring.split("\n")[0] if docstring else sig,
+                contextual_summary=summary,
             )
         )
 
@@ -1513,7 +1639,6 @@ class ASTExtractor:
                     )
                 )
 
-        body = node.child_by_field_name("body")
         if body:
             self._collect_ts_calls(body, qual_name, edges)
 
@@ -1566,6 +1691,12 @@ class ASTExtractor:
                     ret_str = _node_text(ret_node) if ret_node else ""
                     sig = f"const {fn_name} = {params_str}{ret_str} => ..."
 
+                    body = val_node.child_by_field_name("body")
+                    ts_tags = self._extract_ts_contract_tags(_node_text(body)) if body else []
+                    summary = docstring.split("\n")[0] if docstring else sig
+                    if ts_tags:
+                        summary = f"{summary} {' '.join(ts_tags)}".strip()
+
                     symbols.append(
                         ParsedSymbol(
                             name=fn_name,
@@ -1578,7 +1709,7 @@ class ASTExtractor:
                             signature=sig,
                             signature_skeleton=sig,
                             docstring=docstring,
-                            contextual_summary=docstring.split("\n")[0] if docstring else sig,
+                            contextual_summary=summary,
                         )
                     )
 
@@ -1601,7 +1732,6 @@ class ASTExtractor:
                                 )
                             )
 
-                    body = val_node.child_by_field_name("body")
                     if body:
                         self._collect_ts_calls(body, qual_name, edges)
 

@@ -260,6 +260,15 @@ class ASTDependencyExpander:
             "DOCUMENTS_COMPONENT",
             "OWNED_BY_TEAM",
             "PART_OF_SYSTEM",
+            "PUBLISHES_EVENT",
+            "SUBSCRIBES_EVENT",
+            "READS_TABLE",
+            "WRITES_TABLE",
+            "RENDERS_TEMPLATE",
+            "IMPLEMENTS_SPEC",
+            "IMPLEMENTS_ISSUE",
+            "BINDS_SERVICE_ACCOUNT",
+            "ACCESSES_SECRET",
         )
         for edge in visible_edges:
             if edge.source_symbol_id in family_ids and (
@@ -382,7 +391,21 @@ class ASTDependencyExpander:
             if focus_repo_name
             else focus_symbol.qualified_name
         )
-        _incoming_cross_kinds = ("CALLS", "USES_TYPE", "PROVISIONED_BY", "DOCUMENTS_COMPONENT")
+        _incoming_cross_kinds = (
+            "CALLS",
+            "USES_TYPE",
+            "PROVISIONED_BY",
+            "DOCUMENTS_COMPONENT",
+            "PUBLISHES_EVENT",
+            "SUBSCRIBES_EVENT",
+            "READS_TABLE",
+            "WRITES_TABLE",
+            "RENDERS_TEMPLATE",
+            "IMPLEMENTS_SPEC",
+            "IMPLEMENTS_ISSUE",
+            "BINDS_SERVICE_ACCOUNT",
+            "ACCESSES_SECRET",
+        )
         family_short_names = {
             qn.split(".")[-1] for qn in family_qnames if not qn.endswith(".__init__")
         }

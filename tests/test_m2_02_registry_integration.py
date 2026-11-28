@@ -48,6 +48,15 @@ ALLOWED_EDGE_KINDS: frozenset[str] = frozenset(
         "DOCUMENTS_COMPONENT",
         "OWNED_BY_TEAM",
         "PART_OF_SYSTEM",
+        "PUBLISHES_EVENT",
+        "SUBSCRIBES_EVENT",
+        "READS_TABLE",
+        "WRITES_TABLE",
+        "RENDERS_TEMPLATE",
+        "IMPLEMENTS_SPEC",
+        "IMPLEMENTS_ISSUE",
+        "BINDS_SERVICE_ACCOUNT",
+        "ACCESSES_SECRET",
     }
 )
 

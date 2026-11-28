@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gc
 import json
 import logging
 import re
@@ -235,27 +234,21 @@ class TemplatesI18nPlugin:
         prefix = module_prefix or self._derive_module_prefix(file_path)
         lower = file_path.lower()
 
-        was_gc = gc.isenabled()
-        gc.disable()
-        try:
-            if lower.endswith(".mjml"):
-                return self._extract_mjml(code, file_path, repo_name, prefix)
-            if lower.endswith((".hbs", ".handlebars")):
-                return self._extract_handlebars(code, file_path, repo_name, prefix)
-            if lower.endswith((".j2", ".jinja", ".jinja2")):
-                return self._extract_jinja2(code, file_path, repo_name, prefix)
-            if lower.endswith((".po", ".pot")):
-                return self._extract_po(code, file_path, repo_name, prefix)
-            if lower.endswith(".json"):
-                return self._extract_locale_json(code, file_path, repo_name, prefix)
-            if lower.endswith((".yaml", ".yml")):
-                return self._extract_locale_yaml(code, file_path, repo_name, prefix)
+        if lower.endswith(".mjml"):
+            return self._extract_mjml(code, file_path, repo_name, prefix)
+        if lower.endswith((".hbs", ".handlebars")):
+            return self._extract_handlebars(code, file_path, repo_name, prefix)
+        if lower.endswith((".j2", ".jinja", ".jinja2")):
+            return self._extract_jinja2(code, file_path, repo_name, prefix)
+        if lower.endswith((".po", ".pot")):
+            return self._extract_po(code, file_path, repo_name, prefix)
+        if lower.endswith(".json"):
+            return self._extract_locale_json(code, file_path, repo_name, prefix)
+        if lower.endswith((".yaml", ".yml")):
+            return self._extract_locale_yaml(code, file_path, repo_name, prefix)
 
-            self.last_parse_diagnostics = ParseDiagnostics(parser_backend="templates_i18n")
-            return [], []
-        finally:
-            if was_gc:
-                gc.enable()
+        self.last_parse_diagnostics = ParseDiagnostics(parser_backend="templates_i18n")
+        return [], []
 
     def _extract_mjml(
         self,

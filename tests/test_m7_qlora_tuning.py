@@ -735,7 +735,9 @@ class TestDomainAdaptersIntegration:
         assert domains["code_architecture_scout"]["recall_at_5_after"] >= 90.0
         assert domains["enterprise_docs_scout"]["recall_at_5_after"] >= 90.0
 
-        # 5. Reports written to disk
+        # 5. Reports written to disk & honestly labeled as simulated mock run
         assert (tmp_path / "m7_qlora_benchmark_report.json").is_file()
         assert (tmp_path / "m7_qlora_benchmark_report.md").is_file()
-        assert "Milestone 7 Empirical QLoRA Benchmark Report" in md_report
+        assert report_dict["benchmark_mode"] == "simulated_mock_client"
+        assert report_dict["is_empirical"] is False
+        assert "Milestone 7 Simulated QLoRA Benchmark Report" in md_report

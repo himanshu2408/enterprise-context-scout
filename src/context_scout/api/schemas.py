@@ -231,7 +231,7 @@ class ScoutTokenSavingsBreakdown(BaseModel):
     tokens_saved: int
     estimated_usd_saved: float
     frontier_savings_ratio_pct: float
-    qlora_overhead_eliminated_tokens: float = 1634.0
+    qlora_overhead_eliminated_tokens: float = 0.0
 
 
 class ScoutQueryResponse(BaseModel):
@@ -392,8 +392,8 @@ class AggregateROISummary(BaseModel):
     total_paid_tokens_saved: int
     total_estimated_usd_saved: float
     frontier_savings_ratio_pct: float
-    qlora_overhead_eliminated_per_query: float = 1634.0
-    total_qlora_overhead_eliminated: float
+    qlora_overhead_eliminated_per_query: float = 0.0
+    total_qlora_overhead_eliminated: float = 0.0
     telemetry_source: Literal["postgresql_live", "in_memory_session"] = "postgresql_live"
 
 
