@@ -238,6 +238,12 @@ resource "azurerm_storage_account" "artifacts" {
     versioning_enabled = true
   }
 
+  network_rules {
+    default_action             = "Deny"
+    bypass                     = ["AzureServices"]
+    virtual_network_subnet_ids = [var.subnet_id]
+  }
+
   tags = local.common_tags
 
   depends_on = [azurerm_role_assignment.kv_storage_cmek]

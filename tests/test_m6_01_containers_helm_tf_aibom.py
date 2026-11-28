@@ -764,6 +764,10 @@ def test_multicloud_terraform_workload_identity_parity() -> None:
         assert sa_name in azure_main, f"azure-aks/main.tf missing {sa_name} federated credential"
         assert sa_name in onprem_main, f"onprem-k8s/main.tf missing {sa_name} ServiceAccount"
 
+    assert "network_acls" in azure_main
+    assert "network_rules" in azure_main
+    assert azure_main.count('default_action             = "Deny"') >= 2
+
     for out_name in (
         "scout_api_irsa_role_arn",
         "scout_worker_irsa_role_arn",
