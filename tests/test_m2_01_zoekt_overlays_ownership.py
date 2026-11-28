@@ -174,7 +174,7 @@ def test_zoekt_acl_bitmap_isolation_short_circuit_and_post_filter() -> None:
                     "Stats": {"FilesConsidered": 4},
                     "Files": [
                         {
-                            "Repository": "acme/core",
+                            "Repository": f"{tenant_a}::acme/core",
                             "RepositoryID": id_a_core,
                             "FileName": _b64("src/token.py"),
                             "Branches": ["main"],
@@ -191,7 +191,7 @@ def test_zoekt_acl_bitmap_isolation_short_circuit_and_post_filter() -> None:
                             ],
                         },
                         {
-                            "Repository": "acme/billing",
+                            "Repository": f"{tenant_a}::acme/billing",
                             "RepositoryID": id_a_bill,
                             "FileName": _b64("src/secret.py"),
                             "Branches": ["main"],
@@ -225,7 +225,7 @@ def test_zoekt_acl_bitmap_isolation_short_circuit_and_post_filter() -> None:
     assert len(calls) == 1
     assert calls[0]["url"].endswith("/zoekt.webserver.v1.WebserverService/Search")
     assert calls[0]["body"]["RepoIds"] == [id_a_core]
-    assert "r:^(acme/core)$" in calls[0]["body"]["Q"]
+    assert f"r:^({tenant_a}::acme/core)$" in calls[0]["body"]["Q"]
     assert len(auth_resp.file_matches) == 1
     hit = auth_resp.file_matches[0]
     assert hit.repo_name == "acme/core"
@@ -280,7 +280,7 @@ def test_zoekt_uncapped_enumeration_650_files_and_error_fail_closed() -> None:
             for chunk_start in range(0, 650, 100):
                 files_batch = [
                     {
-                        "Repository": "acme/monorepo",
+                        "Repository": f"{tenant_id}::acme/monorepo",
                         "RepositoryID": rid,
                         "FileName": _b64(f"services/mod_{i:04d}/handler.py"),
                         "Branches": ["main"],
@@ -320,6 +320,100 @@ def test_zoekt_uncapped_enumeration_650_files_and_error_fail_closed() -> None:
     with pytest.raises(ZoektUnavailableError):
         json_client.search("verify_invoice_token", principal, domain_id="dom_scale")
     json_client.close()
+
+
+def test_pr7_remote_zoekt_multi_tenant_shard_isolation_and_purge() -> None:
+    """PR-7 (ECS-154): Remote Zoekt shards namespace `{tenant_id}::{repo_name}`."""
+    from context_scout.retrieval.zoekt_client import (
+        format_zoekt_shard_repo_name,
+        strip_zoekt_shard_repo_name,
+    )
+
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    shared_repo = "org/payments"
+    shard_a = format_zoekt_shard_repo_name(tenant_a, shared_repo)
+    shard_b = format_zoekt_shard_repo_name(tenant_b, shared_repo)
+    assert shard_a == f"{tenant_a}::{shared_repo}"
+    assert shard_b == f"{tenant_b}::{shared_repo}"
+    assert strip_zoekt_shard_repo_name(tenant_a, shard_a) == (shared_repo, True)
+    assert strip_zoekt_shard_repo_name(tenant_a, shard_b) == ("", False)
+    assert strip_zoekt_shard_repo_name(tenant_a, shared_repo) == ("", False)
+
+    registry = RepoACLBitmapRegistry()
+    id_a = registry.register_repo(tenant_a, "dom_a", shared_repo, ["scope:a"])
+    registry.register_repo(tenant_b, "dom_b", shared_repo, ["scope:b"])
+    p_a = PrincipalContext(
+        user_id="alice", role=RoleType.ENGINEER, allowed_scopes=["scope:a"], tenant_id=tenant_a
+    )
+
+    purge_calls: list[dict[str, Any]] = []
+    search_queries: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        if request.url.path == "/api/admin/purge":
+            purge_calls.append(body)
+            return httpx.Response(200, json={"deleted": 1})
+        search_queries.append(body["Q"])
+        return httpx.Response(
+            200,
+            json={
+                "Result": {
+                    "Stats": {"FilesConsidered": 3},
+                    "Files": [
+                        {
+                            "Repository": shard_a,
+                            "RepositoryID": id_a,
+                            "FileName": _b64("pay.py"),
+                            "Branches": ["main"],
+                            "Language": "Python",
+                            "Score": 10.0,
+                            "LineMatches": [{"LineNumber": 1, "Line": _b64("def charge(): pass")}],
+                        },
+                        {
+                            "Repository": shard_b,
+                            "FileName": _b64("tenant_b_secret.py"),
+                            "Branches": ["main"],
+                            "Language": "Python",
+                            "Score": 99.0,
+                            "LineMatches": [{"LineNumber": 1, "Line": _b64("def charge(): pass")}],
+                        },
+                        {
+                            "Repository": shared_repo,
+                            "FileName": _b64("unprefixed.py"),
+                            "Branches": ["main"],
+                            "Language": "Python",
+                            "Score": 99.0,
+                            "LineMatches": [{"LineNumber": 1, "Line": _b64("def charge(): pass")}],
+                        },
+                    ],
+                }
+            },
+        )
+
+    client = ZoektGrpcJsonClient(
+        "http://zoekt.local:6070",
+        acl_registry=registry,
+        protocol="grpc_json",
+        transport=httpx.MockTransport(_handler),
+    )
+    resp = client.search("charge", p_a, domain_id="dom_a")
+    assert len(search_queries) == 1
+    assert f"{tenant_a}::{shared_repo}" in search_queries[0]
+    assert [m.repo_name for m in resp.file_matches] == [shared_repo]
+    assert [m.file_path for m in resp.file_matches] == ["pay.py"]
+
+    client.purge_repo(tenant_id=tenant_a, domain_id="dom_a", repo_name=shared_repo)
+    assert purge_calls == [
+        {
+            "tenant_id": str(tenant_a),
+            "domain_id": "dom_a",
+            "repo_name": shard_a,
+            "logical_repo_name": shared_repo,
+        }
+    ]
+    client.close()
 
 
 # -----------------------------------------------------------------------------

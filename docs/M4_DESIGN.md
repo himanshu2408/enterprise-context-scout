@@ -5,7 +5,7 @@
 **Author:** Architecture Review & Project Orchestrator  
 **Status:** APPROVED CONDITIONAL (All 9 User Directives Fully Incorporated)  
 **Document Path:** `enterprise-context-scout/docs/M4_DESIGN.md`  
-**Authoritative Reference:** `OPEN_ITEMS.md §F19` & User Directives (2026-11-10T10:25:02Z)  
+**Authoritative Reference:** `docs/ROADMAP_AND_KNOWN_LIMITS.md` & User Directives (2026-11-10T10:25:02Z)  
 
 ---
 

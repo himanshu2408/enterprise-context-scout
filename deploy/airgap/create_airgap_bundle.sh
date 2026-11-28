@@ -15,6 +15,8 @@ Options:
   --tenant-id UUID        Optional tenant UUID
   --scopes CSV            Comma-separated allowed_scopes (default: public)
   --cosign-key PATH       Optional cosign private key for signing the .tar.gz bundle
+  --lockfile PATH         Optional uv.lock path to enforce SHA-256 lockfile verification
+  --verify-lockfile       Fail closed if uv.lock is missing or lacks SHA-256 wheel digests
   -h, --help              Show this help message
 EOF
 }
@@ -24,6 +26,8 @@ DOMAIN_ID="code_architecture_scout"
 TENANT_ID=""
 SCOPES_CSV="public"
 COSIGN_KEY=""
+LOCKFILE_PATH=""
+VERIFY_LOCKFILE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -46,6 +50,15 @@ while [[ $# -gt 0 ]]; do
     --cosign-key)
       COSIGN_KEY="${2:?Missing value for --cosign-key}"
       shift 2
+      ;;
+    --lockfile)
+      LOCKFILE_PATH="${2:?Missing value for --lockfile}"
+      VERIFY_LOCKFILE=1
+      shift 2
+      ;;
+    --verify-lockfile)
+      VERIFY_LOCKFILE=1
+      shift
       ;;
     -h|--help)
       usage
@@ -87,7 +100,58 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
-"$PYTHON_BIN" - "$SOURCE_DIR" "$OUTPUT_BUNDLE" "$BUNDLE_ID" "$DOMAIN_ID" "$TENANT_ID" "$SCOPES_CSV" <<'PYEOF'
+if [[ -z "$LOCKFILE_PATH" ]] && [[ -f "$SOURCE_DIR/pyproject.toml" ]] && [[ -f "$SOURCE_DIR/uv.lock" ]]; then
+  LOCKFILE_PATH="$SOURCE_DIR/uv.lock"
+  VERIFY_LOCKFILE=1
+fi
+
+LOCKFILE_SHA256=""
+if [[ "$VERIFY_LOCKFILE" -eq 1 ]]; then
+  if [[ -z "$LOCKFILE_PATH" ]]; then
+    LOCKFILE_PATH="$SOURCE_DIR/uv.lock"
+  fi
+  if [[ ! -f "$LOCKFILE_PATH" ]]; then
+    echo "ERROR: --verify-lockfile set but lockfile not found: $LOCKFILE_PATH" >&2
+    exit 1
+  fi
+  LOCK_DIR="$(dirname "$LOCKFILE_PATH")"
+  if [[ -f "$LOCK_DIR/pyproject.toml" ]] && command -v uv >/dev/null 2>&1; then
+    uv lock --locked --check --directory "$LOCK_DIR" >/dev/null
+  fi
+  LOCKFILE_SHA256="$("$PYTHON_BIN" - "$LOCKFILE_PATH" <<'LOCKPY'
+import hashlib
+import sys
+import tomllib
+from pathlib import Path
+
+lock_path = Path(sys.argv[1])
+raw = lock_path.read_bytes()
+data = tomllib.loads(raw.decode("utf-8"))
+packages = data.get("package") or []
+if not packages:
+    raise SystemExit(f"ERROR: Empty uv.lock at {lock_path}")
+for pkg in packages:
+    if not isinstance(pkg, dict):
+        continue
+    src = pkg.get("source") or {}
+    if isinstance(src, dict) and ("editable" in src or "virtual" in src):
+        continue
+    has_sha = False
+    sdist = pkg.get("sdist")
+    if isinstance(sdist, dict) and str(sdist.get("hash", "")).startswith("sha256:"):
+        has_sha = True
+    for whl in pkg.get("wheels") or []:
+        if isinstance(whl, dict) and str(whl.get("hash", "")).startswith("sha256:"):
+            has_sha = True
+            break
+    if not has_sha:
+        raise SystemExit(f"ERROR: Package missing sha256 digest in {lock_path}: {pkg.get('name')}")
+print(hashlib.sha256(raw).hexdigest().lower())
+LOCKPY
+)"
+fi
+
+"$PYTHON_BIN" - "$SOURCE_DIR" "$OUTPUT_BUNDLE" "$BUNDLE_ID" "$DOMAIN_ID" "$TENANT_ID" "$SCOPES_CSV" "$LOCKFILE_SHA256" <<'PYEOF'
 import gzip
 import hashlib
 import io
@@ -127,6 +191,7 @@ bundle_id = sys.argv[3].strip()
 domain_id = sys.argv[4].strip()
 tenant_id = sys.argv[5].strip()
 scopes_csv = sys.argv[6]
+lockfile_sha256 = sys.argv[7].strip() if len(sys.argv) > 7 else ""
 
 if not bundle_id:
     raise SystemExit("ERROR: bundle_id must be non-empty.")
@@ -211,6 +276,8 @@ manifest: dict[str, object] = {
 }
 if tenant_id:
     manifest["tenant_id"] = tenant_id
+if lockfile_sha256:
+    manifest["lockfile_sha256"] = lockfile_sha256
 
 manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
 

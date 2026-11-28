@@ -958,3 +958,59 @@ def test_concurrent_activate_embedding_space_serialization_and_halfvec_trigger(
             (updated_lit, chk_id),
         ).fetchone()
         assert hv_row is not None and float(str(hv_row[0])) < 1e-3
+
+
+def test_pr7_hash_embeddings_test_flag_fails_closed_in_prod_staging_qa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR-7 (ECS-155): SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS=1 raises in prod/staging/qa."""
+    from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
+    from context_scout.retrieval import (
+        FORBIDDEN_TEST_HASH_ENVS,
+        get_embedding_provider,
+        is_test_hash_embeddings_enabled,
+    )
+
+    assert {"production", "prod", "staging", "qa"}.issubset(FORBIDDEN_TEST_HASH_ENVS)
+
+    monkeypatch.delenv("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", raising=False)
+    for var in ("SCOUT_ENVIRONMENT", "ENVIRONMENT", "APP_ENV"):
+        monkeypatch.delenv(var, raising=False)
+    assert is_test_hash_embeddings_enabled() is False
+
+    monkeypatch.setenv("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "1")
+    monkeypatch.setenv("SCOUT_ENVIRONMENT", "development")
+    assert is_test_hash_embeddings_enabled() is True
+
+    for forbidden_env in ("production", "prod", "staging", "qa"):
+        for var in ("SCOUT_ENVIRONMENT", "ENVIRONMENT", "APP_ENV"):
+            for clear_var in ("SCOUT_ENVIRONMENT", "ENVIRONMENT", "APP_ENV"):
+                monkeypatch.delenv(clear_var, raising=False)
+            monkeypatch.setenv(var, forbidden_env)
+            with pytest.raises(RuntimeError, match="strictly prohibited"):
+                is_test_hash_embeddings_enabled()
+            with pytest.raises(RuntimeError, match="strictly prohibited"):
+                LocalSemanticEmbedder()
+            with pytest.raises(RuntimeError, match="strictly prohibited"):
+                get_embedding_provider()
+
+    from context_scout.agents.preflight_gate import BoundGraphRepository
+    from context_scout.db.repositories import InMemoryRLSRepository
+    from context_scout.db.session import RLSConnectionManager
+
+    prod_db_url = "postgresql://scout_app_user:Prod_Str0ng_Vault_Pw!@127.0.0.1:5432/context_scout"
+    monkeypatch.setenv("SCOUT_ENVIRONMENT", "production")
+    monkeypatch.setenv("SCOUT_DB_APP_URL", prod_db_url)
+    monkeypatch.setenv("SCOUT_AUTH_HMAC_SECRET", "prod-test-secret-with-32-chars-minimum!!")
+    conn_mgr = RLSConnectionManager(prod_db_url, use_pool=False)
+    adapter = PostgresScoutGraphAdapter(connection_manager=conn_mgr)
+    principal = PrincipalContext(
+        user_id="prod-user", role=RoleType.ENGINEER, allowed_scopes=["public"]
+    )
+    with pytest.raises(RuntimeError, match="strictly prohibited"):
+        adapter.search_visible_doc_chunks(principal, "code_architecture_scout", "auth check")
+    bound = BoundGraphRepository(InMemoryRLSRepository())
+    with pytest.raises(RuntimeError, match="strictly prohibited"):
+        bound.search_visible_doc_chunks_calibrated(
+            principal, "code_architecture_scout", "auth check"
+        )

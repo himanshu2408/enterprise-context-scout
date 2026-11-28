@@ -6,6 +6,7 @@ from context_scout.plugins.languages.go import GoPlugin
 from context_scout.plugins.languages.java_spring import JavaSpringPlugin
 from context_scout.plugins.languages.kotlin import KotlinPlugin
 from context_scout.plugins.languages.protobuf_grpc import ProtobufGrpcPlugin
+from context_scout.plugins.languages.python_lang import PythonPlugin
 from context_scout.plugins.languages.react_redux import ReactReduxPlugin
 from context_scout.plugins.languages.rust import RustPlugin
 from context_scout.plugins.languages.scip_ingestor import SCIPIndexPlugin
@@ -13,6 +14,7 @@ from context_scout.plugins.languages.sql_dbt import SqlDbtPlugin
 from context_scout.plugins.languages.storybook import StorybookPlugin
 from context_scout.plugins.languages.templates_i18n import TemplatesI18nPlugin
 from context_scout.plugins.languages.terraform import TerraformPlugin
+from context_scout.plugins.languages.typescript_lang import TypeScriptPlugin
 
 __all__ = [
     "ApiSpecsPlugin",
@@ -21,6 +23,7 @@ __all__ = [
     "JavaSpringPlugin",
     "KotlinPlugin",
     "ProtobufGrpcPlugin",
+    "PythonPlugin",
     "ReactReduxPlugin",
     "RustPlugin",
     "SCIPIndexPlugin",
@@ -28,4 +31,5 @@ __all__ = [
     "StorybookPlugin",
     "TemplatesI18nPlugin",
     "TerraformPlugin",
+    "TypeScriptPlugin",
 ]

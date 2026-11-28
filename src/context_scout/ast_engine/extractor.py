@@ -470,6 +470,10 @@ def _derive_module_prefix(file_path: str) -> str:
 
 
 _LANGUAGE_ALIASES: Final[dict[str, str]] = {
+    "py": "python",
+    "ts": "typescript",
+    "js": "typescript",
+    "javascript": "typescript",
     "golang": "go",
     "rs": "rust",
     "kt": "kotlin",
@@ -535,25 +539,31 @@ class ASTExtractor:
                 lang_key = _LANGUAGE_ALIASES.get(language.lower(), language.lower())
                 plugin = PluginRegistry.get_language_plugin(lang_key)
 
-            if plugin is not None and plugin.language_id == "react_redux":
+            if plugin is not None and plugin.language_id in {"react_redux", "typescript"}:
                 lang_norm = language.lower()
-                if lang_norm in ("typescript", "ts", "javascript", "js") and not (
-                    file_path.lower().endswith((".tsx", ".jsx"))
+                react_redux_markers = (
+                    "createSlice",
+                    "createSelector",
+                    "useSelector",
+                    "useAppSelector",
+                    "useDispatch",
+                    "useAppDispatch",
+                    "from 'react'",
+                    'from "react"',
+                    "react-redux",
+                    "@reduxjs/toolkit",
+                )
+                has_react_markers = any(marker in code for marker in react_redux_markers)
+                if plugin.language_id == "react_redux" and (
+                    lang_norm in ("typescript", "ts", "javascript", "js")
+                    and not file_path.lower().endswith((".tsx", ".jsx"))
+                    and not has_react_markers
                 ):
-                    react_redux_markers = (
-                        "createSlice",
-                        "createSelector",
-                        "useSelector",
-                        "useAppSelector",
-                        "useDispatch",
-                        "useAppDispatch",
-                        "from 'react'",
-                        'from "react"',
-                        "react-redux",
-                        "@reduxjs/toolkit",
-                    )
-                    if not any(marker in code for marker in react_redux_markers):
-                        plugin = None
+                    plugin = PluginRegistry.get_language_plugin("typescript")
+                elif plugin.language_id == "typescript" and (
+                    file_path.lower().endswith((".tsx", ".jsx")) or has_react_markers
+                ):
+                    plugin = PluginRegistry.get_language_plugin("react_redux") or plugin
 
             if plugin is not None:
                 symbols, edges = plugin.extract_ast(

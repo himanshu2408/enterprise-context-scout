@@ -128,6 +128,19 @@ def build_and_smoke_images(repo_root: Path, *, skip_build: bool = False) -> dict
         sizes_mib[tag] = round(size_bytes / (1024.0 * 1024.0), 2)
         print(f"[IMAGE] {tag}: {sizes_mib[tag]:.2f} MiB", flush=True)
 
+    max_mib_by_tag: dict[str, float] = {
+        "ecs-smoke-api:v1.0.1": 2048.0,
+        "ecs-smoke-worker:v1.0.1": 2048.0,
+        "ecs-smoke-sidecar:v1.0.1": 1024.0,
+        "ecs-smoke-webui:v1.0.1": 512.0,
+    }
+    for tag, max_mib in max_mib_by_tag.items():
+        if sizes_mib[tag] >= max_mib:
+            raise RuntimeError(
+                f"Image {tag} exceeded slim footprint gate: "
+                f"{sizes_mib[tag]:.2f} MiB >= {max_mib:.2f} MiB"
+            )
+
     # Hardened boot check 1: worker --help with HF_HUB_OFFLINE=1
     worker_proc = _run_cmd(
         [

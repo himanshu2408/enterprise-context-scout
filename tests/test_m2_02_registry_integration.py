@@ -68,6 +68,7 @@ EXPECTED_LANGUAGES: frozenset[str] = frozenset(
         "java",
         "kotlin",
         "protobuf",
+        "python",
         "react_redux",
         "rust",
         "scip",
@@ -75,6 +76,7 @@ EXPECTED_LANGUAGES: frozenset[str] = frozenset(
         "storybook",
         "templates_i18n",
         "terraform",
+        "typescript",
     }
 )
 
@@ -86,6 +88,7 @@ EXPECTED_EXPORTS: frozenset[str] = frozenset(
         "JavaSpringPlugin",
         "KotlinPlugin",
         "ProtobufGrpcPlugin",
+        "PythonPlugin",
         "ReactReduxPlugin",
         "RustPlugin",
         "SCIPIndexPlugin",
@@ -93,6 +96,7 @@ EXPECTED_EXPORTS: frozenset[str] = frozenset(
         "StorybookPlugin",
         "TemplatesI18nPlugin",
         "TerraformPlugin",
+        "TypeScriptPlugin",
     }
 )
 
@@ -113,6 +117,9 @@ def test_languages_package_exports_and_registry_list() -> None:
     [
         ("components/Button.stories.tsx", "storybook"),
         ("components/Button.tsx", "react_redux"),
+        ("src/state/cartSlice.ts", "react_redux"),
+        ("src/app/service.py", "python"),
+        ("src/utils/date_format.ts", "typescript"),
         ("emails/welcome.mjml", "templates_i18n"),
         ("locales/en.po", "templates_i18n"),
         ("src/locales/en.json", "templates_i18n"),
@@ -306,6 +313,8 @@ def test_ast_extractor_parse_source_delegation_and_db_kind_constraints(
 @pytest.mark.parametrize(
     ("alias", "code", "expected_symbol"),
     [
+        ("py", "def compute_total(x: int) -> int:\n    return x\n", "compute_total"),
+        ("ts", "export function formatId(id: string): string { return id; }\n", "formatId"),
         ("golang", "package p\ntype Foo struct{}\n", "Foo"),
         ("rs", "pub struct Foo;\n", "Foo"),
         ("kt", "class Foo {\n    fun bar() {}\n}\n", "Foo"),
@@ -325,3 +334,75 @@ def test_ast_extractor_pure_alias_resolution_without_file_path(
     assert extractor.last_parse_diagnostics is not None
     assert extractor.last_parse_diagnostics.has_parse_error is False
     assert any(expected_symbol in s.name for s in symbols)
+
+
+def test_pr7_python_and_typescript_plugins_syntax_error_manifests_and_antiredos() -> None:
+    """PR-7 (ECS-152): PythonPlugin/TypeScriptPlugin fail-closed parsing & O(n) runtime."""
+    import time
+
+    from context_scout.plugins.languages import PythonPlugin, TypeScriptPlugin
+
+    PluginRegistry.reset()
+    py_plugin = PluginRegistry.get_plugin_for_file("services/worker.py")
+    ts_plugin = PluginRegistry.get_plugin_for_file("services/client.ts")
+    assert isinstance(py_plugin, PythonPlugin)
+    assert isinstance(ts_plugin, TypeScriptPlugin)
+
+    # 1. Clean extraction + repo qualification
+    py_syms, _ = py_plugin.extract_ast(
+        "class Worker:\n    def run(self) -> None:\n        return None\n",
+        "services/worker.py",
+        repo_name="acme/core",
+    )
+    assert py_plugin.last_parse_diagnostics is not None
+    assert py_plugin.last_parse_diagnostics.abstained is False
+    assert any(s.repo_qualified_id == "acme/core::services.worker::Worker" for s in py_syms)
+
+    ts_syms, _ = ts_plugin.extract_ast(
+        "export interface Config { url: string; }\nexport class Client {}\n",
+        "services/client.ts",
+        repo_name="acme/web",
+    )
+    assert ts_plugin.last_parse_diagnostics is not None
+    assert ts_plugin.last_parse_diagnostics.abstained is False
+    assert any(s.repo_qualified_id == "acme/web::services.client::Client" for s in ts_syms)
+
+    # 2. Fail-closed syntax error abstention
+    bad_py_syms, bad_py_edges = py_plugin.extract_ast("def broken(:\n", "broken.py")
+    assert bad_py_syms == [] and bad_py_edges == []
+    assert py_plugin.last_parse_diagnostics is not None
+    assert py_plugin.last_parse_diagnostics.has_parse_error is True
+    assert py_plugin.last_parse_diagnostics.abstained is True
+
+    bad_ts_syms, bad_ts_edges = ts_plugin.extract_ast("export function broken( {", "broken.ts")
+    assert bad_ts_syms == [] and bad_ts_edges == []
+    assert ts_plugin.last_parse_diagnostics is not None
+    assert ts_plugin.last_parse_diagnostics.has_parse_error is True
+    assert ts_plugin.last_parse_diagnostics.abstained is True
+
+    # 3. Manifest parsing + malformed manifest abstention
+    py_deps = py_plugin.extract_manifest_dependencies(
+        "pyproject.toml",
+        '[project]\nname = "demo"\ndependencies = ["httpx>=0.28.0"]\n',
+    )
+    assert any(d.target_package == "httpx" for d in py_deps)
+    assert py_plugin.extract_manifest_dependencies("pyproject.toml", "[broken") == []
+    assert py_plugin.last_parse_diagnostics is not None
+    assert py_plugin.last_parse_diagnostics.abstained is True
+
+    ts_deps = ts_plugin.extract_manifest_dependencies(
+        "package.json",
+        json.dumps({"name": "web", "dependencies": {"zod": "^3.0.0"}}),
+    )
+    assert any(d.target_package == "zod" for d in ts_deps)
+    assert ts_plugin.extract_manifest_dependencies("package.json", "{broken") == []
+    assert ts_plugin.last_parse_diagnostics is not None
+    assert ts_plugin.last_parse_diagnostics.abstained is True
+
+    # 4. O(n) anti-ReDoS bound on 50 KB pathological input (< 0.25s)
+    t0 = time.monotonic()
+    py_plugin.extract_manifest_dependencies(
+        "requirements.txt",
+        ("a" * 200 + "\n") * 250,
+    )
+    assert time.monotonic() - t0 < 0.25

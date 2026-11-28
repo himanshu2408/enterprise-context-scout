@@ -53,6 +53,9 @@ from context_scout.ingestion.doc_parser import (
     extract_sgml_docbook_text,
     strip_mdx_boilerplate,
 )
+from context_scout.retrieval.embedder import (
+    is_test_hash_embeddings_enabled as _is_test_hash_embeddings_enabled,
+)
 
 if TYPE_CHECKING:
     from context_scout.retrieval.embedder import LocalSemanticEmbedder
@@ -2821,11 +2824,8 @@ class BoundGraphRepository:
         min_calibrated_score: float = 0.0,
     ) -> tuple[list[DocChunkRecord], list[CalibratedRankedSearchHit]]:
         """Search visible doc chunks returning both records and calibrated hit scores."""
-        if (
-            self._use_pg17()
-            and query_text.strip()
-            and os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() != "1"
-        ):
+        use_hash_for_tests = _is_test_hash_embeddings_enabled()
+        if self._use_pg17() and query_text.strip() and not use_hash_for_tests:
             try:
                 query_vec = _embed_query_for_hybrid_rrf(query_text)
                 pg_repo = (
@@ -3011,10 +3011,8 @@ class BoundGraphRepository:
                 min_calibrated_score=min_calibrated_score,
             )
 
-        if (
-            hasattr(self._repo, "search_doc_chunks_hybrid_rrf")
-            and os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() != "1"
-        ):
+        use_hash_for_tests = _is_test_hash_embeddings_enabled()
+        if hasattr(self._repo, "search_doc_chunks_hybrid_rrf") and not use_hash_for_tests:
             base_chunks = self.list_visible_doc_chunks(principal, domain_id, market_scope)
             if not base_chunks:
                 return [], []
@@ -3134,11 +3132,8 @@ class BoundGraphRepository:
         min_calibrated_score: float = 0.0,
     ) -> tuple[list[ASTSymbolRecord], list[CalibratedRankedSearchHit]]:
         """Search visible AST symbols returning both records and calibrated hit scores."""
-        if (
-            self._use_pg17()
-            and query_text.strip()
-            and os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() != "1"
-        ):
+        use_hash_for_tests = _is_test_hash_embeddings_enabled()
+        if self._use_pg17() and query_text.strip() and not use_hash_for_tests:
             try:
                 query_vec = _embed_query_for_hybrid_rrf(query_text)
                 pg_repo = (

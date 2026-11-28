@@ -45,6 +45,7 @@ from context_scout.ast_engine.models import ParsedEdge, ParsedSymbol
 from context_scout.config import ScoutSettings, detect_hardware_profile
 from context_scout.db.migrations_runner import (
     build_admin_url_from_postgres_env,
+    run_alembic_downgrade,
     run_alembic_upgrade,
 )
 from context_scout.db.repositories import (
@@ -3465,6 +3466,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Construct admin DSN from POSTGRES_HOST/PORT/USER/ADMIN_PASSWORD/DB env vars",
     )
+    p_db_downgrade = db_sub.add_parser("downgrade", help="Run Alembic downgrade to target revision")
+    p_db_downgrade.add_argument(
+        "--revision",
+        default="-1",
+        help="Target Alembic downgrade revision (default: -1)",
+    )
+    p_db_downgrade.add_argument(
+        "--from-postgres-env",
+        action="store_true",
+        help="Construct admin DSN from POSTGRES_HOST/PORT/USER/ADMIN_PASSWORD/DB env vars",
+    )
 
     p_import = sub.add_parser(
         "import-bundle",
@@ -3686,6 +3698,15 @@ def main(argv: list[str] | None = None) -> int:
             app_db_url = settings.db_app_url
         run_alembic_upgrade(admin_url, target_revision=args.revision, app_db_url=app_db_url)
         print(json.dumps({"status": "ok", "target_revision": args.revision}, indent=2))
+        return 0
+    if args.command == "db" and args.db_command == "downgrade":
+        admin_url = (
+            build_admin_url_from_postgres_env()
+            if args.from_postgres_env
+            else ScoutSettings().db_admin_url
+        )
+        run_alembic_downgrade(admin_url, target_revision=args.revision)
+        print(json.dumps({"status": "ok", "downgraded_to": args.revision}, indent=2))
         return 0
     if args.command == "import-bundle":
         out = cmd_import_bundle(

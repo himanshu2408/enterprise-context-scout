@@ -7,7 +7,7 @@ name = "enterprise-context-scout"
 version = "1.0.1"
 description = "Enterprise Dual-Engine Context Scout & Multi-Domain Knowledge Platform (Gemma 4 MoE, Google ADK 2.12, MCP 2.3, PostgreSQL 17 RLS + pgvector)"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 license = { text = "Apache-2.0" }
 dependencies = [
     "pydantic>=2.10.0,<3.0.0",
@@ -15,42 +15,27 @@ dependencies = [
     "pyyaml>=6.0.2,<7.0.0",
     "psycopg[binary,pool]>=3.2.3,<4.0.0",
     "pgvector>=0.3.6,<1.0.0",
-    "tree-sitter>=0.24.0,<0.27.0",
-    "tree-sitter-python>=0.23.0,<0.26.0",
-    "tree-sitter-typescript>=0.23.0,<0.25.0",
-    "tree-sitter-c-sharp>=0.23.0,<0.25.0",
-    "tree-sitter-hcl>=1.2.0,<2.0.0",
-    "tree-sitter-language-pack>=0.13.0,<1.0.0",
-    "tree-sitter-yaml>=0.7.0,<1.0.0",
-    "tree-sitter-embedded-template>=0.23.0,<1.0.0",
-    "jinja2>=3.1.0,<4.0.0",
-    "protobuf>=5.0.0,<8.0.0",
-    "pypdf>=5.0.0,<7.0.0",
-    "sentence-transformers>=6.1.0,<7.0.0",
-    "torch>=2.0.0,<3.0.0",
-    "pillow>=13.0.0,<14.0.0",
-    "torchvision>=0.29.2,<0.30.0",
-    "fonttools>=4.68.0,<5.0.0",
-    "mcp>=2.3.0,<3.0.0",
-    "google-adk>=2.12.0,<3.0.0",
-    "google-genai>=2.31.0,<3.0.0",
+    "numpy>=2.0.0,<3.0.0",
+    "safetensors>=0.4.5,<1.0.0",
+    "cryptography>=46.0.0,<52.0.0",
+    "httpx>=0.28.0,<1.0.0",
+    "boto3>=1.35.0,<2.0.0",
     "opentelemetry-api>=1.30.0,<2.0.0",
     "opentelemetry-sdk>=1.30.0,<2.0.0",
     "opentelemetry-semantic-conventions>=0.47b0,<1.0.0",
-    "huggingface-hub>=2.3.0,<3.0.0",
-    "mlx>=0.22.0,<1.0.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "mlx-lm>=0.21.0,<1.0.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "fastapi>=0.115.0,<1.0.0",
-    "uvicorn[standard]>=0.32.0,<1.0.0",
-    "openai>=1.60.0,<3.0.0",
-    "alembic>=1.14.0,<2.0.0",
-    "boto3>=1.35.0,<2.0.0",
 ]
 
 [project.scripts]
 context-scout = "context_scout.cli:main"
 
 [project.optional-dependencies]
+sidecar = [
+    "httpx>=0.28.0,<1.0.0",
+    "boto3>=1.35.0,<2.0.0",
+    "cryptography>=46.0.0,<52.0.0",
+    "safetensors>=0.4.5,<1.0.0",
+    "jinja2>=3.1.0,<4.0.0",
+]
 api = [
     "fastapi>=0.115.0,<1.0.0",
     "uvicorn[standard]>=0.32.0,<1.0.0",
@@ -59,11 +44,22 @@ api = [
     "google-adk>=2.12.0,<3.0.0",
     "google-genai>=2.31.0,<3.0.0",
     "mcp>=2.3.0,<3.0.0",
-    "opentelemetry-api>=1.30.0,<2.0.0",
-    "opentelemetry-sdk>=1.30.0,<2.0.0",
-    "opentelemetry-semantic-conventions>=0.47b0,<1.0.0",
     "alembic>=1.14.0,<2.0.0",
-    "boto3>=1.35.0,<2.0.0",
+    "jinja2>=3.1.0,<4.0.0",
+    "protobuf>=5.0.0,<8.0.0",
+    "pypdf>=5.0.0,<7.0.0",
+    "huggingface-hub>=2.3.0,<3.0.0",
+    "sentence-transformers>=6.1.0,<7.0.0",
+    "pillow>=11.0.0,<14.0.0",
+    "torchvision>=0.20.0,<1.0.0; sys_platform == 'darwin'",
+    "tree-sitter>=0.24.0,<0.27.0",
+    "tree-sitter-python>=0.23.0,<0.26.0",
+    "tree-sitter-typescript>=0.23.0,<0.25.0",
+    "tree-sitter-c-sharp>=0.23.0,<0.25.0",
+    "tree-sitter-hcl>=1.2.0,<2.0.0",
+    "tree-sitter-language-pack>=0.13.0,<1.0.0",
+    "tree-sitter-yaml>=0.7.0,<1.0.0",
+    "tree-sitter-embedded-template>=0.23.0,<1.0.0",
 ]
 worker = [
     "tree-sitter>=0.24.0,<0.27.0",
@@ -78,10 +74,21 @@ worker = [
     "protobuf>=5.0.0,<8.0.0",
     "pypdf>=5.0.0,<7.0.0",
     "sentence-transformers>=6.1.0,<7.0.0",
-    "torch>=2.0.0,<3.0.0",
+    "pillow>=11.0.0,<14.0.0",
     "huggingface-hub>=2.3.0,<3.0.0",
     "alembic>=1.14.0,<2.0.0",
-    "boto3>=1.35.0,<2.0.0",
+    "openai>=1.60.0,<3.0.0",
+    "google-adk>=2.12.0,<3.0.0",
+    "google-genai>=2.31.0,<3.0.0",
+    "mcp>=2.3.0,<3.0.0",
+]
+cpu = [
+    "torch>=2.0.0,<3.0.0",
+    "torchvision>=0.20.0,<1.0.0",
+]
+cu128 = [
+    "torch>=2.0.0,<3.0.0",
+    "torchvision>=0.20.0,<1.0.0",
 ]
 local-mlx = [
     "mlx>=0.22.0,<1.0.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
@@ -89,7 +96,6 @@ local-mlx = [
 ]
 gpu-train = [
     "torch>=2.0.0,<3.0.0",
-    "safetensors>=0.4.5,<1.0.0",
     "transformers>=4.48.0,<6.0.0",
     "huggingface-hub>=2.3.0,<3.0.0",
     "scipy>=1.14.0,<2.0.0",
@@ -98,8 +104,11 @@ gpu-train = [
     "datasets>=5.2.0,<6.0.0",
     "fsspec>=2026.6.0,<2027.0.0",
     "accelerate>=1.2.0,<2.0.0",
+    "bitsandbytes>=0.45.0,<1.0.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 dev = [
+    "enterprise-context-scout[api,worker,local-mlx]",
+    "fonttools>=4.68.0,<5.0.0",
     "pytest>=8.3.0,<10.0.0",
     "pytest-asyncio>=0.24.0,<1.0.0",
     "ruff>=0.8.0,<1.0.0",
@@ -115,6 +124,7 @@ dev = [
 
 [dependency-groups]
 dev = [
+    "fonttools>=4.68.0,<5.0.0",
     "pytest>=8.3.0,<10.0.0",
     "pytest-asyncio>=0.24.0,<1.0.0",
     "ruff>=0.8.0,<1.0.0",
@@ -131,6 +141,39 @@ dev = [
     "squawk-cli>=2.0.0,<3.0.0",
     "schemathesis>=4.33.0,<5.0.0",
 ]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "cu128" },
+    ],
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cu128", extra = "cu128", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cu128", extra = "cu128", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/context_scout"]

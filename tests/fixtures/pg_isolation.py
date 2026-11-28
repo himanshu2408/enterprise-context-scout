@@ -319,19 +319,47 @@ def _git_blob_sha(content: str) -> str:
     return hashlib.sha1(header + raw).hexdigest()
 
 
+def _detect_code_arch_drift(
+    conn: psycopg.Connection[tuple[object, ...]],
+    repo_root: Path,
+) -> tuple[bool, set[str], set[str], set[str]]:
+    """Detects deleted, modified, or unindexed files in ``code_architecture_scout``."""
+    db_blobs = {
+        str(row[0]): str(row[1])
+        for row in conn.execute(
+            "SELECT file_path, git_blob_sha FROM code_files "
+            "WHERE domain_id = 'code_architecture_scout' AND repo_name = 'enterprise-context-scout'"
+        ).fetchall()
+    }
+    disk_files = sorted((repo_root / "src" / "context_scout").rglob("*.py"))
+    disk_blobs = {
+        py_file.relative_to(repo_root).as_posix(): _git_blob_sha(
+            py_file.read_text(encoding="utf-8", errors="replace")
+        )
+        for py_file in disk_files
+    }
+    deleted_paths = set(db_blobs) - set(disk_blobs)
+    stale_or_new = {rel for rel, sha in disk_blobs.items() if db_blobs.get(rel) != sha}
+    has_drift = bool(deleted_paths or stale_or_new or len(db_blobs) < 43)
+    return has_drift, deleted_paths, stale_or_new, set(db_blobs)
+
+
 def _seed_code_architecture_scout(
     conn: psycopg.Connection[tuple[object, ...]],
     repo: PostgresRLSRepository,
     repo_root: Path,
 ) -> None:
     domain_id = "code_architecture_scout"
-    existing_paths = {
-        str(row[0])
-        for row in conn.execute(
-            "SELECT file_path FROM code_files WHERE domain_id = %s",
-            (domain_id,),
-        ).fetchall()
-    }
+    _has_drift, deleted_paths, stale_or_new, db_paths = _detect_code_arch_drift(conn, repo_root)
+    purge_paths = sorted(deleted_paths | (stale_or_new & db_paths))
+    if purge_paths:
+        conn.execute(
+            "DELETE FROM code_files WHERE domain_id = %s "
+            "AND repo_name = 'enterprise-context-scout' AND file_path = ANY(%s)",
+            (domain_id, purge_paths),
+        )
+
+    existing_paths = db_paths - set(purge_paths)
     extractor = ASTExtractor()
     all_files = sorted((repo_root / "src" / "context_scout").rglob("*.py"))
     commit_sha = hashlib.sha1(b"m0-03-code-arch-seed").hexdigest()[:40]
@@ -339,6 +367,15 @@ def _seed_code_architecture_scout(
 
     global_symbol_map: dict[str, UUID] = {}
     short_name_map: dict[str, list[UUID]] = defaultdict(list)
+    for row in conn.execute(
+        "SELECT symbol_id, qualified_name FROM ast_symbols WHERE domain_id = %s",
+        (domain_id,),
+    ).fetchall():
+        sym_uuid = row[0] if isinstance(row[0], UUID) else UUID(str(row[0]))
+        qname = str(row[1])
+        global_symbol_map[qname] = sym_uuid
+        short_name_map[qname.split(".")[-1]].append(sym_uuid)
+
     parsed_files: list[tuple[list[Any], dict[str, UUID]]] = []
 
     for py_file in all_files:
@@ -934,14 +971,8 @@ def ensure_pg17_schema_and_seed_corpora(
                 with mgr.scoped_transaction(
                     seed_principal, enable_hnsw_iterative_scan=False
                 ) as check_conn:
-                    need_code_arch = (
-                        _row_count(
-                            check_conn.execute(
-                                "SELECT count(*) FROM code_files "
-                                "WHERE domain_id = 'code_architecture_scout'"
-                            ).fetchone()
-                        )
-                        < 43
+                    need_code_arch, _del_ca, stale_code_arch, _db_ca = _detect_code_arch_drift(
+                        check_conn, repo_root
                     )
                     need_mr42 = (
                         _row_count(
@@ -952,6 +983,7 @@ def ensure_pg17_schema_and_seed_corpora(
                             ).fetchone()
                         )
                         == 0
+                        or "src/context_scout/ops/state_reconciler.py" in stale_code_arch
                     )
                     need_ent_docs = (
                         _row_count(

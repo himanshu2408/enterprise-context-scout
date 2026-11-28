@@ -562,9 +562,12 @@ class PostgresScoutGraphAdapter:
         limit: int = 50,
     ) -> list[DocChunkRecord]:
         """Searches visible document chunks ranked by RRF, keyword, and market scope under RLS."""
+        from context_scout.retrieval.embedder import is_test_hash_embeddings_enabled
+
+        use_hash_for_tests = is_test_hash_embeddings_enabled()
         if (
             query_text.strip()
-            and os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() != "1"
+            and not use_hash_for_tests
             and (
                 not os.environ.get("PYTEST_CURRENT_TEST")
                 or os.environ.get("SCOUT_ENABLE_HYBRID_RRF_IN_PYTEST", "").strip() == "1"

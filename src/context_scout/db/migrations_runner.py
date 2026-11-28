@@ -307,7 +307,7 @@ def run_alembic_upgrade(
     *,
     app_db_url: str | None = None,
 ) -> None:
-    """Runs Alembic upgrades safely, auto-stamping pre-Alembic 001+002 schemas first."""
+    """Runs Alembic upgrades safely, auto-stamping pre-Alembic or unified 001+002 schemas first."""
     with psycopg.connect(admin_db_url, connect_timeout=10) as conn:
         has_domain_packs = (
             conn.execute("SELECT to_regclass('public.domain_packs')").fetchone() or (None,)
@@ -317,6 +317,9 @@ def run_alembic_upgrade(
         )[0]
         has_repositories = (
             conn.execute("SELECT to_regclass('public.repositories')").fetchone() or (None,)
+        )[0]
+        has_scim_users = (
+            conn.execute("SELECT to_regclass('public.scim_users')").fetchone() or (None,)
         )[0]
         has_tenant_col = (
             conn.execute(
@@ -337,13 +340,27 @@ def run_alembic_upgrade(
             )
             conn.execute(sql_002)
             conn.commit()
+            has_scim_users = (
+                conn.execute("SELECT to_regclass('public.scim_users')").fetchone() or (None,)
+            )[0]
 
+        should_stamp_head = (
+            has_domain_packs is not None
+            and has_alembic is None
+            and has_tenant_col
+            and has_scim_users is not None
+        )
         should_stamp_baseline = (
-            has_domain_packs is not None and has_alembic is None and not has_tenant_col
+            has_domain_packs is not None and has_alembic is None and not should_stamp_head
         )
 
     cfg = _build_alembic_config(admin_db_url)
-    if should_stamp_baseline:
+    if should_stamp_head:
+        script_dir = ScriptDirectory.from_config(cfg)
+        head_rev = script_dir.get_current_head()
+        if head_rev:
+            command.stamp(cfg, head_rev)
+    elif should_stamp_baseline:
         command.stamp(cfg, BASELINE_REVISION)
     command.upgrade(cfg, target_revision)
     if target_revision == "head":
@@ -363,6 +380,15 @@ def run_alembic_upgrade(
                 "ALTER ROLE scout_app_user WITH LOGIN "
                 "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;"
             )
+
+
+def run_alembic_downgrade(
+    admin_db_url: str,
+    target_revision: str = "-1",
+) -> None:
+    """Runs an Alembic downgrade against ``admin_db_url``."""
+    cfg = _build_alembic_config(admin_db_url)
+    command.downgrade(cfg, target_revision)
 
 
 def _strip_alembic_version_dml(sql_text: str) -> str:

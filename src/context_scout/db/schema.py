@@ -4,10 +4,38 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from uuid import UUID
 
 from context_scout.schemas.contracts import DEFAULT_TENANT_ID, DocumentScope
+
+CANONICAL_PG17_TABLES: Final[frozenset[str]] = frozenset(
+    {
+        "domain_packs",
+        "code_files",
+        "ast_symbols",
+        "ast_edges",
+        "doc_chunks",
+        "execution_telemetry",
+        "repositories",
+        "repo_commits",
+        "confluence_pages",
+        "jira_issues",
+        "indexing_queue",
+        "indexing_dead_letter",
+        "embedding_spaces",
+        "domain_sync_manifests",
+        "ref_snapshots",
+        "overlay_file_deltas",
+        "side_effects",
+        "connector_sync_watermarks",
+        "scout_sessions",
+        "model_artifacts",
+        "audit_events",
+        "scim_users",
+        "scim_groups",
+    }
+)
 
 SymbolKind = Literal[
     "function",
@@ -424,6 +452,128 @@ class ModelArtifactRecord:
 
 
 @dataclass(frozen=True)
+class DomainPackRecord:
+    domain_id: str
+    display_name: str
+    lora_adapter_id: str
+    primary_truth_source: Literal["code", "document"]
+    config_json: dict[str, Any] = field(default_factory=dict)
+    freshness_half_life_days: int = 180
+    s3_bundle_uri: str | None = None
+    bundle_sha256: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    tenant_id: UUID = DEFAULT_TENANT_ID
+
+
+@dataclass(frozen=True)
+class ExecutionTelemetryRecord:
+    trace_id: UUID
+    domain_id: str
+    principal_id: str
+    principal_role: str
+    execution_mode: Literal["chat_qa", "gemini_handoff"]
+    local_tokens_read: int
+    context_pack_tokens_sent: int
+    paid_tokens_saved: int
+    estimated_usd_saved: float
+    preflight_passed_first_try: bool
+    latency_ms: int
+    zero_touch_sufficient: bool | None = None
+    missing_context_requests: list[str] = field(default_factory=list)
+    created_at: datetime | None = None
+    tenant_id: UUID = DEFAULT_TENANT_ID
+
+
+@dataclass(frozen=True)
+class IndexingQueueRecord:
+    task_id: UUID
+    domain_id: str
+    event_type: str
+    payload_json: dict[str, Any] = field(default_factory=dict)
+    priority: int = 10
+    status: Literal["PENDING", "PROCESSING", "COMPLETED", "FAILED"] = "PENDING"
+    worker_id: str | None = None
+    attempts: int = 0
+    max_attempts: int = 3
+    error_message: str | None = None
+    scheduled_at: datetime | None = None
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    processed_at: datetime | None = None
+    tenant_id: UUID = DEFAULT_TENANT_ID
+
+
+@dataclass(frozen=True)
+class IndexingDeadLetterRecord:
+    dlq_id: UUID
+    task_id: UUID
+    domain_id: str
+    event_type: str
+    payload_json: dict[str, Any]
+    failure_reason: str
+    stack_trace: str
+    attempts: int
+    failed_at: datetime | None = None
+    tenant_id: UUID = DEFAULT_TENANT_ID
+
+
+@dataclass(frozen=True)
+class AuditEventRecord:
+    seq_no: int
+    event_id: UUID
+    actor_id: str
+    actor_role: str
+    event_type: str
+    prev_hash_sha256: str
+    event_hash_sha256: str
+    domain_id: str = "default"
+    severity: str = "INFO"
+    resource_uri: str = ""
+    outcome: str = "allow"
+    trace_id: str = ""
+    span_id: str = ""
+    payload_json: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime | None = None
+    tenant_id: UUID = DEFAULT_TENANT_ID
+
+
+@dataclass(frozen=True)
+class ScimUserRecord:
+    scim_user_id: str
+    user_name: str
+    domain_id: str = "default"
+    external_id: str = ""
+    email: str = ""
+    display_name: str = ""
+    active: bool = True
+    role_override: str | None = None
+    custom_scopes: list[str] = field(default_factory=list)
+    metadata_json: dict[str, Any] = field(default_factory=dict)
+    emails_json: list[dict[str, Any]] = field(default_factory=list)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    tenant_id: UUID = DEFAULT_TENANT_ID
+
+
+@dataclass(frozen=True)
+class ScimGroupRecord:
+    scim_group_id: str
+    display_name: str
+    domain_id: str = "default"
+    external_id: str = ""
+    member_user_ids: list[str] = field(default_factory=list)
+    member_group_ids: list[str] = field(default_factory=list)
+    mapped_scopes: list[str] = field(default_factory=list)
+    mapped_role: str | None = None
+    metadata_json: dict[str, Any] = field(default_factory=dict)
+    members_json: list[dict[str, Any]] = field(default_factory=list)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    tenant_id: UUID = DEFAULT_TENANT_ID
+
+
+@dataclass(frozen=True)
 class RankedSearchHit:
     item_id: UUID
     qualified_name_or_title: str
@@ -431,3 +581,30 @@ class RankedSearchHit:
     trigram_rank: int | None
     bm25_rank: int | None
     vector_rank: int | None
+
+
+CANONICAL_TABLE_RECORD_CLASSES: Final[dict[str, type[Any]]] = {
+    "domain_packs": DomainPackRecord,
+    "code_files": CodeFileRecord,
+    "ast_symbols": ASTSymbolRecord,
+    "ast_edges": ASTEdgeRecord,
+    "doc_chunks": DocChunkRecord,
+    "execution_telemetry": ExecutionTelemetryRecord,
+    "repositories": RepositoryRecord,
+    "repo_commits": RepoCommitRecord,
+    "confluence_pages": ConfluencePageRecord,
+    "jira_issues": JiraIssueRecord,
+    "indexing_queue": IndexingQueueRecord,
+    "indexing_dead_letter": IndexingDeadLetterRecord,
+    "embedding_spaces": EmbeddingSpaceRecord,
+    "domain_sync_manifests": DomainSyncManifestRecord,
+    "ref_snapshots": RefSnapshotRecord,
+    "overlay_file_deltas": OverlayFileDeltaRecord,
+    "side_effects": SideEffectRecord,
+    "connector_sync_watermarks": ConnectorWatermarkRecord,
+    "scout_sessions": ScoutSessionRecord,
+    "model_artifacts": ModelArtifactRecord,
+    "audit_events": AuditEventRecord,
+    "scim_users": ScimUserRecord,
+    "scim_groups": ScimGroupRecord,
+}
