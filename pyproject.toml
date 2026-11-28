@@ -57,7 +57,7 @@ api = [
     "tree-sitter-typescript>=0.23.0,<0.25.0",
     "tree-sitter-c-sharp>=0.23.0,<0.25.0",
     "tree-sitter-hcl>=1.2.0,<2.0.0",
-    "tree-sitter-language-pack>=0.13.0,<1.0.0",
+    "tree-sitter-language-pack>=0.13.0,<2.0.0",
     "tree-sitter-yaml>=0.7.0,<1.0.0",
     "tree-sitter-embedded-template>=0.23.0,<1.0.0",
 ]
@@ -67,7 +67,7 @@ worker = [
     "tree-sitter-typescript>=0.23.0,<0.25.0",
     "tree-sitter-c-sharp>=0.23.0,<0.25.0",
     "tree-sitter-hcl>=1.2.0,<2.0.0",
-    "tree-sitter-language-pack>=0.13.0,<1.0.0",
+    "tree-sitter-language-pack>=0.13.0,<2.0.0",
     "tree-sitter-yaml>=0.7.0,<1.0.0",
     "tree-sitter-embedded-template>=0.23.0,<1.0.0",
     "jinja2>=3.1.0,<4.0.0",
