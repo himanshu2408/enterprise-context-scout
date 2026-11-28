@@ -52,7 +52,7 @@ api = [
     "sentence-transformers>=6.1.0,<7.0.0",
     "pillow>=11.0.0,<14.0.0",
     "torchvision>=0.20.0,<1.0.0; sys_platform == 'darwin'",
-    "tree-sitter>=0.24.0,<0.27.0",
+    "tree-sitter>=0.24.0,<0.28.0",
     "tree-sitter-python>=0.23.0,<0.26.0",
     "tree-sitter-typescript>=0.23.0,<0.25.0",
     "tree-sitter-c-sharp>=0.23.0,<0.25.0",
@@ -62,7 +62,7 @@ api = [
     "tree-sitter-embedded-template>=0.23.0,<1.0.0",
 ]
 worker = [
-    "tree-sitter>=0.24.0,<0.27.0",
+    "tree-sitter>=0.24.0,<0.28.0",
     "tree-sitter-python>=0.23.0,<0.26.0",
     "tree-sitter-typescript>=0.23.0,<0.25.0",
     "tree-sitter-c-sharp>=0.23.0,<0.25.0",
