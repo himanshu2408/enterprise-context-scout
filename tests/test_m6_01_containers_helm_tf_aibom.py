@@ -24,7 +24,6 @@ from context_scout.plugins.languages.terraform import TerraformPlugin
 from context_scout.serving.adapter_sync_sidecar import (
     CosignBlobVerifier,
     CosignVerificationError,
-    sign_blob_for_cosign,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -67,8 +66,10 @@ def test_distroless_dockerfiles_and_nginx_airgap_hardening() -> None:
         docker_dir / "Dockerfile.adapter-sidecar",
     ):
         text = py_dockerfile.read_text(encoding="utf-8")
-        assert "FROM python:3.12-slim-bookworm AS builder" in text
-        assert "FROM gcr.io/distroless/python3-debian12:nonroot AS runtime" in text
+        assert "ARG PYTHON_BUILDER_IMAGE=python:3.12-slim-bookworm" in text
+        assert "ARG DISTROLESS_PYTHON_IMAGE=gcr.io/distroless/python3-debian12:nonroot" in text
+        assert "FROM ${PYTHON_BUILDER_IMAGE} AS builder" in text
+        assert "FROM ${DISTROLESS_PYTHON_IMAGE} AS runtime" in text
         assert "COPY --from=builder /usr/local/bin/python3.12 /usr/bin/python3" in text
         assert "libpython3.12" in text
         assert "LD_LIBRARY_PATH=/usr/local/lib" in text
@@ -100,7 +101,8 @@ def test_distroless_dockerfiles_and_nginx_airgap_hardening() -> None:
     assert "context_scout.serving.adapter_sync_sidecar" in sidecar_text
 
     webui_text = (docker_dir / "Dockerfile.webui").read_text(encoding="utf-8")
-    assert "FROM node:22-bookworm-slim AS builder" in webui_text
+    assert "ARG NODE_BUILDER_IMAGE=node:22-bookworm-slim" in webui_text
+    assert "FROM ${NODE_BUILDER_IMAGE} AS builder" in webui_text
     assert "npm ci --ignore-scripts" in webui_text
     assert "npm run build" in webui_text
     assert "USER 65532:65532" in webui_text
@@ -151,7 +153,7 @@ def test_docker_compose_enterprise_security_and_isolation() -> None:
 
     assert "pgvector/pgvector:pg17" in str(services["postgres"]["image"])
     assert "redis:7.4-alpine" in str(services["redis"]["image"])
-    assert "vllm/vllm-openai:v0.8.5" in str(services["vllm"]["image"])
+    assert "vllm/vllm-openai:v0.34.0" in str(services["vllm"]["image"])
     vllm_cmd = " ".join(str(x) for x in services["vllm"].get("command", []))
     for flag in (
         "--enable-lora",
@@ -375,7 +377,7 @@ def test_helm_chart_values_templates_and_security_invariants() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_terraform_modules_ast_valid_and_no_static_sa_keys() -> None:
+def test_terraform_modules_ast_valid_and_no_static_sa_keys(tmp_path: Path) -> None:
     tf_root = REPO_ROOT / "deploy" / "terraform"
     modules = ("gcp-gke", "onprem-k8s", "aws-eks", "azure-aks")
     plugin = TerraformPlugin()
@@ -424,7 +426,12 @@ def test_terraform_modules_ast_valid_and_no_static_sa_keys() -> None:
     assert "sensitive   = true" in gcp_vars or "sensitive = true" in gcp_vars
 
     tf_bin = shutil.which("terraform")
+    if os.environ.get("CI", "").lower() == "true":
+        assert tf_bin is not None, "terraform CLI must be installed in CI"
     if tf_bin:
+        tf_env = os.environ.copy()
+        tf_env.setdefault("TF_PLUGIN_CACHE_DIR", "/tmp/tf-plugin-cache")
+        Path(tf_env["TF_PLUGIN_CACHE_DIR"]).mkdir(parents=True, exist_ok=True)
         for mod in modules:
             fmt_proc = subprocess.run(
                 [tf_bin, "fmt", "-check", str(tf_root / mod)],
@@ -433,6 +440,30 @@ def test_terraform_modules_ast_valid_and_no_static_sa_keys() -> None:
                 check=False,
             )
             assert fmt_proc.returncode == 0, f"terraform fmt failed for {mod}: {fmt_proc.stdout}"
+            mod_env = dict(tf_env)
+            mod_env["TF_DATA_DIR"] = str(tmp_path / f"tf_{mod}")
+            mod_copy = tmp_path / f"tf_src_{mod}"
+            shutil.copytree(tf_root / mod, mod_copy)
+            init_proc = subprocess.run(
+                [tf_bin, f"-chdir={mod_copy}", "init", "-backend=false", "-input=false"],
+                env=mod_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert init_proc.returncode == 0, (
+                f"terraform init failed for {mod}: {init_proc.stderr or init_proc.stdout}"
+            )
+            val_proc = subprocess.run(
+                [tf_bin, f"-chdir={mod_copy}", "validate"],
+                env=mod_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert val_proc.returncode == 0, (
+                f"terraform validate failed for {mod}: {val_proc.stderr or val_proc.stdout}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -519,8 +550,14 @@ def _clone_minimal_repo_for_aibom(dest: Path) -> Path:
     """Copies only the files needed by `generate_aibom.build_aibom` for fast mutation tests."""
     dest.mkdir(parents=True, exist_ok=True)
     shutil.copy2(REPO_ROOT / "pyproject.toml", dest / "pyproject.toml")
+    if (REPO_ROOT / "uv.lock").is_file():
+        shutil.copy2(REPO_ROOT / "uv.lock", dest / "uv.lock")
     (dest / "web-ui").mkdir(exist_ok=True)
     shutil.copy2(REPO_ROOT / "web-ui" / "package.json", dest / "web-ui" / "package.json")
+    if (REPO_ROOT / "web-ui" / "package-lock.json").is_file():
+        shutil.copy2(
+            REPO_ROOT / "web-ui" / "package-lock.json", dest / "web-ui" / "package-lock.json"
+        )
     (dest / "config").mkdir(exist_ok=True)
     shutil.copy2(
         REPO_ROOT / "config" / "model_registry.yaml",
@@ -543,7 +580,9 @@ def test_aibom_generation_signing_and_negative_controls(tmp_path: Path) -> None:
     assert rc == 0
     assert out_bom.is_file()
     bundle_file = Path(f"{out_bom}.sigstore.json")
+    pub_file = Path(f"{out_bom}.pub")
     assert bundle_file.is_file()
+    assert pub_file.is_file()
 
     bom = json.loads(out_bom.read_text(encoding="utf-8"))
     assert bom["bomFormat"] == "CycloneDX"
@@ -552,21 +591,25 @@ def test_aibom_generation_signing_and_negative_controls(tmp_path: Path) -> None:
     assert props["scout:trust_remote_code"] == "false"
     assert props["scout:require_safetensors_only"] == "true"
     assert props["scout:cartridges_audited"] == "4"
-    assert len(bom["components"]) >= 10
+    assert props["scout:signing_key_ephemeral"] == "true"
+    assert props["scout:scanner_backend"] in {
+        "modelscan-cli",
+        "modelscan-lib",
+        "native-safetensors-header-inspector",
+    }
+    assert len(bom["components"]) >= 50
+    hashed_libs = [c for c in bom["components"] if c.get("type") == "library" and c.get("hashes")]
+    assert len(hashed_libs) >= 20, "Lockfile SHA hashes must populate library components"
 
-    # Negative control 1: tampered Sigstore bundle / BOM payload must fail verification.
-    priv_key = ec.generate_private_key(ec.SECP256R1())
-    pub_pem = priv_key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
+    # Cryptographically verify the ACTUAL emitted Sigstore bundle + public key.
     bom_bytes = out_bom.read_bytes()
-    valid_bundle = sign_blob_for_cosign(priv_key, bom_bytes, as_sigstore_bundle=True)
-    verifier = CosignBlobVerifier(trusted_public_keys_pem={"aibom": pub_pem})
-    verifier.verify(bom_bytes, valid_bundle, key_id="aibom")
+    actual_bundle = bundle_file.read_text(encoding="utf-8")
+    actual_pub_pem = pub_file.read_bytes()
+    verifier = CosignBlobVerifier(trusted_public_keys_pem={"aibom": actual_pub_pem})
+    verifier.verify(bom_bytes, actual_bundle, key_id="aibom")
 
     with pytest.raises(CosignVerificationError):
-        verifier.verify(bom_bytes + b"tampered", valid_bundle, key_id="aibom")
+        verifier.verify(bom_bytes + b"tampered", actual_bundle, key_id="aibom")
 
     # Negative control 2: unsafe .pkl / .pt weights in a cartridge directory must fail closed.
     repo_pkl = _clone_minimal_repo_for_aibom(tmp_path / "repo_pkl")
@@ -657,7 +700,8 @@ def test_gcp_gke_terraform_helm_parity() -> None:
     dockerfile_api = (REPO_ROOT / "deploy" / "docker" / "Dockerfile.api").read_text(
         encoding="utf-8"
     )
-    assert "path: /api/v1/health" in api_tpl
+    assert "path: /api/v1/health/live" in api_tpl
+    assert "path: /api/v1/health/ready" in api_tpl
     assert "--port" in dockerfile_api and "8080" in dockerfile_api
     assert "http_health_check {" in gcp_main
     assert "https_health_check" not in gcp_main
@@ -959,16 +1003,26 @@ def test_env_example_byo_and_keyless_gcp_parity() -> None:
     assert "gemini-3.8-flash / gemini-4-argon worktree" not in env_example
 
 
-def test_scout_resolver_rejects_multiline_injection_and_accepts_valid_upstream() -> None:
+def test_scout_resolver_rejects_multiline_injection_and_accepts_valid_upstream(
+    tmp_path: Path,
+) -> None:
     """25-scout-resolver.sh must reject multi-line/control-char injection."""
     resolver_script = REPO_ROOT / "deploy" / "docker" / "25-scout-resolver.sh"
     sh_bin = shutil.which("sh") or "/bin/sh"
-    resolver_conf = Path("/tmp/nginx-scout-resolver.conf")
-    override_conf = Path("/tmp/nginx-scout-api-override.conf")
+    conf_dir = tmp_path / "nginx_conf"
+    conf_dir.mkdir(parents=True, exist_ok=True)
+    resolv_conf = tmp_path / "resolv.conf"
+    resolv_conf.write_text("nameserver 10.96.0.10\nnameserver fd00::10\n", encoding="utf-8")
+    resolver_conf = conf_dir / "nginx-scout-resolver.conf"
+    override_conf = conf_dir / "nginx-scout-api-override.conf"
 
     def _cleanup() -> None:
         resolver_conf.unlink(missing_ok=True)
         override_conf.unlink(missing_ok=True)
+
+    base_env = os.environ.copy()
+    base_env["SCOUT_NGINX_CONF_DIR"] = str(conf_dir)
+    base_env["SCOUT_RESOLV_CONF"] = str(resolv_conf)
 
     invalid_upstreams = (
         'http://context-scout-api:8080\n"; add_header X-Injected pwned always; return 200 "pwned',
@@ -985,7 +1039,7 @@ def test_scout_resolver_rejects_multiline_injection_and_accepts_valid_upstream()
     try:
         for bad_upstream in invalid_upstreams:
             _cleanup()
-            env = os.environ.copy()
+            env = dict(base_env)
             env["SCOUT_API_UPSTREAM"] = bad_upstream
             proc = subprocess.run(
                 [sh_bin, str(resolver_script)],
@@ -1008,7 +1062,7 @@ def test_scout_resolver_rejects_multiline_injection_and_accepts_valid_upstream()
             "http://context-scout-api",
         ):
             _cleanup()
-            env = os.environ.copy()
+            env = dict(base_env)
             env["SCOUT_API_UPSTREAM"] = valid_upstream
             proc = subprocess.run(
                 [sh_bin, str(resolver_script)],
@@ -1019,7 +1073,9 @@ def test_scout_resolver_rejects_multiline_injection_and_accepts_valid_upstream()
             )
             assert proc.returncode == 0, proc.stderr
             assert resolver_conf.is_file()
-            assert resolver_conf.read_text(encoding="utf-8").startswith("resolver ")
+            resolver_text = resolver_conf.read_text(encoding="utf-8")
+            assert resolver_text.startswith("resolver ")
+            assert "[fd00::10]" in resolver_text
             assert override_conf.is_file()
             assert (
                 override_conf.read_text(encoding="utf-8")
@@ -1027,7 +1083,7 @@ def test_scout_resolver_rejects_multiline_injection_and_accepts_valid_upstream()
             )
 
         _cleanup()
-        env_unset = {k: v for k, v in os.environ.items() if k != "SCOUT_API_UPSTREAM"}
+        env_unset = {k: v for k, v in base_env.items() if k != "SCOUT_API_UPSTREAM"}
         proc_unset = subprocess.run(
             [sh_bin, str(resolver_script)],
             env=env_unset,
@@ -1115,7 +1171,7 @@ def test_dockerfiles_dockerignore_and_uv_lock_cve_hardening() -> None:
     docker_dir = REPO_ROOT / "deploy" / "docker"
     for py_name in ("Dockerfile.api", "Dockerfile.worker", "Dockerfile.adapter-sidecar"):
         text = (docker_dir / py_name).read_text(encoding="utf-8")
-        builder_stage, _sep, runtime_stage = text.partition("FROM gcr.io/distroless/")
+        builder_stage, _sep, runtime_stage = text.partition("AS runtime")
         assert runtime_stage, f"{py_name} missing distroless runtime stage"
         assert "uv>=0.5.0,<0.7.0" not in text
         assert "uv>=0.13.4" in builder_stage
@@ -1154,3 +1210,78 @@ def test_dockerfiles_dockerignore_and_uv_lock_cve_hardening() -> None:
     assert "datasets" in packages
     datasets_ver = tuple(int(p) for p in str(packages["datasets"]).split(".")[:3])
     assert datasets_ver >= (5, 2, 0), f"Legacy datasets in uv.lock: {packages['datasets']}"
+
+
+def test_pr5_supply_chain_health_probes_and_corpus_hygiene(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies CI SHA pinning, SECURITY.md, Makefile, health probes, pickle, and corpus."""
+    from fastapi.testclient import TestClient
+
+    from context_scout.api.main import app
+    from context_scout.api.routes.health import reset_health_probe_cache
+
+    ci_text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    uses_lines = [ln.strip() for ln in ci_text.splitlines() if "uses:" in ln]
+    assert len(uses_lines) >= 15
+    for ln in uses_lines:
+        assert not re.search(r"@v\d+", ln.split("#", 1)[0]), (
+            f"Mutable @v* action ref found in ci.yml: {ln}"
+        )
+
+    assert (REPO_ROOT / "SECURITY.md").is_file()
+    makefile_text = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "scripts/run_test_batches.py --mode fast" in makefile_text
+    assert "scripts/run_test_batches.py --mode full" in makefile_text
+
+    # Split health probes: /live returns 200 without DB; /ready returns 200 in memory mode
+    reset_health_probe_cache()
+    monkeypatch.setenv("SCOUT_STORAGE_BACKEND", "memory")
+    client = TestClient(app)
+    live_resp = client.get("/api/v1/health/live")
+    assert live_resp.status_code == 200
+    assert live_resp.json()["status"] == "alive"
+
+    ready_resp = client.get("/api/v1/health/ready")
+    assert ready_resp.status_code == 200
+    assert ready_resp.json()["status"] == "ok"
+    reset_health_probe_cache()
+
+    # Air-gap bundle script must reject disguised pickle magic bytes regardless of extension
+    script = REPO_ROOT / "deploy" / "airgap" / "create_airgap_bundle.sh"
+    bad_dir = tmp_path / "disguised_pickle"
+    bad_dir.mkdir()
+    (bad_dir / "weights.safetensors").write_bytes(b"\x80\x04\x95fake-pickle")
+    proc = subprocess.run(
+        [
+            str(script),
+            "--domain-id",
+            "enterprise_docs_scout",
+            str(bad_dir),
+            str(tmp_path / "b.tgz"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0
+
+    # Corpus enrichment script must never use db_admin_url and must fail closed on offline egress
+    corpus_script = REPO_ROOT / "scripts" / "clean_and_enrich_corpus.py"
+    corpus_text = corpus_script.read_text(encoding="utf-8")
+    assert "db_admin_url" not in corpus_text
+    assert "RLSConnectionManager" in corpus_text
+    assert "embedding_halfvec" in corpus_text
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("clean_and_enrich_corpus", corpus_script)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    from context_scout.config import ScoutSettings
+
+    with pytest.raises(RuntimeError, match="SCOUT_ALLOW_EXTERNAL_CLOUD_EGRESS"):
+        mod.fetch_wikipedia_plaintext(
+            "ACID", settings=ScoutSettings(allow_external_cloud_egress=False)
+        )

@@ -555,6 +555,42 @@ class TestVertexPEFTTrainer:
         assert job_submit["state"] == "DRY_RUN_PASSED"
         assert "gs://" in job_submit["output_uri"]
 
+    def test_sovereignty_eea_cmek_vpc_fail_closed(self) -> None:
+        """Verifies non-EEA regions, mismatched KMS keys, and bad VPCs fail closed."""
+        non_eea = VertexPEFTTrainer(
+            config=VertexPEFTConfig(
+                domain_id="enterprise_docs_scout",
+                gcp_region="us-central1",
+                kms_key_name=(
+                    "projects/context-scout-prod-eu/locations/us-central1/keyRings/r/cryptoKeys/k"
+                ),
+            )
+        )
+        res_region = non_eea.validate_spec()
+        assert res_region.is_valid is False
+        assert any("ALLOWED_EEA_REGIONS" in iss for iss in res_region.issues)
+
+        bad_kms = VertexPEFTTrainer(
+            config=VertexPEFTConfig(
+                domain_id="enterprise_docs_scout",
+                gcp_region="europe-west3",
+                kms_key_name="projects/p/locations/europe-west1/keyRings/r/cryptoKeys/k",
+            )
+        )
+        res_kms = bad_kms.validate_spec()
+        assert res_kms.is_valid is False
+        assert any("does not match gcp_region" in iss for iss in res_kms.issues)
+
+        bad_vpc = VertexPEFTTrainer(
+            config=VertexPEFTConfig(
+                domain_id="enterprise_docs_scout",
+                network="default",
+            )
+        )
+        res_vpc = bad_vpc.validate_spec()
+        assert res_vpc.is_valid is False
+        assert any("Invalid VPC network" in iss for iss in res_vpc.issues)
+
 
 class TestDomainAdaptersIntegration:
     """Verifies domain adapter artifacts and AdapterPool integration."""

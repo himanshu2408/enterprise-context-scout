@@ -1204,7 +1204,7 @@ class GeminiImplementationExecutor:
             )
             self._persist_execution_telemetry(principal, telemetry, conn=conn, repo=repo)
 
-            exec_span.record_result(result, telemetry)
+            exec_span.record_result(result, telemetry, invoked_paid_model=will_invoke_paid_model)
             return (result, telemetry)
 
     def _resolve_missing_context(

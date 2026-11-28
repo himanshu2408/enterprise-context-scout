@@ -6,6 +6,7 @@ metadata:
     {{- include "context-scout.labels" . | nindent 4 }}
 data:
   SCOUT_ENVIRONMENT: {{ .Values.global.environment | quote }}
+  SCOUT_STORAGE_BACKEND: "postgres"
   SCOUT_ALLOW_EXTERNAL_CLOUD_EGRESS: {{ .Values.global.allowExternalCloudEgress | quote }}
   SCOUT_DEFAULT_DOMAIN_ID: {{ .Values.config.defaultDomainId | quote }}
   SCOUT_PRIMARY_MODEL_ID: {{ .Values.config.primaryModelId | quote }}
@@ -16,10 +17,11 @@ data:
   SCOUT_EMBEDDING_DIMENSIONS: {{ .Values.config.embeddingDimensions | quote }}
   SCOUT_LOCAL_MAX_KV_TOKENS: {{ .Values.config.localMaxKvTokens | quote }}
   SCOUT_LORA_SLOTS_CAPACITY: {{ .Values.config.loraSlotsCapacity | quote }}
-  SCOUT_REDIS_URL: {{ .Values.config.redisUrl | quote }}
-  SCOUT_ZOEKT_ENDPOINT_URL: {{ .Values.config.zoektEndpointUrl | quote }}
+  SCOUT_REDIS_URL: {{ default (printf "redis://%s-redis:6379/0" (include "context-scout.fullname" .)) .Values.config.redisUrl | quote }}
+  SCOUT_ZOEKT_ENDPOINT_URL: {{ default (printf "http://%s-zoekt:%d" (include "context-scout.fullname" .) (int .Values.zoekt.port)) .Values.config.zoektEndpointUrl | quote }}
   SCOUT_ZOEKT_PROTOCOL: {{ .Values.config.zoektProtocol | quote }}
   SCOUT_LOCAL_MLX_ENDPOINT: {{ printf "http://%s-vllm:%d/v1" (include "context-scout.fullname" .) (int .Values.vllm.port) | quote }}
+  SCOUT_VLLM_ENDPOINTS: {{ printf "http://%s-vllm:%d" (include "context-scout.fullname" .) (int .Values.vllm.port) | quote }}
   SCOUT_GCS_BUCKET: {{ .Values.config.gcsBucket | quote }}
   SCOUT_GCS_PROJECT: {{ .Values.config.gcsProject | quote }}
   SCOUT_S3_BUCKET: {{ .Values.config.s3Bucket | quote }}

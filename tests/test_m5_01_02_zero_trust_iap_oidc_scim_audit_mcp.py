@@ -1269,7 +1269,7 @@ def test_hardened_webhooks_admin_purge_and_openapi_schema_fuzzing(
             "SCOUT_DB_APP_URL",
             "postgresql://scout_app_user:ProdStrongPass99!@127.0.0.1:54329/context_scout",
         )
-        public_paths = {"/api/v1/health"}
+        public_paths = {"/api/v1/health", "/api/v1/health/live", "/api/v1/health/ready"}
         for raw_path, path_item in sorted(spec["paths"].items()):
             fuzzed_path = (
                 raw_path.replace("{user_id}", str(uuid.uuid4()))

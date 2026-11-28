@@ -97,9 +97,29 @@ import posixpath
 import stat
 import sys
 import tarfile
+import zipfile
 from pathlib import Path, PurePosixPath
 
 UNSAFE_EXTENSIONS = frozenset({".pkl", ".pickle", ".pt", ".pth", ".bin", ".h5", ".ckpt"})
+PICKLE_MAGIC_PREFIXES = (b"\x80\x01", b"\x80\x02", b"\x80\x03", b"\x80\x04", b"\x80\x05")
+
+
+def _assert_safe_payload(norm_rel: str, raw_bytes: bytes) -> None:
+    if any(raw_bytes.startswith(prefix) for prefix in PICKLE_MAGIC_PREFIXES):
+        raise SystemExit(
+            f"ERROR: Pickle protocol magic bytes rejected regardless of extension: {norm_rel}"
+        )
+    if raw_bytes.startswith(b"PK\x03\x04"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+                for member in zf.namelist():
+                    lowered = member.lower()
+                    if lowered.endswith((".pkl", ".pickle")) or "data.pkl" in lowered:
+                        raise SystemExit(
+                            f"ERROR: ZIP-wrapped pickle archive rejected ({member}): {norm_rel}"
+                        )
+        except zipfile.BadZipFile:
+            pass
 
 source_dir = Path(sys.argv[1])
 output_bundle = Path(sys.argv[2])
@@ -162,6 +182,7 @@ for dirpath, dirnames, filenames in os.walk(source_dir, followlinks=False):
             raise SystemExit(f"ERROR: Unsafe weight/pickle extension rejected ({suffix}): {norm_rel}")
 
         raw_bytes = fpath.read_bytes()
+        _assert_safe_payload(norm_rel, raw_bytes)
         collected_files.append((norm_rel, raw_bytes))
 
 if not collected_files:
@@ -195,7 +216,7 @@ manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode(
 
 output_bundle.parent.mkdir(parents=True, exist_ok=True)
 tar_buf = io.BytesIO()
-with tarfile.open(fileobj=tar_buf, mode="w") as tf:
+with tarfile.open(fileobj=tar_buf, mode="w", format=tarfile.PAX_FORMAT) as tf:
     all_members = [("manifest.json", manifest_bytes), *collected_files]
     for member_name, payload in all_members:
         info = tarfile.TarInfo(name=member_name)

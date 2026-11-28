@@ -14,8 +14,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-context_scout}
     volumes:
       - scout_pgdata:/var/lib/postgresql/data
-      - ./sql/001_init_schema.sql:/docker-entrypoint-initdb.d/001_init_schema.sql:ro
-      - ./sql/002_production_enterprise_schema.sql:/docker-entrypoint-initdb.d/002_production_enterprise_schema.sql:ro
     command:
       - "postgres"
       - "-c"
@@ -117,14 +115,14 @@ services:
       - scout_data_plane
 
   vllm:
-    image: vllm/vllm-openai:v0.8.5
+    image: vllm/vllm-openai:v0.34.0
     restart: unless-stopped
     security_opt:
       - "no-new-privileges:true"
     cap_drop:
       - ALL
     environment:
-      HF_HOME: /tmp/hf_cache
+      HF_HOME: /root/.cache/huggingface
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
@@ -195,6 +193,7 @@ services:
     environment:
       SCOUT_ENV: production
       SCOUT_ENVIRONMENT: production
+      SCOUT_STORAGE_BACKEND: postgres
       SCOUT_DB_APP_URL: ${SCOUT_DB_APP_URL:?SCOUT_DB_APP_URL must be set}
       SCOUT_ALLOW_EXTERNAL_CLOUD_EGRESS: "false"
       SCOUT_PRIMARY_MODEL_ID: ${SCOUT_PRIMARY_MODEL_ID:-google/gemma-4-26B-A4B-it}
@@ -219,7 +218,13 @@ services:
       vllm:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "/usr/bin/python3", "-c", "import context_scout.serving.adapter_sync_sidecar"]
+      test:
+        [
+          "CMD",
+          "/usr/bin/python3",
+          "-c",
+          "import os, urllib.request; urllib.request.urlopen(os.environ['SCOUT_VLLM_ENDPOINTS'] + '/health', timeout=3); from context_scout.db.session import RLSConnectionManager; from context_scout.schemas.contracts import PrincipalContext, RoleType; m = RLSConnectionManager(os.environ['SCOUT_DB_APP_URL']);\nwith m.scoped_transaction(PrincipalContext(user_id='hc', role=RoleType.ENGINEER, allowed_scopes=['system:connector_ingest']), enable_hnsw_iterative_scan=False) as c: c.execute('SELECT 1')",
+        ]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -242,6 +247,7 @@ services:
     environment:
       SCOUT_ENV: production
       SCOUT_ENVIRONMENT: production
+      SCOUT_STORAGE_BACKEND: postgres
       SCOUT_DB_APP_URL: ${SCOUT_DB_APP_URL:?SCOUT_DB_APP_URL must be set}
       SCOUT_AUTH_HMAC_SECRET: ${SCOUT_AUTH_HMAC_SECRET:?SCOUT_AUTH_HMAC_SECRET must be set}
       SCOUT_ALLOW_EXTERNAL_CLOUD_EGRESS: "false"
@@ -257,7 +263,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "/usr/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v1/health', timeout=3)"]
+      test: ["CMD", "/usr/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v1/health/ready', timeout=3)"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -281,6 +287,7 @@ services:
     environment:
       SCOUT_ENV: production
       SCOUT_ENVIRONMENT: production
+      SCOUT_STORAGE_BACKEND: postgres
       SCOUT_DB_APP_URL: ${SCOUT_DB_APP_URL:?SCOUT_DB_APP_URL must be set}
       SCOUT_ALLOW_EXTERNAL_CLOUD_EGRESS: "false"
       SCOUT_REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0
@@ -289,6 +296,8 @@ services:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
+    volumes:
+      - scout_zoekt_index:/data/index:rw
     command: ["worker"]
     depends_on:
       postgres:
@@ -298,7 +307,13 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "/usr/bin/python3", "-c", "import context_scout.cli"]
+      test:
+        [
+          "CMD",
+          "/usr/bin/python3",
+          "-c",
+          "import os, redis; r = redis.from_url(os.environ['SCOUT_REDIS_URL']); r.ping()",
+        ]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -170,6 +170,7 @@ class StateReconciler:
         promote_last_known_good_adapter: bool = True,
         prune_orphan_objects: bool = False,
         stale_task_seconds: int = 0,
+        reconcile_batch_size: int = 64,
     ) -> None:
         self._settings = settings or ScoutSettings()
         if connection_manager is not None:
@@ -208,6 +209,7 @@ class StateReconciler:
         self.promote_last_known_good_adapter = bool(promote_last_known_good_adapter)
         self.prune_orphan_objects = bool(prune_orphan_objects)
         self.stale_task_seconds = max(0, int(stale_task_seconds))
+        self.reconcile_batch_size = max(1, int(reconcile_batch_size))
 
         if isinstance(self.task_queue, PostgresTaskQueue):
             self._validate_non_admin_rls_manager(self.task_queue._conn_mgr, self._settings)
@@ -785,59 +787,82 @@ class StateReconciler:
 
         try:
             embedder = self._resolve_embedder_for_space(active_space)
+            bs = self.reconcile_batch_size
             if sym_rows:
-                sym_texts = [f"{r[1]} {r[2]} {r[3]}".strip() for r in sym_rows]
-                sym_vecs = embedder.embed_batch(sym_texts, is_query=False)
-                if len(sym_vecs) != len(sym_rows):
-                    raise RuntimeError(
-                        f"Embedder returned {len(sym_vecs)} vectors for {len(sym_rows)} symbols."
-                    )
-                sym_updates: list[tuple[str, str, str, str, UUID]] = []
-                for row, vec in zip(sym_rows, sym_vecs, strict=True):
-                    checked = validate_non_zero_embedding(vec, expected_dim=active_space.dimensions)
-                    vec768_lit, hv_lit = _format_db_vector_and_halfvec(checked)
-                    sym_updates.append(
-                        (vec768_lit, active_space.space_id, hv_lit, domain_id, UUID(str(row[0])))
-                    )
-                with conn.cursor() as cur:
-                    cur.executemany(
-                        """
-                        UPDATE ast_symbols
-                        SET embedding = %s::vector,
-                            embedding_space_id = %s,
-                            embedding_halfvec = %s::halfvec
-                        WHERE domain_id = %s AND symbol_id = %s;
-                        """,
-                        sym_updates,
-                    )
-                    sym_reembedded = max(int(cur.rowcount or 0), len(sym_updates))
+                for start in range(0, len(sym_rows), bs):
+                    batch_rows = sym_rows[start : start + bs]
+                    sym_texts = [f"{r[1]} {r[2]} {r[3]}".strip() for r in batch_rows]
+                    sym_vecs = embedder.embed_batch(sym_texts, is_query=False)
+                    if len(sym_vecs) != len(batch_rows):
+                        raise RuntimeError(
+                            f"Embedder returned {len(sym_vecs)} vectors for "
+                            f"{len(batch_rows)} symbols."
+                        )
+                    sym_updates: list[tuple[str, str, str, str, UUID]] = []
+                    for row, vec in zip(batch_rows, sym_vecs, strict=True):
+                        checked = validate_non_zero_embedding(
+                            vec, expected_dim=active_space.dimensions
+                        )
+                        vec768_lit, hv_lit = _format_db_vector_and_halfvec(checked)
+                        sym_updates.append(
+                            (
+                                vec768_lit,
+                                active_space.space_id,
+                                hv_lit,
+                                domain_id,
+                                UUID(str(row[0])),
+                            )
+                        )
+                    with conn.cursor() as cur:
+                        cur.executemany(
+                            """
+                            UPDATE ast_symbols
+                            SET embedding = %s::vector,
+                                embedding_space_id = %s,
+                                embedding_halfvec = %s::halfvec
+                            WHERE domain_id = %s AND symbol_id = %s;
+                            """,
+                            sym_updates,
+                        )
+                        sym_reembedded += max(int(cur.rowcount or 0), len(sym_updates))
 
             if chk_rows:
-                chk_texts = [f"{r[1]} {r[2]} {r[3]} {r[4]}".strip() for r in chk_rows]
-                chk_vecs = embedder.embed_batch(chk_texts, is_query=False)
-                if len(chk_vecs) != len(chk_rows):
-                    raise RuntimeError(
-                        f"Embedder returned {len(chk_vecs)} vectors for {len(chk_rows)} chunks."
-                    )
-                chk_updates: list[tuple[str, str, str, str, UUID]] = []
-                for row, vec in zip(chk_rows, chk_vecs, strict=True):
-                    checked = validate_non_zero_embedding(vec, expected_dim=active_space.dimensions)
-                    vec768_lit, hv_lit = _format_db_vector_and_halfvec(checked)
-                    chk_updates.append(
-                        (vec768_lit, active_space.space_id, hv_lit, domain_id, UUID(str(row[0])))
-                    )
-                with conn.cursor() as cur:
-                    cur.executemany(
-                        """
-                        UPDATE doc_chunks
-                        SET embedding = %s::vector,
-                            embedding_space_id = %s,
-                            embedding_halfvec = %s::halfvec
-                        WHERE domain_id = %s AND chunk_id = %s;
-                        """,
-                        chk_updates,
-                    )
-                    chk_reembedded = max(int(cur.rowcount or 0), len(chk_updates))
+                for start in range(0, len(chk_rows), bs):
+                    batch_rows = chk_rows[start : start + bs]
+                    chk_texts = [f"{r[1]} {r[2]} {r[3]} {r[4]}".strip() for r in batch_rows]
+                    chk_vecs = embedder.embed_batch(chk_texts, is_query=False)
+                    if len(chk_vecs) != len(batch_rows):
+                        raise RuntimeError(
+                            f"Embedder returned {len(chk_vecs)} vectors for "
+                            f"{len(batch_rows)} chunks."
+                        )
+                    chk_updates: list[tuple[str, str, str, str, UUID]] = []
+                    for row, vec in zip(batch_rows, chk_vecs, strict=True):
+                        checked = validate_non_zero_embedding(
+                            vec, expected_dim=active_space.dimensions
+                        )
+                        vec768_lit, hv_lit = _format_db_vector_and_halfvec(checked)
+                        chk_updates.append(
+                            (
+                                vec768_lit,
+                                active_space.space_id,
+                                hv_lit,
+                                domain_id,
+                                UUID(str(row[0])),
+                            )
+                        )
+                    with conn.cursor() as cur:
+                        cur.executemany(
+                            """
+                            UPDATE doc_chunks
+                            SET embedding = %s::vector,
+                                embedding_space_id = %s,
+                                embedding_halfvec = %s::halfvec
+                            WHERE domain_id = %s AND chunk_id = %s;
+                            """,
+                            chk_updates,
+                        )
+                        chk_reembedded += max(int(cur.rowcount or 0), len(chk_updates))
         except Exception as exc:
             unhealed = (drifted_syms - sym_reembedded) + (drifted_chks - chk_reembedded)
             warnings.append(

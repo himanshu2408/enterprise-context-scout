@@ -927,7 +927,6 @@ class TestSyntheticFixtureAnswerableQueryDiscrimination:
                 user_prompt=task.prompt,
                 principal=principal,
                 domain_id=bench_domain,
-                normalized_rrf_score=0.75,
             )
 
             if isinstance(result, ImplementationContextPack):

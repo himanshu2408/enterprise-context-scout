@@ -1,4 +1,4 @@
-.PHONY: install lint format-check typecheck test-fast test-full test-ui demo-seed verify-backend ci
+.PHONY: install lint format-check typecheck test-fast test-full test-ui iac-verify demo-seed verify-backend ci
 
 PY_DIRS := src tests
 PER_FILE_TIMEOUT_S := 120
@@ -78,10 +78,20 @@ typecheck:
 	cd web-ui && npm run typecheck
 
 test-fast:
-	uv run pytest -q -m "not postgres and not live and not benchmark"
+	uv run python scripts/run_test_batches.py --mode fast --workers 4
 
 test-full:
-	@uv run python -c "$$_TEST_FULL_PY" $(PER_FILE_TIMEOUT_S)
+	uv run python scripts/run_test_batches.py --mode full --workers 4
+
+iac-verify:
+	helm lint deploy/helm/context-scout
+	helm lint deploy/helm/context-scout -f deploy/helm/context-scout/values-gcp-gke.yaml
+	for mod in gcp-gke aws-eks azure-aks onprem-k8s; do \
+		terraform -chdir="deploy/terraform/$$mod" fmt -check && \
+		TF_DATA_DIR="/tmp/tf-make-$$mod" terraform -chdir="deploy/terraform/$$mod" init -backend=false -input=false >/dev/null && \
+		TF_DATA_DIR="/tmp/tf-make-$$mod" terraform -chdir="deploy/terraform/$$mod" validate || exit 1; \
+	done
+	uv run python scripts/generate_aibom.py --output /tmp/make-aibom.cdx.json
 
 test-ui:
 	cd web-ui && npm run test && npm run build

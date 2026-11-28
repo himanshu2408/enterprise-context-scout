@@ -29,6 +29,11 @@ _TENANT_KEY_RE: Final[re.Pattern[str]] = re.compile(
 )
 _GCS_DEFAULT_API_ROOT: Final[str] = "https://storage.googleapis.com"
 _GCS_RW_SCOPE: Final[str] = "https://www.googleapis.com/auth/devstorage.read_write"
+DEFAULT_MAX_OBJECT_BYTES: Final[int] = 512 * 1024 * 1024
+
+
+class ObjectTooLargeError(ValueError):
+    """Raised fail-closed when an object exceeds the configured max_object_bytes bound."""
 
 
 def validate_object_key(key: str, *, expected_tenant_id: UUID | None = None) -> str:
@@ -116,8 +121,14 @@ class ArtifactObjectStore(Protocol):
 class InMemoryObjectStore:
     """Thread-safe in-memory ArtifactObjectStore for offline development and tests."""
 
-    def __init__(self, bucket: str = "local-inmemory") -> None:
+    def __init__(
+        self,
+        bucket: str = "local-inmemory",
+        *,
+        max_object_bytes: int = DEFAULT_MAX_OBJECT_BYTES,
+    ) -> None:
         self._bucket = bucket
+        self._max_object_bytes = max(1, int(max_object_bytes))
         self._lock = threading.Lock()
         self._objects: dict[str, tuple[bytes, ObjectMetadata]] = {}
 
@@ -130,6 +141,11 @@ class InMemoryObjectStore:
         expected_tenant_id: UUID | None = None,
     ) -> ObjectMetadata:
         clean_key = validate_object_key(key, expected_tenant_id=expected_tenant_id)
+        if len(data) > self._max_object_bytes:
+            raise ObjectTooLargeError(
+                f"Object {clean_key!r} size {len(data)} exceeds "
+                f"max_object_bytes={self._max_object_bytes}"
+            )
         digest = hashlib.sha256(data).hexdigest()
         meta = ObjectMetadata(
             uri=f"memory://{self._bucket}/{clean_key}",
@@ -182,10 +198,12 @@ class S3CompatibleObjectStore:
         aws_secret_access_key: str | None = None,
         force_path_style: bool = True,
         client: Any | None = None,
+        max_object_bytes: int = DEFAULT_MAX_OBJECT_BYTES,
     ) -> None:
         if not bucket or not bucket.strip():
             raise ValueError("S3 bucket name must be non-empty.")
         self._bucket = bucket.strip()
+        self._max_object_bytes = max(1, int(max_object_bytes))
         if client is not None:
             self._client = client
         else:
@@ -218,6 +236,11 @@ class S3CompatibleObjectStore:
         expected_tenant_id: UUID | None = None,
     ) -> ObjectMetadata:
         clean_key = validate_object_key(key, expected_tenant_id=expected_tenant_id)
+        if len(data) > self._max_object_bytes:
+            raise ObjectTooLargeError(
+                f"Object {clean_key!r} size {len(data)} exceeds "
+                f"max_object_bytes={self._max_object_bytes}"
+            )
         digest = hashlib.sha256(data).hexdigest()
         self._client.put_object(
             Bucket=self._bucket,
@@ -237,8 +260,23 @@ class S3CompatibleObjectStore:
     def get_bytes(self, key: str, *, expected_tenant_id: UUID | None = None) -> bytes:
         clean_key = validate_object_key(key, expected_tenant_id=expected_tenant_id)
         resp = self._client.get_object(Bucket=self._bucket, Key=clean_key)
-        body = resp["Body"].read()
+        content_len = resp.get("ContentLength")
+        if content_len is not None and int(content_len) > self._max_object_bytes:
+            raise ObjectTooLargeError(
+                f"S3 object s3://{self._bucket}/{clean_key} ContentLength={content_len} "
+                f"exceeds max_object_bytes={self._max_object_bytes}"
+            )
+        body_stream = resp["Body"]
+        try:
+            body = body_stream.read(self._max_object_bytes + 1)
+        except TypeError:
+            body = body_stream.read()
         data = body if isinstance(body, bytes) else bytes(body)
+        if len(data) > self._max_object_bytes:
+            raise ObjectTooLargeError(
+                f"S3 object s3://{self._bucket}/{clean_key} stream size exceeds "
+                f"max_object_bytes={self._max_object_bytes}"
+            )
         expected_sha = str((resp.get("Metadata") or {}).get("sha256", "")).strip()
         if expected_sha and hashlib.sha256(data).hexdigest() != expected_sha:
             raise ValueError(f"S3 SHA-256 integrity mismatch for s3://{self._bucket}/{clean_key}")
@@ -312,8 +350,10 @@ class GCSObjectStore:
         credentials: Any | None = None,
         http_client: httpx.Client | None = None,
         client: Any | None = None,
+        max_object_bytes: int = DEFAULT_MAX_OBJECT_BYTES,
     ) -> None:
         self._bucket = _normalize_gcs_bucket_name(bucket)
+        self._max_object_bytes = max(1, int(max_object_bytes))
         self._project = project.strip() if project and project.strip() else None
         raw_emulator = (
             emulator_host if emulator_host is not None else os.environ.get("STORAGE_EMULATOR_HOST")
@@ -392,6 +432,11 @@ class GCSObjectStore:
         expected_tenant_id: UUID | None = None,
     ) -> ObjectMetadata:
         clean_key = validate_object_key(key, expected_tenant_id=expected_tenant_id)
+        if len(data) > self._max_object_bytes:
+            raise ObjectTooLargeError(
+                f"Object {clean_key!r} size {len(data)} exceeds "
+                f"max_object_bytes={self._max_object_bytes}"
+            )
         digest = hashlib.sha256(data).hexdigest()
 
         if self._sdk_client is not None and hasattr(self._sdk_client, "bucket"):
@@ -454,8 +499,19 @@ class GCSObjectStore:
                 )
             if hasattr(blob, "reload"):
                 blob.reload()
+            blob_size = getattr(blob, "size", None)
+            if blob_size is not None and int(blob_size) > self._max_object_bytes:
+                raise ObjectTooLargeError(
+                    f"GCS object gs://{self._bucket}/{clean_key} size={blob_size} "
+                    f"exceeds max_object_bytes={self._max_object_bytes}"
+                )
             raw_bytes = blob.download_as_bytes()
             data = raw_bytes if isinstance(raw_bytes, bytes) else bytes(raw_bytes)
+            if len(data) > self._max_object_bytes:
+                raise ObjectTooLargeError(
+                    f"GCS object gs://{self._bucket}/{clean_key} exceeds "
+                    f"max_object_bytes={self._max_object_bytes}"
+                )
             expected_sha = str((getattr(blob, "metadata", None) or {}).get("sha256", "")).strip()
             if expected_sha and hashlib.sha256(data).hexdigest() != expected_sha:
                 raise ValueError(
@@ -472,6 +528,12 @@ class GCSObjectStore:
             raise KeyError(f"Object not found in GCSObjectStore: gs://{self._bucket}/{clean_key}")
         meta_resp.raise_for_status()
         meta_payload = meta_resp.json() if meta_resp.content else {}
+        meta_size = meta_payload.get("size")
+        if meta_size is not None and int(meta_size) > self._max_object_bytes:
+            raise ObjectTooLargeError(
+                f"GCS object gs://{self._bucket}/{clean_key} size={meta_size} "
+                f"exceeds max_object_bytes={self._max_object_bytes}"
+            )
         expected_sha = str((meta_payload.get("metadata") or {}).get("sha256", "")).strip()
 
         media_resp = self._http_client.get(
@@ -483,6 +545,11 @@ class GCSObjectStore:
             raise KeyError(f"Object not found in GCSObjectStore: gs://{self._bucket}/{clean_key}")
         media_resp.raise_for_status()
         data = bytes(media_resp.content)
+        if len(data) > self._max_object_bytes:
+            raise ObjectTooLargeError(
+                f"GCS object gs://{self._bucket}/{clean_key} exceeds "
+                f"max_object_bytes={self._max_object_bytes}"
+            )
         if expected_sha and hashlib.sha256(data).hexdigest() != expected_sha:
             raise ValueError(f"GCS SHA-256 integrity mismatch for gs://{self._bucket}/{clean_key}")
         return data

@@ -6,7 +6,9 @@ metadata:
     {{- include "context-scout.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker
 spec:
+  {{- if not .Values.keda.enabled }}
   replicas: {{ .Values.worker.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "context-scout.selectorLabels" . | nindent 6 }}
@@ -19,6 +21,7 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      terminationGracePeriodSeconds: {{ int (.Values.worker.terminationGracePeriodSeconds | default 60) }}
       serviceAccountName: {{ include "context-scout.serviceAccountName" (list . "worker") }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       {{- with .Values.global.imagePullSecrets }}
@@ -60,6 +63,26 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.existingSecret | quote }}
                   key: {{ .Values.secrets.dbAppUrlKey | quote }}
+            - name: SCOUT_AUTH_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | quote }}
+                  key: {{ .Values.secrets.authHmacSecretKey | quote }}
+                  optional: true
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/usr/bin/python3", "-c", "import time; time.sleep(5)"]
+          livenessProbe:
+            exec:
+              command: ["/usr/bin/python3", "-c", "import context_scout.cli"]
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["/usr/bin/python3", "-c", "import context_scout.cli"]
+            initialDelaySeconds: 10
+            periodSeconds: 15
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:

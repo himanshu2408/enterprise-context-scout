@@ -37,3 +37,15 @@ variable "gpu_vm_size" {
   type        = string
   default     = "Standard_NC24ads_A100_v4"
 }
+
+variable "entra_postgres_admin_object_id" {
+  description = "Microsoft Entra ID group/principal object ID for PostgreSQL Flexible Server admin."
+  type        = string
+  default     = "00000000-0000-0000-0000-000000000001"
+}
+
+variable "entra_postgres_admin_principal_name" {
+  description = "Microsoft Entra ID group/principal display name for PostgreSQL Flexible Server admin."
+  type        = string
+  default     = "context-scout-pg-admins"
+}

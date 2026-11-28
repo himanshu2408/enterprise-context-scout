@@ -17,9 +17,9 @@
 
 ---
 
-## 2. PostgreSQL 17 `FORCE ROW LEVEL SECURITY` (`src/context_scout/db/migrations/versions/0001..0023`)
+## 2. PostgreSQL 17 `FORCE ROW LEVEL SECURITY` (`src/context_scout/db/migrations/versions/0001..0024`)
 
-Tenant and repository isolation is enforced inside PostgreSQL 17 across all **23 public tables** (Alembic migrations `0001` through `0023`) so that even a compromised application query cannot read unauthorized rows:
+Tenant and repository isolation is enforced inside PostgreSQL 17 across all **23 public tables** (Alembic migrations `0001` through `0024`) so that even a compromised application query cannot read unauthorized rows:
 
 ```sql
 -- Forced RLS on all 23 tenant-scoped tables (even table owners cannot bypass)
@@ -75,7 +75,8 @@ CREATE POLICY rls_code_files_scope ON code_files
 | **Identity & Principal Binding** | `POST /api/v1/auth/session` + HMAC-SHA256 Bearer / `X-Principal-Signature` | **Google Cloud IAP / Okta / Entra ID / Keycloak OIDC JWT** validated at API Gateway $\rightarrow$ signed `PrincipalContext` |
 | **Input/Output Guardrails** | Local deterministic `PromptInjectionSanitizer` + `SecretRedactor` (`ShieldGemmaGuardrail` fallback) | **Google Cloud Model Armor** + neural `ShieldGemma 2` / BYO (`Prompt-Guard-2`, `Qwen3Guard`, `Granite-Guardian`) |
 | **Optional Cloud Handoff (`allow_external_cloud_egress: true`)** | Disabled by default (`false`); optional BYO cloud (`gemini-3.8-flash`, `gemini-4-argon`, `claude-*`, `gpt-*`) | **Vertex AI Gemini API** (EU-pinned `europe-west3` via keyless ADC) with VPC Service Controls or approved BYO cloud provider |
-| **CI/CD & Cloud Auth** | GitHub Actions [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | Keyless **Workload Identity Federation (WIF)** OIDC $\rightarrow$ Artifact Registry $\rightarrow$ GKE |
+| **CI/CD & Cloud Auth** | GitHub Actions [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) (40-char SHA-pinned) + Sigstore-signed CycloneDX v1.6 AI-BOM (`aibom.cdx.json.sigstore.json` + `.pub`) | Keyless **Workload Identity Federation (WIF)** OIDC $\rightarrow$ Artifact Registry $\rightarrow$ GKE |
+| **Health Probes & OTel GenAI `v1.42+`** | Split `/api/v1/health/live` & `/api/v1/health/ready` (2s TTL pooled check); `gen_ai.provider.name` + `scout.pack.tokens` + `max_tracked_tenants` cardinality cap | Kubernetes `livenessProbe` / `readinessProbe` + Cloud Trace / Managed Service for Prometheus |
 
 ---
 

@@ -17,6 +17,7 @@ spec:
         {{- include "context-scout.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: webui
     spec:
+      terminationGracePeriodSeconds: {{ int (.Values.webui.terminationGracePeriodSeconds | default 60) }}
       automountServiceAccountToken: false
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -35,15 +36,21 @@ spec:
           env:
             - name: TMPDIR
               value: "/tmp"
+            - name: SCOUT_API_UPSTREAM
+              value: {{ printf "http://%s-api:%d" (include "context-scout.fullname" .) (int .Values.api.service.port) | quote }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
           livenessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: http
             initialDelaySeconds: 10
             periodSeconds: 15
           readinessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10

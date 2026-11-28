@@ -97,12 +97,48 @@ PHASE_GATING: Final[str] = "gating"
 PHASE_EXECUTION: Final[str] = "execution"
 PHASE_WORKFLOW: Final[str] = "workflow"
 
-# OpenTelemetry Standard GenAI Semantic Conventions
+# OpenTelemetry Standard GenAI Semantic Conventions (v1.42+ dual-emit)
 GEN_AI_SYSTEM: Final[str] = "gen_ai.system"
+GEN_AI_PROVIDER_NAME: Final[str] = "gen_ai.provider.name"
 GEN_AI_REQUEST_MODEL: Final[str] = "gen_ai.request.model"
 GEN_AI_USAGE_INPUT_TOKENS: Final[str] = "gen_ai.usage.input_tokens"
 GEN_AI_USAGE_OUTPUT_TOKENS: Final[str] = "gen_ai.usage.output_tokens"
 GEN_AI_OPERATION_NAME: Final[str] = "gen_ai.operation.name"
+ATTR_SCOUT_PACK_TOKENS: Final[str] = "scout.pack.tokens"
+
+
+def resolve_otel_model_and_provider(
+    model_id: str | None = None,
+) -> tuple[str, str]:
+    """Resolve active model_id and GenAI provider name from settings or override."""
+    if model_id is None or not model_id.strip():
+        from context_scout.config import ScoutSettings
+
+        active_model = ScoutSettings().primary_model_id.strip() or "google/gemma-4-26B-A4B-it"
+    else:
+        active_model = model_id.strip()
+
+    lowered = active_model.lower()
+    if "gemma" in lowered:
+        provider = "gemma"
+    elif "gemini" in lowered:
+        provider = "gemini"
+    elif "qwen" in lowered:
+        provider = "qwen"
+    elif "mistral" in lowered or "devstral" in lowered:
+        provider = "mistral"
+    elif "deepseek" in lowered:
+        provider = "deepseek"
+    elif "llama" in lowered:
+        provider = "llama"
+    elif "phi" in lowered:
+        provider = "microsoft"
+    elif "granite" in lowered:
+        provider = "ibm"
+    else:
+        provider = "open_weights"
+    return active_model, provider
+
 
 # Legacy Compatibility Aliases (context_scout.*)
 ATTR_TOKENS_SAVED: Final[str] = "context_scout.tokens_saved"
@@ -250,6 +286,7 @@ class BaseScoutSpanContext:
 
         # Legacy backward compatibility attributes
         self.span.set_attribute(ATTR_PREFLIGHT_PASSED, False)
+        self.span.set_attribute(ATTR_SCOUT_PACK_TOKENS, 0)
         self.span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, 0)
         self.span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, 0)
         self.span.set_attribute("context_scout.rejection_reason", str(reason))
@@ -350,7 +387,13 @@ class ExecutionSpanContext(BaseScoutSpanContext):
     def __init__(self, span: trace.Span) -> None:
         super().__init__(span, phase=PHASE_EXECUTION)
 
-    def record_result(self, result: Any, telemetry: Any) -> None:
+    def record_result(
+        self,
+        result: Any,
+        telemetry: Any,
+        *,
+        invoked_paid_model: bool = True,
+    ) -> None:
         tokens_saved = int(getattr(telemetry, "paid_tokens_saved", 0))
         usd_saved = float(getattr(telemetry, "estimated_usd_saved", 0.0))
         zero_touch = bool(getattr(telemetry, "zero_touch_sufficient", False))
@@ -362,7 +405,10 @@ class ExecutionSpanContext(BaseScoutSpanContext):
         self.span.set_attribute(ATTR_SCOUT_TOKENS_SAVED, tokens_saved)
         self.span.set_attribute(ATTR_SCOUT_ESTIMATED_USD_SAVED, usd_saved)
         self.span.set_attribute(ATTR_SCOUT_ZERO_TOUCH_SUFFICIENT, zero_touch)
-        self.span.set_attribute(ATTR_SCOUT_PAID_TOKENS_SPENT, pack_sent + out_tokens)
+        self.span.set_attribute(
+            ATTR_SCOUT_PAID_TOKENS_SPENT,
+            (pack_sent + out_tokens) if invoked_paid_model else 0,
+        )
         self.span.set_attribute(ATTR_SCOUT_PREFLIGHT_PASSED, preflight_ok)
         self.span.set_attribute(ATTR_SCOUT_IS_ABSTENTION, False)
 
@@ -372,9 +418,14 @@ class ExecutionSpanContext(BaseScoutSpanContext):
         self.span.set_attribute(ATTR_ZERO_TOUCH_SUFFICIENT, zero_touch)
         self.span.set_attribute(ATTR_PREFLIGHT_PASSED, preflight_ok)
 
-        # GenAI semantic conventions
-        self.span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, pack_sent)
-        self.span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, out_tokens)
+        # GenAI semantic conventions (only record generative usage when paid model ran)
+        if invoked_paid_model:
+            self.span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, pack_sent)
+            self.span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, out_tokens)
+        else:
+            self.span.set_attribute(GEN_AI_OPERATION_NAME, "deterministic_handoff")
+            self.span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, 0)
+            self.span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, 0)
 
         verif_passed = getattr(result, "verification_passed", getattr(result, "success", True))
         self.span.set_attribute(ATTR_SCOUT_VERIFICATION_PASSED, bool(verif_passed))
@@ -422,8 +473,10 @@ class WorkflowSpanContext(BaseScoutSpanContext):
             self.span.set_attribute(ATTR_NORMALIZED_RRF_SCORE, rrf)
             self.span.set_attribute(ATTR_CITATIONS_VERIFIED, cites)
             self.span.set_attribute(ATTR_AUTO_ATTACHED_AST_COUNT, ast_count)
+            self.span.set_attribute(ATTR_SCOUT_PACK_TOKENS, out_tokens)
             self.span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, in_tokens)
-            self.span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, out_tokens)
+            # Deterministic context-pack assembly spends 0 generative LLM output tokens.
+            self.span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, 0)
 
             if hasattr(pack, "trace_id"):
                 self.span.set_attribute(ATTR_SCOUT_TRACE_ID, str(pack.trace_id))
@@ -490,18 +543,21 @@ class ScoutTelemetryTracer:
         span_name: str = "scout.workflow",
         domain_id: str | None = None,
         trace_id: str | None = None,
-        model_id: str = "gemma-4-moe",
-        system: str = "gemma",
+        model_id: str | None = None,
+        system: str | None = None,
     ) -> Iterator[WorkflowSpanContext]:
         """Context manager tracing a root scout workflow DAG invocation."""
+        resolved_model, resolved_provider = resolve_otel_model_and_provider(model_id)
+        active_provider = (system or resolved_provider).strip()
         with self.tracer.start_as_current_span(span_name) as span:
             ctx = WorkflowSpanContext(span)
             span.set_attribute(ATTR_SCOUT_PHASE, PHASE_WORKFLOW)
-            if system:
-                span.set_attribute(GEN_AI_SYSTEM, system)
-            if model_id:
-                span.set_attribute(GEN_AI_REQUEST_MODEL, model_id)
-                span.set_attribute(ATTR_SCOUT_MODEL_ID, model_id)
+            if active_provider:
+                span.set_attribute(GEN_AI_SYSTEM, active_provider)
+                span.set_attribute(GEN_AI_PROVIDER_NAME, active_provider)
+            if resolved_model:
+                span.set_attribute(GEN_AI_REQUEST_MODEL, resolved_model)
+                span.set_attribute(ATTR_SCOUT_MODEL_ID, resolved_model)
             if domain_id:
                 span.set_attribute(ATTR_SCOUT_DOMAIN_ID, domain_id)
                 span.set_attribute(ATTR_DOMAIN_ID, domain_id)
@@ -617,6 +673,7 @@ class ScoutTelemetryTracer:
             ctx = ExecutionSpanContext(span)
             if system:
                 span.set_attribute(GEN_AI_SYSTEM, system)
+                span.set_attribute(GEN_AI_PROVIDER_NAME, system)
             if model_id:
                 span.set_attribute(GEN_AI_REQUEST_MODEL, model_id)
                 span.set_attribute(ATTR_SCOUT_MODEL_ID, model_id)

@@ -230,6 +230,22 @@ resource "aws_db_parameter_group" "pg17_hardened" {
   tags = local.common_tags
 }
 
+resource "aws_security_group" "rds_postgres17" {
+  name        = "${var.cluster_name}-rds-pg17-sg"
+  description = "Least-privilege PostgreSQL 17 ingress from EKS cluster."
+  vpc_id      = var.vpc_id
+
+  ingress {
+    description     = "PostgreSQL 17 from EKS cluster SG"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_eks_cluster.primary.vpc_config[0].cluster_security_group_id]
+  }
+
+  tags = local.common_tags
+}
+
 resource "aws_db_instance" "postgres17" {
   identifier                          = "${var.cluster_name}-pg17"
   engine                              = "postgres"
@@ -244,6 +260,7 @@ resource "aws_db_instance" "postgres17" {
   manage_master_user_password         = true
   iam_database_authentication_enabled = true
   db_subnet_group_name                = aws_db_subnet_group.pg17.name
+  vpc_security_group_ids              = [aws_security_group.rds_postgres17.id]
   parameter_group_name                = aws_db_parameter_group.pg17_hardened.name
   publicly_accessible                 = false
   multi_az                            = true
@@ -261,6 +278,22 @@ resource "aws_elasticache_subnet_group" "redis" {
   subnet_ids = var.private_subnet_ids
 }
 
+resource "aws_security_group" "redis_cache" {
+  name        = "${var.cluster_name}-redis-sg"
+  description = "Least-privilege Redis TLS ingress from EKS cluster."
+  vpc_id      = var.vpc_id
+
+  ingress {
+    description     = "Redis TLS from EKS cluster SG"
+    from_port       = 6379
+    to_port         = 6379
+    protocol        = "tcp"
+    security_groups = [aws_eks_cluster.primary.vpc_config[0].cluster_security_group_id]
+  }
+
+  tags = local.common_tags
+}
+
 resource "aws_elasticache_replication_group" "redis" {
   replication_group_id       = "${var.cluster_name}-redis"
   description                = "TLS and KMS-encrypted Redis HA for Context Scout."
@@ -270,6 +303,7 @@ resource "aws_elasticache_replication_group" "redis" {
   engine_version             = "7.1"
   port                       = 6379
   subnet_group_name          = aws_elasticache_subnet_group.redis.name
+  security_group_ids         = [aws_security_group.redis_cache.id]
   transit_encryption_enabled = true
   at_rest_encryption_enabled = true
   kms_key_id                 = aws_kms_key.cmek.arn
@@ -325,6 +359,11 @@ resource "aws_iam_role_policy" "irsa_s3_rds" {
       },
       {
         Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:DescribeKey", "kms:GenerateDataKey", "kms:GenerateDataKeyWithoutPlaintext"]
+        Resource = [aws_kms_key.cmek.arn]
+      },
+      {
+        Effect   = "Allow"
         Action   = ["rds-db:connect"]
         Resource = "arn:aws:rds-db:${var.region}:${data.aws_caller_identity.current.account_id}:dbuser:${aws_db_instance.postgres17.resource_id}/scout_app_user"
       }
@@ -346,6 +385,11 @@ resource "aws_iam_role_policy" "irsa_worker_s3_rds" {
       },
       {
         Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:DescribeKey", "kms:GenerateDataKey", "kms:GenerateDataKeyWithoutPlaintext"]
+        Resource = [aws_kms_key.cmek.arn]
+      },
+      {
+        Effect   = "Allow"
         Action   = ["rds-db:connect"]
         Resource = "arn:aws:rds-db:${var.region}:${data.aws_caller_identity.current.account_id}:dbuser:${aws_db_instance.postgres17.resource_id}/scout_app_user"
       }
@@ -364,6 +408,11 @@ resource "aws_iam_role_policy" "irsa_vllm_s3_rds" {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:ListBucket"]
         Resource = [aws_s3_bucket.artifacts.arn, "${aws_s3_bucket.artifacts.arn}/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:DescribeKey"]
+        Resource = [aws_kms_key.cmek.arn]
       },
       {
         Effect   = "Allow"

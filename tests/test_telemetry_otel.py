@@ -53,6 +53,7 @@ from context_scout.telemetry import (
     ATTR_SCOUT_FAILURE_CHECK,
     ATTR_SCOUT_IS_ABSTENTION,
     ATTR_SCOUT_NORMALIZED_RRF_SCORE,
+    ATTR_SCOUT_PACK_TOKENS,
     ATTR_SCOUT_PAID_TOKENS_SPENT,
     ATTR_SCOUT_PHASE,
     ATTR_SCOUT_PREFLIGHT_PASSED,
@@ -61,6 +62,7 @@ from context_scout.telemetry import (
     ATTR_TRACE_ID,
     ATTR_ZERO_TOUCH_SUFFICIENT,
     GEN_AI_OPERATION_NAME,
+    GEN_AI_PROVIDER_NAME,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_SYSTEM,
     GEN_AI_USAGE_INPUT_TOKENS,
@@ -171,6 +173,7 @@ def test_trace_workflow_attributes(sample_pack: ImplementationContextPack) -> No
     attrs = span.attributes
     assert attrs is not None
     assert attrs[GEN_AI_SYSTEM] == "gemma"
+    assert attrs[GEN_AI_PROVIDER_NAME] == "gemma"
     assert attrs[GEN_AI_REQUEST_MODEL] == "gemma-4-moe"
     assert attrs[GEN_AI_OPERATION_NAME] == "workflow"
     assert attrs[ATTR_DOMAIN_ID] == DOMAIN_ID
@@ -179,8 +182,9 @@ def test_trace_workflow_attributes(sample_pack: ImplementationContextPack) -> No
     assert attrs[ATTR_NORMALIZED_RRF_SCORE] == 0.92
     assert attrs[ATTR_CITATIONS_VERIFIED] is True
     assert attrs[ATTR_AUTO_ATTACHED_AST_COUNT] == 1
+    assert attrs[ATTR_SCOUT_PACK_TOKENS] == 180
     assert attrs[GEN_AI_USAGE_INPUT_TOKENS] == 450
-    assert attrs[GEN_AI_USAGE_OUTPUT_TOKENS] == 180
+    assert attrs[GEN_AI_USAGE_OUTPUT_TOKENS] == 0
     assert span.status.status_code == trace.StatusCode.OK
 
 
@@ -427,7 +431,11 @@ def test_end_to_end_gemini_executor_span_capture(
     attrs = exec_spans[0].attributes
     assert attrs is not None
     assert attrs[GEN_AI_SYSTEM] == "gemini"
+    assert attrs[GEN_AI_PROVIDER_NAME] == "gemini"
     assert attrs[GEN_AI_REQUEST_MODEL] == "gemini-3.8-flash"
+    assert attrs[GEN_AI_OPERATION_NAME] == "deterministic_handoff"
+    assert attrs[GEN_AI_USAGE_INPUT_TOKENS] == 0
+    assert attrs[GEN_AI_USAGE_OUTPUT_TOKENS] == 0
     assert attrs[ATTR_DOMAIN_ID] == DOMAIN_ID
     assert attrs[ATTR_TOKENS_SAVED] == telemetry.paid_tokens_saved
     assert attrs[ATTR_ESTIMATED_USD_SAVED] == telemetry.estimated_usd_saved
@@ -599,3 +607,38 @@ def test_standardized_and_legacy_attribute_dual_emission() -> None:
     assert attrs[ATTR_NORMALIZED_RRF_SCORE] == 0.95
     assert attrs[ATTR_CITATIONS_VERIFIED] is True
     assert attrs[ATTR_AUTO_ATTACHED_AST_COUNT] == 5
+
+
+def test_otel_v142_byo_model_dual_emit_and_prometheus_tenant_cap() -> None:
+    """Verifies OTel v1.42+ gen_ai.provider.name dual-emit and Prometheus tenant cap."""
+    from uuid import uuid4
+
+    from context_scout.telemetry.prometheus_metrics import ScoutPrometheusRegistry
+
+    tracer = get_tracer()
+    with tracer.trace_workflow(
+        span_name="scout.byo_workflow",
+        domain_id="code_architecture_scout",
+        model_id="Qwen/Qwen3-Coder-30B-A3B",
+    ) as wf_span:
+        wf_span.set_attribute(ATTR_SCOUT_PACK_TOKENS, 256)
+
+    spans = tracer.find_spans_by_name("scout.byo_workflow")
+    assert len(spans) == 1
+    attrs = spans[0].attributes or {}
+    assert attrs[GEN_AI_SYSTEM] == "qwen"
+    assert attrs[GEN_AI_PROVIDER_NAME] == "qwen"
+    assert attrs[GEN_AI_REQUEST_MODEL] == "Qwen/Qwen3-Coder-30B-A3B"
+    assert attrs[ATTR_SCOUT_PACK_TOKENS] == 256
+
+    prom = ScoutPrometheusRegistry(max_tracked_tenants=3)
+    for _ in range(5):
+        prom.record_query_outcome(
+            tenant_id=uuid4(),
+            domain_id="code_architecture_scout",
+            outcome="ready",
+            rrf_score=0.9,
+        )
+    text = prom.render_prometheus_text()
+    assert 'tenant_id="_overflow"' in text
+    assert "scout_prometheus_tenant_overflow_total 2" in text

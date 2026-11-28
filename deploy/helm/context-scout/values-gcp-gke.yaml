@@ -48,6 +48,8 @@ webui:
       cloud.google.com/neg: '{"ingress": true}'
 
 vllm:
+  adapterSyncSidecar:
+    enabled: true
   gpu:
     vendor: nvidia
     count: 1

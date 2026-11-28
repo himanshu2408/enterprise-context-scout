@@ -46,7 +46,7 @@ from uuid import UUID, uuid4
 import httpx
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
@@ -83,6 +83,10 @@ _ALLOWED_STORAGE_SCHEMES: Final[frozenset[str]] = frozenset({"gs", "s3", "memory
 
 class AdapterSyncError(RuntimeError):
     """Base error raised by AdapterSyncSidecar."""
+
+
+class AdapterStagingCapacityError(AdapterSyncError):
+    """Raised fail-closed when staging filesystem free space is below required capacity."""
 
 
 class AdapterVerificationError(AdapterSyncError):
@@ -146,8 +150,19 @@ def sign_blob_for_cosign(
         return sig_b64
 
     sha256_b64 = base64.b64encode(hashlib.sha256(payload).digest()).decode("ascii")
+    pub_der_b64 = base64.b64encode(
+        private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    ).decode("ascii")
     bundle = {
         "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+        "verificationMaterial": {
+            "publicKey": {
+                "rawBytes": pub_der_b64,
+            }
+        },
         "messageSignature": {
             "messageDigest": {
                 "algorithm": "SHA2_256",
@@ -189,7 +204,35 @@ class CosignBlobVerifier:
 
     def _extract_leaf_key_from_bundle(self, bundle: Mapping[str, Any]) -> Any | None:
         ver_mat = bundle.get("verificationMaterial")
-        if not isinstance(ver_mat, Mapping) or not self._ca_certs:
+        if not isinstance(ver_mat, Mapping):
+            return None
+
+        pub_obj = ver_mat.get("publicKey")
+        if isinstance(pub_obj, Mapping) and pub_obj.get("rawBytes"):
+            try:
+                embedded_der = base64.b64decode(str(pub_obj["rawBytes"]).strip(), validate=True)
+                embedded_key = serialization.load_der_public_key(embedded_der)
+            except Exception as exc:
+                raise CosignVerificationError(
+                    f"Malformed verificationMaterial.publicKey in bundle: {exc}"
+                ) from exc
+            if self._public_keys:
+                trusted_ders = {
+                    k.public_bytes(
+                        encoding=serialization.Encoding.DER,
+                        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                    )
+                    for k in self._public_keys.values()
+                }
+                if embedded_der not in trusted_ders:
+                    raise CosignVerificationError(
+                        "Bundle verificationMaterial.publicKey does not match any trusted key."
+                    )
+                return None
+            if not self._ca_certs:
+                return embedded_key
+
+        if not self._ca_certs:
             return None
         raw_cert_b64 = ""
         cert_obj = ver_mat.get("certificate")
@@ -379,6 +422,8 @@ class AdapterSyncSidecar:
         poll_interval_seconds: float = 10.0,
         governance_policy: ModelGovernancePolicy | None = None,
         owns_rls_conn_manager: bool = False,
+        min_staging_free_bytes: int = 64 * 1024 * 1024,
+        stale_staging_ttl_seconds: float = 600.0,
     ) -> None:
         self.policy = governance_policy or ModelGovernancePolicy.default()
         self.expected_base_model_id = self.policy.validate_local_model_id(expected_base_model_id)
@@ -432,6 +477,8 @@ class AdapterSyncSidecar:
         self._owns_http_client = http_client is None
         self._adapter_router = adapter_router
         self.poll_interval_seconds = max(0.05, float(poll_interval_seconds))
+        self._min_staging_free_bytes = max(0, int(min_staging_free_bytes))
+        self._stale_staging_ttl_seconds = max(0.0, float(stale_staging_ttl_seconds))
 
         self._lock = threading.RLock()
         self._loaded_by_domain: dict[str, LoadedPodCartridge] = {}
@@ -455,6 +502,26 @@ class AdapterSyncSidecar:
                     f"AdapterSyncSidecar MUST NOT connect as privileged DB role '{user}'; "
                     "use RLS runtime pool ('scout_app_user' with NOBYPASSRLS)."
                 )
+
+    def _sweep_stale_staging_dirs(self, domain_parent: Path) -> int:
+        """Remove stale `.staging_*` / `.tmp_*` directories left by interrupted syncs."""
+        removed = 0
+        now = time.time()
+        if not domain_parent.is_dir():
+            return 0
+        for child in domain_parent.iterdir():
+            if not child.is_dir():
+                continue
+            if not (child.name.startswith(".staging_") or child.name.startswith(".tmp_")):
+                continue
+            try:
+                age = now - child.stat().st_mtime
+                if age >= self._stale_staging_ttl_seconds:
+                    shutil.rmtree(child, ignore_errors=True)
+                    removed += 1
+            except OSError:
+                continue
+        return removed
 
     @property
     def loaded_cartridges(self) -> dict[str, LoadedPodCartridge]:
@@ -698,6 +765,15 @@ class AdapterSyncSidecar:
             raise AdapterVerificationError("Path traversal detected in artifact staging path.")
 
         domain_parent.mkdir(parents=True, exist_ok=True)
+        self._sweep_stale_staging_dirs(domain_parent)
+        required_bytes = len(weights_bytes) * 2 + len(config_bytes)
+        free_bytes = shutil.disk_usage(domain_parent).free
+        min_required = max(required_bytes * 2, self._min_staging_free_bytes)
+        if free_bytes < min_required:
+            raise AdapterStagingCapacityError(
+                f"Insufficient staging disk space in {domain_parent}: "
+                f"free={free_bytes}B < required={min_required}B."
+            )
         staging_tmp = domain_parent / f".staging_{safe_artifact_id}_{uuid4().hex[:8]}"
         staging_tmp.mkdir(parents=True, exist_ok=True)
         try:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -56,6 +57,24 @@ MACHINE_HOURLY_RATES_USD: Final[dict[str, float]] = {
 }
 
 
+ALLOWED_EEA_REGIONS: Final[frozenset[str]] = frozenset(
+    {
+        "europe-west1",
+        "europe-west3",
+        "europe-west4",
+        "europe-west8",
+        "europe-west9",
+        "europe-north1",
+        "europe-central2",
+        "europe-southwest1",
+    }
+)
+_KMS_KEY_RE: Final[re.Pattern[str]] = re.compile(
+    r"^projects/[^/]+/locations/([^/]+)/keyRings/[^/]+/cryptoKeys/[^/]+$"
+)
+_VPC_NETWORK_RE: Final[re.Pattern[str]] = re.compile(r"^projects/[^/]+/global/networks/[^/]+$")
+
+
 class VertexPEFTConfig(BaseModel):
     """Configuration contract for Enterprise GCP Vertex AI PEFT QLoRA fine-tuning."""
 
@@ -91,6 +110,13 @@ class VertexPEFTConfig(BaseModel):
 
     gcp_project_id: str = Field(default=DEFAULT_GCP_PROJECT)
     gcp_region: str = Field(default=DEFAULT_GCP_REGION)
+    kms_key_name: str = Field(
+        default=f"projects/{DEFAULT_GCP_PROJECT}/locations/{DEFAULT_GCP_REGION}/keyRings/context-scout-keyring/cryptoKeys/context-scout-cmek"
+    )
+    network: str = Field(
+        default=f"projects/{DEFAULT_GCP_PROJECT}/global/networks/context-scout-vpc"
+    )
+    allow_non_eea_region: bool = Field(default=False)
     machine_type: str = Field(default=DEFAULT_MACHINE_TYPE)
     accelerator_type: str = Field(default=DEFAULT_ACCELERATOR_TYPE)
     accelerator_count: int = Field(default=1, ge=1)
@@ -197,7 +223,9 @@ class VertexPEFTTrainer:
 
         job_spec = {
             "displayName": display_name,
+            "encryptionSpec": {"kmsKeyName": self.config.kms_key_name},
             "jobSpec": {
+                "network": self.config.network,
                 "workerPoolSpecs": [
                     {
                         "machineSpec": {
@@ -266,7 +294,31 @@ class VertexPEFTTrainer:
         except ValueError as exc:
             issues.append(f"Model ID authorization failure: {exc}")
 
-        # 4. GCS bucket URI checks
+        # 4. GCS bucket URI & EEA / CMEK / VPC sovereignty checks
+        if (
+            not self.config.allow_non_eea_region
+            and self.config.gcp_region not in ALLOWED_EEA_REGIONS
+        ):
+            issues.append(
+                f"Region '{self.config.gcp_region}' is outside ALLOWED_EEA_REGIONS "
+                "and allow_non_eea_region=False."
+            )
+        kms_match = _KMS_KEY_RE.match(self.config.kms_key_name.strip())
+        if not kms_match:
+            issues.append(
+                f"Invalid CMEK kms_key_name '{self.config.kms_key_name}'. "
+                "Expected projects/<project>/locations/<region>/keyRings/<ring>/cryptoKeys/<key>."
+            )
+        elif kms_match.group(1) != self.config.gcp_region:
+            issues.append(
+                f"CMEK kms_key_name location '{kms_match.group(1)}' does not match "
+                f"gcp_region '{self.config.gcp_region}'."
+            )
+        if not _VPC_NETWORK_RE.match(self.config.network.strip()):
+            issues.append(
+                f"Invalid VPC network '{self.config.network}'. "
+                "Expected projects/<project>/global/networks/<network>."
+            )
         if not self.config.output_gcs_uri.startswith("gs://"):
             issues.append(
                 f"Invalid GCS output URI '{self.config.output_gcs_uri}'. Must start with gs://"

@@ -13,11 +13,13 @@ import re
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import Any
 from uuid import NAMESPACE_DNS, UUID, uuid5
 
 import psycopg
 
 from context_scout.config import ScoutSettings
+from context_scout.db.session import PoolRole, RLSConnectionManager
 from context_scout.ingestion.doc_parser import (
     DocumentChunk,
     MarkdownTableChunker,
@@ -26,7 +28,12 @@ from context_scout.ingestion.doc_parser import (
     is_license_or_stub_text,
 )
 from context_scout.retrieval.embedder import LocalSemanticEmbedder
-from context_scout.schemas.contracts import DocumentScope
+from context_scout.schemas.contracts import (
+    DEFAULT_TENANT_ID,
+    DocumentScope,
+    PrincipalContext,
+    RoleType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +85,31 @@ WIKIPEDIA_FOUNDATIONAL_PAGES: tuple[tuple[str, str, str], ...] = (
 RAW_LATEX_REF_RE = re.compile(r"\\(?:label|cref|Cref|autoref|eqref|ref)\{[^}]*\}")
 
 
-def fetch_wikipedia_plaintext(page_slug: str) -> str:
+def _ingestion_principal(tenant_id: UUID) -> PrincipalContext:
+    return PrincipalContext(
+        tenant_id=tenant_id,
+        user_id="svc_corpus_cleaner",
+        role=RoleType.ENGINEER,
+        allowed_scopes=[
+            "system:connector_ingest",
+            "public",
+            "public_eng",
+            "public_docs",
+            "public_de",
+            "domain:data_engineering",
+            "domain:data_engineering_scout",
+            "domain:enterprise_docs_scout",
+        ],
+    )
+
+
+def fetch_wikipedia_plaintext(page_slug: str, settings: ScoutSettings | None = None) -> str:
     """Fetches real CC-BY-SA 4.0 encyclopedic plain text from Wikipedia API."""
+    cfg = settings or ScoutSettings()
+    if not cfg.allow_external_cloud_egress:
+        raise RuntimeError(
+            "External cloud egress is disabled (SCOUT_ALLOW_EXTERNAL_CLOUD_EGRESS=false)."
+        )
     params = urllib.parse.urlencode(
         {
             "action": "query",
@@ -128,7 +158,7 @@ def _mediawiki_extract_to_markdown(extract: str) -> str:
     return text.strip()
 
 
-def get_domain_counts(conn: psycopg.Connection[tuple[object, ...]]) -> dict[str, int]:
+def get_domain_counts(conn: psycopg.Connection[Any]) -> dict[str, int]:
     """Returns read-only doc_chunks counts grouped by domain_id."""
     with conn.cursor() as cur:
         cur.execute(
@@ -137,10 +167,17 @@ def get_domain_counts(conn: psycopg.Connection[tuple[object, ...]]) -> dict[str,
         return {str(row[0]): int(str(row[1])) for row in cur.fetchall()}
 
 
-def clean_doc_chunks(settings: ScoutSettings) -> dict[str, dict[str, int]]:
+def clean_doc_chunks(
+    settings: ScoutSettings,
+    tenant_id: UUID = DEFAULT_TENANT_ID,
+) -> dict[str, dict[str, int]]:
     """Audits and cleans corrupt stubs, pure-license boilerplate, and raw LaTeX ref macros."""
     summary: dict[str, dict[str, int]] = {}
-    with psycopg.connect(settings.db_admin_url) as conn:
+    conn_mgr = RLSConnectionManager(settings.db_app_url, pool_role=PoolRole.INGESTION)
+    principal = _ingestion_principal(tenant_id)
+    embedder: LocalSemanticEmbedder | None = None
+
+    with conn_mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn:
         before_counts = get_domain_counts(conn)
         print("=== BEFORE CLEANUP COUNTS ===")
         for dom, cnt in before_counts.items():
@@ -148,14 +185,15 @@ def clean_doc_chunks(settings: ScoutSettings) -> dict[str, dict[str, int]]:
 
         for domain_id in TARGET_CLEANUP_DOMAINS:
             delete_ids: list[UUID] = []
-            repair_rows: list[tuple[str, UUID]] = []
+            repair_rows: list[tuple[str, str, UUID]] = []
 
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT chunk_id, verbatim_content FROM doc_chunks WHERE domain_id = %s;",
+                    "SELECT chunk_id, doc_title, section_heading, verbatim_content "
+                    "FROM doc_chunks WHERE domain_id = %s;",
                     (domain_id,),
                 )
-                for chunk_id_raw, content in cur.fetchall():
+                for chunk_id_raw, doc_title, section_heading, content in cur.fetchall():
                     chunk_id = (
                         chunk_id_raw if isinstance(chunk_id_raw, UUID) else UUID(str(chunk_id_raw))
                     )
@@ -172,7 +210,11 @@ def clean_doc_chunks(settings: ScoutSettings) -> dict[str, dict[str, int]]:
                     if RAW_LATEX_REF_RE.search(text):
                         cleaned = clean_latex_artifacts(text)
                         if cleaned != text and not is_license_or_stub_text(cleaned):
-                            repair_rows.append((cleaned, chunk_id))
+                            embed_input = (
+                                f"Document: {doc_title or ''} | "
+                                f"Section: {section_heading or ''}\n{cleaned}"
+                            )
+                            repair_rows.append((cleaned, embed_input, chunk_id))
 
             deleted_count = 0
             repaired_count = 0
@@ -184,13 +226,26 @@ def clean_doc_chunks(settings: ScoutSettings) -> dict[str, dict[str, int]]:
                     )
                     deleted_count = cur.rowcount or 0
                 if repair_rows:
+                    if embedder is None:
+                        embedder = LocalSemanticEmbedder(settings=settings)
+                    repaired_embs = embedder.embed_batch(
+                        [item[1] for item in repair_rows],
+                        is_query=False,
+                        batch_size=16,
+                    )
+                    update_params: list[tuple[str, str, str, str, UUID]] = []
+                    for (cleaned, _embed_input, cid), emb in zip(
+                        repair_rows, repaired_embs, strict=True
+                    ):
+                        emb_literal = "[" + ",".join(f"{v:.7f}" for v in emb) + "]"
+                        update_params.append((cleaned, emb_literal, emb_literal, domain_id, cid))
                     cur.executemany(
-                        "UPDATE doc_chunks SET verbatim_content = %s "
+                        "UPDATE doc_chunks SET verbatim_content = %s, "
+                        "embedding = %s::vector, embedding_halfvec = %s::halfvec "
                         "WHERE domain_id = %s AND chunk_id = %s;",
-                        [(txt, domain_id, cid) for txt, cid in repair_rows],
+                        update_params,
                     )
                     repaired_count = len(repair_rows)
-            conn.commit()
 
             summary[domain_id] = {
                 "before": before_counts.get(domain_id, 0),
@@ -207,13 +262,18 @@ def clean_doc_chunks(settings: ScoutSettings) -> dict[str, dict[str, int]]:
     return summary
 
 
-def build_foundational_chunks(repo_root: Path) -> list[DocumentChunk]:
+def build_foundational_chunks(
+    repo_root: Path,
+    settings: ScoutSettings | None = None,
+    tenant_id: UUID = DEFAULT_TENANT_ID,
+) -> list[DocumentChunk]:
     """Parses real upstream Wikipedia CC-BY-SA + local official PostgreSQL SGML docs."""
+    cfg = settings or ScoutSettings()
     chunker = MarkdownTableChunker()
     all_chunks: list[DocumentChunk] = []
 
     for slug, title, source_uri in WIKIPEDIA_FOUNDATIONAL_PAGES:
-        md_text = fetch_wikipedia_plaintext(slug)
+        md_text = fetch_wikipedia_plaintext(slug, settings=cfg)
         if not md_text:
             logger.warning("Empty extract for Wikipedia page %s", slug)
             continue
@@ -228,7 +288,7 @@ def build_foundational_chunks(repo_root: Path) -> list[DocumentChunk]:
             max_chunk_tokens=700,
         )
         for idx, ch in enumerate(raw_chunks):
-            det_id = uuid5(NAMESPACE_DNS, f"{doc_id}:{idx}")
+            det_id = uuid5(NAMESPACE_DNS, f"{tenant_id}:{doc_id}:{idx}")
             all_chunks.append(
                 DocumentChunk(
                     chunk_id=det_id,
@@ -275,7 +335,7 @@ def build_foundational_chunks(repo_root: Path) -> list[DocumentChunk]:
             max_chunk_tokens=750,
         )
         for idx, ch in enumerate(raw_chunks):
-            det_id = uuid5(NAMESPACE_DNS, f"{doc_id}:{idx}")
+            det_id = uuid5(NAMESPACE_DNS, f"{tenant_id}:{doc_id}:{idx}")
             all_chunks.append(
                 DocumentChunk(
                     chunk_id=det_id,
@@ -301,9 +361,13 @@ def build_foundational_chunks(repo_root: Path) -> list[DocumentChunk]:
     return all_chunks
 
 
-def enrich_data_engineering_corpus(settings: ScoutSettings, repo_root: Path) -> int:
+def enrich_data_engineering_corpus(
+    settings: ScoutSettings,
+    repo_root: Path,
+    tenant_id: UUID = DEFAULT_TENANT_ID,
+) -> int:
     """Embeds real foundational docs with EmbeddingGemma 2 and upserts into PG17."""
-    chunks = build_foundational_chunks(repo_root)
+    chunks = build_foundational_chunks(repo_root, settings=settings, tenant_id=tenant_id)
     if not chunks:
         return 0
 
@@ -316,13 +380,13 @@ def enrich_data_engineering_corpus(settings: ScoutSettings, repo_root: Path) -> 
 
     upsert_sql = """
         INSERT INTO doc_chunks (
-            chunk_id, domain_id, doc_id, doc_title, source_uri,
+            chunk_id, tenant_id, domain_id, doc_id, doc_title, source_uri,
             market_scope, published_date, authority_weight,
             section_heading, contextual_header, verbatim_content,
-            metadata_json, allowed_scopes, embedding
+            metadata_json, allowed_scopes, embedding, embedding_halfvec
         )
         VALUES (
-            %s, 'data_engineering_scout', %s, %s, %s,
+            %s, %s, 'data_engineering_scout', %s, %s, %s,
             %s, NULL, 1.2,
             %s, %s, %s,
             %s::jsonb,
@@ -330,7 +394,8 @@ def enrich_data_engineering_corpus(settings: ScoutSettings, repo_root: Path) -> 
                 'public', 'public_eng', 'public_docs', 'public_de',
                 'domain:data_engineering', 'domain:data_engineering_scout'
             ],
-            %s::vector
+            %s::vector,
+            %s::halfvec
         )
         ON CONFLICT (chunk_id) DO UPDATE SET
             doc_title = EXCLUDED.doc_title,
@@ -341,37 +406,44 @@ def enrich_data_engineering_corpus(settings: ScoutSettings, repo_root: Path) -> 
             verbatim_content = EXCLUDED.verbatim_content,
             metadata_json = EXCLUDED.metadata_json,
             allowed_scopes = EXCLUDED.allowed_scopes,
-            embedding = EXCLUDED.embedding;
+            embedding = EXCLUDED.embedding,
+            embedding_halfvec = EXCLUDED.embedding_halfvec;
     """
-    with psycopg.connect(settings.db_admin_url) as conn:
-        with conn.cursor() as cur:
-            for ch, emb in zip(chunks, embeddings, strict=True):
-                ctx_header = (
-                    f"Foundational data engineering reference: "
-                    f"{ch.doc_title} — {ch.section_heading}."
-                )
-                emb_literal = "[" + ",".join(f"{v:.7f}" for v in emb) + "]"
-                cur.execute(
-                    upsert_sql,
-                    (
-                        ch.chunk_id,
-                        ch.doc_id,
-                        ch.doc_title,
-                        ch.source_uri,
-                        ch.market_scope.value,
-                        ch.section_heading,
-                        ctx_header,
-                        ch.verbatim_content,
-                        json.dumps(ch.metadata_json),
-                        emb_literal,
-                    ),
-                )
-        conn.commit()
+    conn_mgr = RLSConnectionManager(settings.db_app_url, pool_role=PoolRole.INGESTION)
+    principal = _ingestion_principal(tenant_id)
+    with (
+        conn_mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=False) as conn,
+        conn.cursor() as cur,
+    ):
+        for ch, emb in zip(chunks, embeddings, strict=True):
+            ctx_header = (
+                f"Foundational data engineering reference: {ch.doc_title} — {ch.section_heading}."
+            )
+            emb_literal = "[" + ",".join(f"{v:.7f}" for v in emb) + "]"
+            cur.execute(
+                upsert_sql,
+                (
+                    ch.chunk_id,
+                    tenant_id,
+                    ch.doc_id,
+                    ch.doc_title,
+                    ch.source_uri,
+                    ch.market_scope.value
+                    if isinstance(ch.market_scope, DocumentScope)
+                    else str(ch.market_scope),
+                    ch.section_heading,
+                    ctx_header,
+                    ch.verbatim_content,
+                    json.dumps(ch.metadata_json),
+                    emb_literal,
+                    emb_literal,
+                ),
+            )
     print(f"Upserted {len(chunks)} real foundational chunks into data_engineering_scout.")
     return len(chunks)
 
 
-def verify_queries(settings: ScoutSettings) -> None:
+def verify_queries(settings: ScoutSettings, tenant_id: UUID = DEFAULT_TENANT_ID) -> None:
     """Runs read-only vector + FTS verification queries against data_engineering_scout."""
     queries = [
         "What is ACID",
@@ -383,23 +455,27 @@ def verify_queries(settings: ScoutSettings) -> None:
     embedder = LocalSemanticEmbedder(settings=settings)
     q_embs = embedder.embed_batch(queries, is_query=True, batch_size=8)
 
-    with psycopg.connect(settings.db_admin_url) as conn, conn.cursor() as cur:
-        cur.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order';")
+    conn_mgr = RLSConnectionManager(settings.db_app_url, pool_role=PoolRole.INGESTION)
+    principal = _ingestion_principal(tenant_id)
+    with (
+        conn_mgr.scoped_transaction(principal, enable_hnsw_iterative_scan=True) as conn,
+        conn.cursor() as cur,
+    ):
         for q, emb in zip(queries, q_embs, strict=True):
             emb_literal = "[" + ",".join(f"{v:.7f}" for v in emb) + "]"
             cur.execute(
                 """
-                SELECT doc_title, section_heading,
-                       1 - (embedding <=> %s::vector) AS cosine_sim,
-                       left(
-                           regexp_replace(verbatim_content, E'[\\n\\r]+', ' ', 'g'),
-                           140
-                       ) AS preview
-                FROM doc_chunks
-                WHERE domain_id = 'data_engineering_scout'
-                ORDER BY embedding <=> %s::vector ASC
-                LIMIT 3;
-                """,
+                    SELECT doc_title, section_heading,
+                           1 - (embedding <=> %s::vector) AS cosine_sim,
+                           left(
+                               regexp_replace(verbatim_content, E'[\\n\\r]+', ' ', 'g'),
+                               140
+                           ) AS preview
+                    FROM doc_chunks
+                    WHERE domain_id = 'data_engineering_scout'
+                    ORDER BY embedding <=> %s::vector ASC
+                    LIMIT 3;
+                    """,
                 (emb_literal, emb_literal),
             )
             print(f"\n[VERIFY QUERY] {q!r}")
@@ -419,17 +495,23 @@ def main() -> None:
     parser.add_argument(
         "--verify", action="store_true", help="Run read-only vector retrieval checks"
     )
+    parser.add_argument(
+        "--tenant-id",
+        default=str(DEFAULT_TENANT_ID),
+        help="Target tenant UUID for RLS-scoped ingestion",
+    )
     args = parser.parse_args()
 
+    tenant_id = UUID(args.tenant_id)
     settings = ScoutSettings()
     repo_root = Path(__file__).resolve().parent.parent
 
     if args.clean:
-        clean_doc_chunks(settings)
+        clean_doc_chunks(settings, tenant_id=tenant_id)
     if args.enrich:
-        enrich_data_engineering_corpus(settings, repo_root)
+        enrich_data_engineering_corpus(settings, repo_root, tenant_id=tenant_id)
     if args.verify:
-        verify_queries(settings)
+        verify_queries(settings, tenant_id=tenant_id)
 
 
 if __name__ == "__main__":
