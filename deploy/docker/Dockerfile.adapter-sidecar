@@ -18,16 +18,7 @@ RUN pip install --no-cache-dir "uv>=0.13.4,<0.14.0"
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
-RUN uv sync --frozen --no-dev --extra api --no-editable \
-    && rm -rf /app/.venv/lib/python3.12/site-packages/torch* \
-              /app/.venv/lib/python3.12/site-packages/sentence_transformers* \
-              /app/.venv/lib/python3.12/site-packages/transformers* \
-              /app/.venv/lib/python3.12/site-packages/scipy* \
-              /app/.venv/lib/python3.12/site-packages/scikit_learn* \
-              /app/.venv/lib/python3.12/site-packages/tree_sitter* \
-              /app/.venv/lib/python3.12/site-packages/onnx* \
-              /app/.venv/lib/python3.12/site-packages/triton* \
-              /app/.venv/lib/python3.12/site-packages/nvidia* \
+RUN uv sync --locked --no-dev --no-editable --extra sidecar \
     && pip uninstall -y uv \
     && find /app /usr/local/lib/python3.12 -type d -name '__pycache__' -exec rm -rf {} + \
     && mkdir -p /var/run/scout/adapters \

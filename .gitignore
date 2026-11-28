@@ -80,4 +80,5 @@ reports/*.json
 reports/*.jsonl
 install_antigravity_kit.*
 
-docs/
+docs/*
+!docs/ROADMAP_AND_KNOWN_LIMITS.md

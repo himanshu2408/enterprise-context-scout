@@ -745,3 +745,20 @@ def test_sync_custom_domain_require_manifest_skips_cold_crawl_on_hot_path(
         require_manifest=True,
     )
     assert res is None
+
+
+def test_pr7_evals_consolidation_and_bloat_retirement() -> None:
+    """PR-7 (ECS-151, ECS-153): Single context_scout.evals package & retired bloated docs."""
+    assert not (REPO_ROOT / "evals").exists()
+    assert (
+        REPO_ROOT / "src" / "context_scout" / "evals" / "harnesses" / "statistical_evaluator.py"
+    ).is_file()
+    assert (
+        REPO_ROOT / "src" / "context_scout" / "evals" / "scale_ladder" / "fixtures.py"
+    ).is_file()
+
+    assert not (REPO_ROOT / "docs" / "phase_reports").exists()
+    assert not (REPO_ROOT / "reports" / "unseen_ab_traces.jsonl").exists()
+    roadmap = REPO_ROOT / "docs" / "ROADMAP_AND_KNOWN_LIMITS.md"
+    assert roadmap.is_file()
+    assert roadmap.stat().st_size < 5120

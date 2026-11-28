@@ -8,19 +8,19 @@ import sys
 from pathlib import Path
 
 import pytest
-from evals.datasets.token_ab_dataset import (
-    count_bpe_tokens,
-    get_token_ab_benchmark_set,
-)
-from evals.harnesses.statistical_evaluator import compute_token_ab_significance
 
 from context_scout.config import ModelGovernancePolicy, ScoutSettings, validate_model_id
 from context_scout.db.repositories import InMemoryRLSRepository
+from context_scout.evals.datasets.token_ab_dataset import (
+    count_bpe_tokens,
+    get_token_ab_benchmark_set,
+)
 from context_scout.evals.harness import (
     EvaluationHarness,
     EvaluationRunResult,
     MetricResult,
 )
+from context_scout.evals.harnesses.statistical_evaluator import compute_token_ab_significance
 from context_scout.evals.runner import generate_markdown_report
 from context_scout.schemas.contracts import (
     DocCitationSpan,

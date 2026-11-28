@@ -228,8 +228,26 @@ class ReactReduxPlugin:
         return ("package.json",)
 
     def can_handle(self, file_path: str) -> bool:
-        lower = file_path.lower()
-        return any(lower.endswith(ext) for ext in self.file_extensions)
+        lower = file_path.lower().replace("\\", "/")
+        if lower.endswith((".tsx", ".jsx")):
+            return True
+        if lower.endswith((".ts", ".js")):
+            return any(
+                hint in lower
+                for hint in (
+                    "slice",
+                    "store",
+                    "reducer",
+                    "selector",
+                    "thunk",
+                    ".hook.",
+                    "/hooks/",
+                    "/slices/",
+                    "/store/",
+                    "/redux/",
+                )
+            )
+        return False
 
     def _derive_module_prefix(self, file_path: str) -> str:
         if not file_path:

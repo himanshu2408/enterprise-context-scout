@@ -76,8 +76,24 @@ _JINJA_EXPR_RE = re.compile(r"\{\{-?.*?-?\}\}", re.DOTALL)
 _PG_VECTOR_TYPE_RE = re.compile(r"\b(vector|halfvec|sparsevec)\s*\(\s*\d+\s*\)", re.IGNORECASE)
 _PG_USING_INDEX_RE = re.compile(r"\bUSING\s+(?:hnsw|ivfflat)\s*\(([^)]+)\)", re.IGNORECASE)
 _PG_OPCLASS_RE = re.compile(
-    r"\b(?:vector_cosine_ops|vector_l2_ops|vector_ip_ops|gin_trgm_ops)\b",
+    r"\b(?:vector_cosine_ops|vector_l2_ops|vector_ip_ops|halfvec_cosine_ops|halfvec_l2_ops|halfvec_ip_ops|gin_trgm_ops|jsonb_path_ops)\b",
     re.IGNORECASE,
+)
+_PG_NAMED_TBL_CONSTRAINT_RE = re.compile(
+    r"\bCONSTRAINT\s+[A-Za-z_][\w\"]*\s+(?=(?:UNIQUE|FOREIGN\s+KEY)\b)",
+    re.IGNORECASE,
+)
+_PG_CREATE_FUNCTION_RE = re.compile(
+    r"\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\b[^$]*\$\$.*?\$\$\s*LANGUAGE\s+\w+\s*;",
+    re.IGNORECASE | re.DOTALL,
+)
+_PG_DROP_TRIGGER_RE = re.compile(
+    r"\bDROP\s+TRIGGER\b[^;]*;",
+    re.IGNORECASE,
+)
+_PG_CREATE_TRIGGER_RE = re.compile(
+    r"\bCREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\b[^;]*;",
+    re.IGNORECASE | re.DOTALL,
 )
 _PG_ALTER_RLS_RE = re.compile(
     r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?([A-Za-z_][\w.\"]*)\s+"
@@ -233,7 +249,11 @@ def _normalize_pg17_and_bigquery(
 
     out = _PG_CREATE_POLICY_RE.sub(_collect_policy, out)
 
-    # 2. PG17 DO $$ ... END $$; and GRANT statements
+    # 2. PG17 PL/pgSQL functions, triggers, named UNIQUE/FK table constraints, DO $$ blocks, GRANTs
+    out = _PG_CREATE_FUNCTION_RE.sub(lambda m: _preserve_newlines(m.group(0), "SELECT 1;"), out)
+    out = _PG_DROP_TRIGGER_RE.sub(lambda m: _preserve_newlines(m.group(0), "SELECT 1;"), out)
+    out = _PG_CREATE_TRIGGER_RE.sub(lambda m: _preserve_newlines(m.group(0), "SELECT 1;"), out)
+    out = _PG_NAMED_TBL_CONSTRAINT_RE.sub("", out)
     out = _PG_DO_BLOCK_RE.sub(lambda m: _preserve_newlines(m.group(0), "SELECT 1;"), out)
     out = _PG_GRANT_RE.sub(lambda m: _preserve_newlines(m.group(0), "SELECT 1;"), out)
 

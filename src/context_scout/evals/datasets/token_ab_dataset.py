@@ -17,13 +17,16 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from evals.datasets.answerable_dataset import StackType
+from context_scout.evals.datasets.answerable_dataset import StackType
+
+logger = logging.getLogger(__name__)
 
 MIN_TOKEN_AB_TASKS_PER_STACK: Final[int] = 30
 TOTAL_MIN_TOKEN_AB_TASKS: Final[int] = MIN_TOKEN_AB_TASKS_PER_STACK * 4  # 120
@@ -84,8 +87,11 @@ def get_bpe_tokenizer(model_id: str = DEFAULT_BPE_MODEL_ID) -> Any:
             cached_tok = huggingface_hub.try_to_load_from_cache(cand, "tokenizer.json")
             if isinstance(cached_tok, str) and Path(cached_tok).is_file():
                 return Tokenizer.from_file(cached_tok)
-    except Exception:
-        pass
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        logger.warning(
+            "Unable to load cached huggingface tokenizer (%s); trying AutoTokenizer.",
+            type(exc).__name__,
+        )
 
     try:
         from transformers import AutoTokenizer
@@ -97,10 +103,17 @@ def get_bpe_tokenizer(model_id: str = DEFAULT_BPE_MODEL_ID) -> Any:
                     local_files_only=True,
                     trust_remote_code=False,
                 )
-            except Exception:
-                continue
-    except Exception:
-        pass
+            except (ImportError, OSError, RuntimeError, ValueError) as exc:
+                logger.debug(
+                    "AutoTokenizer unavailable for '%s' (%s).",
+                    cand,
+                    type(exc).__name__,
+                )
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        logger.warning(
+            "AutoTokenizer fallback unavailable (%s); using offline BPE bootstrap.",
+            type(exc).__name__,
+        )
 
     tok = Tokenizer(models.BPE())
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)

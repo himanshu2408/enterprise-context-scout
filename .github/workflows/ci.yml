@@ -2,7 +2,7 @@ name: Enterprise Context Scout CI
 
 on:
   push:
-    branches: ["main", "feat/**"]
+    branches: ["main", "feat/**", "refactor/**"]
   pull_request:
     branches: ["main"]
 
@@ -30,15 +30,18 @@ jobs:
           enable-cache: true
 
       - name: Install Python dependencies
-        run: uv sync --extra api --extra worker --extra gpu-train --extra dev
+        run: uv sync --locked --extra api --extra worker --extra sidecar --extra gpu-train --extra cpu --extra dev
+
+      - name: Verify Lockfile Consistency (uv lock --check)
+        run: uv lock --check
 
       - name: Verify Pytest LPT Shard Partition Completeness
         run: uv run python scripts/ci_pytest_shard.py --summary --total-shards 6
 
       - name: Run Ruff Linter & Formatter Check
         run: |
-          uv run ruff check src tests scripts evals examples
-          uv run ruff format --check src tests scripts evals examples
+          uv run ruff check src tests scripts examples
+          uv run ruff format --check src tests scripts examples
 
       - name: Run Mypy Strict Typechecker
         run: uv run mypy --strict src tests scripts/ci_pytest_shard.py scripts/run_test_batches.py scripts/generate_aibom.py scripts/clean_and_enrich_corpus.py scripts/smoke_e2e_live_stack.py
@@ -46,7 +49,7 @@ jobs:
       - name: Lint PostgreSQL 17 Alembic Migrations via Squawk
         run: uv run python -m context_scout.db.migrations_runner --lint-squawk
 
-      - name: Install Helm and Terraform (SHA-256 Verified)
+      - name: Install Helm, Terraform, Kubeconform & Trivy (SHA-256 Verified)
         run: |
           mkdir -p "$HOME/.local/bin"
           curl -fsSL "https://get.helm.sh/helm-v3.17.1-linux-amd64.tar.gz" -o /tmp/helm.tar.gz
@@ -55,16 +58,23 @@ jobs:
           curl -fsSL "https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip" -o /tmp/terraform.zip
           echo "186e0145f5e5f2eb97cbd785bc78f21bae4ef15119349f6ad4fa535b83b10df8  /tmp/terraform.zip" | sha256sum -c -
           unzip -o /tmp/terraform.zip terraform -d "$HOME/.local/bin" && chmod +x "$HOME/.local/bin/terraform"
-          rm -rf /tmp/helm.tar.gz /tmp/linux-amd64 /tmp/terraform.zip
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz" -o /tmp/kubeconform.tar.gz
+          echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  /tmp/kubeconform.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp && mv /tmp/kubeconform "$HOME/.local/bin/kubeconform" && chmod +x "$HOME/.local/bin/kubeconform"
+          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz" -o /tmp/trivy.tar.gz
+          echo "bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf  /tmp/trivy.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy && mv /tmp/trivy "$HOME/.local/bin/trivy" && chmod +x "$HOME/.local/bin/trivy"
+          rm -rf /tmp/helm.tar.gz /tmp/linux-amd64 /tmp/terraform.zip /tmp/kubeconform.tar.gz /tmp/trivy.tar.gz
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Verify Helm, Multi-Cloud Terraform, Compose & CycloneDX AI-BOM
+      - name: Verify Helm, Kubeconform, Trivy IaC, Multi-Cloud Terraform, Compose & CycloneDX AI-BOM
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           helm lint deploy/helm/context-scout
           helm lint deploy/helm/context-scout -f deploy/helm/context-scout/values-gcp-gke.yaml
-          helm template context-scout deploy/helm/context-scout >/dev/null
-          helm template prod-scout deploy/helm/context-scout -f deploy/helm/context-scout/values-gcp-gke.yaml >/dev/null
+          helm template context-scout deploy/helm/context-scout | kubeconform -strict -ignore-missing-schemas -summary
+          helm template prod-scout deploy/helm/context-scout -f deploy/helm/context-scout/values-gcp-gke.yaml | kubeconform -strict -ignore-missing-schemas -summary
+          trivy config --exit-code 1 --severity CRITICAL deploy/
           for mod in gcp-gke aws-eks azure-aks onprem-k8s; do
             terraform -chdir="deploy/terraform/$mod" fmt -check
             rm -rf "/tmp/tf-mod-$mod"
@@ -104,7 +114,7 @@ jobs:
             hf-hub-embeddinggemma-v2-
 
       - name: Install Python dependencies
-        run: uv sync --extra api --extra worker --extra gpu-train --extra dev
+        run: uv sync --locked --extra api --extra worker --extra sidecar --extra gpu-train --extra cpu --extra dev
 
       - name: Run Milestone 6 Evaluation Gate (In-Memory CI Mode)
         run: |
@@ -163,7 +173,7 @@ jobs:
       - name: Install Python dependencies & PostgreSQL client
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
-          uv sync --extra api --extra worker --extra gpu-train --extra dev
+          uv sync --locked --extra api --extra worker --extra sidecar --extra gpu-train --extra cpu --extra dev
 
       - name: Bootstrap Schema, Seed Corpora & Audit Forced RLS
         run: |
@@ -194,10 +204,12 @@ jobs:
           else
             echo "Seed cache miss: running Alembic upgrade and seeding PG17 corpora..."
             uv run context-scout db upgrade
+            uv run alembic downgrade -1 && uv run alembic upgrade head
             uv run python -c "import os; from pathlib import Path; from tests.fixtures.pg_isolation import ensure_pg17_schema_and_seed_corpora; ensure_pg17_schema_and_seed_corpora(os.environ['SCOUT_DB_ADMIN_URL'], os.environ['SCOUT_DB_APP_URL'], Path.cwd())"
             PGPASSWORD=postgres_ci_password pg_dump -Fc -h 127.0.0.1 -p 5432 -U postgres -d context_scout -f "$DUMP_PATH"
           fi
 
+          uv run alembic downgrade -1 && uv run alembic upgrade head
           uv run python .agents/skills/rls-pgtap-audit/scripts/check_rls_catalog.py
           ls -lh "$DUMP_PATH"
 
@@ -265,7 +277,7 @@ jobs:
       - name: Install Python dependencies & Restore Seeded PG17 Snapshot
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
-          uv sync --extra api --extra worker --extra gpu-train --extra dev
+          uv sync --locked --extra api --extra worker --extra sidecar --extra gpu-train --extra cpu --extra dev
           APP_PW="$(openssl rand -hex 24)"
           echo "::add-mask::${APP_PW}"
           APP_URL="postgresql://scout_app_user:${APP_PW}@127.0.0.1:5432/context_scout"
@@ -342,3 +354,52 @@ jobs:
 
       - name: Build Production Bundle
         run: npm run build
+
+  container-verify:
+    name: Build 4 Locked Containers, Verify < 2.0 GiB & Trivy Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Trivy v0.76.2 (SHA-256 Verified)
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz" -o /tmp/trivy.tar.gz
+          echo "bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf  /tmp/trivy.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy && mv /tmp/trivy "$HOME/.local/bin/trivy" && chmod +x "$HOME/.local/bin/trivy"
+          rm -f /tmp/trivy.tar.gz
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build All 4 Docker Images & Enforce Slim Size Gate (< 2.0 GiB)
+        run: |
+          docker build -f deploy/docker/Dockerfile.webui -t ecs-ci-webui:pr7 .
+          docker build -f deploy/docker/Dockerfile.adapter-sidecar -t ecs-ci-sidecar:pr7 .
+          docker build --build-arg TORCH_BACKEND=cpu -f deploy/docker/Dockerfile.api -t ecs-ci-api:pr7 .
+          docker build --build-arg TORCH_BACKEND=cpu -f deploy/docker/Dockerfile.worker -t ecs-ci-worker:pr7 .
+
+          for img in ecs-ci-api:pr7 ecs-ci-worker:pr7; do
+            sz="$(docker image inspect --format '{{.Size}}' "$img")"
+            echo "$img size_bytes=$sz"
+            if [[ "$sz" -ge 2147483648 ]]; then
+              echo "ERROR: $img exceeds 2.0 GiB slim gate ($sz bytes)" >&2
+              exit 1
+            fi
+          done
+
+      - name: Hardened Non-Root Read-Only Container Boot Smoke
+        run: |
+          docker run --rm --user 65532:65532 --read-only --cap-drop=ALL --security-opt no-new-privileges:true --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            -e HF_HUB_OFFLINE=1 ecs-ci-worker:pr7 worker --help | grep -q -- "--once"
+          docker run --rm --user 65532:65532 --read-only --cap-drop=ALL --security-opt no-new-privileges:true --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --entrypoint /usr/bin/python3 ecs-ci-sidecar:pr7 -W error::RuntimeWarning -m context_scout.serving.adapter_sync_sidecar --help
+          docker run --rm --user 65532:65532 --read-only --cap-drop=ALL --security-opt no-new-privileges:true --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --entrypoint /usr/bin/python3 ecs-ci-api:pr7 -c "import context_scout.api.main as m; assert m.app.version == '1.0.1', m.app.version"
+
+      - name: Trivy CRITICAL Vulnerability & Secret Scan Across All 4 Images
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          for img in ecs-ci-webui:pr7 ecs-ci-sidecar:pr7 ecs-ci-api:pr7 ecs-ci-worker:pr7; do
+            echo "Scanning $img..."
+            trivy image --pkg-types library --scanners vuln,secret --ignore-unfixed --severity CRITICAL --exit-code 1 "$img"
+          done

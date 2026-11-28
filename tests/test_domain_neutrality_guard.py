@@ -388,7 +388,6 @@ def find_silent_broad_except_handlers(src_root: Path) -> dict[str, list[tuple[in
 NEUTRAL_SCAN_TREES: Final[tuple[str, ...]] = (
     "src",
     "sql",
-    "evals",
     "web-ui/src",
     "tests/fixtures",
     "scripts",

@@ -1,6 +1,6 @@
 """Evaluation harnesses package."""
 
-from evals.harnesses.statistical_evaluator import (
+from context_scout.evals.harnesses.statistical_evaluator import (
     ClopperPearsonBound,
     WilcoxonABResult,
     compute_clopper_pearson,

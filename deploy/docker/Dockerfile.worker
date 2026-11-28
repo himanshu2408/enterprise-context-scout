@@ -5,6 +5,8 @@ ARG DISTROLESS_PYTHON_IMAGE=gcr.io/distroless/python3-debian12:nonroot
 
 FROM ${PYTHON_BUILDER_IMAGE} AS builder
 
+ARG TORCH_BACKEND=cpu
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=0 \
@@ -18,7 +20,7 @@ RUN pip install --no-cache-dir "uv>=0.13.4,<0.14.0"
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
-RUN uv sync --frozen --no-dev --extra worker --no-editable \
+RUN uv sync --locked --no-dev --no-editable --extra worker --extra "${TORCH_BACKEND}" \
     && pip uninstall -y uv \
     && find /app /usr/local/lib/python3.12 -type d -name '__pycache__' -exec rm -rf {} +
 

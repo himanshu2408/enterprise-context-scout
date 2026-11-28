@@ -350,12 +350,28 @@ class PluginRegistry:
             logger.debug("ProtobufGrpcPlugin not loaded: %s", err)
 
         try:
+            from context_scout.plugins.languages.python_lang import PythonPlugin
+
+            if "python" not in cls._unregistered_languages:
+                cls.register_language(PythonPlugin(), priority=50)
+        except ImportError as err:
+            logger.debug("PythonPlugin not loaded: %s", err)
+
+        try:
             from context_scout.plugins.languages.scip_ingestor import SCIPIndexPlugin
 
             if "scip" not in cls._unregistered_languages:
                 cls.register_language(SCIPIndexPlugin(), priority=60)
         except ImportError as err:
             logger.debug("SCIPIndexPlugin not loaded: %s", err)
+
+        try:
+            from context_scout.plugins.languages.typescript_lang import TypeScriptPlugin
+
+            if "typescript" not in cls._unregistered_languages:
+                cls.register_language(TypeScriptPlugin(), priority=70)
+        except ImportError as err:
+            logger.debug("TypeScriptPlugin not loaded: %s", err)
 
         try:
             from context_scout.plugins.connectors.confluence import ConfluenceConnectorPlugin

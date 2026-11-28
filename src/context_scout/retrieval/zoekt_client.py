@@ -1769,6 +1769,30 @@ def _parse_connect_stream_envelopes(raw: bytes) -> list[dict[str, Any]]:
     return ndjson_frames
 
 
+def format_zoekt_shard_repo_name(tenant_id: UUID | str, repo_name: str) -> str:
+    """Namespaces remote Zoekt repository shards as ``{tenant_id}::{repo_name}``."""
+    tid_str = str(tenant_id).strip()
+    cleaned = repo_name.strip()
+    prefix = f"{tid_str}::"
+    if cleaned.startswith(prefix):
+        return cleaned
+    return f"{prefix}{cleaned}"
+
+
+def strip_zoekt_shard_repo_name(tenant_id: UUID | str, raw_repo_name: str) -> tuple[str, bool]:
+    """Strips ``{tenant_id}::`` when ``raw_repo_name`` belongs to ``tenant_id``.
+
+    Returns ``(bare_repo_name, matched_tenant)`` and fails closed on foreign-tenant or
+    unprefixed shared-storage shards.
+    """
+    tid_str = str(tenant_id).strip()
+    cleaned = raw_repo_name.strip()
+    prefix = f"{tid_str}::"
+    if cleaned.startswith(prefix):
+        return cleaned[len(prefix) :], True
+    return "", False
+
+
 class ZoektGrpcJsonClient:
     """Zoekt client speaking Connect gRPC-JSON (`/Search`, `/StreamSearch`) and `/api/search`."""
 
@@ -1873,14 +1897,18 @@ class ZoektGrpcJsonClient:
 
     def purge_repo(self, *, tenant_id: UUID, domain_id: str, repo_name: str) -> int:
         """Revoke ACL bitmap entry immediately and request remote Zoekt shard purge."""
-        removed = 1 if self.acl_registry.unregister_repo(tenant_id, domain_id, repo_name) else 0
+        bare_repo, matched = strip_zoekt_shard_repo_name(tenant_id, repo_name)
+        logical_repo = bare_repo if matched else repo_name
+        shard_repo = format_zoekt_shard_repo_name(tenant_id, logical_repo)
+        removed = 1 if self.acl_registry.unregister_repo(tenant_id, domain_id, logical_repo) else 0
         try:
             resp = self._client.post(
                 f"{self.endpoint_url}/api/admin/purge",
                 json={
                     "tenant_id": str(tenant_id),
                     "domain_id": domain_id,
-                    "repo_name": repo_name,
+                    "repo_name": shard_repo,
+                    "logical_repo_name": logical_repo,
                 },
             )
             if 200 <= resp.status_code < 300:
@@ -1889,7 +1917,7 @@ class ZoektGrpcJsonClient:
             logger.warning(
                 "Remote Zoekt purge endpoint failed for repo '%s' (%s); "
                 "ACL bitmap entry was revoked fail-closed.",
-                repo_name,
+                shard_repo,
                 type(exc).__name__,
             )
         return removed
@@ -1897,13 +1925,17 @@ class ZoektGrpcJsonClient:
     def _build_zoekt_query(
         self,
         *,
+        tenant_id: UUID,
         query: str,
         authorized_repos: frozenset[str],
         file_pattern: str | None,
         branch: str | None,
         case_sensitive: bool,
     ) -> str:
-        repo_alt = "|".join(re.escape(r) for r in sorted(authorized_repos))
+        repo_alt = "|".join(
+            re.escape(format_zoekt_shard_repo_name(tenant_id, r)).replace(r"\-", "-")
+            for r in sorted(authorized_repos)
+        )
         clauses = [f"r:^({repo_alt})$"]
         if branch and branch.strip():
             clauses.append(f"b:^{re.escape(branch.strip())}$")
@@ -1941,16 +1973,17 @@ class ZoektGrpcJsonClient:
             for raw_file in raw_files:
                 if not isinstance(raw_file, dict):
                     continue
-                repo_name = _decode_zoekt_text(
+                raw_repo = _decode_zoekt_text(
                     raw_file.get("Repository") or raw_file.get("repo_name")
                 )
+                repo_name, matched_tenant = strip_zoekt_shard_repo_name(acl.tenant_id, raw_repo)
                 raw_rid = raw_file.get("RepositoryID") or raw_file.get("RepoID")
                 repo_id = int(raw_rid) if raw_rid is not None else None
                 # Fail-closed defense-in-depth post-filter against stale/spoofed server shards.
-                if repo_name not in acl.repo_names:
+                if not matched_tenant or repo_name not in acl.repo_names:
                     logger.warning(
                         "Zoekt post-filter dropped unauthorized repo '%s' for tenant %s",
-                        repo_name,
+                        raw_repo,
                         acl.tenant_id,
                     )
                     continue
@@ -2162,6 +2195,7 @@ class ZoektGrpcJsonClient:
             )
 
         effective_q = self._build_zoekt_query(
+            tenant_id=principal.tenant_id,
             query=query,
             authorized_repos=acl.repo_names,
             file_pattern=file_pattern,
@@ -2265,5 +2299,7 @@ __all__ = [
     "ZoektUnavailableError",
     "compile_re2",
     "extract_required_trigrams",
+    "format_zoekt_shard_repo_name",
+    "strip_zoekt_shard_repo_name",
     "validate_re2_pattern",
 ]

@@ -21,15 +21,6 @@ from typing import Any, Final
 import numpy as np
 import psycopg
 import pytest
-from evals.harnesses.statistical_evaluator import (
-    compute_clopper_pearson,
-    compute_rule_of_three,
-    compute_token_ab_significance,
-)
-from evals.scale_ladder import (
-    ScaleLadderTier,
-    generate_scale_ladder_corpus,
-)
 from scipy import stats
 
 from context_scout.config import ScoutSettings
@@ -42,6 +33,15 @@ from context_scout.db.repositories import (
 )
 from context_scout.db.schema import ASTEdgeRecord
 from context_scout.db.session import RLSConnectionManager
+from context_scout.evals.harnesses.statistical_evaluator import (
+    compute_clopper_pearson,
+    compute_rule_of_three,
+    compute_token_ab_significance,
+)
+from context_scout.evals.scale_ladder import (
+    ScaleLadderTier,
+    generate_scale_ladder_corpus,
+)
 from context_scout.ingestion.git_merkle_indexer import (
     GitMerkleIndexer,
     MerkleBlobDiff,
@@ -361,7 +361,10 @@ class TestClopperPearsonStatisticalEngineStress:
         assert res_tied.cohens_d > 1.0  # Large effect size
 
         # 2b. High-savings distribution exceeding 80% target threshold (n=40 -> unrounded p > 0)
-        from evals.datasets.token_ab_dataset import DEFAULT_BPE_MODEL_ID, count_bpe_tokens
+        from context_scout.evals.datasets.token_ab_dataset import (
+            DEFAULT_BPE_MODEL_ID,
+            count_bpe_tokens,
+        )
 
         assert DEFAULT_BPE_MODEL_ID == "deterministic-offline-bytelevel-bpe-v1"
         assert count_bpe_tokens("def verify_tenant_isolation(ctx): return True") > 0

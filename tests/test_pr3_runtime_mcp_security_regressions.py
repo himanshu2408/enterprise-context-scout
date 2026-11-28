@@ -537,7 +537,7 @@ def test_zoekt_client_hydrates_acl_from_repo_and_admin_wires_endpoint(
                 "Result": {
                     "Files": [
                         {
-                            "Repository": "private-payments",
+                            "Repository": f"{DEFAULT_TENANT_ID}::private-payments",
                             "FileName": b64_path,
                             "LineMatches": [{"LineNumber": 4, "Line": b64_line}],
                         }

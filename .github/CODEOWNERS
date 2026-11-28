@@ -1,0 +1,9 @@
+# Global default owner
+* @himanshu2408
+
+# Security-critical, RLS, IaC, and CI/CD paths
+/src/context_scout/security/ @himanshu2408
+/src/context_scout/db/migrations/ @himanshu2408
+/sql/ @himanshu2408
+/deploy/ @himanshu2408
+/.github/workflows/ @himanshu2408

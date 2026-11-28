@@ -1,6 +1,6 @@
 .PHONY: install lint format-check typecheck test-fast test-full test-ui iac-verify demo-seed verify-backend ci
 
-PY_DIRS := src tests scripts evals examples
+PY_DIRS := src tests scripts examples
 STRICT_MYPY_TARGETS := src tests scripts/ci_pytest_shard.py scripts/run_test_batches.py scripts/generate_aibom.py scripts/clean_and_enrich_corpus.py scripts/smoke_e2e_live_stack.py
 PER_FILE_TIMEOUT_S := 120
 

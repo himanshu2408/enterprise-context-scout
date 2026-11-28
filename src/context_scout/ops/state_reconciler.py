@@ -528,6 +528,11 @@ class StateReconciler:
 
         # Case 2: Remote ZoektGrpcJsonClient (HTTP /api/list, /api/admin/purge, /api/admin/reindex)
         if hasattr(zoekt, "endpoint_url") and hasattr(zoekt, "_client"):
+            from context_scout.retrieval.zoekt_client import (
+                format_zoekt_shard_repo_name,
+                strip_zoekt_shard_repo_name,
+            )
+
             remote_repos: set[str] = set()
             remote_files: dict[tuple[str, str], str] = {}
             list_supported = False
@@ -540,15 +545,21 @@ class StateReconciler:
                     list_supported = True
                     payload = list_resp.json() if list_resp.content else {}
                     for r in payload.get("repos") or []:
-                        if str(r).strip():
-                            remote_repos.add(str(r).strip())
+                        raw_r = str(r).strip()
+                        if raw_r:
+                            bare_r, matched = strip_zoekt_shard_repo_name(
+                                principal.tenant_id, raw_r
+                            )
+                            if matched and bare_r:
+                                remote_repos.add(bare_r)
                     for item in payload.get("files") or []:
                         if not isinstance(item, Mapping):
                             continue
-                        rname = str(item.get("repo_name") or item.get("Repository") or "").strip()
+                        raw_rn = str(item.get("repo_name") or item.get("Repository") or "").strip()
                         fpath = str(item.get("file_path") or item.get("FileName") or "").strip()
                         csum = str(item.get("checksum") or item.get("Checksum") or "").strip()
-                        if rname and fpath:
+                        rname, matched = strip_zoekt_shard_repo_name(principal.tenant_id, raw_rn)
+                        if matched and rname and fpath:
                             remote_repos.add(rname)
                             remote_files[(rname, fpath)] = csum
                 elif list_resp.status_code != 404:
@@ -600,13 +611,24 @@ class StateReconciler:
                         json={
                             "tenant_id": str(principal.tenant_id),
                             "domain_id": domain_id,
-                            "active_repos": sorted(active_repos),
+                            "active_repos": [
+                                format_zoekt_shard_repo_name(principal.tenant_id, r)
+                                for r in sorted(active_repos)
+                            ],
                             "delete_files": [
-                                {"repo_name": rn, "file_path": fp} for rn, fp in extra_remote_files
+                                {
+                                    "repo_name": format_zoekt_shard_repo_name(
+                                        principal.tenant_id, rn
+                                    ),
+                                    "file_path": fp,
+                                }
+                                for rn, fp in extra_remote_files
                             ],
                             "upsert_files": [
                                 {
-                                    "repo_name": cf.repo_name,
+                                    "repo_name": format_zoekt_shard_repo_name(
+                                        principal.tenant_id, cf.repo_name
+                                    ),
                                     "file_path": cf.file_path,
                                     "checksum": cf.git_blob_sha,
                                     "content": cf.raw_content,

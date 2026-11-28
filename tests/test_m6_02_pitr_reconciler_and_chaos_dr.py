@@ -1472,14 +1472,18 @@ def test_chaos_postgres_pitr_rollback_reconciles_zoekt_gcs_s3_vllm(
             checksum=blob_c2,
         )
         # 2. Remote Zoekt server has phantom T2 file + phantom repo (missing svc-core/src/core.py)
-        zoekt_vllm_srv.zoekt_files[(str(tenant_a), dom_a, "svc-core", "src/phantom_t2.py")] = {
-            "repo_name": "svc-core",
+        zoekt_vllm_srv.zoekt_files[
+            (str(tenant_a), dom_a, f"{tenant_a}::svc-core", "src/phantom_t2.py")
+        ] = {
+            "repo_name": f"{tenant_a}::svc-core",
             "file_path": "src/phantom_t2.py",
             "checksum": blob_c2,
             "content": "def phantom_t2_fn(): return 2",
         }
-        zoekt_vllm_srv.zoekt_files[(str(tenant_a), dom_a, "phantom-repo-t2", "src/ghost.py")] = {
-            "repo_name": "phantom-repo-t2",
+        zoekt_vllm_srv.zoekt_files[
+            (str(tenant_a), dom_a, f"{tenant_a}::phantom-repo-t2", "src/ghost.py")
+        ] = {
+            "repo_name": f"{tenant_a}::phantom-repo-t2",
             "file_path": "src/ghost.py",
             "checksum": blob_c2,
             "content": "def ghost(): pass",
@@ -1578,11 +1582,16 @@ def test_chaos_postgres_pitr_rollback_reconciles_zoekt_gcs_s3_vllm(
             principal=principal_a, domain_id=dom_a, query="compute_checksum_v1"
         ).file_matches
         assert [f.file_path for f in t1_hits] == ["src/core.py"]
-        assert (str(tenant_a), dom_a, "svc-core", "src/core.py") in zoekt_vllm_srv.zoekt_files
         assert (
             str(tenant_a),
             dom_a,
-            "phantom-repo-t2",
+            f"{tenant_a}::svc-core",
+            "src/core.py",
+        ) in zoekt_vllm_srv.zoekt_files
+        assert (
+            str(tenant_a),
+            dom_a,
+            f"{tenant_a}::phantom-repo-t2",
             "src/ghost.py",
         ) not in zoekt_vllm_srv.zoekt_files
 

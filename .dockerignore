@@ -32,8 +32,9 @@ web-ui/dist
 *.crt
 *.p12
 
-# Data, reports, and domain-specific examples
+# Data, reports, caches, and domain-specific examples
 reports
+data
 .postgres_data
 examples/quant_dogfood
 domains/*/adapters

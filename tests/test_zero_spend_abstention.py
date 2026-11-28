@@ -5,8 +5,8 @@ All test cases and evaluation indices in this file operate on synthetic evaluati
 fixtures (synthetic C# e-commerce, synthetic TS/React state, synthetic Python web,
 synthetic Terraform infrastructure, synthetic Atlassian Confluence/Jira documents)
 to verify the scout's multi-source preflight gate discrimination without claiming
-live repository provenance. Real-corpus evaluation with pinned commit SHAs is tracked
-under open item M4-OI-03 in docs/phase_reports/OPEN_ITEMS.md.
+live repository provenance. Real-corpus evaluation guidance is documented
+in docs/ROADMAP_AND_KNOWN_LIMITS.md.
 
 Guarantees and mechanically proves:
 1. Intercepts all paid model execution points (GeminiExecutor, Vertex AI, HTTP).
@@ -52,16 +52,6 @@ from typing import Any, cast
 import httpx
 import psycopg
 import pytest
-from evals.datasets.answerable_dataset import (
-    AnswerableTask,
-    StackType,
-    get_answerable_benchmark_set,
-)
-from evals.datasets.unanswerable_dataset import (
-    UnanswerableReason,
-    UnanswerableTask,
-    get_unanswerable_benchmark_set,
-)
 from scipy import stats
 
 from context_scout.agents.domain_registry import DomainRegistry
@@ -78,6 +68,16 @@ from context_scout.db.repositories import (
     PostgresRLSRepository,
 )
 from context_scout.db.session import RLSConnectionManager
+from context_scout.evals.datasets.answerable_dataset import (
+    AnswerableTask,
+    StackType,
+    get_answerable_benchmark_set,
+)
+from context_scout.evals.datasets.unanswerable_dataset import (
+    UnanswerableReason,
+    UnanswerableTask,
+    get_unanswerable_benchmark_set,
+)
 from context_scout.mcp_servers.common import PostgresScoutGraphAdapter
 from context_scout.retrieval.embedder import LocalSemanticEmbedder
 from context_scout.schemas.contracts import (

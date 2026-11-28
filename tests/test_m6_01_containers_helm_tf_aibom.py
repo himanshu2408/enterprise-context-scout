@@ -55,7 +55,6 @@ def test_distroless_dockerfiles_and_nginx_airgap_hardening() -> None:
         docker_dir / "Dockerfile.webui",
         docker_dir / "nginx-airgap.conf",
         docker_dir / "25-scout-resolver.sh",
-        docker_dir / ".dockerignore",
     ]
     for path in required_files:
         assert path.is_file(), f"Missing container artifact: {path}"
@@ -79,6 +78,8 @@ def test_distroless_dockerfiles_and_nginx_airgap_hardening() -> None:
         assert "TMPDIR=/tmp" in text
 
     api_text = (docker_dir / "Dockerfile.api").read_text(encoding="utf-8")
+    assert "ARG TORCH_BACKEND=cpu" in api_text
+    assert "--locked" in api_text
     assert "--extra api" in api_text
     assert "EXPOSE 8080" in api_text
     assert "context_scout.api.main:app" in api_text
@@ -87,6 +88,8 @@ def test_distroless_dockerfiles_and_nginx_airgap_hardening() -> None:
     assert "domains /app/domains" in api_text
 
     worker_text = (docker_dir / "Dockerfile.worker").read_text(encoding="utf-8")
+    assert "ARG TORCH_BACKEND=cpu" in worker_text
+    assert "--locked" in worker_text
     assert "--extra worker" in worker_text
     assert "HF_HUB_OFFLINE=1" in worker_text
     assert "TRANSFORMERS_OFFLINE=1" in worker_text
@@ -96,6 +99,8 @@ def test_distroless_dockerfiles_and_nginx_airgap_hardening() -> None:
     assert "domains /app/domains" in worker_text
 
     sidecar_text = (docker_dir / "Dockerfile.adapter-sidecar").read_text(encoding="utf-8")
+    assert "--locked" in sidecar_text
+    assert "--extra sidecar" in sidecar_text
     assert "SCOUT_ADAPTER_STAGING_DIR=/var/run/scout/adapters" in sidecar_text
     assert "chown -R 65532:65532 /var/run/scout/adapters" in sidecar_text
     assert "context_scout.serving.adapter_sync_sidecar" in sidecar_text
@@ -130,7 +135,7 @@ def test_distroless_dockerfiles_and_nginx_airgap_hardening() -> None:
     ):
         assert expected_loc in nginx_conf
 
-    dockerignore = (docker_dir / ".dockerignore").read_text(encoding="utf-8")
+    dockerignore = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
     for excluded in (".git", ".venv", "node_modules", ".env", "examples/quant_dogfood"):
         assert excluded in dockerignore
 
@@ -759,6 +764,10 @@ def test_multicloud_terraform_workload_identity_parity() -> None:
         assert sa_name in azure_main, f"azure-aks/main.tf missing {sa_name} federated credential"
         assert sa_name in onprem_main, f"onprem-k8s/main.tf missing {sa_name} ServiceAccount"
 
+    assert "network_acls" in azure_main
+    assert "network_rules" in azure_main
+    assert azure_main.count('default_action             = "Deny"') >= 2
+
     for out_name in (
         "scout_api_irsa_role_arn",
         "scout_worker_irsa_role_arn",
@@ -1231,7 +1240,7 @@ def test_dockerfiles_dockerignore_and_uv_lock_cve_hardening() -> None:
     root_ignore = REPO_ROOT / ".dockerignore"
     nested_ignore = docker_dir / ".dockerignore"
     assert root_ignore.is_file(), "Missing root ./.dockerignore for BuildKit context=."
-    assert root_ignore.read_text(encoding="utf-8") == nested_ignore.read_text(encoding="utf-8")
+    assert not nested_ignore.exists(), "Duplicate deploy/docker/.dockerignore must be removed"
     ignore_text = root_ignore.read_text(encoding="utf-8")
     for token in (
         "__pycache__",
@@ -1263,12 +1272,34 @@ def test_pr5_supply_chain_health_probes_and_corpus_hygiene(
     from context_scout.api.main import app
     from context_scout.api.routes.health import reset_health_probe_cache
 
-    ci_text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    uses_lines = [ln.strip() for ln in ci_text.splitlines() if "uses:" in ln]
-    assert len(uses_lines) >= 15
+    assert (REPO_ROOT / ".github" / "CODEOWNERS").is_file()
+    assert (REPO_ROOT / ".github" / "dependabot.yml").is_file()
+    workflow_files = sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+    assert {wf.name for wf in workflow_files} >= {"ci.yml", "release-supply-chain.yml"}
+    uses_lines: list[str] = []
+    for wf in workflow_files:
+        wf_text = wf.read_text(encoding="utf-8")
+        uses_lines.extend(ln.strip() for ln in wf_text.splitlines() if "uses:" in ln)
+    assert len(uses_lines) >= 18
     for ln in uses_lines:
         assert not re.search(r"@v\d+", ln.split("#", 1)[0]), (
-            f"Mutable @v* action ref found in ci.yml: {ln}"
+            f"Mutable @v* action ref found in workflow: {ln}"
+        )
+
+    ci_text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    for required_ci_token in (
+        "uv lock --check",
+        "--locked",
+        "kubeconform",
+        "trivy_0.76.2",
+        "alembic downgrade -1",
+        "Dockerfile.api",
+        "Dockerfile.worker",
+        "Dockerfile.adapter-sidecar",
+        "Dockerfile.webui",
+    ):
+        assert required_ci_token in ci_text, (
+            f"Missing CI supply-chain gate token: {required_ci_token}"
         )
 
     assert (REPO_ROOT / "SECURITY.md").is_file()

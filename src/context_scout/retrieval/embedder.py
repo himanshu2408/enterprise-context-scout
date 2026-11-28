@@ -37,6 +37,35 @@ DEFAULT_GOOGLE_EMBEDDING_MODEL: Final[str] = "google/embeddinggemma-2"
 DEFAULT_EMBEDDING_SPACE_ID: Final[str] = "embeddinggemma-2-768"
 EXPECTED_EMBEDDING_DIM: Final[int] = 768
 _ZERO_NORM_EPSILON: Final[float] = 1e-9
+FORBIDDEN_TEST_HASH_ENVS: Final[frozenset[str]] = frozenset({"production", "prod", "staging", "qa"})
+
+
+def is_test_hash_embeddings_enabled(environment: str | None = None) -> bool:
+    """Returns True iff test hash-embedding bypass is explicitly enabled outside protected envs.
+
+    Fails closed by raising ``RuntimeError`` when ``SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS=1`` is
+    set in ``production``, ``prod``, ``staging``, or ``qa``.
+    """
+    if os.environ.get("SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS", "").strip() != "1":
+        return False
+    env_name = (
+        (
+            environment
+            or os.environ.get("SCOUT_ENVIRONMENT")
+            or os.environ.get("ENVIRONMENT")
+            or os.environ.get("APP_ENV")
+            or "development"
+        )
+        .strip()
+        .lower()
+    )
+    if env_name in FORBIDDEN_TEST_HASH_ENVS:
+        raise RuntimeError(
+            f"SCOUT_USE_HASH_EMBEDDINGS_FOR_TESTS=1 is strictly prohibited when running "
+            f"in protected environment {env_name!r}."
+        )
+    return True
+
 
 _TORCH_EMBED_LOCK: Final[threading.Lock] = threading.Lock()
 _EMBEDDER_MODEL_CACHE: dict[tuple[str, str], SentenceTransformer] = {}
@@ -312,7 +341,9 @@ class LocalSemanticEmbedder:
         dimensions: int | None = None,
         policy: ModelGovernancePolicy | None = None,
     ) -> None:
+        is_test_hash_embeddings_enabled()
         self.settings = settings or ScoutSettings()
+        is_test_hash_embeddings_enabled(getattr(self.settings, "environment", None))
         gov = policy or ModelGovernancePolicy.default()
         raw_id = model_id or self.settings.embedding_model_id or DEFAULT_GOOGLE_EMBEDDING_MODEL
         self._model_id = gov.validate_local_model_id(raw_id)
@@ -816,7 +847,9 @@ def get_embedding_provider(
     policy: ModelGovernancePolicy | None = None,
 ) -> EmbeddingProviderSPI:
     """Resolves the configured EmbeddingProviderSPI (`google/embeddinggemma-2` local default)."""
+    is_test_hash_embeddings_enabled()
     cfg = settings or ScoutSettings()
+    is_test_hash_embeddings_enabled(getattr(cfg, "environment", None))
     backend = (
         (provider_backend or cfg.embedding_provider or "sentence-transformers").strip().lower()
     )

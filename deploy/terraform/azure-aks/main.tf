@@ -38,7 +38,14 @@ resource "azurerm_key_vault" "cmk" {
   purge_protection_enabled   = true
   soft_delete_retention_days = 90
   rbac_authorization_enabled = true
-  tags                       = local.common_tags
+
+  network_acls {
+    default_action             = "Deny"
+    bypass                     = "AzureServices"
+    virtual_network_subnet_ids = [var.subnet_id]
+  }
+
+  tags = local.common_tags
 }
 
 resource "azurerm_role_assignment" "kv_crypto_officer" {
@@ -229,6 +236,12 @@ resource "azurerm_storage_account" "artifacts" {
 
   blob_properties {
     versioning_enabled = true
+  }
+
+  network_rules {
+    default_action             = "Deny"
+    bypass                     = ["AzureServices"]
+    virtual_network_subnet_ids = [var.subnet_id]
   }
 
   tags = local.common_tags

@@ -1088,3 +1088,82 @@ def test_m1_migrations_runner_role_escaping_and_nologin_privileges(
     assert "''" in role_stmts[0]  # single-quote escaped by psycopg.sql.Literal
     assert "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT" in role_stmts[1]
     assert "PASSWORD" not in role_stmts[1]
+
+
+def test_pr7_three_way_schema_parity_sql_alembic_dataclasses() -> None:
+    """PR-7 (ECS-150): Proves 100% 3-way parity between SQL DDL, PG17 0024, and schema.py."""
+    import re
+    from urllib.parse import urlsplit, urlunsplit
+
+    from psycopg import sql as pg_sql
+
+    from context_scout.db.migrations_runner import run_alembic_downgrade
+    from context_scout.db.schema import CANONICAL_PG17_TABLES, CANONICAL_TABLE_RECORD_CLASSES
+
+    assert len(CANONICAL_PG17_TABLES) == 23
+    assert set(CANONICAL_TABLE_RECORD_CLASSES) == CANONICAL_PG17_TABLES
+
+    create_re = re.compile(r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([a-z_]+)\b", re.IGNORECASE)
+    sql_001 = (REPO_ROOT / "sql" / "001_init_schema.sql").read_text(encoding="utf-8")
+    sql_002 = (REPO_ROOT / "sql" / "002_production_enterprise_schema.sql").read_text(
+        encoding="utf-8"
+    )
+    sql_tables = set(create_re.findall(sql_001)) | set(create_re.findall(sql_002))
+    assert sql_tables == CANONICAL_PG17_TABLES
+
+    settings = ScoutSettings()
+    temp_db = f"context_scout_parity_{uuid.uuid4().hex[:10]}"
+    parsed = urlsplit(settings.db_admin_url)
+    maintenance_url = urlunsplit(parsed._replace(path="/postgres"))
+    temp_url = urlunsplit(parsed._replace(path=f"/{temp_db}"))
+
+    with psycopg.connect(maintenance_url, autocommit=True) as mconn:
+        mconn.execute(pg_sql.SQL("CREATE DATABASE {}").format(pg_sql.Identifier(temp_db)))
+
+    try:
+        with psycopg.connect(temp_url, autocommit=True) as tconn:
+            tconn.execute(sql_001)
+            tconn.execute(sql_002)
+
+        # Auto-stamps unified 001+002 directly to head without re-running legacy 0002..0024
+        run_alembic_upgrade(temp_url)
+        # Reversibility check: downgrade -1 (0024 -> 0023) and re-upgrade cleanly
+        run_alembic_downgrade(temp_url, "-1")
+        run_alembic_upgrade(temp_url, "head")
+
+        with (
+            psycopg.connect(settings.db_admin_url) as ref_conn,
+            psycopg.connect(temp_url) as tmp_conn,
+        ):
+            col_q = """
+                SELECT table_name, column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name <> 'alembic_version'
+                ORDER BY table_name, column_name
+            """
+            ref_cols = ref_conn.execute(col_q).fetchall()
+            tmp_cols = tmp_conn.execute(col_q).fetchall()
+            assert tmp_cols == ref_cols
+
+            rls_q = """
+                SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname <> 'alembic_version'
+                ORDER BY c.relname
+            """
+            ref_rls = ref_conn.execute(rls_q).fetchall()
+            tmp_rls = tmp_conn.execute(rls_q).fetchall()
+            assert len(ref_rls) == 23
+            assert tmp_rls == ref_rls
+            assert all(row[1] and row[2] for row in tmp_rls)
+    finally:
+        with psycopg.connect(maintenance_url, autocommit=True) as mconn:
+            mconn.execute(
+                pg_sql.SQL(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = {}"
+                ).format(pg_sql.Literal(temp_db))
+            )
+            mconn.execute(
+                pg_sql.SQL("DROP DATABASE IF EXISTS {}").format(pg_sql.Identifier(temp_db))
+            )
