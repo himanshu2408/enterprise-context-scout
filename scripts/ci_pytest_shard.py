@@ -53,12 +53,8 @@ MEASURED_UBUNTU_CI_SECONDS: Final[dict[str, int]] = {
 }
 
 # Co-located module groups that share large in-RAM embedding caches (_SYMBOL_EMBEDDING_CACHE
-# or _TEXT_VECTOR_CACHE), eliminating ~30m of duplicate cold CPU re-embedding across shards.
+# or _TEXT_VECTOR_CACHE), eliminating duplicate cold CPU re-embedding across shards.
 CACHE_AFFINITY_GROUPS: Final[tuple[tuple[str, ...], ...]] = (
-    (
-        "tests/test_m2_code_engine.py",
-        "tests/test_postgres_m2_live.py",
-    ),
     (
         "tests/test_m0_02_governance_and_eval_fixes.py",
         "tests/test_zero_spend_abstention.py",
